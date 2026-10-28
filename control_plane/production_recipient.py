@@ -687,12 +687,14 @@ class ProductionRecipientAdapter:
         allowed_environments = [values]
         if record.execution.get("runtime_identity"):
             from control_plane.contracts.runtime_identity import (
+                COMPOSE_IMAGE_REFERENCE_ENV_KEYS,
                 RuntimeIdentity,
                 runtime_identity_env,
             )
 
             deployed_values = {
                 **values,
+                **dict.fromkeys(COMPOSE_IMAGE_REFERENCE_ENV_KEYS, record.image_reference),
                 **runtime_identity_env(
                     RuntimeIdentity.model_validate(record.execution["runtime_identity"])
                 ),

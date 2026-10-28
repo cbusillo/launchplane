@@ -21,7 +21,6 @@ from control_plane.contracts.production_backup_authority import ProductionBackup
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
-from control_plane.contracts.runtime_identity import runtime_identity_env
 from control_plane.production_recipient import custody, runtime_values
 from control_plane.production_recipient_cutover import (
     RecipientCutoverAdapter,
@@ -31,9 +30,9 @@ from control_plane.production_recipient_cutover import (
 )
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.runtime_environments import SiteRuntimeEnvironment
-from control_plane.dokploy import api
 from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 from control_plane.workflows.production_backup_gate import enqueue_production_backup_gate
+from control_plane.workflows.dokploy_deploy import update_dokploy_target_artifact
 from control_plane.workflows.production_backup_gate_operation_worker import (
     run_production_backup_gate_operation_worker_once,
 )
@@ -335,14 +334,17 @@ class RecipientCutoverTests(unittest.TestCase):
             )
 
     def deploy(self, **kwargs: Any) -> None:
-        kwargs["before_provider_mutation"]("target_update")
         current = custody(self.store, self.fixture.product, self.fixture.context)
         assert current is not None
-        self.fixture.provider[current.target_id]["env"] = api.serialize_dokploy_env_text(
-            {
-                **runtime_values(self.store, self.fixture.root, current),
-                **runtime_identity_env(kwargs["runtime_identity"]),
-            },
+        update_dokploy_target_artifact(
+            host="https://provider.invalid",
+            token="fixture-token",
+            target_type="compose",
+            target_id=current.target_id,
+            artifact_id=current.image_reference,
+            runtime_identity=kwargs["runtime_identity"],
+            runtime_environment=runtime_values(self.store, self.fixture.root, current),
+            before_provider_mutation=kwargs["before_provider_mutation"],
         )
         kwargs["before_provider_mutation"]("deploy_trigger")
         self.assertFalse(self.old_running)
@@ -414,6 +416,13 @@ class RecipientCutoverTests(unittest.TestCase):
         self.assertEqual(
             self.store.read_deployment_record(inventory.deployment_record_id).runtime_identity,
             inventory.runtime_identity,
+        )
+        deployment = self.store.read_deployment_record(inventory.deployment_record_id)
+        self.assertTrue(deployment.deploy.finished_at)
+        self.assertEqual(deployment.deploy.finished_at, inventory.updated_at)
+        self.assertLessEqual(
+            datetime.fromisoformat(deployment.deploy.started_at),
+            datetime.fromisoformat(deployment.deploy.finished_at),
         )
         self.assertEqual(self.run_release().response_status_code, 202)
         self.assertEqual(self.deploys, 1)
