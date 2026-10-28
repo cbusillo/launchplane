@@ -9,7 +9,14 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerReconciliationRequiredError,
     build_merge_train_controller_state_record,
 )
-from control_plane.merge_train_admission import MergeTrainControllerStatusReadModel
+from control_plane.merge_train_admission import (
+    MergeTrainControllerStatusReadModel,
+    _latest_controller_state,
+)
+from control_plane.merge_train_controller_run_once import (
+    MergeTrainControllerLeaseContext,
+    latest_merge_train_controller_state_record,
+)
 from control_plane.contracts.merge_train_admission import MergeTrainAdmissionDecision
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 from control_plane.contracts.merge_train_stack_collapse import (
@@ -423,6 +430,63 @@ class RepositoryNameStorageTests(unittest.TestCase):
                 admission, admitted_at=admission.created_at
             )
         self.assertEqual(self.store.list_merge_admission_records(), (stored,))
+
+    def test_current_readers_never_select_newer_history_as_the_canonical_controller(self) -> None:
+        legacy = self._seed_controller_alias()
+        for present in (False, True):
+            canonical = build_merge_train_controller_state_record(
+                repository=REPOSITORY,
+                base_branch=legacy.base_branch,
+                policy_key=legacy.policy_key,
+                policy_sha256=legacy.policy_sha256,
+                updated_at="2026-09-28T00:00:00Z",
+            )
+            if present:
+                self.store.write_merge_train_controller_state_record(canonical)
+            expected = canonical if present else None
+            self.assertEqual(
+                _latest_controller_state(
+                    store=self.store,
+                    repository=REPOSITORY,
+                    base_branch=legacy.base_branch,
+                ),
+                expected,
+            )
+            self.assertEqual(
+                latest_merge_train_controller_state_record(
+                    record_store=self.store,
+                    repository=REPOSITORY,
+                    base_branch=legacy.base_branch,
+                ),
+                expected,
+            )
+            if present:
+                self.assertEqual(
+                    MergeTrainControllerLeaseContext(
+                        record=canonical,
+                        record_store=self.store,
+                    ).read_current(),
+                    canonical,
+                )
+
+    def test_controller_alias_fence_does_not_change_progress_record_write_contract(self) -> None:
+        progress = _collapse()
+        self._seed_controller_alias(
+            base_branch=progress.plan.base_branch,
+            ordinary_job_binding=OrdinaryAgentJobBinding(
+                request_id="retained-request",
+                scope_sha256="d" * 64,
+                binding_revision=1,
+            ),
+        )
+        self.store.write_merge_train_stack_collapse_plan_record(progress)
+        self.assertEqual(
+            self.store.list_merge_train_stack_collapse_plan_records(
+                repository=REPOSITORY,
+                base_branch=progress.plan.base_branch,
+            ),
+            (progress,),
+        )
 
     def test_expired_historical_controller_still_fences_canonical_acquisition(self) -> None:
         legacy = self._seed_controller_alias(

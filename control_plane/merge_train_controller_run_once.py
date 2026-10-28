@@ -33,6 +33,7 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerReconciliationRequiredError,
     MergeTrainControllerStateRecord,
     build_merge_train_controller_state_record,
+    find_current_merge_train_controller_state,
 )
 from control_plane.contracts.merge_train_effect import (
     MergeTrainEffectLineage,
@@ -326,13 +327,13 @@ class MergeTrainControllerLeaseContext:
         records = self.record_store.list_merge_train_controller_state_records(
             repository=self.record.repository,
             base_branch=self.record.base_branch,
-            limit=1,
         )
-        if not records:
+        current = find_current_merge_train_controller_state(records)
+        if current is None:
             raise MergeTrainControllerLeaseLostError(
                 "Persisted merge train controller state is missing."
             )
-        return records[0]
+        return current
 
     def release(
         self,
@@ -7646,9 +7647,8 @@ def latest_merge_train_controller_state_record(
     records = record_store.list_merge_train_controller_state_records(
         repository=repository,
         base_branch=base_branch,
-        limit=1,
     )
-    return records[0] if records else None
+    return find_current_merge_train_controller_state(records)
 
 
 def require_merge_train_controller_state_record_store(

@@ -24899,9 +24899,6 @@ class PostgresRecordStore(HumanSessionStore):
     def _require_legacy_merge_train_target_unbound(
         self, session: Any, *, repository: str, base_branch: str
     ) -> None:
-        self._require_inert_merge_train_controller_aliases(
-            session, repository=repository, base_branch=base_branch
-        )
         if any(
             payload.get("ordinary_job_binding") is not None
             for payload in self._ordinary_agent_active_progress(
@@ -24957,6 +24954,10 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._advisory_lock_merge_train_controller(session, key)
+            if isinstance(row, LaunchplaneMergeTrainControllerStateRow):
+                self._require_inert_merge_train_controller_aliases(
+                    session, repository=row.repository, base_branch=row.base_branch
+                )
             self._require_legacy_merge_train_target_unbound(
                 session, repository=row.repository, base_branch=row.base_branch
             )
@@ -25199,6 +25200,9 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._advisory_lock_merge_train_controller(session, controller_key)
+            self._require_inert_merge_train_controller_aliases(
+                session, repository=repository, base_branch=base_branch
+            )
             self._require_legacy_merge_train_target_unbound(
                 session, repository=repository, base_branch=base_branch
             )

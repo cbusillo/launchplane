@@ -11,7 +11,10 @@ from threading import Event
 from typing import Protocol, cast
 from urllib.parse import quote
 
-from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+    find_current_merge_train_controller_state,
+)
 from control_plane import runtime_environments
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
@@ -286,9 +289,9 @@ def run_stall_monitor_pass(
                         policy=policy_record.policy, snapshot=snapshot, batch_landing=True
                     )
                     states = stall_store.list_merge_train_controller_state_records(
-                        repository=repository, base_branch=target.base_branch, limit=1
+                        repository=repository, base_branch=target.base_branch
                     )
-                    state = states[0] if states else None
+                    state = find_current_merge_train_controller_state(states)
                     candidate_records = getattr(store, "list_merge_train_batch_candidate_records")(
                         repository=repository,
                         base_branch=target.base_branch,

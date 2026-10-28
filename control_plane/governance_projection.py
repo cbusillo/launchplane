@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
 from control_plane.contracts.merge_train_policy import MergeTrainGitHubTokenSource
+from control_plane.contracts.merge_train_controller_state import (
+    find_current_merge_train_controller_state,
+)
 from control_plane.contracts.repository_evidence import (
     RepositoryEvidenceProvider,
 )
@@ -150,11 +153,10 @@ class LiveGovernanceCurrentReadinessProvider:
             controller_records = controller_store.list_merge_train_controller_state_records(
                 repository=repository,
                 base_branch=base_branch,
-                limit=1,
             )
-            if not controller_records:
+            controller_state = find_current_merge_train_controller_state(controller_records)
+            if controller_state is None:
                 return _unavailable_readiness()
-            controller_state = controller_records[0]
             if controller_state.status != "running" or not controller_state.lease_owner:
                 return _unavailable_readiness()
             stack_collapse_record = _stack_collapse_record(

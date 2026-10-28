@@ -18,6 +18,7 @@ from control_plane.contracts.merge_train_batch import MergeTrainHeldOutReason
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerLastResult,
     MergeTrainControllerStateRecord,
+    find_current_merge_train_controller_state,
 )
 from control_plane.contracts.merge_train_admission import MergeTrainAdmissionDecision
 from control_plane.contracts.merge_admission_record import MergeAdmissionRecord
@@ -807,9 +808,8 @@ def _latest_controller_state(
     records = store.list_merge_train_controller_state_records(
         repository=repository,
         base_branch=base_branch,
-        limit=1,
     )
-    return records[0] if records else None
+    return find_current_merge_train_controller_state(records)
 
 
 def _controller_lease_diagnostics(

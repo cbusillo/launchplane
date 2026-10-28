@@ -4,7 +4,9 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import Mock, patch
 import runpy
-from types import SimpleNamespace
+from control_plane.contracts.merge_train_controller_state import (
+    build_merge_train_controller_state_record,
+)
 
 from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
 from control_plane.contracts.merge_train_batch import (
@@ -276,15 +278,21 @@ class StallMonitorTests(TestCase):
         client.read_merge_train_snapshot.return_value = snapshot
         reporter.publish.return_value = 91
         hold_reader = Mock(return_value=object())
-        state = SimpleNamespace(
-            last_action="observe",
-            last_phase="checks",
-            last_record_id="candidate",
-            active_action="observe",
-            active_phase="read_snapshot",
-            active_record_id="candidate",
-            lease_owner="",
-            lease_expires_at="",
+        state = build_merge_train_controller_state_record(
+            repository=snapshot.repository,
+            base_branch="main",
+            policy_key=f"{snapshot.repository}:main",
+            policy_sha256=policy.policy_sha256,
+            updated_at=_time(0),
+        ).model_copy(
+            update={
+                "last_action": "observe",
+                "last_phase": "checks",
+                "last_record_id": "candidate",
+                "active_action": "observe",
+                "active_phase": "read_snapshot",
+                "active_record_id": "candidate",
+            }
         )
         with (
             TemporaryDirectory() as directory,

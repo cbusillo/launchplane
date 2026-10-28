@@ -212,6 +212,23 @@ def require_canonical_merge_train_controller_state(
     return validated
 
 
+def find_current_merge_train_controller_state(
+    records: Iterable[MergeTrainControllerStateRecord],
+) -> MergeTrainControllerStateRecord | None:
+    return next(
+        (
+            record
+            for record in records
+            if record.controller_key
+            == build_merge_train_controller_key(
+                repository=record.repository,
+                base_branch=record.base_branch,
+            )
+        ),
+        None,
+    )
+
+
 def select_canonical_merge_train_controller_state(
     records: Iterable[MergeTrainControllerStateRecord], *, repository: str, base_branch: str
 ) -> MergeTrainControllerStateRecord | None:
