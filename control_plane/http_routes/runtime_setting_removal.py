@@ -53,14 +53,6 @@ def register_runtime_setting_removal_routes(
                 trace_id=trace,
                 idempotency_key=idempotency_key,
             )
-            if body.mode == "dry-run" and body.scope == "global":
-                result = result.model_copy(
-                    update={
-                        "consumer_inventory": record_store.global_setting_consumer_inventory(
-                            keys=body.keys
-                        )
-                    }
-                )
         except PermissionError:
             raise dependencies.http_error(
                 status_code=403,
@@ -82,6 +74,14 @@ def register_runtime_setting_removal_routes(
                 code="runtime_setting_removal_unverified",
                 message="Refresh the exact review or read the original removal receipt; no retry under a new key.",
             ) from None
+        if body.mode == "dry-run" and body.scope == "global":
+            result = result.model_copy(
+                update={
+                    "consumer_inventory": record_store.global_setting_consumer_inventory(
+                        keys=body.keys
+                    )
+                }
+            )
         return RuntimeSettingRemovalResponse(trace_id=trace, result=result)
 
     app.add_api_route(

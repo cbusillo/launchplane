@@ -125,7 +125,7 @@ def setting_consumer_inventory(
                         selected_keys=(binding_requirement.binding_key,),
                     )
                 )
-        if profile.preview.context:
+        if profile.preview.context or profile.preview.override_env:
             consumers.append(
                 SettingConsumer(
                     kind="preview_profile",
@@ -137,24 +137,24 @@ def setting_consumer_inventory(
                     ),
                 )
             )
-            for scope, names in (
-                ("required_template_env_keys", profile.preview.required_template_env_keys),
-                ("copied_env_keys", profile.preview.copied_env_keys),
-                ("omitted_env_keys", profile.preview.omitted_env_keys),
-                ("preview_url_env_keys", profile.preview.preview_url_env_keys),
-                ("preview_domain_env_keys", profile.preview.preview_domain_env_keys),
-            ):
-                if matches := tuple(sorted(selected.intersection(names))):
-                    consumers.append(
-                        SettingConsumer(
-                            kind="preview_policy",
-                            product=profile.product,
-                            context=profile.preview.context,
-                            instance=profile.preview.template_instance,
-                            scope=scope,
-                            selected_keys=matches,
-                        )
+        for scope, names in (
+            ("required_template_env_keys", profile.preview.required_template_env_keys),
+            ("copied_env_keys", profile.preview.copied_env_keys),
+            ("omitted_env_keys", profile.preview.omitted_env_keys),
+            ("preview_url_env_keys", profile.preview.preview_url_env_keys),
+            ("preview_domain_env_keys", profile.preview.preview_domain_env_keys),
+        ):
+            if matches := tuple(sorted(selected.intersection(names))):
+                consumers.append(
+                    SettingConsumer(
+                        kind="preview_policy",
+                        product=profile.product,
+                        context=profile.preview.context,
+                        instance=profile.preview.template_instance,
+                        scope=scope,
+                        selected_keys=matches,
                     )
+                )
     for target in targets:
         target_count += 1
         consumers.append(

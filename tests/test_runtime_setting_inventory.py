@@ -21,22 +21,17 @@ class SettingConsumerInventoryTests(unittest.TestCase):
                 {"binding_key": "REMOVE", "context": "old-site", "instance": "prod"}
             ],
         }
+        payload["lifecycle_state"] = "retired"
+        payload["preview"] = {
+            "enabled": False,
+            "context": "",
+            "override_env": {"REMOVE": "private-preview"},
+            "copied_env_keys": ["REMOVE"],
+            "omitted_env_keys": ["OMITTED"],
+        }
         profile = LaunchplaneProductProfileRecord.model_validate(payload)
-        profile = profile.model_copy(
-            update={
-                "lifecycle_state": "retired",
-                "preview": profile.preview.model_copy(
-                    update={
-                        "context": "old-site",
-                        "override_env": {"REMOVE": "private-preview"},
-                        "copied_env_keys": ("REMOVE",),
-                        "omitted_env_keys": ("REMOVE",),
-                    }
-                ),
-            }
-        )
         result = setting_consumer_inventory(
-            keys=("REMOVE",),
+            keys=("REMOVE", "OMITTED"),
             records=(
                 runtime(),
                 runtime(scope="instance", context="orphan", instance="historical"),

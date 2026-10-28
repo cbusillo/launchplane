@@ -660,6 +660,22 @@ class RuntimeRemovalTests(unittest.TestCase):
 
 
 class RuntimeRemovalHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_inventory_row_is_not_reported_as_a_stale_removal_review(self) -> None:
+        with _database_app(policy(), director_agent=True) as (store, _, app):
+            store.write_runtime_environment_record(runtime())
+            with patch.object(
+                store,
+                "global_setting_consumer_inventory",
+                side_effect=ValueError("invalid inventory row"),
+            ):
+                async with lifespan_client(app) as client:
+                    with self.assertRaisesRegex(ValueError, "invalid inventory row"):
+                        await client.post(
+                            ROUTE,
+                            json=request().model_dump(mode="json"),
+                            headers={"Authorization": "Bearer reader-token"},
+                        )
+
     async def test_global_review_inventories_orphan_records_only_after_authorization(self) -> None:
         with _database_app(policy(), director_agent=True) as (store, _, app):
             records = (
