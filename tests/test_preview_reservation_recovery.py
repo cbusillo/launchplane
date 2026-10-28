@@ -422,6 +422,13 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         )
 
     def test_expired_preview_can_prepare_intent_without_losing_original_recovery(self) -> None:
+        self.reservation = self.replace_record(state="reconcile_required")
+        self.assert_expired_preview_preparation_preserves_recovery()
+
+    def test_expired_running_preview_can_prepare_intent_without_losing_recovery(self) -> None:
+        self.assert_expired_preview_preparation_preserves_recovery()
+
+    def assert_expired_preview_preparation_preserves_recovery(self) -> None:
         from control_plane.contracts.odoo_instance_override_record import (
             OdooInstanceOverrideRecord,
             OdooWebsiteBootstrapPayload,
@@ -430,7 +437,6 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         from control_plane.odoo_post_deploy_http import OdooWebsiteBootstrapOverrideRequest
         from control_plane.preview_website_bootstrap_override import prepare_preview_bootstrap
 
-        self.reservation = self.replace_record(state="reconcile_required")
         template = OdooInstanceOverrideRecord(
             context=self.profile.preview.context,
             instance=self.profile.preview.template_instance,
@@ -549,6 +555,17 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         request.mode = "apply"
         request.reviewed_plan_sha256 = str(plan["plan_sha256"])
         with self.assertRaises(ValueError):
+            prepare_preview_bootstrap(self.store, request)
+
+        self.reservation = self.replace_record(
+            state="reconcile_required",
+            lease_expires_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+        )
+        request.mode = "dry-run"
+        plan = prepare_preview_bootstrap(self.store, request)
+        request.mode = "apply"
+        request.reviewed_plan_sha256 = str(plan["plan_sha256"])
+        with self.assertRaisesRegex(ValueError, "exclusive hold"):
             prepare_preview_bootstrap(self.store, request)
 
     def test_exact_bootstrap_edit_invalidates_a_previously_issued_refresh_plan(self) -> None:
