@@ -1678,8 +1678,12 @@ an older completed record. Pending and terminal deployment changes trigger a
 fresh check even when inventory has not changed.
 
 A new HTTP/identity incident is deferred for at most five minutes from its own
-lane's recorded pending deploy start. The record must bind the same product,
-context, instance and deployment identity, with no finish or recorded failure.
+lane's recorded pending deploy start. The lane must belong exclusively to one
+active product; any recorded deployment identity must agree with it. The record must
+have no finish or recorded failure. Unorderable deployment history retains
+normal alerts; comparable start times are ordered in UTC. Only deploy identity,
+start, status, finish and failure presence enter scheduler revisions, so
+checkpoint-only evidence rewrites do not start another probe.
 Failed probes remain failed, retained evidence and cannot earn green time.
 Their summary identifies the deploy. Completion, failure or expiry ends the
 deferral; the next failed probe opens the incident and its normal alert outbox.

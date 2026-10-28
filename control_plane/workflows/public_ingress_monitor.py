@@ -3274,12 +3274,22 @@ def _deployment_deferring_failure(
     if not isinstance(deployment, DeploymentRecord):
         return None
     identity = deployment.runtime_identity
+    owners = [
+        profile.product
+        for profile in record_store.list_product_profile_records()
+        if profile.is_active
+        and any(
+            (lane.context, lane.instance) == (record.context, record.instance)
+            for lane in profile.lanes
+        )
+    ]
     if (
         deployment.deploy.status != "pending"
         or deployment.deploy.finished_at
         or deployment.failure is not None
-        or identity is None
-        or (identity.product, identity.context, identity.instance, identity.deployment_record_id)
+        or owners != [record.product]
+        or identity is not None
+        and (identity.product, identity.context, identity.instance, identity.deployment_record_id)
         != (record.product, record.context, record.instance, deployment.record_id)
         or (deployment.context, deployment.instance) != (record.context, record.instance)
     ):
@@ -3297,12 +3307,17 @@ def _deployment_deferring_failure(
         instance_name=record.instance,
         check_name=record.check_name,
         check_kind=record.check_kind,
-        limit=1,
+        limit=50,
+    )
+    preceding_probe = next(
+        (item for item in previous if item.purpose == "probe" and item.status != "skipped"), None
     )
     if (
         previous
-        and previous[0].status == "fail"
-        and _parse_utc_timestamp(previous[0].observed_at) < started
+        and preceding_probe is None
+        or preceding_probe is not None
+        and preceding_probe.status == "fail"
+        and _parse_utc_timestamp(preceding_probe.observed_at) < started
     ):
         return None
     return deployment

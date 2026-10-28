@@ -870,6 +870,14 @@ class TrustedMaintenancePolicyCompareWriteResult(NamedTuple):
     idempotency_record: LaunchplaneIdempotencyRecord | None = None
 
 
+class DeploymentMonitorState(NamedTuple):
+    started_at: str
+    record_id: str
+    status: str | None
+    finished_at: str | None
+    failed: bool
+
+
 class PublicIngressTransitionWriteResult(NamedTuple):
     status: PublicIngressTransitionWriteStatus
 
@@ -5731,35 +5739,13 @@ class PostgresRecordStore(HumanSessionStore):
                     snapshots.setdefault((context, instance), []).append(
                         (row_type.__tablename__, payload)
                     )
-            latest_deployments = (
-                select(
-                    LaunchplaneDeploymentRow.context,
-                    LaunchplaneDeploymentRow.instance,
-                    LaunchplaneDeploymentRow.payload,
-                    func.row_number()
-                    .over(
-                        partition_by=(
-                            LaunchplaneDeploymentRow.context,
-                            LaunchplaneDeploymentRow.instance,
-                        ),
-                        order_by=(
-                            LaunchplaneDeploymentRow.deploy_started_at.desc(),
-                            LaunchplaneDeploymentRow.record_id.desc(),
-                        ),
-                    )
-                    .label("position"),
-                )
-                .where(LaunchplaneDeploymentRow.context.in_(contexts))
-                .subquery()
-            )
-            for context, instance, payload in session.execute(
-                select(
-                    latest_deployments.c.context,
-                    latest_deployments.c.instance,
-                    latest_deployments.c.payload,
-                ).where(latest_deployments.c.position == 1)
-            ):
-                snapshots.setdefault((context, instance), []).append(("latest-deployment", payload))
+            lane_pairs = {
+                (lane.context, lane.instance) for profile in profiles for lane in profile.lanes
+            }
+            deployments = self._monitor_deployment_states(session, lane_pairs)
+            for pair, records in deployments.items():
+                latest = max(records, key=lambda item: (item.started_at, item.record_id))
+                snapshots.setdefault(pair, []).append(("latest-deployment", latest))
             for context, instance, secret_id, version_id, status in session.execute(
                 select(
                     LaunchplaneSecretRow.context,
@@ -19424,20 +19410,64 @@ class PostgresRecordStore(HumanSessionStore):
     def read_latest_lane_deployment_record(
         self, *, context_name: str, instance_name: str
     ) -> DeploymentRecord | None:
-        records = self._list_models(
-            model_type=DeploymentRecord,
-            orm_model=LaunchplaneDeploymentRow,
-            filters=(
-                LaunchplaneDeploymentRow.context == context_name,
-                LaunchplaneDeploymentRow.instance == instance_name,
-            ),
-            order_by=(
-                LaunchplaneDeploymentRow.deploy_started_at.desc(),
-                LaunchplaneDeploymentRow.record_id.desc(),
-            ),
-            limit=1,
+        with self._session_factory() as session:
+            records = self._monitor_deployment_states(session, {(context_name, instance_name)}).get(
+                (context_name, instance_name), []
+            )
+            if not records or any(not item.started_at for item in records):
+                return None
+            latest = max(records, key=lambda item: (item.started_at, item.record_id))
+            row = session.get(LaunchplaneDeploymentRow, latest.record_id)
+            return DeploymentRecord.model_validate(row.payload) if row is not None else None
+
+    @staticmethod
+    def _monitor_deployment_states(
+        session: Session, lane_pairs: set[tuple[str, str]]
+    ) -> dict[tuple[str, str], list[DeploymentMonitorState]]:
+        if not lane_pairs:
+            return {}
+        statement = select(
+            LaunchplaneDeploymentRow.context,
+            LaunchplaneDeploymentRow.instance,
+            LaunchplaneDeploymentRow.record_id,
+            LaunchplaneDeploymentRow.deploy_started_at,
+            LaunchplaneDeploymentRow.payload["deploy"]["status"].as_string(),
+            LaunchplaneDeploymentRow.deploy_finished_at,
+            LaunchplaneDeploymentRow.payload["failure"].as_string().is_not(None),
+        ).where(
+            or_(
+                *(
+                    and_(
+                        LaunchplaneDeploymentRow.context == context,
+                        LaunchplaneDeploymentRow.instance == instance,
+                    )
+                    for context, instance in lane_pairs
+                )
+            )
         )
-        return records[0] if records else None
+        states: dict[tuple[str, str], list[DeploymentMonitorState]] = {}
+        for (
+            context,
+            instance,
+            record_id,
+            started_at,
+            status,
+            finished_at,
+            failure,
+        ) in session.execute(statement):
+            try:
+                started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                normalized = (
+                    started.astimezone(timezone.utc).isoformat()
+                    if started.tzinfo is not None
+                    else ""
+                )
+            except ValueError:
+                normalized = ""
+            states.setdefault((context, instance), []).append(
+                DeploymentMonitorState(normalized, record_id, status, finished_at, bool(failure))
+            )
+        return states
 
     def list_deployment_records(
         self,
