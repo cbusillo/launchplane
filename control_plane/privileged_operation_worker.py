@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import hashlib
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import hashlib
-import json
-import math
 from typing import Any, Literal, Protocol, cast
 
-from control_plane import secrets as control_plane_secrets
 from control_plane import authz_grant_service
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.authz_policy_write_transition import (
     AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
     AuthzPolicySchemaV3TransitionDeniedError,
     AuthzPolicySchemaV3WriteEvidence,
 )
+from control_plane.contracts.backup_policy_proposal import (
+    BackupPolicyExecutionEvidence,
+    BackupPolicyProposalInput,
+)
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
     DurableOperationCallerIdentity,
@@ -70,8 +74,8 @@ from control_plane.contracts.privileged_operation_worker_heartbeat import (
 )
 from control_plane.durable_operation_authorization import (
     durable_operation_administrator_grant_allows,
-    managed_github_id_explicit_action_rule_allows,
     managed_github_id_action_allows,
+    managed_github_id_explicit_action_rule_allows,
     managed_github_id_rule_allows,
     read_active_authz_policy_record,
 )
@@ -82,11 +86,6 @@ from control_plane.privileged_operation_service import (
 )
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
-from control_plane.contracts.backup_policy_proposal import (
-    BackupPolicyProposalInput,
-    BackupPolicyExecutionEvidence,
-)
-
 
 PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS = 300
 
@@ -261,9 +260,7 @@ def _timestamp(value: datetime) -> str:
 
 
 def _digest(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def privileged_operation_execution_token(operation_id: str) -> str:

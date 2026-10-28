@@ -14,8 +14,6 @@ copies and that route are deleted in #2606.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from collections.abc import Iterable
 from typing import Literal
@@ -30,6 +28,7 @@ from control_plane.contracts.repository_inventory import (
     RepositoryInventoryRecord,
     normalize_repository,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 ProductRepositoryIdentityMode = Literal["dry-run", "apply"]
@@ -296,9 +295,7 @@ def build_product_repository_identity_plan(
         "source_label": PRODUCT_REPOSITORY_IDENTITY_SOURCE,
         "reason": request.reason,
     }
-    plan_sha256 = hashlib.sha256(
-        json.dumps(plan_evidence, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    plan_sha256 = nonvalidating_compact_sorted_json_sha256(plan_evidence)
     return ProductRepositoryIdentityPlan(
         mode=request.mode,
         product=profile.product,

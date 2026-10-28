@@ -1,12 +1,12 @@
 """A restart is bound to one existing container, never a deployment request."""
 
-import hashlib
 import json
 import re
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 SERVICE_RESTART_ROUTE = "/v1/drivers/odoo/service-restart"
@@ -81,9 +81,7 @@ class LaneServiceRestartPlan(BaseModel):
     before: RestartContainerIdentity
 
     def digest(self) -> str:
-        return hashlib.sha256(
-            json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        return nonvalidating_compact_sorted_json_sha256(self.model_dump(mode="json"))
 
 
 class LaneServiceRestartResult(BaseModel):

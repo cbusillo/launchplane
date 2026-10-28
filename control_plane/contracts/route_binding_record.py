@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from control_plane.contracts.data_provenance import FreshnessStatus
 from control_plane.contracts.text_fields import require_text
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 RouteBindingStatus = Literal["active", "disabled"]
@@ -293,10 +294,9 @@ class EnvironmentRouteBindingRecord(BaseModel):
     def external_custody_sha256(self, domain_name: str) -> str:
         if self.external_ingress is None or domain_name not in self.external_ingress.domains:
             return ""
-        payload = json.dumps(
-            self.external_ingress.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        return nonvalidating_compact_sorted_json_sha256(
+            self.external_ingress.model_dump(mode="json")
         )
-        return hashlib.sha256(payload.encode()).hexdigest()
 
     @property
     def binding_key(self) -> str:

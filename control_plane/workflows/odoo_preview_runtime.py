@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 
-import hashlib
 import json
 import re
 import time
@@ -77,6 +76,7 @@ from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import compose as dokploy_compose
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.dokploy.api import JsonObject, JsonValue
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 OdooPreviewDokployDryRunStatus = OdooPreviewRuntimePlanStatus
@@ -284,8 +284,7 @@ class OdooPreviewApplyInputsResult(BaseModel):
 
 def odoo_preview_apply_plan_sha256(result: OdooPreviewApplyInputsResult) -> str:
     payload = result.model_dump(mode="json", exclude={"plan_provenance"})
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def build_odoo_preview_apply_inputs(

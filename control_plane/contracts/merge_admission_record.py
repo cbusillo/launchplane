@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -21,6 +19,7 @@ from control_plane.contracts.record_fields import (
     normalize_sha256,
     required_token,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 MergeLandingOutcomeStatus = Literal["landed", "rejected", "reconcile_required"]
@@ -64,13 +63,7 @@ def _normalize_timestamp(value: str, field_name: str) -> str:
 
 
 def _canonical_sha256(payload: object) -> str:
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 class MergeAdmissionRecord(BaseModel):

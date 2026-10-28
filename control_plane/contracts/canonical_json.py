@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pydantic import BaseModel
 
+from pydantic import BaseModel
 
 CANONICAL_JSON_INTEGER_MIN = -(2**63)
 CANONICAL_JSON_INTEGER_MAX = 2**63 - 1
@@ -42,6 +42,12 @@ def canonical_json_bytes(payload: object) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def nonvalidating_compact_sorted_json_sha256(payload: object) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def canonical_json_sha256(payload: object) -> str:

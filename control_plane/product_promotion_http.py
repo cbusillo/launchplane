@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -46,6 +44,7 @@ from control_plane.workflows.generic_web_promotion_workflow import (
     BumpLevel,
     GenericWebPromotionWorkflowRequest,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 PRODUCT_PROMOTION_INVENTORY_STALE_AFTER = timedelta(minutes=30)
@@ -1029,8 +1028,7 @@ def _promotion_evidence_fingerprint(
 
 
 def _canonical_sha256(payload: dict[str, object]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def _parse_timestamp(value: str) -> datetime:

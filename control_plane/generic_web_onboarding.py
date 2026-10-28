@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import hashlib
-from ipaddress import ip_address
-import json
 import re
+from ipaddress import ip_address
 from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.product_onboarding_manifest import (
     ProductOnboardingExpectedConfigManifest,
     ProductOnboardingLaneManifest,
@@ -21,7 +20,6 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductRuntimeConfigRequirement,
 )
-
 
 _PRODUCT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -151,9 +149,7 @@ def generic_web_onboarding_plan_sha256(intent: GenericWebOnboardingIntent) -> st
         "provider_operation": "create-application",
         "stable_instance": "testing",
     }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def validate_generic_web_onboarding_is_new_product(

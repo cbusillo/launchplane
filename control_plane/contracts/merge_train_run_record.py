@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -18,6 +16,7 @@ from control_plane.workflows.merge_train_worker import (
     MergeTrainWorkerStepResult,
     MergeTrainWorkerStepStatus,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 MergeTrainRunMode = Literal["dry_run", "mutate"]
@@ -150,7 +149,5 @@ def build_merge_train_run_record_id(record: MergeTrainRunRecord) -> str:
         record.recorded_at.replace("-", "").replace(":", "").replace("+00:00", "Z")
     )
     digest_payload = record.model_dump(mode="json", exclude={"run_id"})
-    digest = hashlib.sha256(
-        json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(digest_payload)[:16]
     return f"merge-train-run-{normalized_timestamp}-{digest}"

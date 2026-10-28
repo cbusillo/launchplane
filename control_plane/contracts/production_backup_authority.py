@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.record_fields import SHA256_PATTERN
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 ProductionBackupAuthorityRecordStatus = Literal["active", "superseded", "retired"]
@@ -332,9 +331,7 @@ def build_production_backup_policy_id(
         "instance": _required_identifier(instance, "instance"),
         "promotion_action": _required_value(promotion_action, "promotion_action"),
     }
-    digest = hashlib.sha256(
-        json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(scope)
     return f"production-backup-policy-{digest[:24]}"
 
 
@@ -380,9 +377,7 @@ def production_backup_policy_digest(record: ProductionBackupPolicyRecord) -> str
 
 
 def _digest(payload: dict[str, object]) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def _required_identifier(value: str, label: str) -> str:

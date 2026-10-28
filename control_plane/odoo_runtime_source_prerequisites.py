@@ -1,5 +1,4 @@
 import json
-import hashlib
 import hmac
 import logging
 import threading
@@ -38,6 +37,7 @@ from control_plane.odoo_source_prerequisite_programs import (
 from control_plane.release_compatibility import _files
 from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION, _decrypt_secret_value
 from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 SourceName = Literal["cm_data", "repairshopr", "fishbowl"]
 Agreement = Literal["match", "mismatch", "unknown"]
@@ -600,18 +600,14 @@ def read_source_consumers(
         ):
             return unknown
         reads.assert_selection_current(store, selection)
-        digest = hashlib.sha256(
-            json.dumps(
-                {
-                    "authority": authority.snapshot,
-                    "identity": selection.identity.model_dump(mode="json"),
-                    "artifact": manifest.model_dump(mode="json"),
-                    "result": result.model_dump(mode="json"),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
+        digest = nonvalidating_compact_sorted_json_sha256(
+            {
+                "authority": authority.snapshot,
+                "identity": selection.identity.model_dump(mode="json"),
+                "artifact": manifest.model_dump(mode="json"),
+                "result": result.model_dump(mode="json"),
+            }
+        )
         return result.model_copy(update={"evidence_sha256": digest})
     except Exception:
         _logger.debug("Qualified source read unavailable.")

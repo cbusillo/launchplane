@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-import hashlib
-import json
 import re
 import click
 from sqlalchemy.exc import SQLAlchemyError
@@ -39,6 +37,7 @@ from control_plane.odoo_runtime_reads import (
 from control_plane.contracts.runtime_identity import runtime_identity_from_health_payload
 from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 class BusinessHoursHeld(ValueError):
@@ -355,19 +354,15 @@ def require_calendar_authority_current(
         != endpoint_digest
     ):
         raise ValueError("Private calendar transport changed during qualification.")
-    return hashlib.sha256(
-        json.dumps(
-            {
-                "identity": connection.selection.identity.model_dump(mode="json"),
-                "base_url": connection.selection.base_url,
-                "slot_target_id": connection.selection.slot_target_id,
-                "route_host": connection.selection.route_host,
-                "endpoint_digest": endpoint_digest,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(
+        {
+            "identity": connection.selection.identity.model_dump(mode="json"),
+            "base_url": connection.selection.base_url,
+            "slot_target_id": connection.selection.slot_target_id,
+            "route_host": connection.selection.route_host,
+            "endpoint_digest": endpoint_digest,
+        }
+    )
 
 
 def calendar_window(

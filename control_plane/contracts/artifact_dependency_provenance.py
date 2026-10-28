@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-import hashlib
-import json
 from pathlib import PurePosixPath
 import re
 from typing import Literal
@@ -10,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from control_plane.contracts.record_fields import GIT_SHA1_PATTERN, SHA256_PATTERN
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 ArtifactUvLockScope = Literal["support_runtime", "tenant"]
 ArtifactPythonPackageSourceKind = Literal["registry", "vcs"]
@@ -243,13 +242,7 @@ def artifact_python_package_inventory_sha256(
     payload = [
         package.model_dump(mode="json") for package in sorted(packages, key=lambda item: item.name)
     ]
-    canonical_json = json.dumps(
-        payload,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 class ArtifactPythonEnvironmentProvenance(BaseModel):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import hashlib
-import json
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,8 +25,9 @@ class GuestCaptureBoundary(BaseModel):
 
     @property
     def event_id(self) -> str:
-        payload = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-        return GUEST_CAPTURE_BINDING_PREFIX + hashlib.sha256(payload.encode()).hexdigest()
+        return GUEST_CAPTURE_BINDING_PREFIX + nonvalidating_compact_sorted_json_sha256(
+            self.model_dump(mode="json")
+        )
 
 
 class GuestCaptureCredential(BaseModel):

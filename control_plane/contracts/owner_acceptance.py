@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
-import json
 import re
 from typing import Literal
 from urllib.parse import urlsplit
@@ -34,6 +32,7 @@ from control_plane.contracts.record_fields import (
     normalize_sha256,
     required_token,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 OWNER_ACCEPTANCE_READ_ACTION = "owner_acceptance.read"
 OWNER_ACCEPTANCE_EVENT_WRITE_ACTION = "owner_acceptance_event.write"
@@ -155,13 +154,7 @@ def _normalize_http_url(value: str, field_name: str) -> str:
 
 
 def _canonical_sha256(payload: object) -> str:
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 class OwnerAcceptanceRuntimeIdentityBinding(BaseModel):

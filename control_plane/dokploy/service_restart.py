@@ -1,25 +1,23 @@
 """Dokploy's container restart API, with strict inspected Compose membership."""
 
-import hashlib
 import json
 from datetime import datetime
 from typing import cast
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.lane_service_restart import RestartContainerIdentity
 from control_plane.contracts.runtime_identity import (
+    RUNTIME_IDENTITY_ENV_KEY,
     RuntimeIdentity,
     compare_runtime_identity,
     parse_runtime_identity_payload,
-    RUNTIME_IDENTITY_ENV_KEY,
 )
 from control_plane.dokploy import api
 from control_plane.dokploy.runtime_evidence import normalize_expected_image_reference
 
 
 def _digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(value)
 
 
 class ServiceInspectionUnavailable(ValueError):

@@ -1,5 +1,4 @@
 import hashlib
-import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +36,7 @@ from control_plane.workflows.preview_pr_feedback import (
     LEGACY_PREVIEW_FEEDBACK_MARKERS,
     render_preview_pr_feedback_markdown,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 MANAGED_PREVIEW_FEEDBACK_MARKERS = (
@@ -132,8 +132,7 @@ def _comment_actor(comment: dict[str, object]) -> tuple[int, str]:
 
 
 def _observation_digest(payload: dict[str, object]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def observe_managed_preview_pr_feedback(

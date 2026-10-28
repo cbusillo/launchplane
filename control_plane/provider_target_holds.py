@@ -1,24 +1,24 @@
-from dataclasses import dataclass
-from datetime import timedelta
 import base64
-import hashlib
 import json
 import re
+from dataclasses import dataclass
+from datetime import timedelta
 from typing import Literal
 from uuid import UUID
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_mutation_reservation_id,
     parse_launchplane_mutation_timestamp,
 )
-from control_plane.contracts.provider_target_origin import (
-    ProviderTargetOrigin,
-    RetainedProviderTargetOrigin,
-)
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
     odoo_stable_target_replacement_operation_is_terminal,
+)
+from control_plane.contracts.provider_target_origin import (
+    ProviderTargetOrigin,
+    RetainedProviderTargetOrigin,
 )
 
 
@@ -233,9 +233,7 @@ class ProviderHoldLaneSnapshot:
 
 
 def provider_hold_source_sha256(material: object) -> str:
-    return hashlib.sha256(
-        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(material)
 
 
 # Long enough for a same-key retry or a recovery already underway to settle.

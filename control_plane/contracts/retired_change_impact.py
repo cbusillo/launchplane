@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
-import json
 import re
 from typing import Annotated, Literal
 
@@ -14,6 +12,7 @@ from control_plane.contracts.record_fields import (
     normalize_sha256,
     required_token,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 ChangeImpactPolicyStatus = Literal["active", "superseded"]
@@ -60,8 +59,7 @@ def _normalize_timestamp(value: str, field_name: str) -> str:
 
 def _canonical_sha256(payload: object) -> str:
     # JSON defaults to ASCII escapes; str.encode defaults to UTF-8.
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def _normalize_path(value: str, field_name: str) -> str:

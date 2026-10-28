@@ -1,11 +1,10 @@
-import hashlib
-import json
 import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 ProductPreviewTlsMode = Literal["dry-run", "apply"]
@@ -83,13 +82,7 @@ def build_product_preview_tls_plan(
         "source_label": PRODUCT_PREVIEW_TLS_SOURCE,
         "reason": request.reason,
     }
-    plan_sha256 = hashlib.sha256(
-        json.dumps(
-            plan_evidence,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    plan_sha256 = nonvalidating_compact_sorted_json_sha256(plan_evidence)
     return ProductPreviewTlsPlan(
         mode=request.mode,
         product=profile.product,

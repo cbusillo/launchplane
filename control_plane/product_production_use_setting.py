@@ -3,8 +3,6 @@ whether its Client's release acceptance starts the release."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal
 from collections.abc import Iterable
 
@@ -19,6 +17,7 @@ from control_plane.contracts.product_profile_record import (
     ReleaseOnAcceptance,
     ProductionUseAuthority as ProductionUseAuthority,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 ProductionUse = Literal["unknown", "prelaunch", "live"]
 ProductionUseMode = Literal["dry-run", "apply"]
@@ -109,9 +108,7 @@ def build_product_production_use_plan(
             raise ValueError(
                 "Director standing acceptance requires a generic-web product with a recorded Client."
             )
-    digest = hashlib.sha256(
-        json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(evidence)
     if request.mode == "apply" and request.reviewed_plan_sha256 != digest:
         raise ProductProductionUseChangedError("The plan changed; review a new dry run.")
     bootstrap_reconfirmation = (

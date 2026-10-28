@@ -1,5 +1,3 @@
-import hashlib
-import json
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic_core import CoreSchema
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 MergeTrainActorRole = Literal["repo_owner", "repo_admin"]
@@ -580,8 +579,7 @@ def merge_train_policy_sha256(policy: MergeTrainPolicy) -> str:
             "provider_delivery_protection_expectation"
         ):
             repository_policy.pop("provider_delivery_protection_expectation", None)
-    encoded = json.dumps(policy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(policy_payload)
 
 
 def merge_train_policy_provider_expectation_projection(
@@ -638,9 +636,7 @@ def merge_train_repository_authority_projection(
 
 
 def _projection_sha256(payload: dict[str, object]) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def merge_train_repository_authority_sha256(policy: MergeTrainRepositoryPolicy) -> str:
