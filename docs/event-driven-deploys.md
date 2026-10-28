@@ -231,55 +231,13 @@ reservation. The webhook request never waits on a deploy.
     evidence without backfilling a legacy attempt from today's inputs. See
     [application testing delivery](private-testing-transport.md) for retirement,
     platform-credential and unchanged-reconcile behavior.
-    For VeriReel testing, a matching image without deployment-bound migration and
-    creator/admin qualification gets one normal deploy of that same verified
-    artifact to run the testing-only post-deploy extension. Passing qualification
-    is reused only when its authority digest matches the current lane. The
-    deployment captures this digest before target preparation and provider
-    effects, and carries it into qualification rather than reading a newer
-    authority after deployment. This binds the expected starting authority;
-    it does not provide an atomic snapshot of every runtime read. Changing consumed
-    runtime settings or secret versions also requires fresh qualification. Declaring
-    a new shared-web lifecycle therefore requalifies a previously passing legacy
-    deployment even when the artifact is unchanged; a matching qualification then
-    stops at `already_deployed`. A failed qualification with unchanged
-    stored lane authority remains failed; a supported configuration repair can
-    permit a fresh attempt. Transient infrastructure failures get bounded fresh
-    attempts through the same deploy lifecycle. A cleanup failure remains failed,
-    with the reserved fixture email recorded for the existing maintenance cleanup
-    intent. An administrator can retry the exact verified artifact using the
-    existing testing deploy surface after resolving the recorded failure; no grant
-    is added for a retry. Interrupted effects retain the existing provider
-    reservation and generic-web recovery path. After interruption, the recovery
-    admin can derive the reserved fixture email from the deployment ID using
-    `fixture_email`; no cleanup mutation runs after its effect fence is lost.
-    Unknown VeriReel exchanges emit a fixed reason and catch site in service logs,
-    with allowlisted method, route, HTTP status and resource type when observable.
-    Verification routes omit their fixture identifier; queries, request values and
-    exception text are never logged. The verifier logs the deployment record ID
-    separately for correlation. These diagnostics leave qualification unknown and
-    do not release the reservation or permit cleanup or replay.
-    The verifier buffers each tracked same-origin request using Playwright's
-    upstream fetch, with no retries or redirect following and a finite deadline.
-    Its full response body and successful status acknowledge the exact intercepted
-    request before delivery to the browser. Browser cancellation cannot erase that
-    receipt. Missing bodies, unsuccessful status and write redirects stay unknown;
-    signup, server actions and public verification (which records a scan) share
-    this rule. Native read redirects retain actual browser navigation. Each known
-    same-origin read descendant requires its own successful response and matching
-    finished request, because Playwright does not route redirect descendants.
-    A cancelled native descendant remains unknown. Same-origin sign-in redirects
-    retain their own receipt, so a lost application session can fail the product
-    check and clean up its acknowledged fixture.
-    Closing fences new routed requests before upstream dispatch and waits for
-    handlers already in flight. No cancelled-read or page-close inference completes
-    an exchange. A failed page close remains unknown, with cleanup skipped.
-    Service workers are blocked so they cannot bypass interception. The billing
-    page must render its main heading after signup; transport receipts do not
-    replace the product assertions.
-    No new caller capability or
-    product-repository call-in is involved. Production and rollback do not select
-    this extension.
+    Product browser behavior is checked by the product Build before its artifact
+    manifest is published. Launchplane performs shared runtime and identity
+    qualification. Retired VeriReel browser declarations hold reconciliation
+    before provider effects until explicitly migrated through the reviewed
+    generic-web transition after a checked product Build is available. Stored
+    historical execution receipts and unknown-effect recovery remain readable;
+    removing the browser executor does not settle or replay interrupted effects.
   - If the lane is busy, the reconcile stays pending and runs again after it.
   - While the testing lane is held for staff testing, the reconcile records
     its plan as held (`action: wait`, reason `staff_testing`) and deploys

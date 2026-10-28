@@ -284,8 +284,10 @@ Launchplane drivers once the driver has the necessary profile data.
 
 Product smoke checks own their fixture setup and cleanup. They do not call a
 Launchplane maintenance endpoint. The old generated smoke-maintenance client is
-retired; testing qualification still uses an internal fixture helper until its
-product checks move out of Launchplane.
+retired. VeriReel runs its browser checks against each candidate image, using
+disposable product-owned fixtures and a credential-free browser before Build
+publishes its artifact manifest. Launchplane retains shared runtime qualification
+and never runs the product check inside its credentialed service.
 
 ## What Launchplane Owns
 

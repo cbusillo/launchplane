@@ -97,14 +97,6 @@ def build_generic_web_transition_plan(
         for lane in lanes
     ):
         raise ValueError("The testing verification extension requires the recorded testing lane.")
-    if legacy_profile and any(
-        lane.instance == "testing"
-        and lane.generic_web_extensions.verification_extension != "verireel-testing"
-        for lane in lanes
-    ):
-        raise ValueError(
-            "The existing lane qualification must have a supported shared-web declaration."
-        )
     preview = profile.preview
     if request.preview is not None:
         updates = request.preview.model_dump(exclude_unset=True, exclude={"generic_web_extensions"})

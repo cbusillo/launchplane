@@ -643,30 +643,9 @@ def reconcile_testing_target(
                         reason="testing_runtime_drift",
                         testing_runtime_drift_sha256=drift,
                     )
-    if (
-        isinstance(desired, VerifiedGenericWebBuild)
-        and declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
-        and plan.get("reason") == "already_deployed"
-    ):
-        from control_plane.workflows.verireel_testing_post_deploy import (
-            recorded_verireel_testing_qualification,
-        )
-
-        lane = next(lane for lane in profile.lanes if lane.instance == TESTING_INSTANCE)
-        qualification = recorded_verireel_testing_qualification(
-            cast(GenericWebDeployStore, record_store),
-            _current_testing_deployment_id(record_store=record_store, lane=lane),
-            desired.image_reference,
-            desired.manifest.source_commit,
-            _generic_web_testing_authority(record_store=record_store, lane=lane),
-        )
-        if qualification == "fail":
-            plan.update(post_deploy_status="fail", reason="testing_qualification_failed")
-            return ReconcileOutcome(
-                plan, error="This testing deployment failed product qualification."
-            )
-        if qualification != "pass":
-            plan.update(action="deploy", reason="testing_qualification_missing")
+    if declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE):
+        plan.update(action="wait", held=True, reason="product_browser_checks_migration_required")
+        return ReconcileOutcome(plan)
     if desired is None or plan["action"] != "deploy":
         return ReconcileOutcome(plan)
     if isinstance(desired, VerifiedGenericWebBuild):

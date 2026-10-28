@@ -14,9 +14,6 @@ from control_plane.workflows.generic_web_deploy_provider import (
     decode_generic_web_provider_reconciliation_target,
 )
 from control_plane.workflows.generic_web_execution import execution_receipt
-from control_plane.workflows.generic_web_post_deploy import (
-    generic_web_post_deploy_executor_for_profile,
-)
 
 
 def testing_abandonment_authority(
@@ -89,7 +86,6 @@ def inspect_testing_abandonment(
     authority = testing_abandonment_authority(store, adapter, original)
     if authority is None:
         return None
-    profile = adapter.profile
     target_id = authority["bindings"][2]["target_id"]
     try:
         inspected = adapter.inspect(
@@ -102,8 +98,7 @@ def inspect_testing_abandonment(
         if not inspected.identity_matches or record is None:
             return None
         receipt = execution_receipt(record)
-        executor = generic_web_post_deploy_executor_for_profile(profile, instance="testing")
-        if receipt is None or not receipt.entries or executor is None:
+        if receipt is None or not receipt.entries:
             return None
         if inspected.execution is None or inspected.execution.digest_evidence.get(
             "receipt"
@@ -112,7 +107,6 @@ def inspect_testing_abandonment(
         last = receipt.entries[-1]
         if (
             last.kind != "product_executor"
-            or last.name != executor.__name__
             or last.target_id != target_id
             or last.acknowledgement != "none"
             or last.terminal
