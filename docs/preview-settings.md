@@ -66,3 +66,26 @@ are accepted, but credentials, including password-bearing connection strings,
 require managed bindings. Integration credentials still need a matching existing
 runtime key-safety rule that permits preview use. A rule cannot override a
 binding declared production-only or testing-only.
+
+An unrecorded Odoo preview can need different Website bootstrap intent from its
+stable template. Use the existing native
+`POST /v1/drivers/odoo/website-bootstrap-override` with an `override` containing
+the product, exact context/instance, `preview_original_reservation_id`, an
+explicit `website_bootstrap` value (including `null`), and `mode: dry-run`.
+The original's retained issued plan must prove that exact unrecorded preview and
+unique product ownership. Review the returned `plan_sha256`, then submit the
+same intent with `mode: apply`, `reviewed_plan_sha256`, and an idempotency key.
+The service writes only that preview's existing per-instance override family
+with the `preview` phase, checks concurrent profile/record changes and reads it
+back. Its null bootstrap explicitly withdraws template inheritance for this
+preview. Without such an exact record, template inheritance is unchanged.
+Mixed phases/settings and conflicting carried Website intent refuse.
+
+This preparation uses the Director agent's existing preview authority or the
+route's existing instance permission; stable-lane writes retain their original
+authorization and non-null contract. It changes no original operation,
+provider, database, template or other preview. It supplies no custody,
+disposability or settlement proof. A subsequent refresh still requires its
+normal gates and a fresh issued plan. Preview safety bindings include managed
+preview settings and exact bootstrap intent; changing them invalidates old
+observations. Existing issued original plans retain their old digests.

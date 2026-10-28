@@ -174,7 +174,8 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         profile.preview.clean_testing_snapshot = True
         envelope = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
         issued = _issued_plan(envelope)
-        store = Mock(spec=["read_clean_testing_snapshot"])
+        store = Mock(spec=["read_clean_testing_snapshot", "read_odoo_instance_override_record"])
+        store.read_odoo_instance_override_record.side_effect = FileNotFoundError
         store.read_clean_testing_snapshot.side_effect = AssertionError(
             "A retained preview needs no source lookup"
         )
@@ -619,6 +620,7 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
         website_bootstrap: bool = False,
         snapshot_enabled: bool = False,
         template_extra: dict[str, str] | None = None,
+        preview_override: OdooInstanceOverrideRecord | None = None,
     ) -> dict[str, str]:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -632,6 +634,8 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
                 ]
             }
             profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            if preview_override is not None:
+                store.write_odoo_instance_override_record(preview_override)
             if preview_payload:
                 store.write_runtime_environment_record(
                     RuntimeEnvironmentRecord(
@@ -751,6 +755,117 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
         values = self._service_environment(manifest_odoo_version="19.0", website_bootstrap=True)
         decoded = json.loads(base64.b64decode(values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))
         self.assertEqual(decoded["addon_settings"], [])
+
+    def test_exact_preview_can_withdraw_inherited_website_intent(self) -> None:
+        from control_plane.odoo_instance_overrides import (
+            LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+        )
+
+        plan = OdooPreviewApplyEnvelope.model_validate(_refresh_payload()).apply.dry_run_plan
+        values = self._service_environment(
+            manifest_odoo_version="19.0",
+            website_bootstrap=True,
+            preview_override=OdooInstanceOverrideRecord(
+                context="cm",
+                instance=plan.preview_slug,
+                apply_on=("preview",),
+                updated_at="2026-10-28T00:00:00Z",
+            ),
+        )
+        self.assertNotIn(LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY, values)
+        if encoded := values.get(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY):
+            self.assertFalse(json.loads(base64.b64decode(encoded)).get("website_bootstrap"))
+
+    def test_exact_preview_intent_does_not_change_a_sibling(self) -> None:
+        expected = self._service_environment(manifest_odoo_version="19.0", website_bootstrap=True)
+        actual = self._service_environment(
+            manifest_odoo_version="19.0",
+            website_bootstrap=True,
+            preview_override=OdooInstanceOverrideRecord(
+                context="cm",
+                instance="pr-99",
+                apply_on=("preview",),
+                updated_at="2026-10-28T00:00:00Z",
+            ),
+        )
+        self.assertEqual(actual, expected)
+
+    def test_exact_preview_bootstrap_uses_its_own_intent_and_generated_url(self) -> None:
+        bootstrap = OdooWebsiteBootstrapPayload(
+            name="Own website", canonical_url="https://invalid.example"
+        )
+        plan = OdooPreviewApplyEnvelope.model_validate(_refresh_payload()).apply.dry_run_plan
+        values = self._service_environment(
+            manifest_odoo_version="19.0",
+            website_bootstrap=True,
+            preview_override=OdooInstanceOverrideRecord(
+                context="cm",
+                instance=plan.preview_slug,
+                apply_on=("preview",),
+                website_bootstrap=bootstrap,
+                updated_at="2026-10-28T00:00:00Z",
+            ),
+        )
+        payload = json.loads(base64.b64decode(values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))
+        self.assertEqual(payload["instance"], plan.preview_slug)
+        self.assertEqual(payload["website_bootstrap"]["name"], bootstrap.name)
+        self.assertEqual(payload["website_bootstrap"]["canonical_url"], plan.preview_url)
+
+    def test_exact_preview_withdrawal_refuses_conflicting_carried_intent(self) -> None:
+        from control_plane.odoo_instance_overrides import (
+            LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+        )
+
+        plan = OdooPreviewApplyEnvelope.model_validate(_refresh_payload()).apply.dry_run_plan
+        for extra in (
+            {LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true"},
+            {
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                    json.dumps(
+                        {
+                            "context": "cm",
+                            "instance": "testing",
+                            "website_bootstrap": {"name": "Explicit carried website"},
+                        }
+                    ).encode()
+                ).decode()
+            },
+        ):
+            with self.subTest(extra_keys=list(extra)), self.assertRaises(ValueError):
+                self._service_environment(
+                    manifest_odoo_version="19.0",
+                    site_odoo_version="19.0",
+                    template_extra=extra,
+                    preview_override=OdooInstanceOverrideRecord(
+                        context="cm",
+                        instance=plan.preview_slug,
+                        apply_on=("preview",),
+                        updated_at="2026-10-28T00:00:00Z",
+                    ),
+                )
+
+    def test_exact_preview_intent_refuses_mixed_phases_and_unrelated_settings(self) -> None:
+        plan = OdooPreviewApplyEnvelope.model_validate(_refresh_payload()).apply.dry_run_plan
+        for changes in (
+            {"apply_on": ("preview", "deploy")},
+            {
+                "addon_settings": (
+                    OdooAddonSettingOverride(
+                        addon="authentik_sso",
+                        setting="client_id",
+                        value=OdooOverrideValue(source="literal", value="must-not-be-dropped"),
+                    ),
+                )
+            },
+        ):
+            record = OdooInstanceOverrideRecord(
+                context="cm",
+                instance=plan.preview_slug,
+                apply_on=("preview",),
+                updated_at="2026-10-28T00:00:00Z",
+            ).model_copy(update=changes)
+            with self.subTest(changes=list(changes)), self.assertRaises(ValueError):
+                self._service_environment(manifest_odoo_version="19.0", preview_override=record)
 
     def test_preview_addon_settings_survive_website_bootstrap(self) -> None:
         settings = [

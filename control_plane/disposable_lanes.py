@@ -497,14 +497,16 @@ def disposable_lane_configuration(
         policies = store.list_runtime_key_safety_policy_records(status="active", limit=1)
         template = profiles[0].preview.template_instance
         instances.add(template)
-        try:
-            overrides.append(
-                store.read_odoo_instance_override_record(
-                    context_name=context, instance_name=template
+        instances.add("preview")
+        for override_instance in dict.fromkeys((template, instance)):
+            try:
+                overrides.append(
+                    store.read_odoo_instance_override_record(
+                        context_name=context, instance_name=override_instance
+                    )
                 )
-            )
-        except FileNotFoundError:
-            pass
+            except FileNotFoundError:
+                pass
     # Site values and version pointers stay inside the service and only enter
     # the digest. Secret values are never read or returned.
     bindings = tuple(

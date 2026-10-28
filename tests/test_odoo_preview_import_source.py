@@ -185,6 +185,61 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
             database_url=self.store.database_url,
         )
 
+    def test_exact_preview_withdrawal_also_controls_import_source_composition(self) -> None:
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooWebsiteBootstrapPayload,
+        )
+        from control_plane.odoo_instance_overrides import (
+            LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+        )
+
+        _write_odoo_preview_template_runtime_environment(store=self.store)
+        self.store.write_runtime_environment_record(
+            self.runtime.model_copy(
+                update={
+                    "env": {**self.runtime.env, "ODOO_DB_USER": "odoo"},
+                }
+            )
+        )
+        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        template = OdooInstanceOverrideRecord(
+            context=self.profile.preview.context,
+            instance=self.profile.preview.template_instance,
+            website_bootstrap=OdooWebsiteBootstrapPayload(name="Template site"),
+            updated_at=self.profile.updated_at,
+        )
+        self.store.write_odoo_instance_override_record(template)
+        self.store.write_odoo_instance_override_record(
+            OdooInstanceOverrideRecord(
+                context=self.profile.preview.context,
+                instance=request.apply.dry_run_plan.preview_slug,
+                apply_on=("preview",),
+                updated_at=self.profile.updated_at,
+            )
+        )
+        result = _odoo_preview_service_environment(
+            control_plane_root_path=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            plan=request.apply.dry_run_plan,
+            manifest=request.apply.manifest,
+            database_url=self.store.database_url,
+            fishbowl_source=self.reference,
+        )
+        payload = json.loads(
+            base64.b64decode(result.values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY])
+        )
+        self.assertFalse(payload.get("website_bootstrap"))
+        self.assertTrue(payload["config_parameters"])
+        self.assertNotIn(LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY, result.values)
+        self.assertEqual(
+            self.store.read_odoo_instance_override_record(
+                context_name=template.context,
+                instance_name=template.instance,
+            ),
+            template,
+        )
+
     def test_only_selected_source_enters_normal_post_deploy_payload(self) -> None:
         _write_odoo_preview_template_runtime_environment(store=self.store)
         self.store.write_runtime_environment_record(

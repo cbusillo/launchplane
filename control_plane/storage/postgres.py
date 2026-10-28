@@ -32776,6 +32776,7 @@ class PostgresRecordStore(HumanSessionStore):
         required_product_config_target: tuple[str, str, str] | None = None,
         expected_record: OdooInstanceOverrideRecord | None = None,
         require_absent: bool = False,
+        expected_product_profile: LaunchplaneProductProfileRecord | None = None,
     ) -> None:
         row = LaunchplaneOdooInstanceOverrideRow(
             context=record.context,
@@ -32788,12 +32789,27 @@ class PostgresRecordStore(HumanSessionStore):
             and required_product_config_target is None
             and expected_record is None
             and not require_absent
+            and expected_product_profile is None
         ):
             self._write_row(row)
             return
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            if expected_product_profile is not None:
+                profile_row = session.scalar(
+                    select(LaunchplaneProductProfileRow)
+                    .where(LaunchplaneProductProfileRow.product == expected_product_profile.product)
+                    .with_for_update()
+                )
+                if (
+                    profile_row is None
+                    or self._read_product_profile_payload(profile_row.payload)
+                    != expected_product_profile
+                ):
+                    raise OdooInstanceOverrideConflictError(
+                        "Preview profile changed before commit."
+                    )
             if expected_record is not None or require_absent:
                 current = session.scalar(
                     select(LaunchplaneOdooInstanceOverrideRow)
