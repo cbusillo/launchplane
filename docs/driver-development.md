@@ -486,7 +486,7 @@ declaration alone does not add lifecycle work to a pre-extension rollback.
 If provider deployment evidence is absent but the exact attempt's receipt proves
 that a pre-image refusal restored all schedules, recovery may retry the original
 operation. A different attempt or an unqualified/failed-restoration receipt does
-not supply that proof. Testing rollback retains shared runtime qualification. Product browser behavior
+not supply that proof. After removing the retired declaration, testing rollback retains shared runtime qualification. Product browser behavior
 is checked by the Build that produced the artifact.
 
 ### VeriReel extension repair and history

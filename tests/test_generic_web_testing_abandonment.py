@@ -1166,17 +1166,6 @@ class TestingAbandonmentReconcileTests(unittest.TestCase):
         self.addCleanup(scenario.doCleanups)
         triggered = scenario.prepare_application_runtime_test()
         scenario.application_input_schedule()
-        profile = scenario.store.read_product_profile_record("site")
-        lane = profile.lanes[0].model_copy(
-            update={
-                "generic_web_extensions": profile.lanes[0].generic_web_extensions.model_copy(
-                    update={}
-                )
-            }
-        )
-        scenario.store.write_product_profile_record(
-            profile.model_copy(update={"lanes": (lane, *profile.lanes[1:])})
-        )
         calls: list[str] = []
 
         def execute_fixture_post_deploy(*args: object) -> PostDeployUpdateEvidence:

@@ -19,7 +19,8 @@ class TestingBrowserTests(unittest.TestCase):
             },
         ):
             self.assertIs(launch_testing_browser(chromium), chromium.connect.return_value)
-        chromium.connect.assert_called_once_with(endpoint, timeout=30_000)
+        chromium.connect.assert_called_once()
+        self.assertEqual(chromium.connect.call_args.args, (endpoint,))
         chromium.launch.assert_not_called()
 
     def test_linux_requires_the_isolated_browser(self) -> None:

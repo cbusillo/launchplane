@@ -33,10 +33,6 @@ from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
     resolve_generic_web_promotion_inputs,
 )
-from control_plane.workflows.verireel_app_maintenance import (
-    _request_internal_smoke_maintenance_api,
-    VeriReelAppMaintenanceRequest,
-)
 from tests.test_generic_web_promotion import _store_with_production
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
@@ -287,28 +283,14 @@ class OriginalExecutionTests(unittest.TestCase):
                     def executor(
                         root: Path, records: object, context: Any, guard: Any
                     ) -> PostDeployUpdateEvidence:
-                        _request_internal_smoke_maintenance_api(
-                            base_url="https://fixture.invalid",
-                            secret="fixture-only",
-                            request=VeriReelAppMaintenanceRequest(
-                                action="grant-sponsored",
-                                intent="stable-testing-remote-e2e-grant-sponsored",
-                                email="fixture@example.com",
-                            ),
-                            execution_guard=guard,
-                        )
+                        guard.begin_exchange("fixture_request")
+                        response_lost()
                         return PostDeployUpdateEvidence(attempted=True, status="pass")
 
                     patches.enter_context(
                         patch(
                             "control_plane.generic_web_deploy_http._generic_web_post_deploy_executor_for_profile",
                             return_value=executor,
-                        )
-                    )
-                    patches.enter_context(
-                        patch(
-                            "control_plane.workflows.verireel_app_maintenance.urlopen",
-                            side_effect=response_lost,
                         )
                     )
                 else:
