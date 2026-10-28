@@ -918,11 +918,11 @@ jobs:
         with:
           path: ${{ env.UNITTEST_TIMINGS_CACHE }}
           key: >-
-            ${{ runner.os }}-python-3.14-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ runner.os }}-python-${{ hashFiles('.python-version') }}-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ${{ runner.os }}-python-3.14-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-
-            ${{ runner.os }}-python-3.14-unittest-timings-${{ github.ref_name }}-
-            ${{ runner.os }}-python-3.14-unittest-timings-
+            ${{ runner.os }}-python-${{ hashFiles('.python-version') }}-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-
+            ${{ runner.os }}-python-${{ hashFiles('.python-version') }}-unittest-timings-${{ github.ref_name }}-
+            ${{ runner.os }}-python-${{ hashFiles('.python-version') }}-unittest-timings-
 
       - name: Freeze unittest timing snapshot
         run: |
@@ -1162,7 +1162,7 @@ jobs:
         with:
           path: ${{ env.UNITTEST_TIMINGS_CACHE }}
           key: >-
-            ${{ runner.os }}-python-3.14-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ runner.os }}-python-${{ hashFiles('.python-version') }}-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   test_fork:
     if: >-

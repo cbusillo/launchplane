@@ -6,7 +6,7 @@ set -euo pipefail
 # Evidence must land in the checkout mount; the container's own /tmp is lost.
 : "${BROWSER_SMOKE_ARTIFACT_DIR:?Set a checkout-relative artifact folder from the CI workflow}"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-pnpm --dir "$repo_root/frontend" generate:openapi-types
+(cd "$repo_root/frontend" && pnpm generate:openapi-types)
 node_executable="$(realpath -- "$(command -v node)")"
 host_network_namespace="$(readlink /proc/self/ns/net)"
 container_id=""
