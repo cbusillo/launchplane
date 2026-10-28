@@ -210,6 +210,9 @@ def admit_reservation(store: Any, session: Any, scope: str, route_path: str = ""
 def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[str, object], ...]:
     from control_plane.storage.postgres import (
         LaunchplaneIdempotencyRow,
+        LaunchplaneOdooStableBootstrapOperationRow,
+        LaunchplaneOdooProdBackupRestoreOperationRow,
+        LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
         LaunchplaneOutboxDeliveryRow,
         LaunchplaneOdooProdPromotionOperationRow,
         LaunchplaneOdooProdRollbackOperationRow,
@@ -219,6 +222,9 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
 
     observations: list[dict[str, object]] = []
     for row_type in (
+        LaunchplaneOdooStableBootstrapOperationRow,
+        LaunchplaneOdooProdBackupRestoreOperationRow,
+        LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
         LaunchplaneOdooProdPromotionOperationRow,
         LaunchplaneOdooProdRollbackOperationRow,
         LaunchplaneOdooStableTargetReplacementOperationRow,

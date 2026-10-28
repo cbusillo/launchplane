@@ -16658,6 +16658,247 @@ class RealPostgresCalendarProfileFenceTests(unittest.TestCase):
 
 
 class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
+    def test_real_readonly_service_startup_http_and_shutdown_preserve_database(self) -> None:
+        from control_plane.database_maintenance import database_snapshot
+        from control_plane.database_maintenance_cli import verify_application_reads
+        from control_plane.http_app import resolve_launchplane_authz_policy
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from control_plane.storage.schema_migration import migrate_schema
+        from control_plane import service_bootstrap
+
+        with _isolated_postgres_database() as url:
+            migrate_schema(database_url=url)
+            store = PostgresRecordStore(database_url=url)
+            try:
+                resolve_launchplane_authz_policy(
+                    record_store=store,
+                    bootstrap_policy=LaunchplaneAuthzPolicy(),
+                    policy_source="synthetic",
+                    now_timestamp="2026-01-01T00:00:00Z",
+                )
+            finally:
+                store.close()
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            from control_plane.http_app import create_launchplane_fastapi_app as factory
+
+            def create_app(**arguments: Any) -> Any:
+                schedulers = {
+                    name: value for name, value in arguments.items() if name.endswith("_scheduler")
+                }
+                self.assertTrue(schedulers)
+                for value in schedulers.values():
+                    self.assertIsNone(value)
+                return factory(**arguments)
+
+            with (
+                engine.connect() as connection,
+                patch.object(
+                    service_bootstrap, "create_launchplane_fastapi_app", side_effect=create_app
+                ),
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_POLICY_TOML": f"schema_version = {LaunchplaneAuthzPolicy().schema_version}"
+                    },
+                    clear=True,
+                ),
+            ):
+                before = database_snapshot(connection)
+                connection.commit()
+                verify_application_reads(connection, service_health=True)
+                self.assertEqual(database_snapshot(connection), before)
+                connection.commit()
+                from control_plane.storage.schema_migration import migrate_schema_on_connection
+                from control_plane.storage.migrations.versions import (
+                    e7c1d5e9a3b6_drop_retired_delivery_tables as retirement,
+                )
+
+                with connection.begin():
+                    migrate_schema_on_connection(connection, target_revision=retirement.revision)
+                retired = database_snapshot(connection)
+                connection.commit()
+                verify_application_reads(connection, service_health=True)
+                self.assertEqual(database_snapshot(connection), retired)
+
+    def test_readonly_service_startup_refuses_a_policy_seed(self) -> None:
+        from control_plane.database_maintenance_cli import verify_application_reads
+        from control_plane.database_maintenance_host import (
+            RecoveryRequired,
+            VERIFICATION_BLOCKED_EVENT,
+        )
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from control_plane.storage.schema_migration import migrate_schema
+
+        with _isolated_postgres_database() as url:
+            migrate_schema(database_url=url)
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            with (
+                engine.connect() as connection,
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_POLICY_TOML": f"schema_version = {LaunchplaneAuthzPolicy().schema_version}"
+                    },
+                    clear=True,
+                ),
+            ):
+                with self.assertRaises(RecoveryRequired) as failure:
+                    verify_application_reads(connection, service_health=True)
+                self.assertEqual(failure.exception.event, VERIFICATION_BLOCKED_EVENT)
+
+    def test_shutdown_cancels_only_readonly_waiters_blocked_by_its_admission(self) -> None:
+        from control_plane.database_maintenance import MAINTENANCE_LOCKS, maintenance_admission
+        from control_plane.database_maintenance_cli import cancel_waiting_admissions
+        from sqlalchemy.pool import NullPool
+        from queue import Queue
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            identities: Queue[int] = Queue()
+            results: list[str] = []
+
+            def wait() -> None:
+                with engine.connect() as waiter:
+                    identities.put(int(waiter.scalar(text("SELECT pg_backend_pid()"))))
+                    try:
+                        waiter.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
+                            {"key": MAINTENANCE_LOCKS[-1]},
+                        )
+                    except DBAPIError as error:
+                        results.append(str(getattr(error.orig, "sqlstate", None)))
+
+            with engine.connect() as keeper, maintenance_admission(keeper):
+                thread = threading.Thread(target=wait)
+                thread.start()
+                waiter_pid = identities.get(timeout=5)
+                deadline = time.monotonic() + 5
+                while not keeper.scalar(
+                    text("SELECT pg_backend_pid()=ANY(pg_blocking_pids(:pid))"), {"pid": waiter_pid}
+                ):
+                    if time.monotonic() >= deadline:
+                        self.fail("The synthetic admission waiter did not block.")
+                    time.sleep(0.01)
+                cancel_waiting_admissions(keeper, ["192.0.2.1"])
+                self.assertTrue(thread.is_alive())
+                address = str(
+                    keeper.scalar(
+                        text("SELECT host(client_addr) FROM pg_stat_activity WHERE pid=:pid"),
+                        {"pid": waiter_pid},
+                    )
+                )
+                cancel_waiting_admissions(keeper, [address])
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(results, ["57014"])
+
+    def test_keeper_release_closes_only_after_its_admission_scope_finishes(self) -> None:
+        import argparse
+        from contextlib import nullcontext, redirect_stdout
+        from io import StringIO
+        from control_plane import database_maintenance_cli
+        from control_plane.storage.schema_migration import migrate_schema
+        from sqlalchemy.pool import NullPool
+        from tempfile import TemporaryDirectory
+
+        with _isolated_postgres_database() as url, TemporaryDirectory() as directory:
+            migrate_schema(database_url=url)
+            root = Path(directory)
+            root.joinpath("state.json").write_text(
+                json.dumps(
+                    {
+                        "hold_id": "own",
+                        "originals": {"synthetic-writer": {"addresses": ["192.0.2.1"]}},
+                    }
+                )
+            )
+            expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+            arguments = argparse.Namespace(
+                hold_id="own", job_directory=root, expires_at=expires.isoformat()
+            )
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            output = StringIO()
+            deployment = Mock(target_id="synthetic", fence=Mock(return_value=nullcontext()))
+            with (
+                engine.connect() as connection,
+                patch.object(
+                    database_maintenance_cli,
+                    "await_command",
+                    side_effect=({"action": "stopped"}, {"action": "release"}),
+                ),
+                redirect_stdout(output),
+            ):
+                database_maintenance_cli.keep_database(
+                    connection, deployment=deployment, arguments=arguments, expires=expires
+                )
+                self.assertTrue(connection.closed)
+            self.assertEqual(
+                json.loads(output.getvalue().splitlines()[-1])["event"], "database_released"
+            )
+
+    def test_stable_lane_claims_obey_maintenance_and_durable_deploy_admission(self) -> None:
+        from control_plane import service_deploy_drain as drain
+        from control_plane.database_maintenance import maintenance_admission
+        from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.pool import NullPool
+        from tests.test_odoo_prod_retained_volume_backup_import_storage import (
+            _stable_lane_operations,
+            _write_stable_lane_operation,
+            _claim_stable_lane_operation,
+        )
+
+        for kind, operation in _stable_lane_operations().items():
+            with self.subTest(kind=kind), _head_postgres_database() as url:
+                limited = (
+                    make_url(url)
+                    .update_query_dict({"options": "-c lock_timeout=100"})
+                    .render_as_string(hide_password=False)
+                )
+                store = PostgresRecordStore(database_url=limited)
+                engine = create_engine(url, poolclass=NullPool)
+                try:
+                    _write_stable_lane_operation(store, operation)
+                    with engine.connect() as keeper, maintenance_admission(keeper):
+                        with self.assertRaises(DBAPIError):
+                            _claim_stable_lane_operation(store, kind)
+                    record = drain.ServiceDeployDrainRecord(
+                        request_fingerprint="maintenance-fixture",
+                        target_type="compose",
+                        target_id="own-target",
+                        image_reference="synthetic-image",
+                        deployment_marker="paused",
+                        state="requested",
+                        updated_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    with store._session_factory() as session:
+                        drain._write(session, record)
+                        session.commit()
+                    self.assertIsNone(_claim_stable_lane_operation(store, kind))
+                    with store._session_factory() as session:
+                        row = session.get(LaunchplaneServiceDeployDrainRow, "service")
+                        session.delete(row)
+                        session.commit()
+                    claimed = _claim_stable_lane_operation(store, kind)
+                    self.assertIsNotNone(claimed)
+                    with store._session_factory() as session:
+                        observations = drain._operation_observations(
+                            store, session, datetime.now(timezone.utc).isoformat()
+                        )
+                        active = next(
+                            item
+                            for item in observations
+                            if item["operation_id"] == operation.operation_id
+                        )
+                        self.assertTrue(active["blocks_drain"])
+                finally:
+                    store.close()
+                    engine.dispose()
+
     def test_snapshot_settings_restore_on_sql_failure_without_rolling_back_outer_work(self) -> None:
         from control_plane.database_maintenance import _schema_deparse_settings
 
@@ -17158,10 +17399,9 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     require_retired_functions_absent(connection)
 
-    def test_frozen_client_admission_refuses_unmapped_xid_and_execution_locks(self) -> None:
-        from control_plane.database_maintenance import disconnect_frozen_clients, locked_database
+    def test_stopped_writer_admission_never_disconnects_an_existing_client(self) -> None:
+        from control_plane.database_maintenance import locked_database
         from sqlalchemy.pool import NullPool
-        from ipaddress import ip_interface
 
         with _isolated_postgres_database() as url:
             engine = create_engine(url, poolclass=NullPool)
@@ -17169,42 +17409,20 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             with engine.begin() as seed:
                 seed.execute(text("CREATE TABLE sample(id integer PRIMARY KEY)"))
             with engine.connect() as keeper, engine.connect() as client:
-                address = str(
-                    ip_interface(
-                        str(
-                            client.scalar(
-                                text(
-                                    "SELECT client_addr::text FROM pg_stat_activity WHERE pid=pg_backend_pid()"
-                                )
-                            )
-                        )
-                    ).ip
-                )
-                with self.assertRaises(RuntimeError):
-                    disconnect_frozen_clients(keeper, {"unmapped"})
-                self.assertEqual(client.scalar(text("SELECT 1")), 1)
-                client.execute(text("INSERT INTO sample VALUES(1)"))
-                with self.assertRaises(RuntimeError):
-                    disconnect_frozen_clients(keeper, {address})
-                self.assertEqual(client.scalar(text("SELECT count(*) FROM sample")), 1)
-                client.rollback()
-                client.execute(text("SELECT pg_advisory_xact_lock(9876543)"))
-                with self.assertRaises(RuntimeError):
-                    disconnect_frozen_clients(keeper, {address})
-                self.assertEqual(client.scalar(text("SELECT 1")), 1)
-                client.rollback()
-                client.execute(text("SELECT * FROM sample"))
-                keeper.rollback()
-                with locked_database(
-                    keeper,
-                    expires_at=datetime.now(timezone.utc) + timedelta(seconds=20),
-                    disconnect_clients=lambda: disconnect_frozen_clients(keeper, {address}),
+                for statement in (
+                    "SELECT * FROM sample",
+                    "SELECT pg_advisory_xact_lock(9876543)",
+                    "INSERT INTO sample VALUES(1)",
                 ):
-                    keeper.execute(text("INSERT INTO sample VALUES(2)"))
-                with self.assertRaises(SQLAlchemyError):
-                    client.execute(text("SELECT 1"))
-            with engine.connect() as observer:
-                self.assertEqual(observer.scalar(text("SELECT count(*) FROM sample")), 1)
+                    client.execute(text(statement))
+                    keeper.rollback()
+                    with self.assertRaises((RuntimeError, SQLAlchemyError)):
+                        with locked_database(
+                            keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=20)
+                        ):
+                            self.fail("An existing client was admitted.")
+                    self.assertEqual(client.scalar(text("SELECT 1")), 1)
+                    client.rollback()
 
     def test_existing_executor_census_rejects_admitted_worker_without_using_lease_expiry(
         self,
