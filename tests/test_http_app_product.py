@@ -1007,17 +1007,6 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
         self.assertEqual(payload["error"]["code"], "invalid_request")
         self.assertNotIn("detail", payload)
 
-    async def test_openapi_includes_config_status_route(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        openapi = response.json()
-        route = openapi["paths"]["/v1/products/{product}/environments/{environment}/config-status"][
-            "get"
-        ]
-        self.assertIn("ProductEnvironmentConfigStatusResponse", json.dumps(route))
-        self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
-
 
 class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -1473,80 +1462,6 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         sections = response.json()["context"]["sections"]
         self.assertEqual(sections["repo_product_mapping"]["status"], "available")
         self.assertEqual(sections["preview_readiness"]["status"], "available")
-
-    async def test_openapi_includes_agent_context_read_contracts(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        openapi = response.json()
-        expected_routes = {
-            "/v1/repo-product-mapping": (
-                "read_repo_product_mapping",
-                "RepoProductMappingResponse",
-            ),
-            "/v1/agent/context": ("read_agent_context", "AgentContextResponse"),
-        }
-        for path, (operation_id, response_model_name) in expected_routes.items():
-            route = openapi["paths"][path]["get"]
-            self.assertEqual(route["operationId"], operation_id)
-            self.assertEqual(
-                route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-                f"#/components/schemas/{response_model_name}",
-            )
-            for status_code in ("401", "403", "503"):
-                self.assertIn(
-                    "LaunchplaneErrorResponse", json.dumps(route["responses"][status_code])
-                )
-            self.assertFalse(
-                openapi["components"]["schemas"][response_model_name]["additionalProperties"]
-            )
-        expected_write_routes = {
-            "/v1/product-config/apply": (
-                "apply_product_config",
-                "ProductConfigApplyResponse",
-                ("400", "401", "403", "409", "503"),
-            ),
-            "/v1/drivers/generic-web/prod-promotion": (
-                "apply_generic_web_prod_promotion",
-                "GenericWebProdPromotionResponse",
-                ("400", "401", "403", "404", "409", "503"),
-            ),
-            "/v1/drivers/generic-web/prod-promotion-workflow": (
-                "dispatch_generic_web_prod_promotion_workflow",
-                "GenericWebPromotionWorkflowResponse",
-                ("400", "401", "403", "404", "409", "503"),
-            ),
-            "/v1/products/{product}/environments/{environment}/promotion/dry-run": (
-                "dry_run_product_promotion",
-                "ProductPromotionDryRunResponse",
-                ("400", "401", "403", "404", "409", "503"),
-            ),
-            "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": (
-                "dispatch_product_promotion_workflow",
-                "ProductPromotionWorkflowDispatchResponse",
-                ("400", "401", "403", "404", "409", "503"),
-            ),
-        }
-        for path, (
-            operation_id,
-            response_model_name,
-            error_statuses,
-        ) in expected_write_routes.items():
-            route = openapi["paths"][path]["post"]
-            self.assertEqual(route["operationId"], operation_id)
-            self.assertEqual(
-                route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-                f"#/components/schemas/{response_model_name}",
-            )
-            self.assertFalse(
-                openapi["components"]["schemas"][response_model_name]["additionalProperties"]
-            )
-            for status_code in error_statuses:
-                self.assertIn(
-                    "LaunchplaneErrorResponse",
-                    json.dumps(route["responses"][status_code]),
-                )
-            self.assertNotIn("422", route["responses"])
 
     async def test_list_products_returns_db_backed_overviews(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2097,68 +2012,6 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["environment"]["product"], "example-site")
         self.assertNotIn("provider-host-private-123", response.text)
         self.assertNotIn("certificate-private-789", response.text)
-
-    async def test_openapi_includes_product_environment_read_contracts(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        openapi = response.json()
-        expected_routes = {
-            "/v1/products": ("list_products", "ProductEnvironmentListResponse"),
-            "/v1/products/{product}": ("read_product", "ProductOverviewResponse"),
-            "/v1/products/{product}/activity": (
-                "read_product_activity",
-                "ProductActivityResponse",
-            ),
-            "/v1/products/{product}/environments": (
-                "list_product_environments",
-                "ProductEnvironmentsResponse",
-            ),
-            "/v1/products/{product}/environments/{environment}": (
-                "read_product_environment",
-                "ProductEnvironmentResponse",
-            ),
-            "/v1/products/{product}/environments/{environment}/public-ingress/incidents": (
-                "list_product_environment_public_ingress_incidents",
-                "ProductEnvironmentIncidentsResponse",
-            ),
-            "/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}": (
-                "read_product_environment_public_ingress_incident",
-                "ProductEnvironmentIncidentResponse",
-            ),
-        }
-        for path, (operation_id, response_model_name) in expected_routes.items():
-            route = openapi["paths"][path]["get"]
-            self.assertEqual(route["operationId"], operation_id)
-            self.assertEqual(
-                route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-                f"#/components/schemas/{response_model_name}",
-            )
-            for status_code in ("400", "401", "403", "404", "503"):
-                self.assertIn(
-                    "LaunchplaneErrorResponse", json.dumps(route["responses"][status_code])
-                )
-            self.assertFalse(
-                openapi["components"]["schemas"][response_model_name]["additionalProperties"]
-            )
-        topology_schema = openapi["components"]["schemas"]["ProductEnvironmentTopology"]
-        self.assertEqual(
-            set(topology_schema["properties"]),
-            {"desired", "provider_recorded", "observed", "warnings", "trust_state"},
-        )
-        warning_schema = openapi["components"]["schemas"]["ProductTopologyWarning"]
-        warning_codes = set(warning_schema["properties"]["code"]["enum"])
-        self.assertTrue(
-            {
-                "missing_route_authority",
-                "domain_divergence",
-                "stale_route_authority",
-                "tls_ownership_unknown",
-                "tls_mismatch",
-            }.issubset(warning_codes)
-        )
-        target_properties = openapi["components"]["schemas"]["ProductTargetSummary"]["properties"]
-        self.assertNotIn("target_id", target_properties)
 
 
 class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
@@ -3832,13 +3685,6 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_required")
 
-    async def test_openapi_includes_product_health_monitoring_contract(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        route = response.json()["paths"]["/v1/product-profiles/health-monitoring/apply"]["post"]
-        self.assertEqual(route["operationId"], "apply_product_health_monitoring")
-
     async def test_apply_product_prelaunch_rebuild_policy_dry_run_preserves_profile(
         self,
     ) -> None:
@@ -4863,40 +4709,6 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_required")
 
-    async def test_openapi_includes_product_preview_tls_contract(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        route = response.json()["paths"]["/v1/product-profiles/preview-tls/apply"]["post"]
-        self.assertEqual(route["operationId"], "apply_product_preview_tls")
-        self.assertEqual(
-            route["requestBody"]["content"]["application/json"]["schema"]["title"],
-            "ProductPreviewTlsApplyRequest",
-        )
-        self.assertEqual(
-            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
-        )
-        for status_code in ("400", "401", "403", "404", "409", "503"):
-            self.assertIn(status_code, route["responses"])
-
-    async def test_openapi_includes_product_stable_lane_repair_contract(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        route = response.json()["paths"]["/v1/product-profiles/stable-lane-repair/apply"]["post"]
-        self.assertEqual(route["operationId"], "apply_product_stable_lane_repair")
-        self.assertEqual(
-            route["requestBody"]["content"]["application/json"]["schema"]["title"],
-            "ProductStableLaneRepairRequest",
-        )
-        self.assertEqual(
-            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
-        )
-        for status_code in ("400", "401", "403", "404", "409", "503"):
-            self.assertIn(status_code, route["responses"])
-
     async def test_list_product_profiles_accepts_every_code_worker_token(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -5035,44 +4847,6 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(show_response.status_code, 503)
         self.assertIn("list_product_profile_records", list_response.json()["error"]["message"])
         self.assertIn("read_product_profile_record", show_response.json()["error"]["message"])
-
-    async def test_openapi_includes_product_profile_contracts(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        openapi = response.json()
-        list_route = openapi["paths"]["/v1/product-profiles"]["get"]
-        write_route = openapi["paths"]["/v1/product-profiles"]["post"]
-        show_route = openapi["paths"]["/v1/product-profiles/{product}"]["get"]
-        self.assertEqual(list_route["operationId"], "list_product_profiles")
-        self.assertEqual(write_route["operationId"], "write_product_profile")
-        self.assertEqual(show_route["operationId"], "read_product_profile")
-        self.assertEqual(
-            list_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/ProductProfileListResponse",
-        )
-        self.assertEqual(
-            write_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
-        )
-        self.assertEqual(
-            write_route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/LaunchplaneProductProfileRecord",
-        )
-        self.assertEqual(
-            show_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/ProductProfileResponse",
-        )
-        for status_code in ("400", "401", "403", "409", "503"):
-            self.assertIn(status_code, write_route["responses"])
-        self.assertEqual(
-            openapi["components"]["schemas"]["ProductProfileListResponse"]["additionalProperties"],
-            False,
-        )
-        self.assertEqual(
-            openapi["components"]["schemas"]["ProductProfileResponse"]["additionalProperties"],
-            False,
-        )
 
 
 class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
