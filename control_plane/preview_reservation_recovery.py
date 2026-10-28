@@ -14,7 +14,10 @@ from control_plane.contracts.idempotency_record import (
     parse_launchplane_mutation_timestamp,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
-from control_plane.contracts.preview_execution import odoo_preview_destroy_issued_at
+from control_plane.contracts.preview_execution import (
+    odoo_preview_destroy_issued_at,
+    odoo_preview_target_key,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
@@ -351,6 +354,31 @@ def require_interrupted_preview_disposal(
         raise ValueError("Interrupted preview disposal is held by use, data or shared resources.")
 
 
+def require_current_preview_original_target(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    reservation: LaunchplaneIdempotencyRecord,
+    original: OriginalPreviewIntent,
+    instance: str,
+) -> None:
+    issued = original.issued_plan
+    if (
+        issued.operation != "refresh"
+        or issued.context != profile.preview.context
+        or issued.preview_slug != instance
+        or profile.preview.slug_template.format(number=issued.plan_request.pr_number) != instance
+        or reservation.provider_target_key
+        != odoo_preview_target_key(
+            context=profile.preview.context,
+            compose_name=preview_application_name(
+                app_name_prefix=effective_preview_app_name_prefix(profile=profile),
+                preview_slug=instance,
+            ),
+        )
+    ):
+        raise ValueError("Original preview differs from the current executor target.")
+
+
 def require_unrecorded_preview_original(
     store: PostgresRecordStore,
     *,
@@ -366,27 +394,17 @@ def require_unrecorded_preview_original(
     original = original_preview_intent(reservation, profile=profile, store=store)
     issued = original.issued_plan
     instance = profile.preview.slug_template.format(number=number)
-    if (
-        issued.operation != "refresh"
-        or issued.plan_request.pr_number != number
-        or issued.context != profile.preview.context
-        or issued.preview_slug != instance
-        or issued.dry_run_plan.compose_name
-        != preview_application_name(
-            app_name_prefix=effective_preview_app_name_prefix(profile=profile),
-            preview_slug=instance,
+    require_current_preview_original_target(
+        profile=profile, reservation=reservation, original=original, instance=instance
+    )
+    if issued.plan_request.pr_number != number or any(
+        profile.preview.slug_template.format(number=item.anchor_pr_number) == instance
+        and (
+            item.state != "destroyed"
+            or parse_launchplane_mutation_timestamp(item.updated_at, field_name="updated_at")
+            >= parse_launchplane_mutation_timestamp(reservation.created_at, field_name="created_at")
         )
-        or any(
-            profile.preview.slug_template.format(number=item.anchor_pr_number) == instance
-            and (
-                item.state != "destroyed"
-                or parse_launchplane_mutation_timestamp(item.updated_at, field_name="updated_at")
-                >= parse_launchplane_mutation_timestamp(
-                    reservation.created_at, field_name="created_at"
-                )
-            )
-            for item in store.list_preview_records(context_name=profile.preview.context)
-        )
+        for item in store.list_preview_records(context_name=profile.preview.context)
     ):
         raise ValueError("Original preview does not identify an unrecorded preview.")
     for other in store.list_product_profile_records():
