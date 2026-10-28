@@ -253,7 +253,7 @@ class MonitorDeployWindowTests(unittest.TestCase):
         for code in ("dns_failure", "tls_failure"):
             with self.subTest(code=code):
 
-                def failed_get(url: str, timeout: int) -> HttpObservation:
+                def failed_get(_url: str, _timeout: int) -> HttpObservation:
                     if code == "dns_failure":
                         raise PublicHttpDestinationError("dns_failure", "test DNS failure")
                     raise ssl.SSLError("test TLS failure")

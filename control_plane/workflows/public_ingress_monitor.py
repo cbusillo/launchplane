@@ -3270,7 +3270,9 @@ def _deployment_deferring_failure(
     read_latest = getattr(record_store, "read_latest_lane_deployment_record", None)
     if not callable(read_latest):
         return None
-    deployment = read_latest(context_name=record.context, instance_name=record.instance)
+    deployment = cast(Callable[..., object], read_latest)(
+        context_name=record.context, instance_name=record.instance
+    )
     if not isinstance(deployment, DeploymentRecord):
         return None
     identity = deployment.runtime_identity
