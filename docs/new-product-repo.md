@@ -46,37 +46,12 @@ as Discord Blue's Every Code bridge port `8787`.
 
 ## Launchplane Records
 
-For a conventional generic-web product, dispatch `Product Onboarding` with
-typed product, repository, image, port, health, preview base URL, and optional
-Dokploy naming inputs. The preview base URL is the root URL whose subdomains
-host previews, such as `https://product-preview.example.com`; wildcard DNS and
-ingress for `*.product-preview.example.com` must already route to the selected
-Dokploy server. The workflow resolves immutable GitHub repository identity,
-plans one new non-production Dokploy application, plans the product record
-bundle, and plans six exact preview authz rules. `mode=apply` then pauses at the
-protected `launchplane-authz-admin` review before applying the three reviewed
-contracts.
-
-The normal path accepts no base64 manifest, copied provider id, authz JSON, or
-database credential. Stable idempotency keys make a same-plan retry replay the
-created target rather than create a duplicate. If records apply but authz apply
-fails, the product remains safely unauthorized; rerun the same reviewed flow
-instead of deleting records or creating another target.
-
-The reviewed flow writes the generic-web product profile, immutable repository
-identity, one `testing` lane, provider target records, preview policy, the
-context-scoped `LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record, and
-the complete `operator.generic-web-preview` desired set. The authz planner
-retains all existing managed rules and sends the resulting desired set through
-the existing digest-bound reconcile route. Product onboarding never writes
-authz policy directly.
-
-Existing targets, production targets, compose targets, Odoo products, and
-non-generic drivers remain explicit advanced operations. Use `Dokploy Target
-Setup` for those cases. Use `Product Onboarding Manifest (Advanced)` only for
-an admin-owned manifest that cannot use the conventional path. Direct local
-CLI mutation remains break-glass bootstrap or repair behavior and requires
-`--allow-direct-db-mutation`; it is not an onboarding alternative.
+Onboarding still requires the [existing admin operation](operations.md#conventional-generic-web-onboarding) to create the product
+profile and target records. That is an existing compatibility operation, not a
+product-repository integration contract; no deployed service replacement is
+claimed here. Keep its inputs in admin-owned state, outside the product
+repository and git-tracked history when they contain site-specific runtime
+details.
 
 Reapplying an advanced manifest updates its declared settings while preserving
 existing service-owned state, including the Client, live classification,
@@ -96,19 +71,13 @@ ingress workflow identity from the active policy and fails closed when no single
 template exists; admins do not hand-author authz JSON or edit a per-product
 policy secret.
 
-When retiring a product after its repository has been archived or its onboarding
-GitHub App installation is gone, use `Generic Web Preview Authorization` with
-`operation=retire`. Repository input is optional assertion-only for retirement;
-Launchplane resolves immutable authority from the active product preview rules
-and cross-checks the product profile when available. Retirement cannot set
-`include_ingress_operator` and removes all target-product preview rules, including
-scoped ingress rules, without querying GitHub.
+Existing caller-rule retirement after archival or App offboarding follows the
+[canonical preview-authorization contract](service-boundary.md#product-profile-endpoints).
+Keep that cleanup until retirement and independent readback complete.
 
-Do not store onboarding inputs as product-repo Launchplane manifests. The repo
-may document the expected app runtime contract, but Launchplane records are the
-live source of lifecycle truth. Store admin manifests under Launchplane state or another
-admin-owned state location, not in product repos and not in git-tracked
-history when they contain site-specific runtime details.
+New-product build and handoff requirements are canonical in
+[artifact provenance](artifact-provenance.md) and
+[event-driven deploys](event-driven-deploys.md).
 
 ## GitHub Actions Shape
 
@@ -128,11 +97,6 @@ A product repository never calls Launchplane (see
 OIDC request, grant, secret, or build setting. Launchplane hears the build and
 pull request events itself, verifies the build, and deploys previews and the
 `testing` lane; see [event-driven-deploys.md](event-driven-deploys.md).
-
-Existing products still using caller workflows follow the transitional
-[preview workflow contract](preview-workflow-contract.md) and
-[caller path contract](product-repo-contract.md#repo-metadata-boundary) until
-migration. New products use the event-driven path above.
 
 Product-owned smoke tests manage their own dynamic fixtures. They do not use a
 Launchplane maintenance route or a generated Launchplane smoke client.
@@ -191,5 +155,3 @@ Before treating the repo as Launchplane-ready:
 - A non-prod deploy or preview path has been exercised through Launchplane.
 - Product workflows do not mutate providers directly.
 - Product workflows do not render Launchplane evidence or PR feedback markdown.
-- Any remaining Launchplane adapter scripts are small, temporary, and listed as
-  migration candidates.
