@@ -22,6 +22,7 @@ from control_plane.database_maintenance_host import RecoveryRequired
 from control_plane.database_maintenance_host import (
     DATABASE_UNSAFE_EVENT,
     DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
+    VERIFICATION_BLOCKED_EVENT,
 )
 from control_plane import database_maintenance
 from sqlalchemy.exc import OperationalError
@@ -46,6 +47,7 @@ class DatabaseMaintenanceIsolationTests(unittest.TestCase):
             ]
             for mode, event in (
                 ("verify", DATABASE_UNSAFE_EVENT),
+                ("verify", VERIFICATION_BLOCKED_EVENT),
                 ("unfence", DEPLOYMENT_RECOVERY_REQUIRED_EVENT),
             ):
                 output = io.StringIO()
@@ -64,7 +66,7 @@ class DatabaseMaintenanceIsolationTests(unittest.TestCase):
                     patch.object(
                         database_maintenance_cli,
                         "verify_committed_database",
-                        side_effect=RecoveryRequired("actual mismatch"),
+                        side_effect=RecoveryRequired("actual mismatch", event=event),
                     ),
                     patch.object(
                         database_maintenance_cli,

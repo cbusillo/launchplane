@@ -20,7 +20,7 @@ from control_plane.storage.schema_migration import (
     schema_migration_target,
 )
 from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
-from control_plane.database_maintenance_host import RecoveryRequired
+from control_plane.database_maintenance_host import RecoveryRequired, DATABASE_UNSAFE_EVENT
 
 
 MAINTENANCE_LOCKS = (
@@ -317,7 +317,10 @@ def verify_committed_database(connection: Connection, proof: dict[str, Any]) -> 
     require_no_other_clients(connection)
     observed = database_snapshot(connection)
     if observed not in (proof["before"], proof["after"]):
-        raise RecoveryRequired("Committed state disagrees with both verified maintenance states.")
+        raise RecoveryRequired(
+            "Committed state disagrees with both verified maintenance states.",
+            event=DATABASE_UNSAFE_EVENT,
+        )
     try:
         verify_postgres_schema_invariants(connection)
         if observed == proof["after"] and proof["after"] != proof["before"]:
@@ -325,7 +328,9 @@ def verify_committed_database(connection: Connection, proof: dict[str, Any]) -> 
     except RuntimeError as error:
         if isinstance(error.__cause__, SQLAlchemyError):
             raise
-        raise RecoveryRequired("Committed schema invariants require recovery.") from error
+        raise RecoveryRequired(
+            "Committed schema invariants require recovery.", event=DATABASE_UNSAFE_EVENT
+        ) from error
     return str(connection.scalar(text("SELECT version_num FROM alembic_version")))
 
 

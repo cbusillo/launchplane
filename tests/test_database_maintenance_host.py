@@ -392,6 +392,90 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 host.release(path)
             self.assertTrue(json.loads(path.read_text())["released"])
 
+    def test_automatic_budget_survives_failures_before_and_after_owner_observation(self) -> None:
+        for failure in ("owner", "verification"):
+            with self.subTest(failure=failure), TemporaryDirectory() as temporary:
+                path = state_file(Path(temporary))
+                with (
+                    patch.object(sys, "argv", ["driver", "recover", "--state", str(path)]),
+                    patch.object(
+                        host,
+                        "run",
+                        side_effect=RuntimeError("Owner read") if failure == "owner" else None,
+                        return_value=str(os.getpid()),
+                    ),
+                    patch.object(
+                        host, "release", side_effect=RuntimeError("Verification unavailable")
+                    ) as release,
+                ):
+                    for _ in range(host.WATCHDOG_ATTEMPTS):
+                        with self.assertRaises(RuntimeError):
+                            host.main()
+                    self.assertEqual(host.main(), host.AUTOMATIC_RECOVERY_EXHAUSTED_EXIT)
+                self.assertEqual(
+                    json.loads(path.read_text())["automatic_attempts"], host.WATCHDOG_ATTEMPTS
+                )
+                if failure == "owner":
+                    release.assert_not_called()
+                with host.locked_state(path) as state:
+                    state["released"] = True
+                with (
+                    patch.object(sys, "argv", ["driver", "recover", "--state", str(path)]),
+                    patch.object(host, "run", return_value=str(os.getpid())),
+                    patch.object(host, "release") as cleanup,
+                ):
+                    self.assertEqual(host.main(), 0)
+                    cleanup.assert_called_once_with(path)
+
+    def test_manual_release_can_follow_an_already_exhausted_joined_job(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = state_file(Path(temporary), automatic_attempts=host.WATCHDOG_ATTEMPTS)
+            old_job_finishing = True
+
+            def run(*arguments: str, **_values: Any) -> str:
+                nonlocal old_job_finishing
+                if arguments[:2] == ("systemctl", "start"):
+                    if old_job_finishing:
+                        old_job_finishing = False
+                        raise RuntimeError("The joined old job already selected exhaustion")
+                    with host.locked_state(path) as state:
+                        self.assertLess(state["automatic_attempts"], host.WATCHDOG_ATTEMPTS)
+                        state.update(released=True, watchdog_removed=True)
+                    return ""
+                if arguments[:2] == ("systemctl", "show"):
+                    return str(host.AUTOMATIC_RECOVERY_EXHAUSTED_EXIT)
+                if arguments[:2] == ("systemctl", "reset-failed"):
+                    return ""
+                raise AssertionError("Unexpected fixture operation")
+
+            with patch.object(host, "run", side_effect=run):
+                host.request_release(path, manual=True)
+            self.assertTrue(json.loads(path.read_text())["released"])
+
+    def test_completed_release_finishes_missing_unit_metadata_before_success(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = state_file(Path(temporary), released=True)
+            observed = []
+
+            def cleanup(state: dict[str, Any], **_values: Any) -> None:
+                state["watchdog_removed"] = True
+                host.save(path, state)
+
+            def emit(state: dict[str, Any]) -> None:
+                observed.append(state["watchdog_removed"])
+
+            with (
+                patch.object(host, "run", return_value="LoadState=not-found"),
+                patch.object(host, "remove_watchdog", side_effect=cleanup),
+                patch.object(host, "emit_release", side_effect=emit),
+                patch.object(
+                    host, "release", side_effect=AssertionError("Runtime recovery must not repeat")
+                ),
+            ):
+                host.request_release(path)
+            self.assertEqual(observed, [True])
+            self.assertTrue(json.loads(path.read_text())["watchdog_removed"])
+
     def test_namespace_command_uses_and_closes_the_opened_handle(self) -> None:
         with TemporaryDirectory() as temporary:
             namespace = Path(temporary) / "namespace"
@@ -436,7 +520,11 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
     def test_source_terminal_result_reaches_the_watchdog_without_an_exception_heuristic(
         self,
     ) -> None:
-        for event in (host.DATABASE_UNSAFE_EVENT, host.DEPLOYMENT_RECOVERY_REQUIRED_EVENT):
+        for event in (
+            host.DATABASE_UNSAFE_EVENT,
+            host.DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
+            host.VERIFICATION_BLOCKED_EVENT,
+        ):
             with self.subTest(event=event), TemporaryDirectory() as temporary:
                 state = json.loads(state_file(Path(temporary)).read_text())
                 with (
@@ -718,14 +806,18 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                     host, "resume_original", side_effect=lambda identifier, _state: identifier
                 ),
                 patch.object(
-                    host, "operator", side_effect=host.RecoveryRequired("Original marker unknown")
+                    host,
+                    "operator",
+                    side_effect=host.RecoveryRequired(
+                        "Original marker unknown", event=host.DEPLOYMENT_RECOVERY_REQUIRED_EVENT
+                    ),
                 ),
                 redirect_stdout(output),
             ):
                 with self.assertRaises(host.RecoveryRequired):
                     host.release(path)
             event = json.loads(output.getvalue().splitlines()[-1])
-            self.assertEqual(event["event"], host.RECOVERY_REQUIRED_EVENT)
+            self.assertEqual(event["event"], host.DEPLOYMENT_RECOVERY_REQUIRED_EVENT)
             self.assertIs(event["writers_held"], False)
             self.assertTrue(json.loads(path.read_text())["recovery_required"])
             self.assertFalse(json.loads(path.read_text()).get("released", False))

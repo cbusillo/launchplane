@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from control_plane.dokploy import api
-from control_plane.database_maintenance_host import RecoveryRequired, read_marker_transition, save
+from control_plane.database_maintenance_host import (
+    RecoveryRequired,
+    read_marker_transition,
+    save,
+    DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
+)
 
 
 MAINTENANCE_UNTIL_ENV = "LAUNCHPLANE_DATABASE_MAINTENANCE_UNTIL"
@@ -195,11 +200,13 @@ class DeploymentMaintenance:
             )
         except Exception as error:
             raise RecoveryRequired(
-                "The original marker request has no available effect readback."
+                "The original marker request has no available effect readback.",
+                event=DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
             ) from error
         if observed != transition["desired"]:
             raise RecoveryRequired(
-                "The original marker request remains unresolved; no new write is allowed."
+                "The original marker request remains unresolved; no new write is allowed.",
+                event=DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
             )
         transition["phase"] = "observed"
         save(path, transition)
@@ -223,10 +230,14 @@ class DeploymentMaintenance:
             return
         if remove and environment.get(MAINTENANCE_UNTIL_ENV) != deadline:
             raise RecoveryRequired(
-                "Maintenance marker custody changed; release will not overwrite it."
+                "Maintenance marker custody changed; release will not overwrite it.",
+                event=DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
             )
         if replace is not None and environment.get(MAINTENANCE_UNTIL_ENV) != replace:
-            raise RecoveryRequired("The owned maintenance marker changed before recovery fencing.")
+            raise RecoveryRequired(
+                "The owned maintenance marker changed before recovery fencing.",
+                event=DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
+            )
         if not remove and replace is None:
             require_deployment_available(environment)
         rendered = api.render_dokploy_env_text_with_overrides(

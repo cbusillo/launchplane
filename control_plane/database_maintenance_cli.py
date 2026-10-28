@@ -37,7 +37,6 @@ from control_plane.database_maintenance_host import (
     save,
     RecoveryRequired,
     dump_application_name,
-    DATABASE_UNSAFE_EVENT,
     DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
 )
 from control_plane.storage.postgres import _build_engine
@@ -494,8 +493,8 @@ def main() -> int:
                 try:
                     revision = verify_committed_database(connection, proof)
                     verify_application_reads(connection)
-                except RecoveryRequired:
-                    emit(DATABASE_UNSAFE_EVENT, hold_id=arguments.hold_id)
+                except RecoveryRequired as error:
+                    emit(error.event, hold_id=arguments.hold_id)
                     return 0
                 from control_plane.storage.migrations.versions import (
                     e7c1d5e9a3b6_drop_retired_delivery_tables as retirement,

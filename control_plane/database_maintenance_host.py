@@ -23,6 +23,8 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 
 RECOVERY_REQUIRED_EXIT = 75
+AUTOMATIC_RECOVERY_EXHAUSTED_EXIT = 76
+RECOVERY_WAIT_SECONDS = 920
 HEALTH_PROBE_SECONDS = 30
 HEALTH_REFREEZE_SECONDS = 45
 API_EGRESS_PRIORITY = 300
@@ -30,11 +32,18 @@ API_NETWORK_HOOKS = ("input", "output", "postrouting")
 WATCHDOG_ATTEMPTS = 3
 DATABASE_UNSAFE_EVENT = "database_unsafe"
 DEPLOYMENT_RECOVERY_REQUIRED_EVENT = "deployment_recovery_required"
-RECOVERY_REQUIRED_EVENT = "recovery_required"
+VERIFICATION_BLOCKED_EVENT = "verification_blocked"
+AUTOMATIC_RECOVERY_EXHAUSTED_EVENT = "automatic_recovery_exhausted"
 RELEASE_INCOMPLETE_EVENT = "release_incomplete"
 
 
 class RecoveryRequired(RuntimeError):
+    def __init__(self, message: str, *, event: str = VERIFICATION_BLOCKED_EVENT) -> None:
+        super().__init__(message)
+        self.event = event
+
+
+class AutomaticRecoveryExhausted(RuntimeError):
     pass
 
 
@@ -94,9 +103,11 @@ def sync_path(path: Path) -> None:
 
 
 @contextmanager
-def locked_state(path: Path, *, active: bool = False) -> Iterator[dict[str, Any]]:
+def locked_state(
+    path: Path, *, active: bool = False, wait_seconds: float = 15
+) -> Iterator[dict[str, Any]]:
     with path.with_suffix(".lock").open("a") as lock:
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + wait_seconds
         while True:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -154,7 +165,8 @@ def read_marker_transition(
             raise ValueError("Unbound marker transition.")
     except (ValueError, TypeError, KeyError) as error:
         raise RecoveryRequired(
-            "The original deployment marker transition is unverified."
+            "The original deployment marker transition is unverified.",
+            event=DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
         ) from error
     return transition
 
@@ -225,12 +237,20 @@ def operator(state: dict[str, Any], mode: str) -> dict[str, Any]:
             )
             if transition is not None and transition["phase"] != "observed":
                 raise RecoveryRequired(
-                    "The original deployment marker request requires read-only reconciliation."
+                    "The original deployment marker request requires read-only reconciliation.",
+                    event=DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
                 ) from error
         raise
     settle_operator(state)
-    if result.get("event") in {DATABASE_UNSAFE_EVENT, DEPLOYMENT_RECOVERY_REQUIRED_EVENT}:
-        raise RecoveryRequired("The original maintenance operation requires exact reconciliation.")
+    if result.get("event") in {
+        DATABASE_UNSAFE_EVENT,
+        DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
+        VERIFICATION_BLOCKED_EVENT,
+    }:
+        raise RecoveryRequired(
+            "The original maintenance operation requires exact reconciliation.",
+            event=result["event"],
+        )
     return result
 
 
@@ -591,7 +611,8 @@ def install_watchdog(state_path: Path, state: dict[str, Any], *, health: bool = 
         f"StartLimitIntervalSec=1d\nStartLimitBurst={WATCHDOG_ATTEMPTS}\n"
         "[Service]\nType=oneshot\nExecStart="
         + command
-        + f"\nRestart=on-failure\nRestartPreventExitStatus={RECOVERY_REQUIRED_EXIT}\nRestartSec=15s\nTimeoutStartSec=900s\n"
+        + f"\nRestart=on-failure\nRestartPreventExitStatus={RECOVERY_REQUIRED_EXIT} {AUTOMATIC_RECOVERY_EXHAUSTED_EXIT}\nRestartSec=15s\nTimeoutStartSec=900s\n"
+        + ("[Install]\nWantedBy=multi-user.target\n" if not health else "")
     )
     deadline = (
         datetime.fromisoformat(
@@ -610,6 +631,9 @@ def install_watchdog(state_path: Path, state: dict[str, Any], *, health: bool = 
     run("systemctl", "daemon-reload")
     run("systemctl", "enable", "--now", unit + ".timer")
     sync_path(root / "timers.target.wants")
+    if not health:
+        run("systemctl", "enable", unit + ".service")
+        sync_path(root / "multi-user.target.wants")
     timer = run(
         "systemctl",
         "show",
@@ -659,6 +683,10 @@ def remove_watchdog(state: dict[str, Any], *, health: bool = False) -> None:
     for suffix in (".timer", ".service"):
         (Path("/etc/systemd/system") / (unit + suffix)).unlink(missing_ok=True)
     (Path("/etc/systemd/system/timers.target.wants") / (unit + ".timer")).unlink(missing_ok=True)
+    boot_links = Path("/etc/systemd/system/multi-user.target.wants")
+    (boot_links / (unit + ".service")).unlink(missing_ok=True)
+    if boot_links.exists():
+        sync_path(boot_links)
     sync_path(Path("/etc/systemd/system"))
     run("systemctl", "daemon-reload")
     progress["watchdog_removed"] = True
@@ -1212,16 +1240,17 @@ def finish_release(state_path: Path) -> None:
 
 def record_release_failure(state: dict[str, Any], error: Exception) -> None:
     if isinstance(error, RecoveryRequired):
-        state["recovery_required"] = type(error).__name__
+        state["recovery_required"] = error.event
         save(Path(state["job_directory"]) / "state.json", state)
     print(
         json.dumps(
             {
-                "event": RECOVERY_REQUIRED_EVENT
+                "event": error.event
                 if isinstance(error, RecoveryRequired)
                 else RELEASE_INCOMPLETE_EVENT,
                 "hold_id": state["hold_id"],
                 "writers_held": False if state.get("resumed") else None,
+                "resume_started": state.get("resume_started", False),
                 "error_type": type(error).__name__,
                 "revision": state.get("revision"),
             }
@@ -1244,31 +1273,91 @@ def emit_release(state: dict[str, Any]) -> None:
     )
 
 
-def request_release(state_path: Path, *, manual: bool = False) -> None:
-    state = json.loads(state_path.read_text())
-    if state.get("released"):
-        emit_release(state)
-        return
-    unit = "lp-maint-" + state["hold_id"] + ".service"
-    try:
-        if manual:
-            run("systemctl", "reset-failed", unit)
-        run("systemctl", "start", unit, timeout=920)
-    except RuntimeError as error:
-        state = json.loads(state_path.read_text())
-        if state.get("released"):
-            emit_release(state)
-            return
-        status = run("systemctl", "show", unit, "--property=ExecMainStatus", "--value").strip()
-        if status == str(RECOVERY_REQUIRED_EXIT):
-            raise RecoveryRequired(
-                "The original recovery service requires reconciliation."
-            ) from error
-        raise
+def complete_released_cleanup(state_path: Path) -> None:
     state = json.loads(state_path.read_text())
     if not state.get("released"):
         raise RuntimeError("The original recovery service has no completed release readback.")
-    emit_release(state)
+    for health in (True, False):
+        progress = state.get("verification_phase", {}) if health else state
+        if not progress or progress.get("watchdog_removed"):
+            continue
+        if health and progress.get("active"):
+            raise RecoveryRequired("Released state still has an active verification phase.")
+        unit = "lp-maint-" + state["hold_id"] + ("-health" if health else "")
+        for suffix in (".timer", ".service"):
+            name = unit + suffix
+            try:
+                if "LoadState=not-found" not in run(
+                    "systemctl", "show", name, "--property=LoadState"
+                ):
+                    run("systemctl", "stop", name)
+            except RuntimeError:
+                if "LoadState=not-found" not in run(
+                    "systemctl", "show", name, "--property=LoadState"
+                ):
+                    raise
+    with locked_state(state_path, wait_seconds=RECOVERY_WAIT_SECONDS) as state:
+        if not state.get("released"):
+            raise RecoveryRequired("The completed release proof changed during metadata cleanup.")
+        if state.get("verification_phase"):
+            remove_watchdog(state, health=True)
+        remove_watchdog(state)
+        emit_release(state)
+
+
+def request_release(state_path: Path, *, manual: bool = False) -> None:
+    state = json.loads(state_path.read_text())
+    if state.get("released"):
+        complete_released_cleanup(state_path)
+        return
+    unit = "lp-maint-" + state["hold_id"] + ".service"
+    if manual:
+        with locked_state(state_path, wait_seconds=RECOVERY_WAIT_SECONDS) as state:
+            state["automatic_attempts"] = 0
+    for attempt in range(2 if manual else 1):
+        try:
+            if manual:
+                run("systemctl", "reset-failed", unit)
+            run("systemctl", "start", unit, timeout=RECOVERY_WAIT_SECONDS)
+        except RuntimeError as error:
+            state = json.loads(state_path.read_text())
+            if state.get("released"):
+                complete_released_cleanup(state_path)
+                return
+            status = run("systemctl", "show", unit, "--property=ExecMainStatus", "--value").strip()
+            if status == str(AUTOMATIC_RECOVERY_EXHAUSTED_EXIT):
+                if manual and attempt == 0:
+                    continue
+                raise AutomaticRecoveryExhausted(
+                    "Automatic recovery is exhausted; use explicit manual release."
+                ) from error
+            if status == str(RECOVERY_REQUIRED_EXIT):
+                raise RecoveryRequired(
+                    "The original recovery service requires reconciliation.",
+                    event=state.get("recovery_required", VERIFICATION_BLOCKED_EVENT),
+                ) from error
+            raise
+        complete_released_cleanup(state_path)
+        return
+
+
+def consume_automatic_attempt(state: dict[str, Any], progress: dict[str, Any]) -> None:
+    attempts = progress.get("automatic_attempts", 0)
+    if attempts >= WATCHDOG_ATTEMPTS:
+        print(
+            json.dumps(
+                {
+                    "event": AUTOMATIC_RECOVERY_EXHAUSTED_EVENT,
+                    "hold_id": state["hold_id"],
+                    "phase_id": progress.get("phase_id"),
+                    "resume_started": state.get("resume_started", False),
+                }
+            ),
+            flush=True,
+        )
+        raise AutomaticRecoveryExhausted("The durable automatic recovery budget is exhausted.")
+    progress["automatic_attempts"] = attempts + 1
+    save(Path(state["job_directory"]) / "state.json", state)
 
 
 def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
@@ -1610,9 +1699,14 @@ def main() -> int:
                     if not arguments.phase_id:
                         parser.error("refreeze requires the exact phase id.")
                     with locked_state(state_path) as state:
+                        phase = state.get("verification_phase", {})
+                        if phase.get("active") and phase.get("phase_id") == arguments.phase_id:
+                            consume_automatic_attempt(state, phase)
                         cleanup_api_probe(state, phase_id=arguments.phase_id)
                 elif arguments.mode == "recover":
-                    state = json.loads(state_path.read_text())
+                    with locked_state(state_path) as state:
+                        if not state.get("released"):
+                            consume_automatic_attempt(state, state)
                     unit = "lp-maint-" + state["hold_id"] + ".service"
                     if run(
                         "systemctl", "show", unit, "--property=MainPID", "--value"
@@ -1623,6 +1717,8 @@ def main() -> int:
                     release(state_path)
                 else:
                     request_release(state_path, manual=True)
+            except AutomaticRecoveryExhausted:
+                return AUTOMATIC_RECOVERY_EXHAUSTED_EXIT
             except RecoveryRequired:
                 return RECOVERY_REQUIRED_EXIT
         return 0
@@ -1647,6 +1743,8 @@ def main() -> int:
     if arguments.mode == "hold":
         try:
             hold(state_path)
+        except AutomaticRecoveryExhausted:
+            return AUTOMATIC_RECOVERY_EXHAUSTED_EXIT
         except RecoveryRequired:
             return RECOVERY_REQUIRED_EXIT
     return 0

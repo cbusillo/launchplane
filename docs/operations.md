@@ -5698,11 +5698,19 @@ reboot. The watchdog runs release at the recorded deadline, including after a
 missed deadline during reboot. That oneshot service is the single recovery owner:
 EOF cleanup, the deadline and explicit release requests join the same systemd job.
 The keeper ends at COMMIT; only that recovery owner verifies committed state.
-Systemd bounds automatic starts and each recovery attempt's duration. A genuine
-unsafe committed-state result is terminal; its distinct exit status prevents
-restart loops. Explicit manual release resets the systemd failure/start limit
-and re-runs every gate after a repair, without editing private state. It never
-restores data or replays an uncertain provider request. Observe actual release;
+Each automatic recovery entry consumes a fsync'd budget in the existing private
+state before external commands, including an unavailable ownership read. The
+health refreeze phase has its own phase-bound budget. Reloading systemd or
+restarting the interpreter cannot reset either count. Unit rate limits are
+secondary protection, and each service attempt has a timeout. Genuine unsafe or
+blocked results and exhausted automatic budgets have distinct non-restarting
+statuses. Explicit manual release replenishes only the main automatic budget
+through the supported driver, waits for state custody, then starts or joins the
+same service and its applicable verification gates. It never restores data or
+replays an uncertain provider request. The main service is enabled for the next
+boot without starting at installation; the existing calendar timer still starts
+it at the deadline. Boot, EOF and deadline requests share the same executor and
+persisted budget. Observe actual release;
 installation alone is not a release receipt.
 
 The keeper takes the existing own-deploy dispatch lock and installs an expiring
@@ -5812,11 +5820,23 @@ before/after verifier: first terminate and confirm the exact keeper backend
 is gone, then independently compare committed state with either verified full
 state, check revision/cluster and full invariants. Any unsafe or UNKNOWN result
 keeps originals frozen or stopped with restart disabled and the recovery marker
-held. A verified unsafe result emits `recovery_required`; a transient unavailable
-read emits `release_incomplete` and remains retryable. Neither permits an
-automatic restore or drop retry.
-Preserve the failed state and bring the Director a separate exact full-restore
-decision, since later writes could otherwise be lost.
+held. The failure event states which evidence failed:
+
+- `database_unsafe`: the committed data or schema disagrees with the verified
+  states. Preserve the backup and bring the Director an exact full-restore
+  question; later writes could otherwise be lost.
+- `deployment_recovery_required`: an original marker effect remains unknown.
+  Re-observe that same operation through manual release. This is no evidence of
+  database damage and never calls for restoring a healthy database.
+- `verification_blocked`: identity or runtime/health verification cannot pass.
+  Bring the Director the concrete missing action if it exceeds Q777.
+- `release_incomplete`: a transient read or transport failed; retry is supported.
+- `automatic_recovery_exhausted`: automatic attempts stopped. Supported manual
+  release replenishes their allowance without changing any safety proof.
+
+None authorizes an automatic restore or drop retry. Events report whether resume
+started and whether all original writers were resumed; a failed read does not
+claim physical quiescence.
 
 Before reopening writers, the matching image runs its actual non-serving
 privileged-worker startup/schema probe, retained-history and train readers,
@@ -5870,14 +5890,17 @@ before-state abort can reopen unchanged. A running frozen original automatically
 completes missing verification through the same
 `database_maintenance_host.py release --state STATE_JSON` path used by EOF cleanup
 and the persistent deadline watchdog. The `verify` alias uses that same path.
-Automatic starts are bounded by systemd's retained unit rate limit; transient
-database reads, census collisions and health transport failures remain retryable
-after exact phase cleanup. Exhaustion preserves the holds. Explicit manual
-`release` or `verify` resets that start limit and joins the same recovery service;
-it can always re-read the original operation without a private-state edit.
-A transport failure does not classify the database as unsafe or authorize a
-production restore. Terminal identity/schema or unknown provider-effect results
-still stop automatic retries and require the applicable recovery decision.
+Automatic starts consume the durable budget even when a recovery process crashes
+or its ownership read fails. Transient database reads, census collisions and
+health transport failures remain retryable after exact phase cleanup. Exhaustion
+preserves the holds and permits explicit manual `release` or `verify`; these
+replenish the main allowance and join the same recovery service, without a
+private-state edit. A request that joins an already-exhausted exit can start one
+fresh job after that exit. An active verification may already be in progress.
+The health phase's independent deadline remains protected by its own budget.
+A transport failure or exhausted budget does not classify the database as unsafe
+or authorize a restore. Terminal identity/schema or unknown provider-effect
+results still stop automatic retries and require the applicable recovery action.
 If the API is stopped after reboot and the after-state lacks health proof, the
 driver cannot start it with full network before a namespace fence exists. It
 keeps writers stopped and reports recovery required; bring the Director the
@@ -5923,7 +5946,12 @@ python3 database_maintenance_host.py release --state STATE_JSON
 
 The final receipt includes actual verified revision and original service
 readback. Successful cleanup disables/removes the watchdog and verifies its
-inactive state. Private state defaults to `/var/lib/launchplane-maintenance`;
+inactive state. A crash after marking release complete still uses the same
+supported command to settle only the exact owned units and fsync cleanup progress;
+it repeats no database, provider, freezer or resume operation. It stops those
+units outside state custody before final metadata cleanup. Success requires the
+cleanup readback as well as the sticky release proof.
+Private state defaults to `/var/lib/launchplane-maintenance`;
 a reboot or failed attempt continues through that same supported release,
 never a different target or recovery restore. Monitoring is paused during the
 window, which counts against verification cadence and is not healthy evidence.
