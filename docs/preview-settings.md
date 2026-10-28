@@ -87,9 +87,11 @@ retains the audit history. Other exact settings are never silently removed.
 
 This preparation uses only the Director agent's existing preview authority;
 stable-lane writes retain their original authorization and non-null contract.
-Apply holds the preview's executor lock, requires a completed original and
-refuses any held operation on that provider target. Inspection remains available
-before settlement. It changes no original operation,
+Apply holds the preview's executor lock. It accepts a completed original with
+no held operation, or the exact original as the target's only held operation
+after its lease and supersession grace expire, using the database clock.
+Active executors, unexpired holds and other held operations refuse. Inspection
+remains available before settlement. This record preparation changes no original operation,
 provider, database, template or other preview. It supplies no custody,
 disposability or settlement proof. A subsequent refresh still requires its
 normal gates and a fresh issued plan. Preview safety bindings include managed

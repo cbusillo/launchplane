@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import cast
 
 from control_plane.contracts.odoo_instance_override_record import (
@@ -8,6 +8,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyResult,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.odoo_instance_overrides import resolve_preview_website_bootstrap
 from control_plane.odoo_post_deploy_http import OdooWebsiteBootstrapOverrideRequest
 from control_plane.odoo_preview_apply_http import resolve_odoo_preview_apply_profile
@@ -21,6 +22,7 @@ from control_plane.preview_reservation_recovery import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
+from control_plane.workflows.odoo_preview_runtime import ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS
 
 
 def preview_bootstrap_profile(
@@ -149,10 +151,30 @@ def prepare_preview_bootstrap(
         if check is None:
             raise ValueError("Preview executor is active.")
         check()
-        if original.state != "completed" or store.list_held_provider_target_reservations(
+        held = store.list_held_provider_target_reservations(
             provider_target_key=original.provider_target_key
-        ):
-            raise ValueError("Settle original preview effects before changing bootstrap intent.")
+        )
+        if original.state == "completed":
+            if held:
+                raise ValueError("Another preview operation holds this provider target.")
+        else:
+            lookup = store.lookup_existing_mutation_reservation(
+                route_path=original.route_path,
+                idempotency_key=original.idempotency_key,
+                request_fingerprint=original.request_fingerprint,
+            )
+            if (
+                lookup.status != "found"
+                or lookup.record != original
+                or tuple(held) != (original,)
+                or not original.lease_expires_at
+                or parse_launchplane_mutation_timestamp(
+                    original.lease_expires_at, field_name="lease_expires_at"
+                )
+                + timedelta(seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS)
+                > parse_launchplane_mutation_timestamp(lookup.observed_at, field_name="observed_at")
+            ):
+                raise ValueError("Preview original is active or its exclusive hold is unproven.")
         current_profile, current_reference = preview_bootstrap_profile(store, request)
         if current_profile != profile or current_reference != reference:
             raise OdooInstanceOverrideConflictError(
