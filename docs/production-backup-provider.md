@@ -60,19 +60,15 @@ the exact-operation read, adding operation creation/update/completion times and
 Even an empty list retains its scope and request trace. It starts no capture
 and contacts no provider.
 
-For fleet qualification, enumerate `/v1/product-profiles` and require complete
-service source and authorization coverage before treating its active profiles
-as a census. Include every production lane, keeping `production_use=live`
-separate from prelaunch products. Read each lane's current backup authority,
-capture-free preflight and successful operation history separately. A historical
-pass is proof only of that recorded capture: compare its typed policy/target
+Read current backup authority, capture-free preflight and successful operation
+history separately. A historical pass is proof only of that recorded capture:
+compare its typed policy/target
 binding and both verified capture identities, and retain its timestamps. It
 does not prove current snapshot/archive presence, restoration, promotion or
 freshness for another release. Legacy operation evidence without a typed binding
 does not satisfy typed rollout proof. An empty or truncated list never proves
-that an omitted capture happened; keep missing proof explicit. Live values and
-dated qualification receipts belong in service records and the owning rollout
-issue, rather than a checked-in product inventory.
+that an omitted capture happened; keep missing proof explicit. The owning
+rollout issue keeps the fleet census and dated qualification receipts.
 
 `POST /v1/production-backup-gates/operations/{operation_id}/cancel` takes the
 same scope query and a cancellation reason. It requires the capture action for

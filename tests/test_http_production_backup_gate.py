@@ -46,7 +46,8 @@ from tests.test_http_app_production_backup_authority import (
 from tests.test_postgres_integration import _store_for_fresh_head_database
 from tests import test_generic_web_client_release as release_fixtures
 from control_plane.action_effects import BACKUP_CONTINUATION_ACTION
-from tests import test_production_backup_gate as gate_fixtures
+from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
+from tests.support.durable_operations import durable_operation_authorization_payload
 
 
 class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -170,10 +171,13 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(withheld, running.text)
 
     async def test_list_successful_typed_capture_retains_proof_times_without_mutation(self) -> None:
-        fixture = gate_fixtures.ProductionBackupGateTests()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        binding = fixture.binding
+        directory = self.enterContext(TemporaryDirectory())
+        store = PostgresRecordStore(
+            database_url=f"sqlite+pysqlite:///{Path(directory) / 'state.db'}"
+        )
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        binding = _binding()
         evidence = {
             "policy_record_id": binding.policy.record_id,
             "snapshot_name": "verified-snapshot",
@@ -192,7 +196,15 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
             request_fingerprint=binding.request.model_dump_json(),
             request=binding.request,
             binding=binding,
-            authorization=fixture.authorization,
+            authorization=DurableOperationAuthorization.model_validate(
+                durable_operation_authorization_payload(
+                    action="production_backup_gate.execute",
+                    managed_rule_id="example-prod-backup",
+                    product=binding.request.product,
+                    context=binding.request.context,
+                    instances=(binding.request.instance,),
+                )
+            ),
             status="pass",
             phase="completed",
             created_at="2026-10-28T01:00:00Z",
@@ -204,11 +216,11 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                 evidence=evidence,
             ),
         )
-        fixture.store.write_verireel_prod_backup_gate_operation_record(operation)
+        store.write_verireel_prod_backup_gate_operation_record(operation)
         legacy_request = VeriReelProdBackupGateRequest(
             context=operation.context, backup_record_id="legacy-backup"
         )
-        fixture.store.write_verireel_prod_backup_gate_operation_record(
+        store.write_verireel_prod_backup_gate_operation_record(
             VeriReelProdBackupGateOperationRecord(
                 operation_id="other-product-success",
                 context=operation.context,
@@ -228,12 +240,12 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         )
-        before = fixture.store.list_verireel_prod_backup_gate_operation_records()
+        before = store.list_verireel_prod_backup_gate_operation_records()
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             bearer_identity_config=_local_operator_bearer_config(),
             authz_policy=LaunchplaneAuthzPolicy(),
-            record_store_factory=lambda: fixture.store,
+            record_store_factory=lambda: store,
         )
         query = urlencode(
             {
@@ -256,8 +268,23 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["finished_at"], operation.finished_at)
         self.assertEqual(summary["created_at"], operation.created_at)
         self.assertEqual(summary["updated_at"], operation.updated_at)
-        self.assertEqual(fixture.store.list_verireel_prod_backup_gate_operation_records(), before)
-        self.assertEqual(fixture.store.list_backup_gate_records(), ())
+        padded_query = urlencode(
+            {
+                "product": f" {operation.product.upper()} ",
+                "context": f" {operation.context.upper()} ",
+                "instance": f" {operation.instance.upper()} ",
+                "status": "pass",
+            }
+        )
+        padded = await get(
+            app,
+            f"/v1/production-backup-gates/operations?{padded_query}",
+            headers={"Authorization": "Bearer local-operator-token"},
+        )
+        self.assertEqual(padded.status_code, 200, padded.text)
+        self.assertEqual(padded.json()["operations"], response.json()["operations"])
+        self.assertEqual(store.list_verireel_prod_backup_gate_operation_records(), before)
+        self.assertEqual(store.list_backup_gate_records(), ())
 
     @scoped_agent_test
     async def test_list_operations_requires_exact_scope_read_authorization(self) -> None:
@@ -289,11 +316,17 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         )
+        directory = self.enterContext(TemporaryDirectory())
+        store = PostgresRecordStore(
+            database_url=f"sqlite+pysqlite:///{Path(directory) / 'state.db'}"
+        )
+        self.addCleanup(store.close)
+        store.ensure_schema()
         scoped_app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             bearer_identity_config=_local_operator_bearer_config(),
             authz_policy=read_policy,
-            record_store_factory=object,
+            record_store_factory=lambda: store,
         )
         scope = {"product": "verireel", "context": "allowed", "instance": "prod"}
         for query_scope in (scope, *(scope | {key: "other"} for key in scope)):
@@ -303,7 +336,7 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                     f"/v1/production-backup-gates/operations?{urlencode(query_scope)}",
                     headers={"Authorization": "Bearer local-operator-token"},
                 )
-                self.assertEqual(scoped_response.status_code, 503 if query_scope == scope else 403)
+                self.assertEqual(scoped_response.status_code, 200 if query_scope == scope else 403)
 
     async def test_director_continuation_preserves_acceptance_without_capture_permission(
         self,
