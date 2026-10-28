@@ -46,6 +46,13 @@ class _SessionSnapshotStore(HistoricalCompletionSnapshotStore):
         self._store = store
         self._session = session
 
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        return self._store.read_merge_train_controller_aliases_in_session(
+            self._session, repository=repository, base_branch=base_branch, lock=False
+        )
+
     def list_merge_train_controller_state_records(
         self,
         *,
@@ -59,7 +66,7 @@ class _SessionSnapshotStore(HistoricalCompletionSnapshotStore):
         row_type = LaunchplaneMergeTrainControllerStateRow
         filters: list[object] = []
         if repository:
-            filters.append(row_type.repository == repository)
+            filters.append(row_type.repository == repository.lower())
         if base_branch:
             filters.append(row_type.base_branch == base_branch)
         if status:

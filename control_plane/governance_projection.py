@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
 from control_plane.contracts.merge_train_policy import MergeTrainGitHubTokenSource
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerReconciliationRequiredError,
+    merge_train_controller_alias_reconciliation_detail,
+)
 from control_plane.contracts.repository_evidence import (
     RepositoryEvidenceProvider,
 )
@@ -147,6 +151,12 @@ class LiveGovernanceCurrentReadinessProvider:
             if candidate_record is None:
                 return _unavailable_readiness()
             controller_store = require_merge_train_controller_state_record_store(store)
+            if merge_train_controller_alias_reconciliation_detail(
+                controller_store.list_merge_train_controller_state_alias_records(
+                    repository=repository, base_branch=base_branch
+                )
+            ):
+                return _unavailable_readiness()
             controller_records = controller_store.list_merge_train_controller_state_records(
                 repository=repository,
                 base_branch=base_branch,
@@ -210,6 +220,7 @@ class LiveGovernanceCurrentReadinessProvider:
             )
         except (
             LookupError,
+            MergeTrainControllerReconciliationRequiredError,
             MergeAdmissionDeniedError,
             MergeTrainGitHubError,
             StopIteration,
