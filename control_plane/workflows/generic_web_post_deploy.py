@@ -10,14 +10,7 @@ def generic_web_post_deploy_authority_digest(
     store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
 ) -> str:
     """Read expected testing authority before target preparation and provider effects."""
-    from control_plane.workflows.verireel_testing_post_deploy import (
-        execute_verireel_testing_post_deploy,
-    )
-
-    if (
-        generic_web_post_deploy_executor_for_profile(profile, instance=lane.instance)
-        is not execute_verireel_testing_post_deploy
-    ):
+    if not declares_verireel_testing_extension(profile, instance=lane.instance):
         return ""
     from control_plane.product_reconcile import (
         ProductReconcileStore,
@@ -48,12 +41,6 @@ def generic_web_post_deploy_executor_for_profile(
     *,
     instance: str,
 ) -> GenericWebPostDeployExecutor | None:
-    if declares_verireel_testing_extension(profile, instance=instance):
-        from control_plane.workflows.verireel_testing_post_deploy import (
-            execute_verireel_testing_post_deploy,
-        )
-
-        return execute_verireel_testing_post_deploy
     return generic_web_post_deploy_executor_for_driver_id(profile.driver_id, instance=instance)
 
 

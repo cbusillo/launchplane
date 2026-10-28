@@ -123,28 +123,29 @@ and backup records and retired instance-scoped policy grants remain readable;
 no retired release endpoint is enabled by those grants. Production still changes only through an
 accepted release.
 
-A generic-web testing lane selects `verification_extension="verireel-testing"`
-in `generic_web_extensions` to reuse VeriReel's creator/admin
-qualification. The preset accepts only a recorded testing lane and exact
-reserved application target; other lanes and an absent executor are refused
-before deployment. The preset is selected only by the declaration; a product
-name or historical driver identifier does not enable testing qualification. The shared lifecycle runs the profile's migration commands first. The extension verifies a
-disposable creator's QR/public flow, creator denial of admin pages, and the admin
-pages after the existing smoke-maintenance intent elevates that fixture. Cleanup
-uses the existing test-account deletion intent. The deployment's
-`post_deploy_update.evidence` binds creator, admin and cleanup statuses
-to the deployment ID, immutable artifact and source revision; all must pass.
-The service image includes matching Playwright Chromium. The Compose browser
-service uses Playwright's built-in remote server in an unprivileged, read-only
-container with no credentials, runtime volume, host socket or published port.
-`LAUNCHPLANE_BROWSER_WS_ENDPOINT` is Launchplane self-bootstrap wiring to that
-private component. Both the HTTP service and the event-reconcile worker receive
-that endpoint and private network; control-plane startup does not wait on browser
-health. Verification checks browser availability before migration and Linux
-verification refuses an absent endpoint. Local
-non-Linux rehearsals use a sandboxed browser with a scrubbed environment.
-Fixture passwords are ephemeral and never enter qualification evidence.
-See [event-driven deploys](event-driven-deploys.md) for requalification and replay.
+Product browser checks belong to the product's Build. VeriReel qualifies every
+candidate image using disposable app, database and browser containers before
+publishing its deployable artifact manifest. Launchplane consumes that completed
+Build and immutable artifact; it does not create product fixtures or execute
+product assertions after deploying. Shared health and exact runtime identity
+checks still qualify the deployment.
+
+The retired `verification_extension="verireel-testing"` declaration remains
+readable for stored profiles. Reconcile holds it before provider effects, and
+explicit deploys refuse its missing executor. After the product's checked Build
+is available, use the existing reviewed generic-web transition to remove the
+retired testing declaration. Preserve its maintenance and schedules and every
+production declaration. This is an explicit testing-profile migration, never a
+silent fallback or an automatic production change.
+
+`control_plane.testing_browser` owns Launchplane's shared browser harness for
+Odoo walkthroughs and cutover probes. Its private Compose browser has no
+credentials, runtime volume, host socket or published port.
+`LAUNCHPLANE_BROWSER_WS_ENDPOINT` is Launchplane self-bootstrap wiring. Linux
+refuses an absent endpoint; non-Linux rehearsals launch a sandboxed browser
+with a scrubbed environment. The product's build browser is separate and never
+joins this private service network.
+
 Do not move a product apply route onto generic deploy until its remaining
 release, backup, promotion, migration, and post-deploy invariants are either
 represented in generic contracts or still explicitly wrapped by the product
@@ -485,8 +486,8 @@ declaration alone does not add lifecycle work to a pre-extension rollback.
 If provider deployment evidence is absent but the exact attempt's receipt proves
 that a pre-image refusal restored all schedules, recovery may retry the original
 operation. A different attempt or an unqualified/failed-restoration receipt does
-not supply that proof. Testing rollback selects the same declared qualification
-executor as a forward testing deploy.
+not supply that proof. Testing rollback retains shared runtime qualification. Product browser behavior
+is checked by the Build that produced the artifact.
 
 ### VeriReel extension repair and history
 
@@ -496,9 +497,8 @@ it does not expose a parallel native preview API. Legacy deployment, promotion
 and backup schemas and migrations remain readers for stored history.
 
 The VeriReel app-maintenance endpoint and source-control smoke-client action are
-retired. Fixture setup remains internal to the testing qualification extension
-until the product checks move into the product repository. No product workflow
-calls a Launchplane maintenance route.
+retired. VeriReel owns fixture setup and cleanup in its candidate-image browser
+checks. No product workflow calls a Launchplane maintenance route.
 
 ### Profile maintenance and explicit testing reset
 
