@@ -160,10 +160,10 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             _untracked_preview_warnings,
         )
 
-        def read_warnings(profile: LaunchplaneProductProfileRecord) -> tuple[str, ...]:
+        def read_warnings(selected_profile: LaunchplaneProductProfileRecord) -> tuple[str, ...]:
             return _untracked_preview_warnings(
                 record_store=self.store,
-                profile=profile,
+                profile=selected_profile,
                 slugs=(self.issued.preview_slug,),
                 action_allowed=lambda *_: True,
             )
