@@ -3897,6 +3897,20 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_required")
 
+    async def test_openapi_includes_product_prelaunch_rebuild_policy_contract(self) -> None:
+        response = await openapi_response()
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/product-profiles/prelaunch-rebuild/apply"]["post"]
+        self.assertEqual(
+            route["operationId"],
+            "apply_product_prelaunch_rebuild_policy",
+        )
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request_schema["title"], "ProductPrelaunchRebuildPolicyApplyRequest")
+        self.assertEqual(request_schema["type"], "object")
+        self.assertFalse(request_schema["additionalProperties"])
+
     async def test_apply_product_preview_tls_dry_run_preserves_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
