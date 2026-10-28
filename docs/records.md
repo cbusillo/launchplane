@@ -307,8 +307,12 @@ batch, per-binding CAS, parent replay and partial-progress recovery implementati
 The stable controller requires its own `route_binding.odoo_stable_refresh.plan`
 or `.apply` capability in the Launchplane service context plus the exact target's
 managed `route_binding.read` / `.apply` or external
-`route_binding.external.plan` / `.apply` authority. Every
-target is authorized before the first binding write. Its request accepts only
+`route_binding.external.plan` / `.apply` authority. Both controllers filter
+discovery by that existing authority before planning and the target limit, then
+reauthorize included targets before writing. Excluded targets are absent from
+results and unchanged. Finding bindings but no authorized target returns 403;
+an authorized blocked target still requires attention. Replay reauthorizes all
+stored outcomes even if the caller has since lost part of its scope. Its request accepts only
 schema version, mode, reason and confirmation. Apply requires
 `APPLY ODOO STABLE ROUTE BINDING REFRESH` and an Idempotency-Key. The new route
 grants no access and starts no schedule. Q193 declines a standing renewal clock;

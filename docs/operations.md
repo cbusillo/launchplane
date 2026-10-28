@@ -1444,20 +1444,25 @@ product, context, instance, domain, or provider selectors. The service derives
 its bounded target set from DB-backed Odoo product profiles, keeps only exact
 `testing` lanes with active service-owned route bindings, and skips absent,
 disabled, externally managed, non-Odoo, and production bindings. The target
-limit is 25 and exceeding it fails the whole plan before any write.
+set is restricted to the caller's existing exact-instance authority before
+planning or counting toward the limit of 25. Exceeding that limit fails the
+whole plan before any write; unrelated products cannot consume it.
 
 Controller dry-run requires the service-scoped
 `route_binding.odoo_testing_refresh.plan` action plus `route_binding.read` for
-every discovered exact instance. Apply requires the separate service-scoped
+each included exact instance. Apply requires the separate service-scoped
 `route_binding.odoo_testing_refresh.apply` action, `route_binding.apply` for
-every discovered exact instance, a unique `Idempotency-Key`, and confirmation
-`APPLY ODOO TESTING ROUTE BINDING REFRESH`. All discovered binding grants are
-checked before the first write. The controller then invokes the same
+each included exact instance, a unique `Idempotency-Key`, and confirmation
+`APPLY ODOO TESTING ROUTE BINDING REFRESH`. Included binding grants are
+checked again before the first write. If bindings exist but none is authorized,
+the controller returns 403 rather than an empty success. Excluded bindings are
+neither planned, observed, written nor included in the response. The controller invokes the same
 provider-neutral planner as manual reconcile and writes due refreshes
 sequentially through each binding's PostgreSQL CAS/transaction lock. A parent
 mutation reservation fences concurrent same-key controller runs and is completed
 only after the bounded child loop. Unchanged, blocked, and conflict outcomes are
-returned without mutation; one denied target blocks the whole batch. The
+returned without mutation. Replays reauthorize every stored outcome, including
+targets no longer in the caller's discovery scope. The
 reusable workflow accepts only mode, reason, and an idempotency key, preserves a
 30-day request/response artifact, and fails after artifact upload when any target
 requires attention. Production enrollment is a separate change and cannot be
