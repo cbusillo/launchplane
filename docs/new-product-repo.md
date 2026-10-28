@@ -72,7 +72,7 @@ template exists; admins do not hand-author authz JSON or edit a per-product
 policy secret.
 
 Existing caller-rule retirement after archival or App offboarding follows the
-[canonical preview-authorization contract](service-boundary.md#product-profile-endpoints).
+[onboarding cleanup runbook](operations.md#conventional-generic-web-onboarding).
 Keep that cleanup until retirement and independent readback complete.
 
 New-product build and handoff requirements are canonical in

@@ -1592,10 +1592,9 @@ subject model before diagnostics or downstream intent contracts consume them:
   terminal-agent bearer token, with admission and authority defined in
   [Authentication](#authentication).
 - `local_operator`: trusted Director terminal agents authenticated by the dedicated
-  write bearer token. Their authority comes only from exact `local_operators`
-  policy rules (subject, token label, product, context, action) on routes that
-  accept this identity. Product-config writes require a non-empty reason, and
-  product-config apply also requires a matching recorded dry-run.
+  write bearer token, with authority following the
+  [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission)
+  and each endpoint's admission and safeguards.
 - `github_human`: browser-session humans with `read_only` or `admin` role from
   GitHub human policy rules or bootstrap admin email matching. Read-only humans
   are `limited_remote_user` consumers: even if a rule is accidentally broad,
@@ -1931,8 +1930,8 @@ Launchplane service context.
 On a Live product, `local_operator` apply outside the Director add-only exception
 returns `live_product_requires_operator` even with that grant; inert dry runs
 require existing plan or apply authority unless the Director declaration exception
-applies. Browser CSRF and read-only identity
-restrictions remain in force. The Director may add a positive external-provider
+applies. Browser CSRF remains in force; terminal-agent credentials are not
+admitted on this declaration route. The Director may add a positive external-provider
 purpose to an existing nonlocal requirement while preserving its other metadata.
 Clearing purpose, enabling or retiring existing generation intent, or declaring
 a provider that shadows a local key requires `product_profile.expected_config.apply` and retains
@@ -4409,6 +4408,13 @@ The privileged-operation API is a typed governed surface, not an execution
 proxy. Human create/read/cancel routes are under
 `/v1/privileged-operations/plans`; the counts-only agent read is under
 `/v1/agent/privileged-operations/plans/{operation_id}`.
+
+`POST /v1/agent/privileged-operations/plans` accepts `terminal_agent` and
+`local_operator` proposal identities under the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission)
+or the existing managed proposal rule. Its closed descriptors are
+`managed-authz-policy-set`, `managed-merge-train-policy-import` and
+`production-backup-policy`; secret rotation and retired delivery descriptors
+are refused. A proposal records inert review intent, never approval or execution.
 
 The human list route returns a strict versioned semantic review projection, and
 `GET /v1/privileged-operations/plans/{operation_id}/review` returns the same

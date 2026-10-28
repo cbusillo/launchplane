@@ -28,6 +28,15 @@ the new-product contract rather than duplicating it here.
 
 ## Retained Preview Safety
 
+Generic-web lifecycle cleanup uses the repository-name anchor from the product
+profile for stored-preview lookup and terminal evidence; the product key need
+not equal the repository name. Historical callers without a profile retain
+their product-shaped anchor, with no fallback to unrelated records.
+Provider application lookup validates the complete project/environment/application
+inventory before proving absence or reusing a match. Missing or malformed nested
+relations fail cleanup without deleting provider state or marking a preview
+destroyed; a fully enumerated empty inventory remains valid absence.
+
 After native generic-web provider teardown succeeds, the destroy route records
 the matching preview as `destroyed` and clears its active and serving generation
 links before returning success. A destroy for a preview that was never recorded

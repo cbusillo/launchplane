@@ -109,9 +109,9 @@ standing permission for the product's declared lanes, including testing and
 production. It stays classified as
 `write`, with an explicit standing declaration in the same action catalog. It
 changes Launchplane's monitoring records, not the live site, credentials, access
-or merge authority. Only this monitoring route admits the Director's terminal
-transport to its existing browser/bearer mutation path; other terminal mutation
-restrictions remain. Exact product/lane/check and private endpoint validation,
+or merge authority. Terminal admission follows the
+[authentication and endpoint contracts](service-boundary.md#authentication).
+Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 

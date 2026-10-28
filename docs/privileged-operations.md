@@ -58,16 +58,13 @@ the proposal and returns the review link without approving or applying it.
 Creation persists a `planned` record and its event only. It installs no rule,
 changes no merge policy, and schedules no execution. The signed-in Director
 reviews the proposer, redacted change evidence and counts, then approves or
-rejects through the existing browser lifecycle. Callers with a `local_operator` identity cannot approve,
+rejects through the existing browser lifecycle. Agent requesters cannot approve,
 cancel, revoke, or execute a plan, even if a policy mistakenly lists those
-actions. The independent `local_operator` requester stores only a domain-separated
-principal fingerprint, so its history and replay do not depend on terminal-agent
-credentials or ordinary-agent enrollment, sessions or leases.
+actions. The requester stores only a domain-separated principal fingerprint; historical
+records do not depend on ordinary-agent enrollment, sessions or leases.
 
-Before first use, the Director prepares **agent proposal access** in the Access
-policy tab and approves that separate managed authorization plan. See
-[the proposer grant](authorization-authority.md#preparing-agent-proposal-access).
-Code landing does not install it. Removing proposer access does not cancel
+Proposal admission follows the [API contract](service-boundary.md#privileged-operation-api).
+Removing proposer access does not cancel
 already pending plans; those still need separate Director approval or cancellation.
 After the first `local_operator` requester record is persisted, rollback must
 retain a reader that supports that requester type. Older records remain readable.
