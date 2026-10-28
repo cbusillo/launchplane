@@ -14689,6 +14689,7 @@ class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):
             RuntimeRemovalTests.test_last_value_preserves_retirement_intent,
             RuntimeRemovalTests.test_transaction_failure_keeps_values_and_no_success_receipt,
             RuntimeRemovalTests.test_drift_type_changes_and_key_or_reason_changes_refuse,
+            RuntimeRemovalTests.test_preview_removal_rechecks_eligibility_and_write_authority_on_replay,
         ):
             with self.subTest(scenario=scenario.__name__), _head_postgres_database() as url:
                 fixture = RuntimeRemovalTests(scenario.__name__)
