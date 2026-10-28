@@ -67,11 +67,11 @@ class OdooInstanceOverrideWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     record: OdooInstanceOverrideRecord
-    expected_record: OdooInstanceOverrideRecord
+    expected_record: OdooInstanceOverrideRecord | None
 
     @model_validator(mode="after")
     def validate_route(self) -> "OdooInstanceOverrideWrite":
-        if (self.record.context, self.record.instance) != (
+        if self.expected_record is not None and (self.record.context, self.record.instance) != (
             self.expected_record.context,
             self.expected_record.instance,
         ):

@@ -14459,6 +14459,133 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
 
 
 class RealPostgresSecretReferenceTests(unittest.TestCase):
+    def test_new_testing_reference_and_receipt_commit_or_roll_back_together(self) -> None:
+        from tests.test_private_testing_integration import seed_integration
+        from control_plane.odoo_secret_references import plan_secret_reference_reconciliation
+        from control_plane.storage.postgres import DbOnlyMutationRequest
+
+        with (
+            _head_postgres_database() as url,
+            closing(PostgresRecordStore(database_url=url)) as store,
+        ):
+            profile, _ = seed_integration(store, "printnode.api_key", write_override=False)
+            plan, bundle = plan_secret_reference_reconciliation(
+                store=store,
+                profile=profile,
+                record=None,
+                environment="testing",
+                keys=("printnode.api_key",),
+                create_missing=True,
+            )
+            mutation = DbOnlyMutationRequest(
+                scope="fixture-admin",
+                route_path="fixture-reference",
+                idempotency_key="original",
+                request_fingerprint=plan.review_digest,
+                lease_owner="fixture",
+                response_status_code=200,
+                response_trace_id="completed-reference",
+                response_payload={"result": plan.model_dump(mode="json")},
+            )
+            with patch.object(
+                store,
+                "_after_product_authority_bundle_step",
+                side_effect=RuntimeError("injected failure"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    store.compare_and_write_product_authority_bundle(bundle, mutation=mutation)
+            self.assertIsNone(
+                store.read_idempotency_record(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                )
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_odoo_instance_override_record(context_name="cm", instance_name="testing")
+            status, receipt = store.compare_and_write_product_authority_bundle(
+                bundle, mutation=mutation
+            )
+            self.assertEqual(status, "written")
+            status, replay = store.compare_and_write_product_authority_bundle(
+                bundle, mutation=mutation
+            )
+            self.assertEqual(status, "replayed")
+            self.assertEqual(replay.response_trace_id, receipt.response_trace_id)
+            after = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            )
+            self.assertEqual(after.config_parameters[0].value.source, "secret_binding")
+
+    def test_parameter_readback_compares_empty_values_inside_postgres(self) -> None:
+        import base64
+        import contextlib
+        import io
+        import sys
+        from types import SimpleNamespace
+        from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
+
+        with (
+            _head_postgres_database() as url,
+            closing(PostgresRecordStore(database_url=url)) as store,
+        ):
+            with store._engine.begin() as connection:
+                connection.execute(
+                    text("CREATE TABLE ir_config_parameter (key text PRIMARY KEY, value text)")
+                )
+                connection.execute(
+                    text("INSERT INTO ir_config_parameter VALUES (:key, :value)"),
+                    [
+                        {"key": "acme.present", "value": "private-readback-sentinel"},
+                        {"key": "acme.empty", "value": "\t \r\n"},
+                    ],
+                )
+            keys = ["acme.present", "acme.empty", "acme.missing"]
+            payload = {
+                "config_parameters": [
+                    {"key": key, "value": {"source": "secret_binding"}} for key in keys
+                ]
+            }
+            spec = {
+                "families": [],
+                "allowed_integrations": [],
+                "connection_isolation_required": False,
+                "protected_shopify_store_handles": [],
+            }
+            output = io.StringIO()
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "psycopg2": SimpleNamespace(
+                            connect=lambda **kwargs: store._engine.raw_connection()
+                        )
+                    },
+                ),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": base64.b64encode(
+                            json.dumps(payload).encode()
+                        ).decode()
+                    },
+                ),
+                patch.object(
+                    sys,
+                    "argv",
+                    ["readback", "testing", base64.b64encode(json.dumps(spec).encode()).decode()],
+                ),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit):
+                    exec(INTEGRATION_READBACK_PROGRAM, {})
+            self.assertIn("odoo_config_parameter_present=acme.present", output.getvalue())
+            self.assertIn(
+                "odoo_config_parameter_missing=acme.empty,acme.missing", output.getvalue()
+            )
+            self.assertNotIn("private-readback-sentinel", output.getvalue())
+
     def test_selection_cas_rollback_and_late_completion_preservation(self) -> None:
         from tests.test_odoo_secret_references import seed, KEY
         from control_plane.odoo_secret_references import plan_secret_reference_reconciliation

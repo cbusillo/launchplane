@@ -22,12 +22,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 from control_plane.contracts.dokploy_target_record import DokployTargetPolicies
+from control_plane.contracts.odoo_instance_override_record import ODOO_CONFIG_PARAMETER_KEY_PATTERN
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.odoo_instance_overrides import SHOPIFY_STORE_SETTINGS, shopify_store_handle
 from control_plane.runtime_key_safety import (
-    DEFAULT_INTEGRATION_KEY_MARKERS,
     INTEGRATION_KEY_MARKERS,
-    runtime_key_matching_markers,
+    runtime_key_required_integrations,
     runtime_key_integrations,
     runtime_key_safety_environment_class,
 )
@@ -43,11 +43,16 @@ INTEGRATION_READBACK_CHECKED_MARKER = "integration_readback_checked"
 INTEGRATION_READBACK_REFUSED_MARKER = "integration_readback_refused"
 INTEGRATION_READBACK_ALLOWED_MARKER = "integration_readback_allowed"
 INTEGRATION_READBACK_NAME_LIST_MARKERS = frozenset(
-    {INTEGRATION_READBACK_REFUSED_MARKER, INTEGRATION_READBACK_ALLOWED_MARKER}
+    {
+        INTEGRATION_READBACK_REFUSED_MARKER,
+        INTEGRATION_READBACK_ALLOWED_MARKER,
+        "odoo_config_parameter_present",
+        "odoo_config_parameter_missing",
+    }
 )
 _NAME_LIST_PATTERN = re.compile(r"[a-z0-9_.:/,-]{1,2000}")
 _IDENTIFIER_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,62}")
-_CONFIG_PARAMETER_PATTERN = re.compile(r"[a-z][a-z0-9_.]{0,127}")
+_CONFIG_PARAMETER_PATTERN = re.compile(ODOO_CONFIG_PARAMETER_KEY_PATTERN)
 
 
 @dataclass(frozen=True)
@@ -177,10 +182,14 @@ def integration_credential_warnings(
             continue
         if binding.integration != "runtime_environment":
             continue
-        integrations.update(runtime_key_integrations(binding.binding_key))
-        for marker in runtime_key_matching_markers(binding.binding_key, extra_markers):
-            if marker not in DEFAULT_INTEGRATION_KEY_MARKERS and marker.lower() not in allowed:
-                unknown_integration = True
+        matched = set(runtime_key_integrations(binding.binding_key))
+        integrations.update(matched)
+        if (
+            runtime_key_required_integrations(binding.binding_key, extra_markers=extra_markers)
+            - matched
+            - allowed
+        ):
+            unknown_integration = True
     return tuple(
         f"Stored {integration} credentials have no integration allowance for this non-production lane."
         for integration in sorted(integrations - allowed)
@@ -307,6 +316,7 @@ INTEGRATION_READBACK_PROGRAM = (
     + """import base64
 import json
 import os
+import re
 import sys
 
 import psycopg2
@@ -359,6 +369,18 @@ def protected_store_key_present(cursor, handles):
 refused = []
 allowed = []
 checked = 0
+parameter_keys = []
+encoded_payload = os.environ.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "")
+if encoded_payload:
+    payload = json.loads(base64.b64decode(encoded_payload, validate=True))
+    parameter_keys = sorted({
+        item["key"] for item in payload.get("config_parameters", [])
+        if item.get("value", {}).get("source") == "secret_binding"
+    })
+    if len(parameter_keys) > 100 or any(not re.fullmatch(r"__ODOO_PARAMETER_KEY_PATTERN__", key) for key in parameter_keys):
+        raise SystemExit("Invalid secret parameter readback names")
+present_parameters = []
+missing_parameters = []
 connection = psycopg2.connect(
     host=(os.environ.get("ODOO_DB_HOST") or "database").strip(),
     port=(os.environ.get("ODOO_DB_PORT") or "5432").strip(),
@@ -369,6 +391,10 @@ connection = psycopg2.connect(
 try:
     with connection.cursor() as cursor:
         cursor.execute("SET TRANSACTION READ ONLY")
+        if parameter_keys:
+            checked += len(parameter_keys)
+            present_parameters = present_config_parameters(cursor, parameter_keys)
+            missing_parameters = sorted(set(parameter_keys) - set(present_parameters))
         if spec["connection_isolation_required"]:
             refused.extend(connection_isolation(cursor, apply=False))
         handles = spec["protected_shopify_store_handles"]
@@ -396,6 +422,11 @@ finally:
     connection.close()
 
 print("integration_readback_checked=" + str(checked))
+if present_parameters:
+    print("odoo_config_parameter_present=" + ",".join(present_parameters))
+if missing_parameters:
+    print("odoo_config_parameter_missing=" + ",".join(missing_parameters))
+    refused.extend("config_parameter/" + key + ":missing" for key in missing_parameters)
 if allowed:
     print("integration_readback_allowed=" + ",".join(allowed))
 if refused:
@@ -415,4 +446,4 @@ if refused:
     )
 print("integration_readback_ok=true")
 """
-)
+).replace("__ODOO_PARAMETER_KEY_PATTERN__", ODOO_CONFIG_PARAMETER_KEY_PATTERN)

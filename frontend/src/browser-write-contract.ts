@@ -1,4 +1,5 @@
 import type {
+  ReconcileOdooSecretReferencesData,
   ApplyPromotionRecoveryData,
   DryRunPromotionRecoveryData,
   RuntimeSettingRemovalData,
@@ -45,6 +46,7 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  odooSecretReferences: "/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile" satisfies ReconcileOdooSecretReferencesData["url"],
   promotionRecoveryReview: "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/dry-run" satisfies DryRunPromotionRecoveryData["url"],
   promotionRecoveryApply: "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/apply" satisfies ApplyPromotionRecoveryData["url"],
   runtimeSettingRemoval: "/v1/admin/runtime-settings/removal" satisfies RuntimeSettingRemovalData["url"],

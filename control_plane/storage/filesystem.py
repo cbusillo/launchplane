@@ -677,9 +677,12 @@ class FilesystemRecordStore:
     ) -> None:
         for write in bundle.odoo_instance_override_writes:
             record_id = f"{write.record.context}-{write.record.instance}"
-            current = self._read_model_locked(
-                OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
-            )
+            try:
+                current = self._read_model_locked(
+                    OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
+                )
+            except FileNotFoundError:
+                current = None
             if not odoo_instance_override_records_match(current, write.expected_record):
                 raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             self._stage_product_authority_bundle_write(

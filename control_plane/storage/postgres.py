@@ -6468,6 +6468,31 @@ class PostgresRecordStore(HumanSessionStore):
     def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
         self._write_product_authority_bundle(bundle)
 
+    def compare_and_write_product_authority_bundle(
+        self, bundle: ProductAuthorityBundle, *, mutation: DbOnlyMutationRequest
+    ) -> tuple[str, LaunchplaneIdempotencyRecord]:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            status, reservation_row, reservation = self._reserve_db_only_mutation_in_session(
+                session=session, mutation=mutation
+            )
+            if status != "acquired":
+                return status, reservation
+            assert reservation_row is not None
+            self._write_product_authority_bundle(
+                bundle, write_session=session, write_transaction_started=True, commit=False
+            )
+            completion = complete_launchplane_mutation_reservation(
+                reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=self._database_mutation_timestamp(session),
+                response_payload=mutation.response_payload,
+            )
+            self._sync_idempotency_row(reservation_row, completion)
+            session.commit()
+            return "written", completion
+
     def write_director_secret_bundle(
         self, bundle: ProductAuthorityBundle, *, identity: GitHubHumanIdentity
     ) -> None:
@@ -6852,7 +6877,7 @@ class PostgresRecordStore(HumanSessionStore):
                         "Runtime selectors changed before commit."
                     )
             for write in bundle.odoo_instance_override_writes:
-                current = session.scalar(
+                current_override_row: LaunchplaneOdooInstanceOverrideRow | None = session.scalar(
                     select(LaunchplaneOdooInstanceOverrideRow)
                     .where(
                         LaunchplaneOdooInstanceOverrideRow.context == write.record.context,
@@ -6860,9 +6885,13 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                     .with_for_update()
                 )
-                if current is None or not odoo_instance_override_records_match(
-                    OdooInstanceOverrideRecord.model_validate(current.payload),
-                    write.expected_record,
+                current_override = None
+                if current_override_row is not None:
+                    current_override = OdooInstanceOverrideRecord.model_validate(
+                        current_override_row.payload
+                    )
+                if not odoo_instance_override_records_match(
+                    current_override, write.expected_record
                 ):
                     raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
                 self._merge_authority_row(
