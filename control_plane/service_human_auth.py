@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import base64
@@ -15,6 +15,8 @@ from time import monotonic
 import warnings
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlsplit
+
+from requests.exceptions import JSONDecodeError, RequestException
 
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
 from control_plane.service_human_credentials import GitHubOAuthCredential, HumanCredentialCipher
@@ -41,7 +43,9 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class GitHubIdentityUnavailable(RuntimeError):
-    """A transient provider failure, without provider response contents."""
+    def __init__(self, message: str, *, credential: GitHubOAuthCredential | None = None) -> None:
+        super().__init__(message)
+        self.credential = credential
 
 
 class HumanSessionUpdateBusy(RuntimeError):
@@ -120,6 +124,7 @@ class HumanSessionStore(Protocol):
 
 class OAuthResponse(Protocol):
     status_code: int
+    headers: Mapping[str, str]
 
     def json(self) -> Any: ...
 
@@ -417,7 +422,16 @@ class GitHubOAuthClient:
                 )
                 credential = GitHubOAuthCredential.from_token(token, now=now)
             client.token = {"access_token": credential.access_token, "token_type": "Bearer"}
-            identity = self._fetch_identity(client, authz_policy=authz_policy, deadline=deadline)
+            try:
+                identity = self._fetch_identity(
+                    client, authz_policy=authz_policy, deadline=deadline
+                )
+            except JSONDecodeError:
+                raise ValueError("GitHub identity response is invalid.") from None
+            except (GitHubIdentityUnavailable, RequestException):
+                raise GitHubIdentityUnavailable(
+                    "GitHub identity provider is unavailable.", credential=credential
+                ) from None
             return GitHubOAuthLogin(identity, credential)
         finally:
             client.close()
@@ -430,7 +444,11 @@ class GitHubOAuthClient:
         response = client.get(
             url, timeout=min(OAUTH_REQUEST_TIMEOUT_SECONDS, remaining), allow_redirects=False
         )
-        if response.status_code == 429 or response.status_code >= 500:
+        rate_limited = response.status_code == 403 and (
+            response.headers.get("X-RateLimit-Remaining") == "0"
+            or bool(response.headers.get("Retry-After"))
+        )
+        if rate_limited or response.status_code == 429 or response.status_code >= 500:
             raise GitHubIdentityUnavailable("GitHub identity provider is unavailable.")
         if response.status_code != 200:
             raise PermissionError("GitHub identity could not be verified.")
@@ -745,7 +763,10 @@ class HumanSessionManager:
             self.revoke(session)
             return None
 
+        verification_pending = False
+
         def refresh(current: LaunchplaneHumanSession) -> LaunchplaneHumanSession | None:
+            nonlocal verification_pending
             now = self._now()
             verified_at = current.claims_verified_at or current.created_at
             if current.expires_at <= now or verified_at > now:
@@ -776,6 +797,18 @@ class HumanSessionManager:
                         github_id=current.identity.github_id,
                     ),
                 )
+            except GitHubIdentityUnavailable as error:
+                verification_pending = True
+                if error.credential is None:
+                    return current
+                return replace(
+                    current,
+                    oauth_credential=self._credential_cipher.encrypt(
+                        error.credential,
+                        session_id=current.session_id,
+                        github_id=current.identity.github_id,
+                    ),
+                )
             except Exception as error:
                 # OAuth exception values can contain credentials; log only type.
                 _LOGGER.warning(
@@ -785,7 +818,18 @@ class HumanSessionManager:
 
         self._session_store.delete_expired_sessions(self._now())
         try:
-            return self._session_store.update_session(session.session_id, refresh, skip_locked=True)
+            refreshed = self._session_store.update_session(
+                session.session_id, refresh, skip_locked=True
+            )
+            if verification_pending:
+                fresh = self._fresh_session(refreshed)
+                if fresh is not None:
+                    return fresh
+                _LOGGER.warning("Human session provider verification temporarily unavailable.")
+                raise GitHubIdentityUnavailable(
+                    "GitHub identity provider is unavailable."
+                ) from None
+            return refreshed
         except HumanSessionUpdateBusy:
             # An exchange is in progress, not failed. A follower may use only
             # already-current claims; it cannot renew them or wait on a DB lock.

@@ -695,8 +695,9 @@ revalidated directly. The implementation requests the existing `read:user`, `rea
 `user:email` OAuth scopes; it adds no scope or app-setting change. Every
 required endpoint must be readable with that authorization; missing membership
 or email access fails closed rather than accepting partial claims.
-Any failed provider request, invalid response, expired/unusable refresh token,
-changed identity or corrupt credential revokes the session and requires sign-in;
+Definitive provider rejection, invalid response, expired/unusable refresh token,
+uncertain token exchange, changed identity or corrupt credential revokes the
+session and requires sign-in;
 there is no stale-claims fallback or automatic retry of a token exchange.
 Sessions issued before credential retention can use their remaining fresh
 claims, then require one new sign-in.
@@ -720,11 +721,22 @@ never retries a dispatched mutation. An already-ended session counts as a
 successful browser sign-out, and concurrent revocation during CSRF consumption
 clears an ended cookie while a live session still requires valid CSRF proof.
 
+GitHub throttling, server errors and transport failures during identity reads
+retain the session without extending its claims. Already-current claims remain
+usable within their existing ceiling. Stale claims receive
+`503 identity_provider_unavailable` without cookie renewal or automatic retries.
+A replacement credential already returned by
+GitHub is encrypted and committed before retry, so its single-use predecessor
+is not exchanged again. Uncertain token exchanges still require a new sign-in;
+the service cannot safely replay a refresh whose replacement was not received.
+
 ### Human OAuth credential retirement
 
 A valid logout removes its current database session and encrypted credential.
-Failed identity verification also removes local custody. Neither path makes a
-GitHub revocation request. Client sessions retain no OAuth credential. Current-row
+Definitive identity rejection, malformed identity responses or credentials and uncertain token exchanges
+also remove local custody. Temporary identity-read failures retain custody for
+retry without extending authorization. Neither path makes a GitHub revocation
+request. Client sessions retain no OAuth credential. Current-row
 update guards prevent renewal from recreating a deleted session; they do not
 prevent restoration from an older database backup.
 
