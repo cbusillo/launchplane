@@ -5731,6 +5731,35 @@ class PostgresRecordStore(HumanSessionStore):
                     snapshots.setdefault((context, instance), []).append(
                         (row_type.__tablename__, payload)
                     )
+            latest_deployments = (
+                select(
+                    LaunchplaneDeploymentRow.context,
+                    LaunchplaneDeploymentRow.instance,
+                    LaunchplaneDeploymentRow.payload,
+                    func.row_number()
+                    .over(
+                        partition_by=(
+                            LaunchplaneDeploymentRow.context,
+                            LaunchplaneDeploymentRow.instance,
+                        ),
+                        order_by=(
+                            LaunchplaneDeploymentRow.deploy_started_at.desc(),
+                            LaunchplaneDeploymentRow.record_id.desc(),
+                        ),
+                    )
+                    .label("position"),
+                )
+                .where(LaunchplaneDeploymentRow.context.in_(contexts))
+                .subquery()
+            )
+            for context, instance, payload in session.execute(
+                select(
+                    latest_deployments.c.context,
+                    latest_deployments.c.instance,
+                    latest_deployments.c.payload,
+                ).where(latest_deployments.c.position == 1)
+            ):
+                snapshots.setdefault((context, instance), []).append(("latest-deployment", payload))
             for context, instance, secret_id, version_id, status in session.execute(
                 select(
                     LaunchplaneSecretRow.context,
@@ -19391,6 +19420,24 @@ class PostgresRecordStore(HumanSessionStore):
             orm_model=LaunchplaneDeploymentRow,
             filters=(LaunchplaneDeploymentRow.record_id == record_id,),
         )
+
+    def read_latest_lane_deployment_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DeploymentRecord | None:
+        records = self._list_models(
+            model_type=DeploymentRecord,
+            orm_model=LaunchplaneDeploymentRow,
+            filters=(
+                LaunchplaneDeploymentRow.context == context_name,
+                LaunchplaneDeploymentRow.instance == instance_name,
+            ),
+            order_by=(
+                LaunchplaneDeploymentRow.deploy_started_at.desc(),
+                LaunchplaneDeploymentRow.record_id.desc(),
+            ),
+            limit=1,
+        )
+        return records[0] if records else None
 
     def list_deployment_records(
         self,

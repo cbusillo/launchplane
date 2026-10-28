@@ -1671,6 +1671,25 @@ completion deadlines remain unchanged. Failed probes and mismatched identities
 remain failures immediately, and stopped probes become stale at their original
 observation's deadline. Qualify actual completion latency and storage growth
 on the deployed service before starting a continuous-green observation clock.
+Each observation is dated when its probe starts, including confirmation retries,
+rather than at the beginning of target discovery. Deployment authority includes
+the newest attempt by start time, so a pending attempt cannot be hidden behind
+an older completed record. Pending and terminal deployment changes trigger a
+fresh check even when inventory has not changed.
+
+A new HTTP/identity incident is deferred for at most five minutes from its own
+lane's recorded pending deploy start. The record must bind the same product,
+context, instance and deployment identity, with no finish or recorded failure.
+Failed probes remain failed, retained evidence and cannot earn green time.
+Their summary identifies the deploy. Completion, failure or expiry ends the
+deferral; the next failed probe opens the incident and its normal alert outbox.
+Existing incidents and failures preceding a new attempt stay alertable, so
+successive attempts cannot renew the window over an outage. DNS, TLS,
+configuration, dependency, delivery, fence and cadence failures are not deferred.
+No deployment, merge-train or recovery admission gate is added; monitoring does
+not change a deployment or settle its effects. Unsupported deployment reads
+retain normal incident behavior.
+
 A long change-triggered run can still delay a subsequent scheduled slot; multiple
 probe waves can also exceed the publication budget. Those are scheduler latency
 limits, not permission to renew old proof or hide a missed completion.
