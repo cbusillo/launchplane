@@ -23,9 +23,9 @@ routing and safety evidence only; it never becomes live runtime authority.
 - GitHub remains authoritative for issue bodies, PR review, merge state, Project
   fields, dependencies, subissues, and check state.
 - Launchplane remains authoritative for product profiles, runtime environment
-  records, managed secret metadata, deployment/promotion evidence, Every Code
-  work requests, preview gates, authz policy records, and write-intent
-  evaluation records.
+  records, managed secret metadata, deployment/promotion evidence, historical
+  Every Code work-request and preview-gate records, advisory engineering-review
+  records, authz policy records, and write-intent evaluation records.
 - Agent-facing payloads should prefer source URLs and compact evidence over
   copied planning prose or provider internals.
 - Launchplane read models must mark unavailable provider evidence explicitly
@@ -33,8 +33,7 @@ routing and safety evidence only; it never becomes live runtime authority.
 
 ## Caller Profiles
 
-This section describes current runtime caller profiles. The session-scoped
-target in issue `#2240` was closed as not planned.
+This section describes current runtime caller profiles.
 
 Agent context callers are identified as compact agent consumers:
 
@@ -42,11 +41,10 @@ Agent context callers are identified as compact agent consumers:
   from exact workflow, repository, event, product, context, and action policy
   rules.
 - `owner_local_agent`: trusted local terminal agent using
-  `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`. The service admits this identity only
-  on redacted `GET` routes, plus the inert ordinary-agent enrollment proposal
-  route after an exact managed policy installation. Policy still scopes products,
-  contexts, and read actions; enrollment authority creates no credential,
-  session, activation, or worker start.
+  `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`. Authentication does not grant
+  unrestricted mutation authority; each admitted route applies its own identity,
+  policy, scope, and safety checks. See the canonical
+  [terminal-agent authentication and route-specific contracts](service-boundary.md#authentication).
 - `owner_local_agent`: trusted local admin using
   `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` from
   `~/.config/launchplane/local-operator.env`. This identity is limited by exact
@@ -132,22 +130,6 @@ allowed status, safe-to-execute decision, product, context, route action,
 freshness, and any route-specific source or idempotency binding before mutating.
 Historical Every Code rerun evaluations remain readable, but the retired
 execution route no longer consumes them or requeues work.
-
-### Reconciled target (not active)
-
-An ordinary delegated engineering session should receive one bounded
-capability for the product, environment, task, and lifetime. That capability
-includes the redacted diagnostic reads needed to implement, test, diagnose, and
-request delivery within the same scope. Launchplane derives the exact pull
-request, evidence, target, and next allowed action. The client should not have
-to submit manually copied pull-request IDs, policy hashes, or routine reasons,
-or trigger another policy proposal/apply cycle for each internal route.
-
-Execution still revalidates scope, expiry, revocation, technical evidence,
-Client acceptance when product experience changes, idempotency, and effect
-fences. The delegation cannot mint broader authority or manufacture Client
-acceptance. This delegated design is retired (see `DIRECTION.md`); the current
-intent and route-specific checks above remain authoritative.
 
 ## Redaction And Provenance
 
