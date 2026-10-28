@@ -720,11 +720,20 @@ never retries a dispatched mutation. An already-ended session counts as a
 successful browser sign-out, and concurrent revocation during CSRF consumption
 clears an ended cookie while a live session still requires valid CSRF proof.
 
+GitHub throttling, server errors and transport failures during identity reads
+return the same pending-verification response without deleting the session or
+extending its claims or cookie. A replacement credential already returned by
+GitHub is encrypted and committed before retry, so its single-use predecessor
+is not exchanged again. Uncertain token exchanges still require a new sign-in;
+the service cannot safely replay a refresh whose replacement was not received.
+
 ### Human OAuth credential retirement
 
 A valid logout removes its current database session and encrypted credential.
-Failed identity verification also removes local custody. Neither path makes a
-GitHub revocation request. Client sessions retain no OAuth credential. Current-row
+Definitive identity rejection, malformed credentials and uncertain token exchanges
+also remove local custody. Temporary identity-read failures retain custody for
+retry without extending authorization. Neither path makes a GitHub revocation
+request. Client sessions retain no OAuth credential. Current-row
 update guards prevent renewal from recreating a deleted session; they do not
 prevent restoration from an older database backup.
 

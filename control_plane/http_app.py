@@ -4587,7 +4587,7 @@ def create_launchplane_fastapi_app(
                     client=github_oauth_client,
                     authz_policy=resolved_authz_policy_runtime.policy,
                 )
-            except HumanSessionUpdateBusy:
+            except (HumanSessionUpdateBusy, GitHubIdentityUnavailable):
                 raise _launchplane_http_error(
                     status_code=503,
                     trace_id=next_trace_id(),

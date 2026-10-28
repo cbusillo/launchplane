@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from requests import PreparedRequest, Response, Session
+from requests import PreparedRequest, Response, Session, Timeout
 from requests.adapters import BaseAdapter
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -279,6 +279,85 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
         self.http.refresh_token.assert_not_called()
         self.assertEqual(self.http.token["access_token"], credential.access_token)
 
+    def test_temporary_identity_failures_keep_rotated_credentials_without_replaying_exchange(
+        self,
+    ) -> None:
+        from control_plane.service_human_auth import GitHubIdentityUnavailable
+
+        for failure in (429, 503, Timeout("synthetic-private-provider-response")):
+            with self.subTest(failure=failure):
+                store = InMemoryHumanSessionStore()
+                manager = HumanSessionManager(
+                    config=_config(), session_store=store, now=lambda: self.now
+                )
+                credential = GitHubOAuthCredential(
+                    "old-access", self.now, "old-refresh", self.now + timedelta(days=3)
+                )
+                session = manager.issue(_identity(), credential)
+                self.now += timedelta(seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS + 1)
+                self.http.refresh_token.reset_mock()
+                self.http.get.side_effect = failure if isinstance(failure, Timeout) else None
+                self.http.get.return_value = Mock(status_code=failure)
+                with (
+                    patch.object(self.client, "_new_session", return_value=self.http),
+                    patch("control_plane.service_human_auth._utc_now", return_value=self.now),
+                ):
+                    with self.assertRaises(GitHubIdentityUnavailable) as raised:
+                        manager.refresh_authorization_claims(
+                            session, client=self.client, authz_policy=_policy()
+                        )
+                    self.assertNotIn("synthetic-private", str(raised.exception))
+                    stored = store.read_session(session.session_id)
+                    assert stored is not None
+                    self.assertEqual(stored.claims_verified_at, session.claims_verified_at)
+                    self.assertEqual(stored.expires_at, session.expires_at)
+                    self.assertFalse(manager.authorization_claims_are_current(stored))
+                    self.assertEqual(
+                        HumanCredentialCipher(_config().session_secret).decrypt(
+                            stored.oauth_credential,
+                            session_id=stored.session_id,
+                            github_id=stored.identity.github_id,
+                        ),
+                        GitHubOAuthCredential.from_token(
+                            self.http.refresh_token.return_value, now=self.now
+                        ),
+                    )
+                    self.http.get.side_effect = lambda url, **kwargs: Mock(
+                        status_code=200,
+                        json=lambda: self.payloads[url.split("?", 1)[0]],
+                    )
+                    recovered = manager.refresh_authorization_claims(
+                        stored, client=self.client, authz_policy=_policy()
+                    )
+                assert recovered is not None
+                self.assertTrue(manager.authorization_claims_are_current(recovered))
+                self.http.refresh_token.assert_called_once()
+
+    def test_uncertain_refresh_exchange_does_not_reuse_the_single_use_credential(self) -> None:
+        store = InMemoryHumanSessionStore()
+        manager = HumanSessionManager(config=_config(), session_store=store, now=lambda: self.now)
+        session = manager.issue(
+            _identity(),
+            GitHubOAuthCredential(
+                "old-access", self.now, "old-refresh", self.now + timedelta(days=3)
+            ),
+        )
+        self.http.refresh_token.side_effect = Timeout("synthetic-private-exchange-response")
+        with patch.object(self.client, "_new_session", return_value=self.http):
+            self.assertIsNone(
+                manager.refresh_authorization_claims(
+                    session, client=self.client, authz_policy=_policy()
+                )
+            )
+            self.assertIsNone(
+                manager.refresh_authorization_claims(
+                    session, client=self.client, authz_policy=_policy()
+                )
+            )
+        self.assertIsNone(store.read_session(session.session_id))
+        self.http.refresh_token.assert_called_once()
+        self.http.get.assert_not_called()
+
     def test_expired_refresh_or_refresh_error_refuses_identity(self) -> None:
         for refresh_token, refresh_deadline in (("", None), ("expired-refresh", self.now)):
             with self.subTest(refresh_token=refresh_token), self.assertRaises(PermissionError):
@@ -446,6 +525,56 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
 
 
 class HostedRenewalHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_temporary_claim_verification_failure_is_retryable_without_ending_session(
+        self,
+    ) -> None:
+        from control_plane.service_human_auth import GitHubIdentityUnavailable
+
+        with TemporaryDirectory() as directory:
+            store = _HostedAuthzPolicyStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'auth.sqlite3'}"
+            )
+            store.ensure_schema()
+            store.write_authz_policy_record(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="authz-initial",
+                    source="test",
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                    policy=_policy(),
+                )
+            )
+            now = datetime.now(timezone.utc)
+            manager = HumanSessionManager(config=_config(), session_store=store, now=lambda: now)
+            credential = GitHubOAuthCredential("synthetic-private-access")
+            session = manager.issue(_identity(), credential)
+            oauth = Mock(spec=GitHubOAuthClient)
+            oauth.revalidate.side_effect = GitHubIdentityUnavailable("synthetic-private-response")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_policy(),
+                human_session_manager=manager,
+                github_oauth_client=oauth,
+                record_store_factory=lambda: store,
+            )
+            now += timedelta(seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS + 1)
+            async with lifespan_client(app) as client:
+                pending = await client.get(
+                    "/v1/auth/session", headers={"Cookie": manager.session_cookie_header(session)}
+                )
+                self.assertEqual(pending.status_code, 503)
+                self.assertNotIn("Set-Cookie", pending.headers)
+                self.assertNotIn("identity", pending.json())
+                self.assertNotIn("synthetic-private", pending.text)
+                self.assertEqual(store.read_session(session.session_id), session)
+                oauth.revalidate.side_effect = None
+                oauth.revalidate.return_value = GitHubOAuthLogin(_identity(), credential)
+                recovered = await client.get(
+                    "/v1/auth/session", headers={"Cookie": manager.session_cookie_header(session)}
+                )
+                self.assertEqual(recovered.status_code, 200)
+                self.assertIn("Set-Cookie", recovered.headers)
+                self.assertEqual(oauth.revalidate.call_count, 2)
+
     async def test_oauth_provider_outage_is_retryable_and_hides_provider_value(self) -> None:
         from control_plane.service_human_auth import GitHubIdentityUnavailable
 
