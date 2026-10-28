@@ -359,7 +359,7 @@ class PortableHistoricalEffectPreflightTests(unittest.TestCase):
                             with store._session_factory() as session:
                                 scoped = _SessionSnapshotStore(
                                     store, session
-                                ).list_merge_train_controller_state_records(
+                                ).list_merge_train_controller_state_alias_records(
                                     repository=repository.lower(),
                                     base_branch=BASE_BRANCH,
                                 )

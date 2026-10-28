@@ -79,10 +79,11 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
+    MergeTrainControllerReconciliationRequiredError,
     MergeTrainControllerStateRecord,
     build_merge_train_controller_resume_detail,
     require_canonical_merge_train_controller_state,
-    select_canonical_merge_train_controller_state,
+    merge_train_controller_alias_reconciliation_detail,
 )
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
@@ -2363,7 +2364,7 @@ class FilesystemRecordStore:
                 MergeTrainControllerStateRecord,
                 "launchplane_merge_train_controller_states",
             )
-            if (not repository or record.repository.lower() == repository.lower())
+            if (not repository or record.repository == repository.lower())
             and (not base_branch or record.base_branch == base_branch)
             and (not status or record.status == status)
         ]
@@ -2372,16 +2373,27 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        return tuple(
+            record
+            for record in self.list_merge_train_controller_state_records()
+            if record.repository.lower() == repository.lower()
+            and record.repository != repository.lower()
+            and record.base_branch == base_branch
+        )
+
     def _require_inert_merge_train_controller_aliases(
         self, *, repository: str, base_branch: str
     ) -> None:
-        select_canonical_merge_train_controller_state(
-            self.list_merge_train_controller_state_records(
+        detail = merge_train_controller_alias_reconciliation_detail(
+            self.list_merge_train_controller_state_alias_records(
                 repository=repository, base_branch=base_branch
-            ),
-            repository=repository,
-            base_branch=base_branch,
+            )
         )
+        if detail:
+            raise MergeTrainControllerReconciliationRequiredError(detail)
 
     def acquire_merge_train_controller_state_record(
         self,

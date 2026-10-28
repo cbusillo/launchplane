@@ -70,6 +70,17 @@ class _NoopClient:
 
 
 class _RunHistoryStore:
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        return tuple(
+            record
+            for record in self.controller_state_records
+            if record.repository.lower() == repository.lower()
+            and record.repository != repository.lower()
+            and record.base_branch == base_branch
+        )
+
     def __init__(
         self,
         latest_run: MergeTrainRunRecord | None,

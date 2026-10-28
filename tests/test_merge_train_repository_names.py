@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from datetime import timedelta
 
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
 from control_plane.contracts.merge_train_controller_state import (
@@ -12,6 +13,7 @@ from control_plane.contracts.merge_train_controller_state import (
 from control_plane.merge_train_admission import (
     MergeTrainControllerStatusReadModel,
     _latest_controller_state,
+    build_merge_train_controller_status_read_model,
 )
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerLeaseContext,
@@ -36,6 +38,9 @@ from control_plane.storage.postgres import (
 )
 from tests.test_merge_train_controller import _stack_collapse_record
 from tests.test_merge_readiness import _merge_admission
+from tests.test_merge_train_quota import _failure, _FAILED_AT, _stamp
+from tests.test_merge_train_scheduler import _policy_record
+from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
 
 
 REPOSITORY = "Example/Merge-Train-Repo"
@@ -279,7 +284,14 @@ class RepositoryNameStorageTests(unittest.TestCase):
             )
             self.assertEqual(
                 {item.controller_key for item in found},
-                {legacy.controller_key, canonical.controller_key},
+                {canonical.controller_key},
+            )
+            self.assertEqual(
+                self.store.list_merge_train_controller_state_alias_records(
+                    repository=repository,
+                    base_branch=legacy.base_branch,
+                ),
+                (legacy,),
             )
         observed = self.store.read_merge_train_controller_state_record(legacy.controller_key)
         self.assertEqual(observed.model_dump(), legacy.model_dump())
@@ -486,6 +498,72 @@ class RepositoryNameStorageTests(unittest.TestCase):
                 base_branch=progress.plan.base_branch,
             ),
             (progress,),
+        )
+
+    def test_peer_quota_evidence_survives_newer_inert_or_unresolved_aliases(self) -> None:
+        policy = _policy_record(
+            *(
+                (repository, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+                for repository in ("cbusillo/alpha", "cbusillo/beta")
+            )
+        )
+        canonical = _failure(
+            "cbusillo/alpha", "retryable:github_rate_limited; retry_after_seconds:600"
+        ).model_copy(update={"policy_sha256": policy.policy_sha256})
+        self.store.write_merge_train_controller_state_record(canonical)
+        for unresolved in (False, True):
+            self._seed_controller_alias(
+                repository="CBusillo/Alpha",
+                base_branch="main",
+                updated_at=_stamp(_FAILED_AT + timedelta(seconds=1)),
+                active_action="land_batch" if unresolved else "",
+                active_phase="merge_batch_entries" if unresolved else "",
+            )
+            model = build_merge_train_controller_status_read_model(
+                store=self.store,
+                repository="cbusillo/beta",
+                base_branch="main",
+                generated_at=_stamp(_FAILED_AT + timedelta(seconds=2)),
+                policy_record=policy,
+            )
+            self.assertFalse(model.admission.admitted)
+            self.assertEqual(model.admission.reason_code, "github_rate_limit_pending")
+            self.assertEqual(
+                self.store.read_merge_train_controller_state_record(canonical.controller_key),
+                canonical,
+            )
+
+    def test_status_reports_alias_blocker_without_rewriting_current_state(self) -> None:
+        legacy = self._seed_controller_alias()
+        canonical = build_merge_train_controller_state_record(
+            repository=REPOSITORY,
+            base_branch=legacy.base_branch,
+            policy_key=legacy.policy_key,
+            policy_sha256=legacy.policy_sha256,
+            updated_at="2026-10-01T00:00:00Z",
+        )
+        self.store.write_merge_train_controller_state_record(canonical)
+        before = build_merge_train_controller_status_read_model(
+            store=self.store,
+            repository=REPOSITORY,
+            base_branch=legacy.base_branch,
+            generated_at=canonical.updated_at,
+        )
+        self._seed_controller_alias(active_action="land_batch", active_phase="merge_batch_entries")
+        status = build_merge_train_controller_status_read_model(
+            store=self.store,
+            repository=REPOSITORY,
+            base_branch=legacy.base_branch,
+            generated_at=canonical.updated_at,
+        )
+        self.assertEqual(status.controller_state, canonical)
+        self.assertEqual(status.admission, before.admission)
+        self.assertIsNotNone(status.controller_diagnostics)
+        assert status.controller_diagnostics is not None
+        self.assertEqual(status.controller_diagnostics.reconciliation_status, "required")
+        self.assertTrue(status.controller_diagnostics.reconciliation_detail)
+        self.assertEqual(
+            self.store.read_merge_train_controller_state_record(canonical.controller_key), canonical
         )
 
     def test_expired_historical_controller_still_fences_canonical_acquisition(self) -> None:

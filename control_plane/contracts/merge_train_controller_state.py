@@ -212,46 +212,10 @@ def require_canonical_merge_train_controller_state(
     return validated
 
 
-def find_current_merge_train_controller_state(
+def merge_train_controller_alias_reconciliation_detail(
     records: Iterable[MergeTrainControllerStateRecord],
-) -> MergeTrainControllerStateRecord | None:
-    return next(
-        (
-            record
-            for record in records
-            if record.controller_key
-            == build_merge_train_controller_key(
-                repository=record.repository,
-                base_branch=record.base_branch,
-            )
-        ),
-        None,
-    )
-
-
-def select_canonical_merge_train_controller_state(
-    records: Iterable[MergeTrainControllerStateRecord], *, repository: str, base_branch: str
-) -> MergeTrainControllerStateRecord | None:
-    expected_key = build_merge_train_controller_key(repository=repository, base_branch=base_branch)
-    canonical: MergeTrainControllerStateRecord | None = None
-    for stored in records:
-        record = MergeTrainControllerStateRecord.model_validate(stored.model_dump(mode="json"))
-        if (
-            build_merge_train_controller_key(
-                repository=record.repository, base_branch=record.base_branch
-            )
-            != expected_key
-        ):
-            raise MergeTrainControllerReconciliationRequiredError(
-                "A retained merge controller has inconsistent scope."
-            )
-        if record.controller_key == expected_key:
-            if canonical is not None:
-                raise MergeTrainControllerReconciliationRequiredError(
-                    "More than one canonical merge controller is present."
-                )
-            canonical = record
-            continue
+) -> str:
+    for record in records:
         if (
             record.status != "idle"
             or record.ordinary_job_binding is not None
@@ -271,10 +235,8 @@ def select_canonical_merge_train_controller_state(
             or record.active_pull_request_number is not None
             or record.reconciliation_status != "clean"
         ):
-            raise MergeTrainControllerReconciliationRequiredError(
-                "A historical merge controller still requires reconciliation."
-            )
-    return canonical
+            return "Retained controller activity requires reconciliation before this train can continue."
+    return ""
 
 
 def build_merge_train_controller_resume_detail(

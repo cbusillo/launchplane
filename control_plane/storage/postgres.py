@@ -325,12 +325,13 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
+    MergeTrainControllerReconciliationRequiredError,
     MergeTrainControllerStateRecord,
     build_merge_train_controller_key,
     build_merge_train_controller_resume_detail,
     build_merge_train_controller_state_record,
     require_canonical_merge_train_controller_state,
-    select_canonical_merge_train_controller_state,
+    merge_train_controller_alias_reconciliation_detail,
 )
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
@@ -24872,29 +24873,46 @@ class PostgresRecordStore(HumanSessionStore):
             )
         return payloads
 
-    def _require_inert_merge_train_controller_aliases(
-        self, session: Any, *, repository: str, base_branch: str
-    ) -> None:
-        rows = session.scalars(
-            select(LaunchplaneMergeTrainControllerStateRow)
-            .where(
-                func.lower(LaunchplaneMergeTrainControllerStateRow.repository)
-                == repository.lower(),
-                LaunchplaneMergeTrainControllerStateRow.base_branch == base_branch,
-            )
-            .with_for_update()
+    def read_merge_train_controller_aliases_in_session(
+        self, session: Any, *, repository: str, base_branch: str, lock: bool
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        statement = select(LaunchplaneMergeTrainControllerStateRow).where(
+            func.lower(LaunchplaneMergeTrainControllerStateRow.repository) == repository.lower(),
+            LaunchplaneMergeTrainControllerStateRow.repository != repository.lower(),
+            LaunchplaneMergeTrainControllerStateRow.base_branch == base_branch,
         )
+        if lock:
+            statement = statement.with_for_update()
         records = []
-        for row in rows:
+        for row in session.scalars(statement):
             record = self._read_payload(
                 model_type=MergeTrainControllerStateRecord, payload=row.payload
             )
             if record.controller_key != row.controller_key:
-                raise ValueError("Stored merge controller identity disagrees with its payload.")
+                raise MergeTrainControllerReconciliationRequiredError(
+                    "Stored merge controller identity disagrees with its payload."
+                )
             records.append(record)
-        select_canonical_merge_train_controller_state(
-            records, repository=repository, base_branch=base_branch
+        return tuple(records)
+
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        with self._session_factory() as session:
+            return self.read_merge_train_controller_aliases_in_session(
+                session, repository=repository, base_branch=base_branch, lock=False
+            )
+
+    def _require_inert_merge_train_controller_aliases(
+        self, session: Any, *, repository: str, base_branch: str
+    ) -> None:
+        detail = merge_train_controller_alias_reconciliation_detail(
+            self.read_merge_train_controller_aliases_in_session(
+                session, repository=repository, base_branch=base_branch, lock=True
+            )
         )
+        if detail:
+            raise MergeTrainControllerReconciliationRequiredError(detail)
 
     def _require_legacy_merge_train_target_unbound(
         self, session: Any, *, repository: str, base_branch: str
@@ -25151,9 +25169,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[MergeTrainControllerStateRecord, ...]:
         filters: list[object] = []
         if repository:
-            filters.append(
-                func.lower(LaunchplaneMergeTrainControllerStateRow.repository) == repository.lower()
-            )
+            filters.append(LaunchplaneMergeTrainControllerStateRow.repository == repository.lower())
         if base_branch:
             filters.append(LaunchplaneMergeTrainControllerStateRow.base_branch == base_branch)
         if status:

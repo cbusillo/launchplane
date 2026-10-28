@@ -8,7 +8,8 @@ from typing import Literal, Protocol, cast
 
 from control_plane.contracts.merge_train_policy import MergeTrainGitHubTokenSource
 from control_plane.contracts.merge_train_controller_state import (
-    find_current_merge_train_controller_state,
+    MergeTrainControllerReconciliationRequiredError,
+    merge_train_controller_alias_reconciliation_detail,
 )
 from control_plane.contracts.repository_evidence import (
     RepositoryEvidenceProvider,
@@ -150,13 +151,20 @@ class LiveGovernanceCurrentReadinessProvider:
             if candidate_record is None:
                 return _unavailable_readiness()
             controller_store = require_merge_train_controller_state_record_store(store)
+            if merge_train_controller_alias_reconciliation_detail(
+                controller_store.list_merge_train_controller_state_alias_records(
+                    repository=repository, base_branch=base_branch
+                )
+            ):
+                return _unavailable_readiness()
             controller_records = controller_store.list_merge_train_controller_state_records(
                 repository=repository,
                 base_branch=base_branch,
+                limit=1,
             )
-            controller_state = find_current_merge_train_controller_state(controller_records)
-            if controller_state is None:
+            if not controller_records:
                 return _unavailable_readiness()
+            controller_state = controller_records[0]
             if controller_state.status != "running" or not controller_state.lease_owner:
                 return _unavailable_readiness()
             stack_collapse_record = _stack_collapse_record(
@@ -212,6 +220,7 @@ class LiveGovernanceCurrentReadinessProvider:
             )
         except (
             LookupError,
+            MergeTrainControllerReconciliationRequiredError,
             MergeAdmissionDeniedError,
             MergeTrainGitHubError,
             StopIteration,

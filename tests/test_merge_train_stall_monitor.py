@@ -28,7 +28,10 @@ from control_plane.merge_train_stall_monitor import (
     observe_stall,
     run_stall_monitor_pass,
 )
-from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.filesystem import (
+    FilesystemRecordStore,
+    _merge_train_controller_storage_id,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.stores import _sqlite_database_url
 from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
@@ -262,6 +265,70 @@ class StallMonitorTests(TestCase):
                 reporter_factory=lambda **_: reporter,
             )
             self.assertFalse(reporter.publish.call_args.kwargs["stalled"])
+
+    def test_unresolved_alias_is_observed_without_a_current_lease_or_queue(self) -> None:
+        snapshot = (
+            _FakeExpandedMergeTrainSnapshotReader(transport=object())
+            .read_merge_train_snapshot(
+                repository="example/repo",
+                base_branch="main",
+            )
+            .model_copy(update={"pull_requests": ()})
+        )
+        policy = _policy_record(
+            (snapshot.repository, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        client, reporter = Mock(), Mock()
+        client.target_setting_gaps.return_value = ()
+        client.read_merge_train_snapshot.return_value = snapshot
+        reporter.publish.return_value = None
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
+                return_value=policy,
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token",
+                return_value="test-token",
+            ),
+            patch(
+                "control_plane.merge_train_stall_monitor.GitHubMergeTrainClient",
+                return_value=client,
+            ),
+        ):
+            store = FilesystemRecordStore(Path(directory))
+            repository = snapshot.repository.upper()
+            alias = build_merge_train_controller_state_record(
+                repository=repository,
+                base_branch="main",
+                policy_key=f"{snapshot.repository}:main",
+                policy_sha256=policy.policy_sha256,
+                updated_at=_time(0),
+            ).model_copy(
+                update={
+                    "repository": repository,
+                    "controller_key": f"merge-train-controller:{repository.replace('/', ':')}:main",
+                    "active_record_id": "retained-provider-effect",
+                }
+            )
+            path = store._write_model(
+                "launchplane_merge_train_controller_states",
+                _merge_train_controller_storage_id(alias.controller_key),
+                alias,
+            )
+            before = path.read_bytes()
+            run_stall_monitor_pass(
+                store=store,
+                root=Path(directory),
+                now=lambda: _time(0),
+                reporter_factory=lambda **_: reporter,
+            )
+            record = store.read_merge_train_stall_record(snapshot.repository)
+            self.assertIn(
+                "controller_alias_requires_reconciliation", record.observations["main"].reasons
+            )
+            self.assertEqual(path.read_bytes(), before)
 
     def test_release_holds_pause_clocks_and_midpass_activity_does_not_reset_them(self) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(

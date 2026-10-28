@@ -13,8 +13,7 @@ from control_plane.contracts.merge_train_batch import (
 )
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerStateRecord,
-    MergeTrainControllerReconciliationRequiredError,
-    select_canonical_merge_train_controller_state,
+    merge_train_controller_alias_reconciliation_detail,
 )
 from control_plane.contracts.merge_train_historical_completion import (
     MergeTrainHistoricalCompletionProviderEvidence,
@@ -120,6 +119,10 @@ class HistoricalCompletionPreflightResponse(BaseModel):
 
 
 class HistoricalCompletionSnapshotStore(Protocol):
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]: ...
+
     def list_merge_train_controller_state_records(
         self,
         *,
@@ -327,15 +330,17 @@ def read_historical_completion_snapshot(
     controllers = store.list_merge_train_controller_state_records(
         repository=repository,
         base_branch=base_branch,
+        limit=2,
     )
-    try:
-        controller = select_canonical_merge_train_controller_state(
-            controllers, repository=repository, base_branch=base_branch
+    if merge_train_controller_alias_reconciliation_detail(
+        store.list_merge_train_controller_state_alias_records(
+            repository=repository, base_branch=base_branch
         )
-    except MergeTrainControllerReconciliationRequiredError as error:
-        raise HistoricalCompletionAssessmentFailure("indeterminate", "controller_busy") from error
-    if controller is None:
+    ):
+        raise HistoricalCompletionAssessmentFailure("indeterminate", "controller_busy")
+    if len(controllers) != 1:
         raise HistoricalCompletionAssessmentFailure("indeterminate", "controller_unavailable")
+    controller = controllers[0]
     if controller.status == "running" or controller.lease_owner or controller.lease_expires_at:
         raise HistoricalCompletionAssessmentFailure("indeterminate", "controller_busy")
     if controller.status != "reconcile_required" or controller.active_action != "land_batch":

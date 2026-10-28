@@ -247,15 +247,16 @@ the current lease is still valid. The lease record stores holder, expiry,
 active action/phase, and reconciliation detail under Launchplane storage, not
 in workflow inputs or checked-in config.
 
-Repository names match without regard to case; branch names remain exact.
-Retained controller identities made with an older repository spelling remain
-readable with their original keys and payloads. New writes require the canonical
-identity. Status, readiness, dry-run and stall readers select the canonical key
-rather than the newest alias. An older alias is inert only when it is idle, unbound, has no lease or
-active work, and has clean reconciliation state. Any unresolved alias fences
-canonical writes, lease acquisition, and guarded admission under the same
-controller lock. Historical-completion reads select the canonical controller
-only after checking every alias. These reads never rewrite or adopt history.
+Scoped current-state lists use the canonical repository spelling; exact-key and
+unscoped history reads preserve older identities with their original payloads.
+Alias observations match repository names without regard to case and branches
+exactly. An alias is inert only when idle, unbound, without lease or active work,
+and cleanly reconciled. Unresolved aliases fence canonical writes, acquisition,
+CAS, guarded admission and historical completion under the existing controller
+lock. Status diagnostics, dry runs, readiness and stall observations expose that
+blocker without rewriting the current controller or changing scheduler cadence.
+Peer quota reads retain canonical evidence independently of aliases. No read
+rewrites or adopts history.
 
 Every GitHub effect that can cross a crash window has a durable pre-effect
 checkpoint. Candidate construction can safely reset and deterministically
