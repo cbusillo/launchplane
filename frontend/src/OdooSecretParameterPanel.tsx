@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { readOdooSecretReferences, reconcileOdooSecretReferences } from "./api";
 import { AppLink } from "./router";
+import { TestingIntegrationAllowancePanel } from "./TestingIntegrationAllowancePanel";
 import type { ProductEnvironmentConfigStatus, SecretReferenceRequest, SecretReferenceResponse } from "./generated/openapi.ts";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
 import { useBrowserOperationController } from "./use-browser-operation";
@@ -27,14 +28,11 @@ export function OdooSecretParameterPanel({ config, fixtureMode }: {
   const uncertain = apply.state.requiresIdempotencyContinuity;
   const busy = [plan.state.phase, apply.state.phase].some(phase => ["queued", "submitting"].includes(phase));
   const key = parameter.trim().toLowerCase();
-  const bindingKey = `ODOO_OVERRIDE_SECRET__CONFIG_PARAM__${key.toUpperCase().replaceAll(".", "__")}`;
-  const declared = config.managed_secrets.some(secret => secret.binding_key === bindingKey && secret.integration === "runtime_environment");
   const enabled = config.write_availability.managed_secrets.plan.enabled && !fixtureMode;
   const reviewMatches = review?.result.entries.length === 1 && review.result.entries[0].key === key;
 
   async function runPlan() {
     setError(""); setReview(null); setConfirmed(false);
-    if (!/^[a-z][a-z0-9_.]{0,127}$/.test(key)) { setError("Enter a valid Odoo parameter name."); return; }
     plan.reset();
     const result = await plan.run({ mode: "dry-run", keys: [key], create_missing: true });
     if (result) setReview(result);
@@ -73,17 +71,16 @@ export function OdooSecretParameterPanel({ config, fixtureMode }: {
   }
 
   if (config.driver_id !== "odoo" || config.environment !== "testing") return null;
-  return <section className="product-config-panel odoo-secret-parameter-panel" aria-labelledby="odoo-secret-parameter-title">
+  return <><TestingIntegrationAllowancePanel config={config} fixtureMode={fixtureMode} /><section className="product-config-panel odoo-secret-parameter-panel" aria-labelledby="odoo-secret-parameter-title">
     <h2 id="odoo-secret-parameter-title">Use a secret in Odoo</h2>
     <p>Bind an existing private testing credential to an Odoo parameter. This saves a reference. Runtime sync, Odoo delivery and database presence verification are separate steps.</p>
     <fieldset className="product-config-field" disabled={!enabled || busy || uncertain}>
       <label>Odoo parameter name<input type="text" value={parameter} placeholder="integration.api_key" onChange={event => { setParameter(event.target.value); setReview(null); setConfirmed(false); }} /></label>
-      {key ? <p>Required binding: <code>{bindingKey}</code></p> : null}
-      {key && !declared ? <p><AppLink to={`/ui/products/${encodeURIComponent(config.product)}`}>Declare this managed-secret field in product setup</AppLink>, then enter its value privately above.</p> : null}
-      <p>Verify the provider account cannot affect a live business system and record its testing integration allowance before binding.</p>
-      <button className="button" disabled={!key || !declared} type="button" onClick={() => void runPlan()}>Review Odoo reference</button>
+      <p><AppLink to={`/ui/products/${encodeURIComponent(config.product)}`}>Declare the managed-secret field in product setup</AppLink>, then enter its value privately above. Review names the required binding if it is missing.</p>
+      <p>Verify the provider account cannot affect a live business system and record its testing integration allowance above before binding.</p>
+      <button className="button" disabled={!key} type="button" onClick={() => void runPlan()}>Review Odoo reference</button>
     </fieldset>
-    {review ? <div><ul>{review.result.entries.map(entry => <li key={entry.key}><code>{entry.key}</code>: {entry.action.replaceAll("_", " ")}</li>)}</ul>
+    {review ? <div><ul>{review.result.entries.map(entry => <li key={entry.key}><code>{entry.key}</code>: {entry.action.replaceAll("_", " ")} · binding <code>{entry.runtime_key}</code></li>)}</ul>
       <p>Trace: <code>{review.trace_id}</code></p>
       {reviewMatches && !review.result.read_back_matches && !review.replayed && !uncertain ? <>
         <label><input type="checkbox" checked={confirmed} disabled={busy} onChange={event => setConfirmed(event.target.checked)} />I reviewed this testing lane and reference.</label>
@@ -97,5 +94,5 @@ export function OdooSecretParameterPanel({ config, fixtureMode }: {
       {pending ? <button className="button" disabled={busy} type="button" onClick={() => void retryOriginal()}>Retry original reference apply</button> : <p>The saved request is unavailable. Engineering must reconcile the original operation.</p>}</div> : null}
     {plan.state.failure || apply.state.failure ? <p role="alert">{plan.state.failure?.message || apply.state.failure?.message}</p> : null}
     {error ? <p role="alert">{error}</p> : null}
-  </section>;
+  </section></>;
 }

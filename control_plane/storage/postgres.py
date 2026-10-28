@@ -652,6 +652,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
     require_bundle_context_owner,
     require_absent_products,
+    require_runtime_key_safety_policies,
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
@@ -6774,6 +6775,18 @@ class PostgresRecordStore(HumanSessionStore):
                     (
                         self._read_product_profile_payload(row.payload)
                         for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                    ),
+                )
+            if bundle.expected_runtime_key_safety_policies is not None:
+                require_runtime_key_safety_policies(
+                    bundle.expected_runtime_key_safety_policies,
+                    (
+                        RuntimeKeySafetyPolicyRecord.model_validate(row.payload)
+                        for row in session.scalars(
+                            select(LaunchplaneRuntimeKeySafetyPolicyRow).where(
+                                LaunchplaneRuntimeKeySafetyPolicyRow.status == "active"
+                            )
+                        ).all()
                     ),
                 )
             for orm_type, model_type, expected_records in (

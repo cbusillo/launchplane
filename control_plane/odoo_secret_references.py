@@ -31,7 +31,6 @@ from control_plane.runtime_environments import (
 from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
-    latest_active_runtime_key_safety_policy,
     runtime_key_required_integrations,
     runtime_key_safety_environment_class,
 )
@@ -51,6 +50,12 @@ class SecretReferenceStore(SiteSecretDeliveryStore, Protocol):
     def list_runtime_key_safety_policy_records(
         self, *, status: str = "", limit: int | None = None
     ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]: ...
+
+
+class TestingSecretReferenceRefusal(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 class ConfigParameterSecretReferenceError(ValueError):
@@ -188,7 +193,7 @@ def selected_config_parameter_bindings(
                 or (secret.scope == "context") != (not binding.instance)
             ):
                 raise ConfigParameterSecretReferenceError(
-                    "A configured lane-scoped reference and delivered binding are required.",
+                    f"Configure the lane's managed-secret field {env_key}, enter its value privately, then review this reference again.",
                     env_keys=env_keys,
                 )
         # Delivery has deterministic tie breaking. A repair must not endorse competing
@@ -251,17 +256,23 @@ def _new_testing_reference_authority(
     selected: dict[str, SecretBinding],
     keys: tuple[str, ...],
     added: set[str],
-) -> tuple[DokployTargetRecord, RuntimeKeySafetyPolicyRecord]:
+) -> tuple[DokployTargetRecord, tuple[RuntimeKeySafetyPolicyRecord, ...]]:
     parameters = {item.key: item for item in record.config_parameters}
     for key in added:
         if not re.fullmatch(ODOO_CONFIG_PARAMETER_KEY_PATTERN, key):
-            raise ValueError("A valid Odoo parameter name is required.")
+            raise TestingSecretReferenceRefusal(
+                "invalid_parameter_name",
+                "Use a lowercase Odoo parameter name with letters, digits, dots or underscores, starting with a letter (128 characters maximum).",
+            )
         env_key = config_parameter_secret_env_key(key)
         if any(
             other != key and config_parameter_secret_env_key(other) == env_key
             for other in (*parameters, *keys)
         ):
-            raise ValueError("Odoo parameter names must have distinct transport keys.")
+            raise TestingSecretReferenceRefusal(
+                "transport_name_collision",
+                "This parameter shares a runtime binding name with another parameter. Choose a distinct parameter name.",
+            )
         binding = selected[key]
         if (
             binding.instance != record.instance
@@ -275,11 +286,25 @@ def _new_testing_reference_authority(
                 for requirement in profile.expected_config.managed_secret_bindings
             )
         ):
-            raise ValueError("Declare and independently supply an exact testing credential first.")
-    target = store.read_dokploy_target_record(
-        context_name=record.context, instance_name=record.instance
-    )
-    policy = latest_active_runtime_key_safety_policy(store)
+            raise TestingSecretReferenceRefusal(
+                "testing_credential_required",
+                "Declare this exact lane's managed-secret field and enter an independently supplied testing credential. Copied or provider-adopted credentials cannot create a testing reference.",
+            )
+    try:
+        target = store.read_dokploy_target_record(
+            context_name=record.context, instance_name=record.instance
+        )
+    except FileNotFoundError as error:
+        raise TestingSecretReferenceRefusal(
+            "integration_target_required",
+            "Set up this lane's deployment target before recording its integration allowance.",
+        ) from error
+    policies = store.list_runtime_key_safety_policy_records(status="active")
+    if not policies:
+        raise TestingSecretReferenceRefusal(
+            "key_safety_policy_required", "An active runtime key-safety policy is required."
+        )
+    policy = policies[0]
     required = set().union(
         *(
             runtime_key_required_integrations(
@@ -294,8 +319,9 @@ def _new_testing_reference_authority(
         if item.kind == "dev_store" and item.evidence.strip()
     }
     if not required.issubset(qualified):
-        raise ValueError(
-            "Record the independently verified testing account's dev_store allowance first."
+        raise TestingSecretReferenceRefusal(
+            "integration_allowance_required",
+            "Record the independently verified testing account's dev_store allowance with evidence in Testing integration allowances first.",
         )
     evaluation = evaluate_runtime_key_safety(
         target=RuntimeKeySafetyTarget(
@@ -307,8 +333,11 @@ def _new_testing_reference_authority(
         integration_key_markers=policy.integration_key_markers,
     )
     if evaluation.status != "pass":
-        raise ValueError("The testing credential failed runtime key safety.")
-    return target, policy
+        raise TestingSecretReferenceRefusal(
+            "runtime_key_safety_failed",
+            "This credential fails the active runtime key-safety policy. Review its class and allowed lane scope.",
+        )
+    return target, policies
 
 
 def plan_secret_reference_reconciliation(
@@ -345,9 +374,9 @@ def plan_secret_reference_reconciliation(
         record, authority, keys, create_missing=create_missing
     )
     target = None
-    policy = None
+    policies = None
     if added:
-        target, policy = _new_testing_reference_authority(
+        target, policies = _new_testing_reference_authority(
             store, profile, record, selected, keys, added
         )
     entries = tuple(
@@ -378,14 +407,9 @@ def plan_secret_reference_reconciliation(
             "source_label": "odoo-secret-reference-reconcile" if changed else record.source_label,
             "config_parameters": tuple(parameters[item.key] for item in record.config_parameters)
             + tuple(parameters[key] for key in sorted(added)),
-            "apply_on": tuple(dict.fromkeys((*record.apply_on, "deploy", "promotion")))
-            if added
-            else record.apply_on,
             "last_apply": record.last_apply.for_override_edit() if added else record.last_apply,
         }
     )
-    # Stamp the metadata edit, preserving pending intent and every apply receipt:
-    # correcting pointers does not apply settings to an Odoo database.
     digest_input = {
         "profile": profile.model_dump(mode="json"),
         "override": existing_record.model_dump(mode="json") if existing_record else None,
@@ -394,7 +418,9 @@ def plan_secret_reference_reconciliation(
         "bindings": sorted(item.model_dump_json() for item in authority.metadata.bindings),
         "runtime": sorted(item.model_dump_json() for item in authority.runtime.records),
         "target": target.model_dump(mode="json") if target else None,
-        "policy": policy.model_dump(mode="json") if policy else None,
+        "policies": [policy.model_dump(mode="json") for policy in policies]
+        if policies is not None
+        else None,
     }
     digest = hashlib.sha256(json.dumps(digest_input, sort_keys=True).encode()).hexdigest()
     return SecretReferencePlan(
@@ -409,6 +435,7 @@ def plan_secret_reference_reconciliation(
         secret_delivery_read_sets=(authority.metadata,),
         runtime_environment_read_sets=(authority.runtime,),
         expected_dokploy_targets=(target,) if target else (),
+        expected_runtime_key_safety_policies=policies,
         odoo_instance_override_writes=(
             OdooInstanceOverrideWrite(record=replacement, expected_record=existing_record),
         )

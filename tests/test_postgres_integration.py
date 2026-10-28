@@ -14551,6 +14551,7 @@ class RealPostgresSecretReferenceTests(unittest.TestCase):
                 "allowed_integrations": [],
                 "connection_isolation_required": False,
                 "protected_shopify_store_handles": [],
+                "verify_secret_parameters": True,
             }
             output = io.StringIO()
             with (

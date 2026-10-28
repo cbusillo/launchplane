@@ -153,8 +153,8 @@ against a preserved restored login. Do not solve that by changing the login.
 
 For a new private testing integration, an admin uses the product setup's
 **Declare managed-secret fields**, then the testing lane's **Managed secrets**.
-The **Use a secret in Odoo** panel shows the neutral binding name derived from
-the parameter name. Declare that exact name under `runtime_environment`, for
+The **Use a secret in Odoo** review names the required neutral binding when the
+field is missing. Declare that exact name under `runtime_environment`, for
 the exact context and testing instance. Enter the value only in the write-only
 field and explicitly choose **Independent testing credential** after verifying
 the provider account cannot affect any live business system. The normal secret
@@ -163,8 +163,10 @@ No product code, per-integration field catalog or product PR is needed.
 
 Provider qualification remains separate. The lane must have an explicit
 `dev_store` integration allowance with evidence of its independently isolated
-test account through the existing reviewed integration-allowance service. Its
-whole-list apply must preserve the other allowances. A testing class or an
+test account. The testing lane's **Testing integration allowances** panel reviews
+and saves that allowance through the existing service, preserving the other
+allowances. It retains the original metadata request and operation key after an
+uncertain response, including after reload. A testing class or an
 allowance cannot make a live-capable key safe. Launchplane cannot inspect the
 provider's permissions; the admin verifies them before entry. `pre_live` and
 `read_only_source` do not qualify a private printing/test-account reference.
@@ -187,16 +189,21 @@ the browser retains the metadata request and retries that original key, includin
 after reload. A replay proves the earlier operation completed; **Read stored Odoo
 references** obtains current metadata separately. Neither operation reads a secret
 version. Existing URL-writer and literal behavior is unchanged.
+Adding a reference preserves the override record's existing apply schedule and
+unrelated intent. A newly created record uses the normal deploy/promotion schedule.
 
 Secret storage, reference metadata, provider runtime sync and Odoo post-deploy
 are separate outcomes. After supported sync and post-deploy, the existing
-database integration readback queries the typed payload's secret parameter names.
+testing-lane database integration readback queries the typed payload's secret
+parameter names. Production readback keeps its existing protected-store-key scope.
 PostgreSQL compares nonempty values itself and returns names only. Evidence
 includes `odoo_config_parameter_present` and, on failure,
 `odoo_config_parameter_missing`; the post-deploy result prefixes these with
 `post_deploy_readback_`. Missing and whitespace-only values fail the readback.
-This evidence is required to confirm actual Odoo delivery; a secret record or
-provider environment entry alone is insufficient. No values or secret hashes
+This confirms nonempty database presence, not equality to the supplied key; a
+secret record or provider environment entry alone is insufficient. Legacy names
+that cannot safely appear in a marker retain their earlier readback behavior;
+new reference creation accepts only safe names. No values or secret hashes
 are emitted.
 
 A typed config-parameter's `secret_binding_id` identifies the binding delivered

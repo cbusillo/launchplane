@@ -107,7 +107,7 @@ class ProductEnvironmentManagedSecretInput(BaseModel):
     integration: str
     value: str = Field(default="", repr=False)
     owner_submission_version_id: str = ""
-    secret_class: RuntimeSecretClass | None = None
+    secret_class: Literal["testing"] | None = None
 
     @model_validator(mode="after")
     def _validate_secret(self) -> "ProductEnvironmentManagedSecretInput":
@@ -647,6 +647,11 @@ def _product_config_secret_input(
     integration_key_markers: tuple[str, ...] | None,
     secret_class: RuntimeSecretClass | None = None,
 ) -> ProductConfigSecretInput:
+    if (
+        secret_class is not None
+        and runtime_key_safety_environment_class(lane.instance) != "testing"
+    ):
+        raise ValueError("An explicit testing credential requires a testing lane.")
     # This surface accepts a freshly supplied value for this lane, never a copy
     # from another lane. Testing stores its own credentials under the same names
     # as production; the declaration applies only to this exact binding.

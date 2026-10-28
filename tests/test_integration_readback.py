@@ -190,6 +190,7 @@ class IntegrationReadbackPolicyTests(unittest.TestCase):
                 )
 
                 self.assertTrue(policy.required)
+                self.assertEqual(policy.verify_secret_parameters, instance == "testing")
                 self.assertIn("payment", _integrations(policy.families))
                 self.assertEqual(policy.allowed_integrations, ("printnode",))
 
@@ -216,6 +217,8 @@ class IntegrationReadbackPolicyTests(unittest.TestCase):
         )
 
         self.assertFalse(unprotected.required)
+        self.assertFalse(unprotected.verify_secret_parameters)
+        self.assertFalse(protected.verify_secret_parameters)
         self.assertEqual(protected.families, ())
         self.assertTrue(protected.required)
         self.assertEqual(protected.protected_shopify_store_handles, ("example-store",))

@@ -207,6 +207,7 @@ class IntegrationReadbackPolicy:
     families: tuple[IntegrationFamily, ...]
     allowed_integrations: tuple[str, ...]
     protected_shopify_store_handles: tuple[str, ...]
+    verify_secret_parameters: bool = False
 
     @property
     def required(self) -> bool:
@@ -228,6 +229,7 @@ class IntegrationReadbackPolicy:
             "allowed_integrations": list(self.allowed_integrations),
             "connection_isolation_required": bool(self.families),
             "protected_shopify_store_handles": list(self.protected_shopify_store_handles),
+            "verify_secret_parameters": self.verify_secret_parameters,
         }
         return base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
 
@@ -253,6 +255,7 @@ def integration_readback_policy(
             if workflow_mode == "restore" or not family.restore_only
         )
     return IntegrationReadbackPolicy(
+        verify_secret_parameters=runtime_key_safety_environment_class(instance_name) == "testing",
         families=families,
         allowed_integrations=tuple(
             allowance.integration for allowance in policies.integration_allowances
@@ -371,14 +374,13 @@ allowed = []
 checked = 0
 parameter_keys = []
 encoded_payload = os.environ.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "")
-if encoded_payload:
+if encoded_payload and spec.get("verify_secret_parameters", False):
     payload = json.loads(base64.b64decode(encoded_payload, validate=True))
     parameter_keys = sorted({
         item["key"] for item in payload.get("config_parameters", [])
         if item.get("value", {}).get("source") == "secret_binding"
+        and re.fullmatch(r"[a-z0-9_.-]{1,128}", item["key"])
     })
-    if len(parameter_keys) > 100 or any(not re.fullmatch(r"__ODOO_PARAMETER_KEY_PATTERN__", key) for key in parameter_keys):
-        raise SystemExit("Invalid secret parameter readback names")
 present_parameters = []
 missing_parameters = []
 connection = psycopg2.connect(
@@ -426,7 +428,6 @@ if present_parameters:
     print("odoo_config_parameter_present=" + ",".join(present_parameters))
 if missing_parameters:
     print("odoo_config_parameter_missing=" + ",".join(missing_parameters))
-    refused.extend("config_parameter/" + key + ":missing" for key in missing_parameters)
 if allowed:
     print("integration_readback_allowed=" + ",".join(allowed))
 if refused:
@@ -444,6 +445,11 @@ if refused:
     raise SystemExit(
         "Non-production lane holds integration settings with no allowance: " + ", ".join(refused)
     )
+if missing_parameters:
+    print("integration_readback_ok=false")
+    if report_only:
+        raise SystemExit(0)
+    raise SystemExit("Testing Odoo secret parameters are empty or missing: " + ", ".join(missing_parameters))
 print("integration_readback_ok=true")
 """
-).replace("__ODOO_PARAMETER_KEY_PATTERN__", ODOO_CONFIG_PARAMETER_KEY_PATTERN)
+)

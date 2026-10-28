@@ -39,7 +39,10 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import BearerIdentityConfig
 from control_plane.product_config import apply_product_config_bundle, ProductConfigError
-from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
+from control_plane.storage.product_authority_bundle import (
+    OdooInstanceOverrideConflictError,
+    RuntimeEnvironmentConflictError,
+)
 from tests.http_app_test_support import _RejectingVerifier
 from tests.support.auth import _local_operator_policy
 from tests.support.http import request as http_request
@@ -143,8 +146,28 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
             binding = store.list_secret_bindings()[0]
             store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
             lane = profile.lanes[0]
-            for classification in (None, "prod_only", "testing"):
-                with self.subTest(classification=classification):
+            for classification, restricted in (
+                (None, False),
+                ("testing", False),
+                ("testing", True),
+            ):
+                with self.subTest(classification=classification, restricted=restricted):
+                    if restricted:
+                        policy = store.list_runtime_key_safety_policy_records()[0]
+                        store.write_runtime_key_safety_policy_record(
+                            policy.model_copy(
+                                update={
+                                    "rules": (
+                                        RuntimeSecretSafetyRule(
+                                            binding_key=config_parameter_secret_env_key(
+                                                "printnode.api_key"
+                                            ),
+                                            secret_class="prod_only",
+                                        ),
+                                    )
+                                }
+                            )
+                        )
                     request = ProductEnvironmentConfigApplyEnvelope.model_validate(
                         {
                             "mode": "dry-run",
@@ -169,7 +192,7 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                             secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "inert-encryption-master-key"
                         },
                     ):
-                        if classification == "testing":
+                        if classification == "testing" and not restricted:
                             result = apply_product_config_bundle(
                                 record_store=store,
                                 payload=translated.model_dump(mode="json", exclude_none=True),
@@ -214,6 +237,17 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(translated.secrets[0].secret_class, "testing")
                 self.assertEqual(translated.secrets[0].scope, "context_instance")
+                with self.assertRaises(ValueError):
+                    product_environment_config_apply_request(
+                        profile=profile,
+                        lane=profile.lanes[1],
+                        request=request,
+                        integration_key_markers=("ACME",),
+                    )
+                rejected = request.model_dump(mode="json")
+                rejected["managed_secrets"][0]["secret_class"] = "prod_only"
+                with self.assertRaises(ValueError):
+                    ProductEnvironmentConfigApplyEnvelope.model_validate(rejected)
 
     def test_new_parameter_reference_uses_existing_delivery_without_reading_values(self) -> None:
         for sql in (False, True):
@@ -230,6 +264,8 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                         store.ensure_schema()
                         self.addCleanup(store.close)
                     profile, before = seed_integration(store, key)
+                    before = before.model_copy(update={"apply_on": ("manual",)})
+                    store.write_odoo_instance_override_record(before)
                     with (
                         patch(
                             "control_plane.storage.filesystem.FilesystemRecordStore.read_secret_version",
@@ -258,14 +294,22 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                         after.config_parameters[0].value.secret_binding_id,
                         "private-testing-binding",
                     )
-                    self.assertEqual(after.apply_on, ("deploy", "promotion"))
+                    self.assertEqual(after.apply_on, before.apply_on)
                     self.assertNotIn("private-testing-binding", plan.model_dump_json())
 
     def test_post_deploy_reports_parameter_names_and_nonempty_database_presence(self) -> None:
-        for present in (True, False):
-            with self.subTest(present=present):
+        for present, key, verify in (
+            (True, "printnode.api_key", True),
+            (False, "printnode.api_key", True),
+            (True, "vendor.api-key", True),
+            (True, "3rdparty.token", True),
+            (False, "vendor.api-key", False),
+            (False, "legacy parameter", True),
+        ):
+            checked = verify and key != "legacy parameter"
+            with self.subTest(present=present, key=key, verify=verify):
                 cursor = MagicMock()
-                cursor.fetchall.return_value = [("printnode.api_key",)] if present else []
+                cursor.fetchall.return_value = [(key,)] if present else []
                 connection = MagicMock()
                 connection.cursor.return_value.__enter__.return_value = cursor
                 spec = {
@@ -273,16 +317,15 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                     "allowed_integrations": [],
                     "connection_isolation_required": False,
                     "protected_shopify_store_handles": [],
+                    "verify_secret_parameters": verify,
                 }
                 payload = {
                     "config_parameters": [
                         {
-                            "key": "printnode.api_key",
+                            "key": key,
                             "value": {
                                 "source": "secret_binding",
-                                "environment_variable": config_parameter_secret_env_key(
-                                    "printnode.api_key"
-                                ),
+                                "environment_variable": config_parameter_secret_env_key(key),
                                 "secret_binding_id": "private-testing-binding",
                             },
                         }
@@ -312,14 +355,22 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                     contextlib.redirect_stdout(output),
                     contextlib.redirect_stderr(io.StringIO()),
                 ):
+                    failure = ""
                     try:
                         exec(INTEGRATION_READBACK_PROGRAM, {})
-                    except SystemExit:
+                    except SystemExit as error:
+                        failure = str(error)
                         self.assertFalse(present)
+                    if checked and not present:
+                        self.assertIn("empty or missing", failure)
                 expected = (
                     "odoo_config_parameter_present" if present else "odoo_config_parameter_missing"
                 )
-                self.assertIn(expected + "=printnode.api_key", output.getvalue())
+                if checked:
+                    self.assertIn(expected + "=" + key, output.getvalue())
+                else:
+                    self.assertNotIn("odoo_config_parameter_", output.getvalue())
+                    self.assertIn("integration_readback_ok=true", output.getvalue())
                 self.assertNotIn("private-testing-binding", output.getvalue())
                 connection.close.assert_called_once()
 
@@ -336,10 +387,12 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
             "collision",
             "production",
             "policy",
+            "custom_allowance",
         ):
             with self.subTest(change=change), TemporaryDirectory() as directory:
                 store = FilesystemRecordStore(Path(directory))
-                profile, record = seed_integration(store, "printnode.api_key")
+                key = "acme.api_token" if change == "custom_allowance" else "printnode.api_key"
+                profile, record = seed_integration(store, key)
                 binding = store.list_secret_bindings()[0]
                 if change in {"class", "copy", "provider", "scope"}:
                     updates: dict[str, object] = (
@@ -350,7 +403,7 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                     if change == "scope":
                         updates = {"instance": "", "declared_secret_class": None}
                     store.write_secret_binding(binding.model_copy(update=updates))
-                elif change in {"allowance", "evidence"}:
+                elif change in {"allowance", "evidence", "custom_allowance"}:
                     target = store.read_dokploy_target_record(
                         context_name="cm", instance_name="testing"
                     )
@@ -359,8 +412,11 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                             update={"kind": "pre_live"}
                             if change == "allowance"
                             else {"evidence": ""}
+                            if change == "evidence"
+                            else {}
                         )
                         for item in target.policies.integration_allowances
+                        if change != "custom_allowance" or item.integration != "acme"
                     )
                     store.write_dokploy_target_record(
                         target.model_copy(
@@ -414,9 +470,37 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                         store=store,
                         profile=profile,
                         record=record,
-                        keys=("printnode.api_key",),
+                        keys=(key,),
                         create_missing=True,
                     )
+
+    def test_policy_changes_refuse_a_reviewed_reference_commit_in_both_stores(self) -> None:
+        for sql in (False, True):
+            with self.subTest(sql=sql), TemporaryDirectory() as directory:
+                store = (
+                    PostgresRecordStore(
+                        database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+                    )
+                    if sql
+                    else FilesystemRecordStore(Path(directory))
+                )
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                    self.addCleanup(store.close)
+                profile, record = seed_integration(store, "acme.api_token")
+                _, bundle = plan_secret_reference_reconciliation(
+                    store=store,
+                    profile=profile,
+                    record=record,
+                    keys=("acme.api_token",),
+                    create_missing=True,
+                )
+                policy = store.list_runtime_key_safety_policy_records()[0]
+                store.write_runtime_key_safety_policy_record(
+                    policy.model_copy(update={"integration_key_markers": ("ACME", "NEW")})
+                )
+                with self.assertRaises(RuntimeEnvironmentConflictError):
+                    store.write_product_authority_bundle(bundle)
 
     def test_absent_override_creation_is_guarded_in_both_stores(self) -> None:
         for sql in (False, True):
@@ -505,6 +589,34 @@ class PrivateTestingIntegrationHttpTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.path = f"/v1/products/{self.profile.product}/environments/testing/odoo-secret-references/reconcile"
+
+    async def test_reference_refusals_name_the_missing_requirement_without_secret_values(
+        self,
+    ) -> None:
+        headers = {"Authorization": "Bearer fixture-token"}
+        body = {"keys": ["printnode.api_key"], "create_missing": True}
+        target = self.store.read_dokploy_target_record(context_name="cm", instance_name="testing")
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "policies": target.policies.model_copy(update={"integration_allowances": ()})
+                }
+            )
+        )
+        response = await http_request(self.app, "POST", self.path, headers=headers, payload=body)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "integration_allowance_required")
+        self.assertIn("Testing integration allowances", response.json()["error"]["message"])
+        self.store.write_dokploy_target_record(target)
+        with patch.object(
+            self.store, "read_dokploy_target_record", side_effect=FileNotFoundError()
+        ):
+            response = await http_request(
+                self.app, "POST", self.path, headers=headers, payload=body
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "integration_target_required")
+        self.assertNotIn("private-testing-binding", response.text)
 
     async def test_admin_plan_apply_receipt_and_stale_review_preserve_secret_privacy(self) -> None:
         with patch.object(

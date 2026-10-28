@@ -16,6 +16,8 @@ from control_plane.odoo_product_driver_http import resolve_odoo_product_route
 from control_plane.odoo_secret_references import (
     SecretReferencePlan,
     SecretReferenceStore,
+    TestingSecretReferenceRefusal,
+    ConfigParameterSecretReferenceError,
     plan_secret_reference_reconciliation,
 )
 from control_plane.service_auth import (
@@ -260,6 +262,17 @@ def register_secret_reference_routes(
                 plan = plan.model_copy(
                     update={"applied": bundle.requires_write(), "read_back_matches": True}
                 )
+        except TestingSecretReferenceRefusal as error:
+            raise dependencies.http_error(
+                status_code=400, trace_id=trace_id, code=error.code, message=str(error)
+            ) from error
+        except ConfigParameterSecretReferenceError as error:
+            raise dependencies.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="secret_binding_required",
+                message=str(error),
+            ) from error
         except ProductContextOwnershipError as error:
             raise dependencies.http_error(
                 status_code=403,

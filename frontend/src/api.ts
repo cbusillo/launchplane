@@ -1,4 +1,15 @@
 import { validateRemovalResponse } from "./runtime-setting-removal";
+import type { ApplyIntegrationAllowancesData, ApplyIntegrationAllowancesResponse, ReadIntegrationAllowancesData, ReadIntegrationAllowancesResponse } from "./generated/openapi.ts";
+
+export function readIntegrationAllowances(query: NonNullable<ReadIntegrationAllowancesData["query"]>, signal?: AbortSignal): Promise<ReadIntegrationAllowancesResponse> {
+  return requestJson(`/v1/product-config/integration-allowances?${new URLSearchParams(query as Record<string, string>)}`, "GET", undefined, signal);
+}
+
+export function applyIntegrationAllowances(body: ApplyIntegrationAllowancesData["body"], options: BrowserOperationOptions): Promise<ApplyIntegrationAllowancesResponse> {
+  const request: ApplyIntegrationAllowancesData = { url: BROWSER_WRITE_ROUTES.integrationAllowances, body,
+    headers: { "Idempotency-Key": options.idempotencyKey } };
+  return requestGeneratedPost(request, options.signal, options.onDispatch);
+}
 import type { BackupCredentialBindingRequest, AcceptedEvidenceResponse, QualifyProductionBackupPreflightData } from "./generated/openapi.ts";
 import type { DiscussionTopicsResponse } from "./generated/openapi.ts";
 import type { ApplyTestingHoldData, ApplyTestingHoldResponse, ReadTestingHoldData, ReadTestingHoldResponse } from "./generated/openapi.ts";
