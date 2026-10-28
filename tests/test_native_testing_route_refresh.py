@@ -148,6 +148,19 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_refresh_renews_publication_without_provider_domains(self) -> None:
         before = self.binding()
+        excluded = before.model_copy(
+            update={"product": "excluded-product", "context": "excluded-testing"}
+        )
+        profile = self.store.read_product_profile_record(before.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "product": excluded.product,
+                    "lanes": (ProductLaneProfile(instance="testing", context=excluded.context),),
+                }
+            )
+        )
+        self.store.write_route_binding_record(excluded)
         response = await self.refresh()
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(response.json()["result"]["refreshed_count"], 1, response.text)
@@ -165,6 +178,18 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["result"]["refreshed_count"], 1, response.text)
         self.assertEqual(self.binding().domains, before.domains)
         self.read.assert_called()
+        self.assertEqual(
+            self.store.read_route_binding_record(
+                product=excluded.product, context_name=excluded.context, instance_name="testing"
+            ),
+            excluded,
+        )
+        self.frame["raw"]["services"][self.fixture.route.route_id + "@file"]["loadBalancer"][
+            "servers"
+        ] = [{"url": "http://foreign-copy:8069"}]
+        blocked = await self.refresh("blocked-with-excluded")
+        self.assertEqual(blocked.json()["result"]["status"], "attention", blocked.text)
+        self.assertEqual(blocked.json()["result"]["blocked_count"], 1, blocked.text)
 
     async def test_director_renews_only_observed_native_authority_without_a_grant(self) -> None:
         before = self.binding()

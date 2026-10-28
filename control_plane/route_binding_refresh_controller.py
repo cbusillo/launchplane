@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -93,16 +94,22 @@ def discover_active_odoo_testing_route_bindings(
     record_store: RouteBindingRefreshControllerStore,
     *,
     target_limit: int,
+    include_record: Callable[[EnvironmentRouteBindingRecord], bool] | None = None,
 ) -> tuple[RouteBindingRefreshTarget, ...]:
-    return _discover_route_bindings(record_store, target_limit=target_limit, remaining=False)
+    return _discover_route_bindings(
+        record_store, target_limit=target_limit, remaining=False, include_record=include_record
+    )
 
 
 def discover_remaining_odoo_stable_route_bindings(
     record_store: RouteBindingRefreshControllerStore,
     *,
     target_limit: int,
+    include_record: Callable[[EnvironmentRouteBindingRecord], bool] | None = None,
 ) -> tuple[RouteBindingRefreshTarget, ...]:
-    return _discover_route_bindings(record_store, target_limit=target_limit, remaining=True)
+    return _discover_route_bindings(
+        record_store, target_limit=target_limit, remaining=True, include_record=include_record
+    )
 
 
 def _discover_route_bindings(
@@ -110,6 +117,7 @@ def _discover_route_bindings(
     *,
     target_limit: int,
     remaining: bool,
+    include_record: Callable[[EnvironmentRouteBindingRecord], bool] | None,
 ) -> tuple[RouteBindingRefreshTarget, ...]:
     if target_limit < 1:
         raise ValueError("Route binding refresh target_limit must be positive.")
@@ -147,6 +155,8 @@ def _discover_route_bindings(
                 continue
             if not remaining and record.source.source_kind != "service":
                 continue
+            if include_record is not None and not include_record(record):
+                continue
             key = (record.product, record.context, record.instance)
             targets[key] = RouteBindingRefreshTarget(
                 product=record.product,
@@ -168,10 +178,12 @@ def plan_odoo_testing_route_binding_refresh(
     record_store: RouteBindingRefreshControllerStore,
     evaluated_at: str,
     target_limit: int,
+    include_record: Callable[[EnvironmentRouteBindingRecord], bool] | None = None,
 ) -> RouteBindingRefreshControllerPlan:
     targets = discover_active_odoo_testing_route_bindings(
         record_store,
         target_limit=target_limit,
+        include_record=include_record,
     )
     return _plan_refresh(
         record_store=record_store,
@@ -185,8 +197,11 @@ def plan_remaining_odoo_stable_route_binding_refresh(
     record_store: StableRouteBindingRefreshControllerStore,
     evaluated_at: str,
     target_limit: int,
+    include_record: Callable[[EnvironmentRouteBindingRecord], bool] | None = None,
 ) -> RouteBindingRefreshControllerPlan:
-    targets = discover_remaining_odoo_stable_route_bindings(record_store, target_limit=target_limit)
+    targets = discover_remaining_odoo_stable_route_bindings(
+        record_store, target_limit=target_limit, include_record=include_record
+    )
     return _plan_refresh(
         record_store=record_store,
         targets=targets,
