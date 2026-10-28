@@ -145,11 +145,8 @@ def prepare_preview_bootstrap(
         if check is None:
             raise ValueError("Preview executor is active.")
         check()
-        held = store.list_held_odoo_preview_reservations(product=profile.product, limit=101)
-        if (
-            original.state != "completed"
-            or len(held) >= 101
-            or any(item.provider_target_key == original.provider_target_key for item in held)
+        if original.state != "completed" or store.list_held_provider_target_reservations(
+            provider_target_key=original.provider_target_key
         ):
             raise ValueError("Settle original preview effects before changing bootstrap intent.")
         current_profile, current_reference = preview_bootstrap_profile(store, request)
