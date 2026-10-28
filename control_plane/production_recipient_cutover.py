@@ -62,6 +62,8 @@ from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_depl
 from control_plane.workflows.generic_web_promotion import _verify_health_evidence_with_identity
 from control_plane.workflows.production_promotion_backup import (
     GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+    ProductionBackupNotAdmissible,
+    backup_capture_freshness_refusal,
     _read_operation,
     _source_key,
     require_production_promotion_backup,
@@ -223,17 +225,10 @@ def cutover_intent(
         or not capture.evidence.get("independent_backup_id")
     ):
         raise ValueError("Destination capture is incomplete or unverified.")
-    now = datetime.now(UTC)
-    for key, maximum in (
-        ("snapshot_finished_at", bound.policy.fast_snapshot.max_evidence_age_seconds),
-        (
-            "independent_backup_finished_at",
-            bound.policy.independent_backup.max_evidence_age_seconds,
-        ),
+    if backup_capture_freshness_refusal(
+        bound, capture.evidence, now=datetime.now(UTC), check_freshness=check_freshness
     ):
-        observed = datetime.fromisoformat(capture.evidence.get(key, "").replace("Z", "+00:00"))
-        if check_freshness and not 0 <= (now - observed).total_seconds() <= maximum:
-            raise ValueError("Destination capture is stale or has a future observation.")
+        raise ValueError("Destination capture is stale or has a future observation.")
     binding = next(
         (
             row
@@ -955,7 +950,11 @@ class RecipientCutoverAdapter:
         )
         with self.store.production_backup_source_lock(_source_key(operation)) as locked:
             if locked is None:
-                raise ProviderMutationRejectedError(ValueError("Production backup source is busy."))
+                raise ProviderMutationRejectedError(
+                    ProductionBackupNotAdmissible(
+                        "Production backup source is busy.", reason="busy"
+                    )
+                )
 
             def backup_check() -> BackupGateEvidence:
                 locked()
