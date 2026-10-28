@@ -17,6 +17,7 @@ COPY_FAILURE_STAGE_MARKER = "copy_failure_stage"
 COPY_FAILURE_EXIT_MARKER = "copy_failure_exit_status"
 COPY_FAILURE_EVIDENCE_MARKER = "copy_failure_evidence_id"
 COPY_FAILURE_OUTPUT_BYTES = 1024 * 1024
+COPY_FAILURE_STATE_DIRECTORY = ".local/state/launchplane-host/copy-failures"
 
 
 def copy_failure_marker_is_safe(key: str, value: str) -> bool:
@@ -41,18 +42,21 @@ def copy_failure_diagnostics_library() -> str:
         + f"COPY_FAILURE_EXIT_MARKER = {COPY_FAILURE_EXIT_MARKER!r}\n"
         + f"COPY_FAILURE_EVIDENCE_MARKER = {COPY_FAILURE_EVIDENCE_MARKER!r}\n"
         + f"COPY_FAILURE_OUTPUT_BYTES = {COPY_FAILURE_OUTPUT_BYTES!r}\n"
+        + f"COPY_FAILURE_STATE_DIRECTORY = {COPY_FAILURE_STATE_DIRECTORY!r}\n"
         + """
-def retain_copy_command_failure(result, stage):
+def retain_copy_command_failure(result, stage, spec):
     import base64
+    from contextlib import suppress
     from datetime import datetime, timezone
     import hashlib
     import json
     import os
     from pathlib import Path
     import uuid
+    evidence_path = None
     try:
-        root = Path.home() / '.local/state/launchplane-host'
-        directory = root / 'copy-failures'
+        directory = Path.home().resolve(strict=True) / COPY_FAILURE_STATE_DIRECTORY
+        root = directory.parent
         if directory.resolve() != directory.absolute():
             return 'unavailable'
         for path in (root, directory):
@@ -72,16 +76,21 @@ def retain_copy_command_failure(result, stage):
             evidence[stream] = base64.b64encode(output[-COPY_FAILURE_OUTPUT_BYTES:]).decode()
             evidence[stream + '_bytes'] = len(output)
             evidence[stream + '_truncated'] = len(output) > COPY_FAILURE_OUTPUT_BYTES
-        descriptor = os.open(directory / (identity + '.json'),
+        path = directory / (identity + '.json')
+        descriptor = os.open(path,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        evidence_path = path
         with os.fdopen(descriptor, 'w') as handle:
             json.dump(evidence, handle)
         return identity
     except OSError:
+        if evidence_path is not None:
+            with suppress(OSError):
+                evidence_path.unlink()
         return 'unavailable'
 
 
-def emit_copy_command_failure(result):
+def emit_copy_command_failure(result, spec):
     stage = None
     for line in (result.stdout or b'').decode(errors='replace').splitlines():
         key, separator, value = line.partition('=')
@@ -90,7 +99,7 @@ def emit_copy_command_failure(result):
             print(key + '=' + value, flush=True)
             break
     print(COPY_FAILURE_EXIT_MARKER + '=' + str(result.returncode), flush=True)
-    print(COPY_FAILURE_EVIDENCE_MARKER + '=' + retain_copy_command_failure(result, stage), flush=True)
+    print(COPY_FAILURE_EVIDENCE_MARKER + '=' + retain_copy_command_failure(result, stage, spec), flush=True)
 """
     )
 

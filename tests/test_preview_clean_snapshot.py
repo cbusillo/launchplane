@@ -23,6 +23,7 @@ from control_plane.copy_readback_diagnostics import (
     COPY_FAILURE_EXIT_MARKER,
     COPY_FAILURE_EVIDENCE_MARKER,
     COPY_FAILURE_STAGE_MARKER,
+    COPY_FAILURE_STATE_DIRECTORY,
     CopyFailureStage,
     ReadbackPredicate,
 )
@@ -1225,6 +1226,16 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertEqual(evidence[COPY_FAILURE_EXIT_MARKER], str(exit_status))
         self.assertNotIn("private-fixture-detail", str(evidence))
 
+    def test_foreign_readonly_mount_cannot_reach_private_copy_failure_evidence(self) -> None:
+        self.containers["foreign"] = {
+            "Id": "foreign",
+            "Config": {"Labels": {"com.docker.compose.project": "another-project"}},
+            "Mounts": [{"Source": str(self.root / COPY_FAILURE_STATE_DIRECTORY), "RW": False}],
+        }
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+
     def test_failed_runner_retains_private_traceback_without_publishing_it(self) -> None:
         original = self.command
         child_stdout = b"copy_failure_stage=module_update\nprivate fixture output\n"
@@ -1246,7 +1257,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             {"logs": self.script_output.getvalue()}
         )
         evidence_id = markers[COPY_FAILURE_EVIDENCE_MARKER]
-        path = self.root / ".local/state/launchplane-host/copy-failures" / (evidence_id + ".json")
+        path = self.root / COPY_FAILURE_STATE_DIRECTORY / (evidence_id + ".json")
         evidence = json.loads(path.read_text())
         self.assertEqual(base64.b64decode(evidence["stdout"]), child_stdout)
         self.assertEqual(base64.b64decode(evidence["stderr"]), child_stderr)

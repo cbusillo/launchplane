@@ -21,6 +21,7 @@ from control_plane.copy_readback_diagnostics import (
     COPY_FAILURE_EVIDENCE_MARKER,
     COPY_FAILURE_OUTPUT_BYTES,
     COPY_FAILURE_STAGE_MARKER,
+    COPY_FAILURE_STATE_DIRECTORY,
     CopyFailureStage,
     ReadbackPredicate,
     copy_failure_diagnostics_library,
@@ -32,6 +33,40 @@ from control_plane.odoo_connection_isolation import (
 
 
 class CopyFailureEvidenceTests(unittest.TestCase):
+    def test_symlinked_home_uses_its_verified_real_directory(self) -> None:
+        namespace: dict[str, Any] = {"spec": {}}
+        exec(copy_failure_diagnostics_library(), namespace)
+        result = subprocess.CompletedProcess(["fixture"], 1, stdout=b"", stderr=b"cause")
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            home = root / "home"
+            home.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(home, target_is_directory=True)
+            with patch.object(Path, "home", return_value=alias):
+                identity = namespace["retain_copy_command_failure"](result, None, {})
+            self.assertNotEqual(identity, "unavailable")
+            self.assertTrue((home / COPY_FAILURE_STATE_DIRECTORY / (identity + ".json")).is_file())
+
+    def test_partial_write_does_not_leave_unreferenced_private_output(self) -> None:
+        namespace: dict[str, Any] = {"spec": {}}
+        exec(copy_failure_diagnostics_library(), namespace)
+        result = subprocess.CompletedProcess(["fixture"], 1, stdout=b"", stderr=b"cause")
+
+        def full_disk(evidence: Any, handle: Any) -> None:
+            handle.write("partial fixture output")
+            raise OSError("fixture full disk")
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            with (
+                patch.object(Path, "home", return_value=root),
+                patch.object(json, "dump", side_effect=full_disk),
+            ):
+                identity = namespace["retain_copy_command_failure"](result, None, {})
+            self.assertEqual(identity, "unavailable")
+            self.assertEqual(list((root / COPY_FAILURE_STATE_DIRECTORY).iterdir()), [])
+
     def test_private_evidence_retains_bounded_tails_and_only_an_input_digest(self) -> None:
         spec = {"fixture_input": "private settings", "runner": "fixture source"}
         namespace: dict[str, Any] = {"spec": spec}
@@ -45,15 +80,15 @@ class CopyFailureEvidenceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             with patch.object(Path, "home", return_value=root), redirect_stdout(output):
-                namespace["emit_copy_command_failure"](result)
-                namespace["emit_copy_command_failure"](result)
+                namespace["emit_copy_command_failure"](result, namespace["spec"])
+                namespace["emit_copy_command_failure"](result, namespace["spec"])
             identifiers = [
                 line.partition("=")[2]
                 for line in output.getvalue().splitlines()
                 if line.startswith(COPY_FAILURE_EVIDENCE_MARKER + "=")
             ]
             self.assertNotEqual(identifiers[0], identifiers[1])
-            path = root / ".local/state/launchplane-host/copy-failures" / (identifiers[0] + ".json")
+            path = root / COPY_FAILURE_STATE_DIRECTORY / (identifiers[0] + ".json")
             text = path.read_text()
             evidence = json.loads(text)
             self.assertEqual(
@@ -87,7 +122,7 @@ class CopyFailureEvidenceTests(unittest.TestCase):
         for fault in ("alias", "permissions", "disk"):
             with self.subTest(fault=fault), TemporaryDirectory() as temporary:
                 root = Path(temporary).resolve()
-                directory = root / ".local/state/launchplane-host/copy-failures"
+                directory = root / COPY_FAILURE_STATE_DIRECTORY
                 directory.parent.mkdir(parents=True)
                 outside = root / "outside"
                 outside.mkdir()
@@ -103,7 +138,7 @@ class CopyFailureEvidenceTests(unittest.TestCase):
                     else nullcontext(),
                     redirect_stdout(output),
                 ):
-                    namespace["emit_copy_command_failure"](result)
+                    namespace["emit_copy_command_failure"](result, namespace["spec"])
                 markers = post_deploy.extract_odoo_post_deploy_readback_markers(
                     {"logs": output.getvalue()}
                 )

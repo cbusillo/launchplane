@@ -76,12 +76,17 @@ private (0700), each new file is 0600, and aliases or unsafe permissions
 refuse retention. Storage failure reports `unavailable` without replacing the
 original copy failure or its recovery classification.
 
-Use the existing documented read-only host access to read that exact file,
+Use the private infrastructure [host read access](https://github.com/cbusillo/shiny-infra-ops/blob/main/docs/services/launchplane.md#operator-access)
+and [SSH access](https://github.com/cbusillo/shiny-infra-ops/blob/main/docs/infrastructure/ssh-access.md)
+routes to read that exact file as the schedule's execution user,
 after binding the original reservation, attempt, completed provider job,
 package/action versions and execution server. No provider job needs to run to
-read it. The file records the SHA-256 of the expanded host input, using
-`json.dumps(spec, sort_keys=True)`, so the authorized original-input reader can
-check that binding without exporting settings. It also records creation time,
+read it. Those private runbooks own the host and guest selectors; a
+control-plane host is not necessarily the operation's execution server.
+The file records the SHA-256 of the expanded host input, using
+`json.dumps(spec, sort_keys=True)`, as audit metadata. The evidence ID in the
+bound job's log is its retrieval reference; this is not a new service-side
+verification or original-settlement receipt. It also records creation time,
 stage and exit status. It never records command arguments, stdin or the input
 settings themselves. Each stream is base64-encoded and limited to its last
 1 MiB, with original byte count and truncation flag. Decode locally into private
@@ -96,6 +101,9 @@ evidence destination. Retention adds no credential, grant or new transport.
 Files stay with the host's retained operational evidence; there is no automatic
 pruning in this change. A later investigation may retire only its own evidence
 under the existing custody/cleanup rules.
+Copy-runtime inspection rejects any container mount, including read-only mounts
+and ancestor paths, that could expose this private evidence directory. Keep it
+outside application mounts; this requires no new runtime volume or credential.
 
 This takes effect only for newly executed reviewed host packages. Historical
 jobs that discarded their pipes cannot be reconstructed by deploying this
