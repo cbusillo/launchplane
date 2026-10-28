@@ -32308,7 +32308,7 @@ class PostgresRecordStore(HumanSessionStore):
         idempotency_key: str = "",
     ) -> RuntimeSettingRemovalPlan:
         """Keep review preimages private; commit the contraction and receipt together."""
-        from control_plane.service_auth import AuthorizationTarget
+        from control_plane.service_auth import AuthorizationTarget, LocalOperatorIdentity
         from control_plane.contracts.product_profile_record import product_context_owner_map
         from control_plane.storage.product_authority_bundle import RuntimeEnvironmentDelete
         from control_plane.runtime_setting_removal import (
@@ -32363,8 +32363,14 @@ class PostgresRecordStore(HumanSessionStore):
                 scope=request.scope,
                 instances=(request.instance,) if request.instance else (),
             )
+            director_preview = (
+                isinstance(identity, LocalOperatorIdentity)
+                and director_agent_identity(identity)
+                and request.scope == "instance"
+                and request.instance == "preview"
+            )
             if request.mode == "apply":
-                if not admin or not active.policy.allows(
+                if not (admin or director_preview) or not active.policy.allows(
                     identity=identity,
                     action="product_config.apply",
                     product=request.product,
@@ -32373,7 +32379,7 @@ class PostgresRecordStore(HumanSessionStore):
                     inherit_agent_read_role=False,
                 ):
                     raise PermissionError(
-                        "Removal requires the authorized signed-in administrator."
+                        "Removal requires an authorized administrator or preview operator."
                     )
             elif not director_agent_identity(identity) and not (
                 admin
@@ -32388,6 +32394,20 @@ class PostgresRecordStore(HumanSessionStore):
                 raise PermissionError("Identity cannot review runtime setting removal.")
 
             profile = profile_for_request(session)
+            if (
+                request.mode == "apply"
+                and director_preview
+                and (
+                    profile is None
+                    or not profile.preview.enabled
+                    or profile.preview.context != request.context
+                    or any(
+                        lane.context == request.context and lane.instance == request.instance
+                        for lane in profile.lanes
+                    )
+                )
+            ):
+                raise PermissionError("The preview configuration scope is not exclusively owned.")
             authority_sha256 = request_fingerprint(
                 {
                     "policy": (active.record_id, active.revision, active.policy_sha256),
