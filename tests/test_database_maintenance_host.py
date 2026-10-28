@@ -61,12 +61,20 @@ def state_file(root: Path, **changes: Any) -> Path:
 
 class DatabaseMaintenanceHostTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.socket_check = patch.object(host, "require_verification_socket")
+        self.socket_check = patch.object(host, "refresh_verification_socket")
         self.socket_check.start()
         self.addCleanup(self.socket_check.stop)
         self.client_check = patch.object(host, "require_no_api_database_clients")
         self.client_check.start()
         self.addCleanup(self.client_check.stop)
+        self.rearm = patch.object(host, "rearm_original_policies")
+        self.rearm.start()
+        self.addCleanup(self.rearm.stop)
+        self.cluster = patch.object(
+            host, "read_database", side_effect=lambda state, _query: state["system_identifier"]
+        )
+        self.cluster.start()
+        self.addCleanup(self.cluster.stop)
 
     def test_transient_verification_remains_manually_recoverable_without_a_state_edit(self) -> None:
         with TemporaryDirectory() as temporary:

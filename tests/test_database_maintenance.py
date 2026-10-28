@@ -144,6 +144,26 @@ class DatabaseMaintenanceSchemaSnapshotTests(unittest.TestCase):
 
 
 class DatabaseMaintenanceIsolationTests(unittest.TestCase):
+    def test_admission_cancellation_follows_each_fresh_stop_intent(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = {
+                "originals": {
+                    "api": {"addresses": ["192.0.2.1"]},
+                    "worker": {"addresses": ["192.0.2.2"]},
+                },
+                "stop_requested": [],
+            }
+            connection = Mock()
+            with patch.object(database_maintenance_cli, "cancel_waiting_admissions") as cancel:
+                (root / "state.json").write_text(json.dumps(state))
+                database_maintenance_cli.cancel_stopping_admissions(connection, root)
+                cancel.assert_not_called()
+                state["stop_requested"] = ["worker"]
+                (root / "state.json").write_text(json.dumps(state))
+                database_maintenance_cli.cancel_stopping_admissions(connection, root)
+                cancel.assert_called_once_with(connection, ["192.0.2.2"])
+
     def test_cli_emits_terminal_database_and_deployment_results_for_the_host(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

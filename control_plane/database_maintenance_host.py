@@ -13,6 +13,7 @@ import select
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -216,7 +217,7 @@ def operator(state: dict[str, Any], mode: str) -> dict[str, Any]:
     intent_path = root / "operator-intent.json"
     settle_operator(state)
     if mode in {"verify", "health"}:
-        require_verification_socket(state)
+        refresh_verification_socket(state)
     intent = {
         "name": state["operator"]
         + ("-release" if mode in {"unfence", "verify", "revision"} else ""),
@@ -254,22 +255,66 @@ def operator(state: dict[str, Any], mode: str) -> dict[str, Any]:
     return result
 
 
-def require_verification_socket(state: dict[str, Any]) -> None:
-    expected = state["verification_socket"]
-    observed = inspect_container(state["postgres"])["State"]
-    if (
-        not observed["Running"]
-        or observed["Pid"] != expected["pid"]
-        or observed["StartedAt"] != expected["started_at"]
-    ):
-        raise RecoveryRequired("The qualified PostgreSQL socket process changed.")
-    socket_path = Path(expected["path"]) / ".s.PGSQL.5432"
-    metadata = socket_path.stat()
-    if not socket_path.is_socket() or (metadata.st_dev, metadata.st_ino) != (
-        expected["device"],
-        expected["inode"],
-    ):
-        raise RecoveryRequired("The qualified PostgreSQL socket identity changed.")
+def socket_identity(path: Path) -> tuple[int, int]:
+    metadata = path.stat()
+    if not stat.S_ISSOCK(metadata.st_mode):
+        raise RecoveryRequired("The PostgreSQL endpoint is not a Unix socket.")
+    return metadata.st_dev, metadata.st_ino
+
+
+def refresh_verification_socket(state: dict[str, Any]) -> None:
+    require_database_cluster(state)
+    postgres = inspect_container(state["postgres"])
+    if not postgres["State"]["Running"]:
+        raise RuntimeError("The original PostgreSQL container is not ready.")
+    directory = Path(
+        run("docker", "exec", state["postgres"], "readlink", "-f", "/var/run/postgresql").strip()
+    )
+    if not directory.is_absolute() or ".." in directory.parts:
+        raise RecoveryRequired("The PostgreSQL socket directory is unqualified.")
+    endpoint = ".s.PGSQL.5432"
+    actual = Path(f"/proc/{postgres['State']['Pid']}/root") / str(directory).lstrip("/") / endpoint
+    identity = socket_identity(actual)
+    candidates = []
+    for mount in postgres.get("Mounts", []):
+        destination = Path(mount["Destination"])
+        if (
+            mount.get("Source")
+            and destination.is_absolute()
+            and directory.is_relative_to(destination)
+        ):
+            candidates.append(Path(mount["Source"]) / directory.relative_to(destination))
+    merged = (postgres.get("GraphDriver", {}).get("Data") or {}).get("MergedDir")
+    if merged:
+        candidates.append(Path(merged) / str(directory).lstrip("/"))
+    source = None
+    for candidate in candidates:
+        try:
+            if (
+                candidate.is_absolute()
+                and not candidate.is_relative_to("/proc")
+                and socket_identity(candidate / endpoint) == identity
+            ):
+                source = candidate
+                break
+        except OSError:
+            continue
+    if source is None:
+        raise RecoveryRequired("No matching host-namespace PostgreSQL socket source is available.")
+    state["verification_socket"] = {
+        "pid": postgres["State"]["Pid"],
+        "started_at": postgres["State"]["StartedAt"],
+        "path": str(source),
+        "device": identity[0],
+        "inode": identity[1],
+    }
+    overlay_path = Path(state["overlay"])
+    overlay = json.loads(overlay_path.read_text())
+    overlay["services"]["launchplane-maintenance-verification"]["volumes"] = [
+        str(source) + ":/pgsocket:ro"
+    ]
+    save(overlay_path, overlay)
+    save(Path(state["job_directory"]) / "state.json", state)
 
 
 def settle_operator(state: dict[str, Any]) -> None:
@@ -399,8 +444,7 @@ def check_originals(state: dict[str, Any], *, stopped: bool = False) -> None:
             if (
                 observed["Id"] not in state.get("stopped_containers", [])
                 or observed["State"]["Running"]
-                or observed["State"].get("ExitCode") != 0
-                or observed["State"].get("OOMKilled")
+                or not clean_original_exit(observed, state)
                 or observed["HostConfig"]["RestartPolicy"]["Name"] != "no"
             ):
                 raise RecoveryRequired("An original service lost its stopped writer hold.")
@@ -446,6 +490,11 @@ def restart_policy(policy: dict[str, Any]) -> str:
     return f"{name}:{attempts}" if name == "on-failure" and attempts else name
 
 
+def clean_original_exit(observed: dict[str, Any], state: dict[str, Any]) -> bool:
+    permitted = {0, 128 + signal.SIGTERM} if observed["Id"] == state["api"] else {0}
+    return not observed["State"].get("OOMKilled") and observed["State"].get("ExitCode") in permitted
+
+
 def wait_for_exit(identifier: str, state: dict[str, Any]) -> dict[str, Any]:
     deadline = time.monotonic() + STOP_WAIT_SECONDS
     if not state.get("resume_started") and state.get("stop_deadline"):
@@ -473,9 +522,14 @@ def wait_for_exit(identifier: str, state: dict[str, Any]) -> dict[str, Any]:
             observed["State"]["Pid"] != original["pid"]
             or observed["State"]["StartedAt"] != original["started_at"]
         ):
+            if (
+                state.get("resume_started")
+                and observed["HostConfig"]["RestartPolicy"] == original["restart_policy"]
+            ):
+                return observed
             raise RecoveryRequired("The signaled original restarted outside recovery.")
         if time.monotonic() >= deadline:
-            raise RecoveryRequired("An original has not completed graceful shutdown.")
+            raise TimeoutError("An original has not completed graceful shutdown.")
         time.sleep(0.2)
 
 
@@ -525,13 +579,31 @@ def stop_services(state_path: Path) -> dict[str, Any]:
             signal_original(identifier, state)
     for identifier in state["containers"]:
         observed = wait_for_exit(identifier, state)
-        if observed["State"].get("ExitCode") != 0 or observed["State"].get("OOMKilled"):
+        if not clean_original_exit(observed, state):
             raise RecoveryRequired("An original did not exit cleanly after graceful termination.")
         with locked_state(state_path, active=True) as state:
             state.setdefault("stopped_containers", []).append(identifier)
             save(state_path, state)
     check_originals(state, stopped=True)
     return dict(state)
+
+
+def rearm_original_policies(state_path: Path, state: dict[str, Any]) -> None:
+    for identifier in state["containers"]:
+        observed = inspect_container(identifier)
+        if (
+            observed["Image"] != state["image_id"]
+            or observed["Config"]["Labels"].get("com.docker.compose.project") != state["project"]
+        ):
+            raise RecoveryRequired("An original changed identity before recovery rearming.")
+        policy = state["originals"][identifier]["restart_policy"]
+        run("docker", "update", "--restart=" + restart_policy(policy), identifier, timeout=10)
+        if inspect_container(identifier)["HostConfig"]["RestartPolicy"] != policy:
+            raise RuntimeError("The original recovery restart policy was not read back.")
+        state.setdefault("rearmed_containers", [])
+        if identifier not in state["rearmed_containers"]:
+            state["rearmed_containers"].append(identifier)
+        save(state_path, state)
 
 
 def resume_original(identifier: str, state: dict[str, Any]) -> str:
@@ -794,6 +866,11 @@ def complete_service_verification(state_path: Path) -> None:
                 "health_passed": True,
             },
         )
+        state["safe_to_resume"] = {
+            key: state[key] for key in ("hold_id", "system_identifier", "image_id", "revision")
+        }
+        save(state_path, state)
+        save(state_path.parent / "database-safe.json", state["safe_to_resume"])
 
 
 def release(state_path: Path) -> None:
@@ -828,33 +905,7 @@ def finish_release(state_path: Path) -> None:
             if safe:
                 require_database_cluster(state)
             if pending and not safe:
-                for observed in original_containers(state):
-                    if observed["HostConfig"]["RestartPolicy"]["Name"] != "no":
-                        raise RecoveryRequired("An unverified service regained automatic restart.")
-                    if observed["State"]["Running"]:
-                        raise RecoveryRequired("An unverified service is no longer stopped.")
-                proof = operator(state, "verify")
-                state["revision"] = proof["revision"]
-                receipt_path = state_path.parent / "verification-complete.json"
-                if proof.get("outcome") != "before":
-                    if not receipt_path.exists():
-                        raise RecoveryRequired(
-                            "Actual runtime and API health verification is incomplete."
-                        )
-                    verified = json.loads(receipt_path.read_text())
-                    if any(
-                        verified.get(key) != state[key]
-                        for key in ("hold_id", "system_identifier", "image_id", "revision")
-                    ) or not verified.get("health_passed"):
-                        raise RecoveryRequired(
-                            "The completed runtime verification belongs to another state."
-                        )
-                state["safe_to_resume"] = {
-                    key: state[key]
-                    for key in ("hold_id", "system_identifier", "image_id", "revision")
-                }
-                save(state_path, state)
-                save(state_path.parent / "database-safe.json", state["safe_to_resume"])
+                raise RecoveryRequired("The completed database and health proof is missing.")
         except Exception as error:
             if pending:
                 raise
@@ -864,6 +915,7 @@ def finish_release(state_path: Path) -> None:
         errors = []
         state["resume_started"] = True
         save(state_path, state)
+        rearm_original_policies(state_path, state)
         if state["api"] not in resumed:
             resumed.add(resume_original(state["api"], state))
             state["resumed_containers"] = sorted(resumed)
@@ -1057,7 +1109,6 @@ def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         "containers": [],
         "browser": "",
         "originals": {},
-        "original_addresses": [],
     }
     if "," in state["compose"] or not Path(state["compose"]).is_file():
         raise ValueError("Exactly one existing provider compose file is required.")
@@ -1085,14 +1136,16 @@ def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
             raise ValueError("Own services are not all on the same image.")
         else:
             state["containers"].append(item["Id"])
-            for network in item["NetworkSettings"]["Networks"].values():
-                for key in ("IPAddress", "GlobalIPv6Address"):
-                    if network.get(key):
-                        state["original_addresses"].append(str(ipaddress.ip_address(network[key])))
             state["originals"][item["Id"]] = {
                 "pid": item["State"]["Pid"],
                 "started_at": item["State"]["StartedAt"],
                 "restart_policy": item["HostConfig"]["RestartPolicy"],
+                "addresses": [
+                    str(ipaddress.ip_address(network[key]))
+                    for network in item["NetworkSettings"]["Networks"].values()
+                    for key in ("IPAddress", "GlobalIPv6Address")
+                    if network.get(key)
+                ],
             }
     state["containers"].sort(key=lambda container_id: container_id != state["api"])
     require_no_outside_writers(
@@ -1102,6 +1155,11 @@ def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         operators=set(),
     )
     for identifier in state["containers"]:
+        if state["originals"][identifier]["restart_policy"]["Name"] not in {
+            "always",
+            "unless-stopped",
+        }:
+            raise ValueError("An original policy cannot recover a late clean shutdown.")
         signal_original(identifier, state, check_only=True)
     overlay = {
         "services": {
@@ -1118,23 +1176,6 @@ def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
             }
         }
     }
-    postgres = inspect_container(state["postgres"])
-    socket_directory = run(
-        "docker", "exec", state["postgres"], "readlink", "-f", "/var/run/postgresql"
-    ).strip()
-    if not socket_directory.startswith("/") or ".." in Path(socket_directory).parts:
-        raise ValueError("The PostgreSQL socket directory is unqualified.")
-    socket_root = Path(f"/proc/{postgres['State']['Pid']}/root") / socket_directory.lstrip("/")
-    if not (socket_root / ".s.PGSQL.5432").is_socket():
-        raise ValueError("The existing PostgreSQL Unix socket is unavailable.")
-    metadata = (socket_root / ".s.PGSQL.5432").stat()
-    state["verification_socket"] = {
-        "pid": postgres["State"]["Pid"],
-        "started_at": postgres["State"]["StartedAt"],
-        "path": str(socket_root),
-        "device": metadata.st_dev,
-        "inode": metadata.st_ino,
-    }
     verification_service = {**overlay["services"]["launchplane-maintenance"]}
     verification_service.pop("networks")
     verification_service.update(
@@ -1142,7 +1183,6 @@ def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
             "network_mode": "none",
             "cap_drop": ["ALL"],
             "security_opt": ["no-new-privileges:true"],
-            "volumes": [str(socket_root) + ":/pgsocket:ro"],
         }
     )
     overlay["services"]["launchplane-maintenance-verification"] = verification_service

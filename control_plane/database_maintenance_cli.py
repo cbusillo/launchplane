@@ -49,9 +49,6 @@ def require_no_active_executors(connection: Connection) -> None:
     from control_plane.service_deploy_drain import _operation_observations
     from control_plane.storage.postgres import (
         PostgresRecordStore,
-        LaunchplaneOdooStableBootstrapOperationRow,
-        LaunchplaneOdooProdBackupRestoreOperationRow,
-        LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
         LaunchplanePrivilegedOperationRow,
         LaunchplaneOutboxDeliveryRow,
         LaunchplaneMergeTrainControllerStateRow,
@@ -84,9 +81,6 @@ def require_no_active_executors(connection: Connection) -> None:
             ):
                 raise RuntimeError("An unqualified API or scheduler reservation is still running.")
             for row_type, column, active in (
-                (LaunchplaneOdooStableBootstrapOperationRow, "status", ("running",)),
-                (LaunchplaneOdooProdBackupRestoreOperationRow, "status", ("running",)),
-                (LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow, "status", ("running",)),
                 (LaunchplanePrivilegedOperationRow, "status", ("executing",)),
                 (LaunchplaneOutboxDeliveryRow, "state", ("running",)),
             ):
@@ -331,6 +325,16 @@ def cancel_waiting_admissions(connection: Connection, addresses: list[str]) -> N
     connection.commit()
 
 
+def cancel_stopping_admissions(connection: Connection, directory: Path) -> None:
+    state = json.loads((directory / "state.json").read_text())
+    stopping = set(state.get("stop_requested", []))
+    addresses = []
+    for identifier in stopping:
+        addresses.extend(state["originals"][identifier].get("addresses", []))
+    if addresses:
+        cancel_waiting_admissions(connection, addresses)
+
+
 def keep_database(
     connection: Connection,
     *,
@@ -353,7 +357,11 @@ def keep_database(
         require_no_active_executors(connection)
         connection.commit()
         state = json.loads((arguments.job_directory / "state.json").read_text())
-        if state["hold_id"] != arguments.hold_id or not state.get("original_addresses"):
+        if (
+            state["hold_id"] != arguments.hold_id
+            or not state.get("originals")
+            or any(not original.get("addresses") for original in state["originals"].values())
+        ):
             raise RuntimeError("The original writer address custody is missing.")
         emit(
             "deployment_held",
@@ -363,7 +371,7 @@ def keep_database(
         )
         command = await_command(
             expires,
-            lambda: cancel_waiting_admissions(connection, state["original_addresses"]),
+            lambda: cancel_stopping_admissions(connection, arguments.job_directory),
             arguments.job_directory,
         )
         if command.get("action") != "stopped" or (arguments.job_directory / "releasing").exists():

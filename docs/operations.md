@@ -5678,7 +5678,8 @@ credentials, grants and product resources are excluded.
 On the documented Launchplane host, copy only the reviewed image's
 `control_plane/database_maintenance_host.py` into a private directory. The
 standalone driver needs Python 3.11+, root's existing Docker/systemd access and
-Linux pidfd signal support. Qualification adds no packages or capability grants.
+Linux pidfd signal support and a single exact Docker cgroup membership per
+original process. Qualification adds no packages or capability grants.
 The existing PostgreSQL container must expose its Unix socket directory; the
 verification helper consumes that socket in place through a read-only mount:
 
@@ -5707,8 +5708,11 @@ never treated as an application writer to freeze or an arbitrary extra client.
 The API needs explicit PostgreSQL username/password wiring; credential indirection
 is unqualified. Values stay in process memory and are never emitted. Unknown
 identities refuse.
-The plan binds the PostgreSQL container, process start, socket path/device/inode
-and database system identifier. A changed process or socket refuses verification.
+The plan binds the original PostgreSQL container and database system identifier.
+Each probe resolves a host-namespace mount or merged-directory source and compares
+its socket device/inode with the actual container socket. A process restart in
+that same container can rebind after the cluster check; a different container
+or cluster refuses recovery. A proc-root path is not used as a bind source.
 No database directory or credential file is mounted into the verification helper.
 `plan` qualifies its actual read-only startup and HTTP health before any pause.
 That qualification authorizes no backup or retirement; committed-state verification
@@ -5753,13 +5757,19 @@ is no queued Docker stop and no SIGKILL escalation. All originals receive TERM
 before the shared shutdown deadline. Read-only own-role clients waiting directly
 on the keeper's advisory locks are canceled so their shutdown can finish; this
 never cancels a transaction with an XID or an unrelated address/blocker.
-Every original must exit cleanly, with no OOM and automatic restart suppressed.
+Every original must have its qualified exit status, no OOM and automatic restart
+suppressed. The API permits the POSIX SIGTERM exit after Uvicorn graceful cleanup;
+ordinary workers must return success. Qualify those signal paths on the exact image.
 All six own writers stop, including the API and workers. No cgroup freezer,
 namespace firewall, API thaw, or second health timer is required.
 
 Shutdown timeout, changed identity or an unclean exit refuses backup admission.
-Recovery settles a signaled original before restarting it; a still-running process
-with TERM pending is never reported as recovered. A native signal can be repeated
+After database safety is proved, recovery restores and reads back every original
+automatic restart policy before waiting on any API or worker. New plans require
+original policies that restart a late clean exit, with no policy mapping.
+A delayed graceful exit can then restart through Docker even after the bounded
+automatic attempts are exhausted. Exit waits remain transient; a still-running
+process with TERM pending is never reported as recovered. A native signal can be repeated
 only against that original process. A newly needed forced termination or Client
 recovery action requires its exact Director question, never an automatic kill.
 The actual released readback qualifies the bounded window; a deadline alone does
@@ -5892,7 +5902,9 @@ before verification succeeds.
 This temporary API runs against the actual own database, never against the
 restored copy. Its root is read-only, scratch is RAM-backed, capabilities are
 dropped, and its network namespace has only loopback. It reaches PostgreSQL via
-the qualified read-only Unix-socket mount. Existing bootstrap and keyring inputs
+the qualified read-only Unix-socket mount, which may use the server's existing
+local-trust authentication. Only reviewed image code consumes that access; no
+role, authentication rule or grant is created. Existing bootstrap and keyring inputs
 are consumed in place, with no credential export, new grant, published port or
 provider connection. Runtime/schema/history/expiry/train probes remain mandatory.
 After the helper exits, zero remaining DB clients are required before a durable
@@ -5905,8 +5917,9 @@ exhaustion never authorizes a restore or resets a safety proof. No probe failure
 is called database damage merely because health is unavailable.
 
 Release starts the exact original API first and requires its container health
-before starting other workers in parallel. It checks running/health and restores
-the exact original restart policies. A partial resume records progress; subsequent cleanup retries
+before explicitly starting other workers in parallel. The original policies
+have already been restored after the bound database/health proof. Healthy readback
+is still required for every original, including an automatically restarted one. A partial resume records progress; subsequent cleanup retries
 reuse the safe proof because legitimate resumed writes may have changed rows.
 They never refreeze healthy services or demand the old full hashes again. A crash after
 starting a stopped original, before progress is recorded, may leave its same
@@ -5916,6 +5929,12 @@ policy readback. On a no-commit release, durable resume intent
 and absence of `commit-pending.json` allow the same exact-original retry; the
 host's releasing flag and state lock prevent a later commit. Unverified changed
 identities still refuse.
+
+After release, observe the normal [catch-up sweep](event-driven-deploys.md#catch-up-sweep)
+and train polling against current source-control state. These existing workers
+recover missed webhook state; do not invent acceptance or blindly replay a
+Client/provider mutation. Their ordinary admission, provenance and release gates
+remain in force. Record any observed catch-up failure on its owning work item.
 
 Only the host removes the deployment marker, after all original recovery
 readbacks pass and the keeper can no longer act. Install, recovery fencing and

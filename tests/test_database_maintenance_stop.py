@@ -17,6 +17,7 @@ class StoppedWriterHoldTests(unittest.TestCase):
             path = Path(directory) / "state.json"
             state: dict[str, Any] = {
                 "containers": ["api", "worker"],
+                "api": "api",
                 "project": "own",
                 "image_id": "image",
                 "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
@@ -64,7 +65,7 @@ class StoppedWriterHoldTests(unittest.TestCase):
             self.assertFalse(any(running.values()))
 
     def test_a_late_exit_cannot_be_reported_as_resumed(self) -> None:
-        state = {
+        state: dict[str, Any] = {
             "containers": ["worker"],
             "originals": {"worker": {"pid": 12, "started_at": "old"}},
             "stop_requested": ["worker"],
@@ -96,14 +97,22 @@ class StoppedWriterHoldTests(unittest.TestCase):
             patch.object(host, "signal_original"),
             patch.object(host, "time") as timer,
         ):
-            timer.monotonic.side_effect = [0, 0, host.STOP_WAIT_SECONDS + 1]
-            with self.assertRaises(host.RecoveryRequired):
+            elapsed = [0.0]
+            timer.monotonic.side_effect = lambda: elapsed[0]
+            timer.sleep.side_effect = lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+            with self.assertRaises(TimeoutError):
                 host.resume_original("worker", state)
         self.assertEqual(events, [])
 
     def test_signal_handle_closes_and_refuses_a_replaced_process_membership(self) -> None:
-        state = {"image_id": "image", "originals": {"owned": {"pid": 19, "started_at": "start"}}}
-        observed = {"Image": "image", "State": {"Running": True, "Pid": 19, "StartedAt": "start"}}
+        state: dict[str, Any] = {
+            "image_id": "image",
+            "originals": {"owned": {"pid": 19, "started_at": "start"}},
+        }
+        observed: dict[str, Any] = {
+            "Image": "image",
+            "State": {"Running": True, "Pid": 19, "StartedAt": "start"},
+        }
         for membership, allowed in (("0::/docker/owned", True), ("0::/docker/foreign", False)):
             with (
                 self.subTest(membership=membership),
@@ -138,6 +147,7 @@ class StoppedWriterHoldTests(unittest.TestCase):
                 patch.object(host, "require_database_cluster"),
                 patch.object(host, "operator_container", return_value=None),
                 patch.object(host, "remove_watchdog"),
+                patch.object(host, "rearm_original_policies"),
                 patch.object(host, "resume_original", side_effect=lambda name, _: name) as resume,
             ):
                 with self.assertRaises(host.RecoveryRequired):
@@ -149,3 +159,120 @@ class StoppedWriterHoldTests(unittest.TestCase):
                 names = [call.args[0] for call in resume.call_args_list]
                 self.assertEqual(names[0], json.loads(path.read_text())["api"])
                 self.assertTrue(json.loads(path.read_text())["released"])
+
+    def test_api_signal_exit_is_qualified_without_accepting_worker_or_oom_exit(self) -> None:
+        state: dict[str, Any] = {"api": "api"}
+        observed: dict[str, Any] = {
+            "Id": "api",
+            "State": {"ExitCode": 128 + signal.SIGTERM, "OOMKilled": False},
+        }
+        self.assertTrue(host.clean_original_exit(observed, state))
+        observed["Id"] = "worker"
+        self.assertFalse(host.clean_original_exit(observed, state))
+        observed["State"]["ExitCode"] = 0
+        self.assertTrue(host.clean_original_exit(observed, state))
+        observed["State"]["OOMKilled"] = True
+        self.assertFalse(host.clean_original_exit(observed, state))
+
+    def test_every_policy_is_rearmed_even_when_the_api_is_still_exiting(self) -> None:
+        from tests.test_database_maintenance_host import state_file
+
+        with TemporaryDirectory() as directory:
+            path = state_file(Path(directory))
+            state = json.loads(path.read_text())
+            containers = {
+                name: {
+                    "Id": name,
+                    "Image": state["image_id"],
+                    "Config": {"Labels": {"com.docker.compose.project": state["project"]}},
+                    "HostConfig": {"RestartPolicy": {"Name": "no"}},
+                    "State": {"Running": True},
+                }
+                for name in state["containers"]
+            }
+
+            def run(*args: str, **_kwargs: Any) -> str:
+                self.assertEqual(args[:2], ("docker", "update"))
+                name = args[-1]
+                containers[name]["HostConfig"]["RestartPolicy"] = state["originals"][name][
+                    "restart_policy"
+                ]
+                return ""
+
+            def pending(_name: str, current: dict[str, Any]) -> str:
+                for name in state["containers"]:
+                    self.assertEqual(
+                        containers[name]["HostConfig"]["RestartPolicy"],
+                        state["originals"][name]["restart_policy"],
+                    )
+                self.assertEqual(set(current["rearmed_containers"]), set(state["containers"]))
+                raise TimeoutError("The original API is finishing its request.")
+
+            with (
+                patch.object(host, "terminate_keeper"),
+                patch.object(host, "inspect_container", side_effect=lambda name: containers[name]),
+                patch.object(host, "run", side_effect=run),
+                patch.object(host, "resume_original", side_effect=pending),
+            ):
+                with self.assertRaises(TimeoutError):
+                    host.release(path)
+            self.assertFalse(json.loads(path.read_text()).get("released", False))
+
+    def test_socket_refresh_survives_the_same_database_process_restart(self) -> None:
+        import socket
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            merged = root / "merged"
+            socket_root = merged / "run/postgresql"
+            socket_root.mkdir(parents=True)
+            endpoint = socket_root / ".s.PGSQL.5432"
+            first = socket.socket(socket.AF_UNIX)
+            self.addCleanup(first.close)
+            first.bind(str(endpoint))
+            overlay = root / "operator.json"
+            overlay.write_text(
+                json.dumps({"services": {"launchplane-maintenance-verification": {}}})
+            )
+            state: dict[str, Any] = {
+                "postgres": "database",
+                "database": "own",
+                "system_identifier": "same-cluster",
+                "overlay": str(overlay),
+                "job_directory": str(root),
+            }
+            postgres: dict[str, Any] = {
+                "State": {"Running": True, "Pid": 10, "StartedAt": "first"},
+                "Mounts": [],
+                "GraphDriver": {"Data": {"MergedDir": str(merged)}},
+            }
+            actual_identity = host.socket_identity
+
+            def identity(path: Path) -> tuple[int, int]:
+                return actual_identity(endpoint if str(path).startswith("/proc/") else path)
+
+            with (
+                patch.object(host, "inspect_container", return_value=postgres),
+                patch.object(host, "run", return_value="/run/postgresql"),
+                patch.object(host, "socket_identity", side_effect=identity),
+                patch.object(
+                    host, "read_database", return_value=state["system_identifier"]
+                ) as cluster,
+            ):
+                host.refresh_verification_socket(state)
+                self.assertEqual(state["verification_socket"]["pid"], postgres["State"]["Pid"])
+                first.close()
+                endpoint.unlink()
+                second = socket.socket(socket.AF_UNIX)
+                self.addCleanup(second.close)
+                second.bind(str(endpoint))
+                postgres["State"].update(Pid=20, StartedAt="restarted")
+                host.refresh_verification_socket(state)
+                self.assertEqual(state["verification_socket"]["pid"], postgres["State"]["Pid"])
+                self.assertEqual(
+                    (state["verification_socket"]["device"], state["verification_socket"]["inode"]),
+                    actual_identity(endpoint),
+                )
+                cluster.return_value = "different-cluster"
+                with self.assertRaises(host.RecoveryRequired):
+                    host.refresh_verification_socket(state)

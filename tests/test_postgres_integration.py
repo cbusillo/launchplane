@@ -16692,6 +16692,18 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 connection.commit()
                 verify_application_reads(connection, service_health=True)
                 self.assertEqual(database_snapshot(connection), before)
+                connection.commit()
+                from control_plane.storage.schema_migration import migrate_schema_on_connection
+                from control_plane.storage.migrations.versions import (
+                    e7c1d5e9a3b6_drop_retired_delivery_tables as retirement,
+                )
+
+                with connection.begin():
+                    migrate_schema_on_connection(connection, target_revision=retirement.revision)
+                retired = database_snapshot(connection)
+                connection.commit()
+                verify_application_reads(connection, service_health=True)
+                self.assertEqual(database_snapshot(connection), retired)
                 for constructor in constructors:
                     constructor.assert_not_called()
 
@@ -16777,7 +16789,12 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             migrate_schema(database_url=url)
             root = Path(directory)
             root.joinpath("state.json").write_text(
-                json.dumps({"hold_id": "own", "original_addresses": ["192.0.2.1"]})
+                json.dumps(
+                    {
+                        "hold_id": "own",
+                        "originals": {"synthetic-writer": {"addresses": ["192.0.2.1"]}},
+                    }
+                )
             )
             expires = datetime.now(timezone.utc) + timedelta(minutes=10)
             arguments = argparse.Namespace(
@@ -16803,6 +16820,65 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(output.getvalue().splitlines()[-1])["event"], "database_released"
             )
+
+    def test_stable_lane_claims_obey_maintenance_and_durable_deploy_admission(self) -> None:
+        from control_plane import service_deploy_drain as drain
+        from control_plane.database_maintenance import maintenance_admission
+        from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.pool import NullPool
+        from tests.test_odoo_prod_retained_volume_backup_import_storage import (
+            _stable_lane_operations,
+            _write_stable_lane_operation,
+            _claim_stable_lane_operation,
+        )
+
+        for kind, operation in _stable_lane_operations().items():
+            with self.subTest(kind=kind), _head_postgres_database() as url:
+                limited = (
+                    make_url(url)
+                    .update_query_dict({"options": "-c lock_timeout=100"})
+                    .render_as_string(hide_password=False)
+                )
+                store = PostgresRecordStore(database_url=limited)
+                engine = create_engine(url, poolclass=NullPool)
+                try:
+                    _write_stable_lane_operation(store, operation)
+                    with engine.connect() as keeper, maintenance_admission(keeper):
+                        with self.assertRaises(DBAPIError):
+                            _claim_stable_lane_operation(store, kind)
+                    record = drain.ServiceDeployDrainRecord(
+                        request_fingerprint="maintenance-fixture",
+                        target_type="compose",
+                        target_id="own-target",
+                        image_reference="synthetic-image",
+                        deployment_marker="paused",
+                        state="requested",
+                        updated_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    with store._session_factory() as session:
+                        drain._write(session, record)
+                        session.commit()
+                    self.assertIsNone(_claim_stable_lane_operation(store, kind))
+                    with store._session_factory() as session:
+                        row = session.get(LaunchplaneServiceDeployDrainRow, "service")
+                        session.delete(row)
+                        session.commit()
+                    claimed = _claim_stable_lane_operation(store, kind)
+                    self.assertIsNotNone(claimed)
+                    with store._session_factory() as session:
+                        observations = drain._operation_observations(
+                            store, session, datetime.now(timezone.utc).isoformat()
+                        )
+                        active = next(
+                            item
+                            for item in observations
+                            if item["operation_id"] == operation.operation_id
+                        )
+                        self.assertTrue(active["blocks_drain"])
+                finally:
+                    store.close()
+                    engine.dispose()
 
     def test_snapshot_settings_restore_on_sql_failure_without_rolling_back_outer_work(self) -> None:
         from control_plane.database_maintenance import _schema_deparse_settings
