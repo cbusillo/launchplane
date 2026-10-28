@@ -2,7 +2,11 @@
 
 import inspect
 
-from control_plane.copy_readback_diagnostics import CopyReadbackRefused, readback_predicate_library
+from control_plane.copy_readback_diagnostics import (
+    CopyReadbackRefused,
+    copy_failure_diagnostics_library,
+    readback_predicate_library,
+)
 from control_plane._odoo_snapshot_files import CLEAN_SNAPSHOT_STATE_DIRECTORY
 from control_plane.preview_filestore import PREVIEW_FILESTORE_LIBRARY
 from control_plane.preview_gateway import PREVIEW_GATEWAY_INSPECTION_LIBRARY
@@ -34,6 +38,7 @@ else:
 VOLUME_BACKING_INSPECTION_LIBRARY = (
     PREVIEW_FILESTORE_LIBRARY
     + readback_predicate_library()
+    + copy_failure_diagnostics_library()
     + inspect.getsource(CopyReadbackRefused)
     + r"""
 import subprocess

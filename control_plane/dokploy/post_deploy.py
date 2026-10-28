@@ -69,7 +69,10 @@ from control_plane.runtime_key_safety import runtime_key_safety_environment_clas
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
 from control_plane.copy_readback_diagnostics import (
     READBACK_FAILURE_MARKERS,
+    COPY_FAILURE_EXIT_MARKER,
+    COPY_FAILURE_STAGE_MARKER,
     ReadbackPredicate,
+    copy_failure_marker_is_safe,
     readback_failure_evidence,
     readback_marker_is_safe,
 )
@@ -432,7 +435,7 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
             and int(site) > 0
             for site in sites
         )
-    if readback_marker_is_safe(key, value):
+    if readback_marker_is_safe(key, value) or copy_failure_marker_is_safe(key, value):
         return True
     if key in {"rehearsal_result", "rehearsal_child_failure", "recipient_recovery_retained"}:
         return bool(
@@ -1143,7 +1146,9 @@ def run_compose_post_deploy_update(
     require_integration_readback_evidence(evidence, readback_policy)
     if fresh_testing_generation is not None and fresh_testing_generation.clean_snapshot_enabled:
         if evidence.get("clean_testing_snapshot_completed") != "true" or not schedule_server_id:
-            raise ValueError("Testing refresh lacks its clean snapshot capture proof.")
+            raise OdooPostDeployReadbackFailure(
+                "Testing refresh lacks its clean snapshot capture proof.", evidence=evidence
+            )
         for key in ("clean_snapshot_database_sha256", "clean_snapshot_filestore_sha256"):
             if re.fullmatch(r"[a-f0-9]{64}", evidence.get(key, "")) is None:
                 raise OdooPostDeployReadbackFailure(
@@ -1154,7 +1159,9 @@ def run_compose_post_deploy_update(
         clean_preview_snapshot is not None
         and evidence.get("clean_preview_snapshot_restored") != "true"
     ):
-        raise ValueError("Preview lacks its clean snapshot restore proof.")
+        raise OdooPostDeployReadbackFailure(
+            "Preview lacks its clean snapshot restore proof.", evidence=evidence
+        )
     if clean_preview_snapshot is not None:
         actual = evidence.get("clean_preview_snapshot_id", "")
         if re.fullmatch(r"[a-f0-9]{64}", actual) is None:
@@ -2599,6 +2606,9 @@ def extract_odoo_post_deploy_readback_markers(deployment: api.JsonObject | None)
         if normalized_key == "website_bootstrap_company_email_skip_reason":
             continue
         if not _safe_odoo_post_deploy_marker(normalized_key, normalized_value):
+            continue
+        if normalized_key in {COPY_FAILURE_STAGE_MARKER, COPY_FAILURE_EXIT_MARKER}:
+            markers.setdefault(normalized_key, normalized_value)
             continue
         markers[normalized_key] = normalized_value
     return markers

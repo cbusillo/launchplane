@@ -19,7 +19,12 @@ import yaml
 
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
 from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
-from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.copy_readback_diagnostics import (
+    COPY_FAILURE_EXIT_MARKER,
+    COPY_FAILURE_STAGE_MARKER,
+    CopyFailureStage,
+    ReadbackPredicate,
+)
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_script
@@ -250,6 +255,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def execute_script(self, script: str) -> str:
         output = io.StringIO()
+        self.script_output = output
         with (
             patch("pathlib.Path.home", return_value=self.root),
             patch("subprocess.run", side_effect=self.command),
@@ -923,7 +929,11 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertTrue(self.ready_before_web)
 
     def service_schedule(
-        self, snapshot: CleanTestingSnapshot, *, elapsed_seconds: int = 0
+        self,
+        snapshot: CleanTestingSnapshot,
+        *,
+        elapsed_seconds: int = 0,
+        evidence_updates: dict[str, str] | None = None,
     ) -> dict[str, str]:
         environment = {
             "ODOO_DB_NAME": self.database,
@@ -941,6 +951,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             return {
                 "log_available": "true",
                 **post_deploy.extract_odoo_post_deploy_readback_markers({"logs": logs}),
+                **(evidence_updates or {}),
             }
 
         with (
@@ -994,6 +1005,17 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(evidence["clean_preview_snapshot_restored"], "true")
         self.assertTrue(self.ready_before_web)
+
+    def test_missing_restore_proof_retains_the_observed_schedule_identity(self) -> None:
+        observed = {
+            "schedule_id": "observed-schedule",
+            "schedule_deployment_id": "observed-deployment",
+            "clean_preview_snapshot_restored": "false",
+        }
+        with self.assertRaises(post_deploy.OdooPostDeployReadbackFailure) as caught:
+            self.service_schedule(self.snapshot, evidence_updates=observed)
+        for key, value in observed.items():
+            self.assertEqual(caught.exception.evidence[key], value)
 
     def test_completed_restore_retry_records_actual_and_requested_snapshot_provenance(self) -> None:
         self.run_script()
@@ -1167,6 +1189,56 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             self.calls.index(["docker", "unpause", "script-runner"]),
             self.calls.index(["docker", "stop", "web"]),
         )
+
+    def test_runner_failure_reports_only_closed_diagnostics_and_keeps_web_stopped(self) -> None:
+        original = self.command
+        stage = CopyFailureStage.MODULE_UPDATE
+        exit_status = 7
+
+        def refuse(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if arguments[-1:] == ["clean-snapshot"]:
+                return subprocess.CompletedProcess(
+                    arguments,
+                    exit_status,
+                    stdout=(
+                        f"{COPY_FAILURE_STAGE_MARKER}={stage}\n"
+                        f"{COPY_FAILURE_STAGE_MARKER}=private-fixture-detail\n"
+                        "password=private-fixture-detail\n"
+                    ).encode(),
+                    stderr=b"private-fixture-detail",
+                )
+            return original(arguments, **kwargs)
+
+        with (
+            patch.object(self, "command", side_effect=refuse),
+            self.assertRaises(RuntimeError),
+        ):
+            self.run_script()
+        self.assertIn(
+            f"{COPY_FAILURE_STAGE_MARKER}={stage}", self.script_output.getvalue().splitlines()
+        )
+        self.assertIn(
+            f"{COPY_FAILURE_EXIT_MARKER}={exit_status}", self.script_output.getvalue().splitlines()
+        )
+        self.assertNotIn("private-fixture-detail", self.script_output.getvalue())
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+        evidence = post_deploy.extract_odoo_post_deploy_readback_markers(
+            {"logs": self.script_output.getvalue()}
+        )
+        self.assertEqual(evidence[COPY_FAILURE_STAGE_MARKER], stage)
+        self.assertEqual(evidence[COPY_FAILURE_EXIT_MARKER], str(exit_status))
+        evidence = post_deploy.extract_odoo_post_deploy_readback_markers(
+            {
+                "logs": self.script_output.getvalue()
+                + f"{COPY_FAILURE_STAGE_MARKER}={CopyFailureStage.RESTORE}\n"
+                + f"{COPY_FAILURE_EXIT_MARKER}=-9\n"
+                + f"{COPY_FAILURE_STAGE_MARKER}=private-fixture-detail\n"
+                + f"{COPY_FAILURE_EXIT_MARKER}=private-fixture-detail\n"
+            }
+        )
+        self.assertEqual(evidence[COPY_FAILURE_STAGE_MARKER], stage)
+        self.assertEqual(evidence[COPY_FAILURE_EXIT_MARKER], str(exit_status))
+        self.assertNotIn("private-fixture-detail", str(evidence))
 
     def test_every_command_inherits_target_lock_and_child_blocks_retry_after_failure(self) -> None:
         command = self.command

@@ -70,6 +70,7 @@ def command(arguments, *, stdin=None):
     result = subprocess.run(arguments, input=stdin, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
+        emit_copy_command_failure(result)
         raise RuntimeError('Clean snapshot preview operation failed')
     return result.stdout
 

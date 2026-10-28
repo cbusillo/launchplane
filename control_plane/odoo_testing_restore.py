@@ -3,7 +3,10 @@
 import base64
 import inspect
 import json
-from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.copy_readback_diagnostics import (
+    ReadbackPredicate,
+    copy_failure_diagnostics_library,
+)
 from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_VALIDATION_LIBRARY
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
@@ -151,7 +154,8 @@ def fresh_testing_mode_refusal(
 TESTING_COPY_COMPLETION_PARAMETER = "launchplane.testing_copy.restore_complete"
 TESTING_COPY_VERIFICATION_FRAME: dict[str, object] = {"type": "complete", "copy_verified": True}
 TESTING_COPY_RUNNER = (
-    ATTACHMENT_VALIDATION_LIBRARY
+    copy_failure_diagnostics_library()
+    + ATTACHMENT_VALIDATION_LIBRARY
     + f"NATIVE_ATTACHMENT_FAILURE_MARKER = {'readback_failed_predicate=' + ReadbackPredicate.ATTACHMENTS!r}\n"
     + """import base64
 import logging
@@ -239,6 +243,7 @@ if settings.host != "database" or settings.db_name != sys.argv[2] or settings.pl
 runner = CopyRunner(settings, None, None)
 runner.acquire_data_workflow_lock()
 restored = False
+copy_failure_stage = CopyFailureStage.RESTORE
 try:
     dump = Path(sys.argv[1])
     copy_marker = """
@@ -257,6 +262,7 @@ try:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         restored = True
         runner.overwrite_database(dump)
+        copy_failure_stage = CopyFailureStage.ATTACHMENTS
         runner.validate_native_attachments()
         dump.unlink()
         runner.connect_to_db()
@@ -269,9 +275,11 @@ try:
             cursor.execute("SELECT value FROM ir_config_parameter WHERE key = %s", (copy_marker,))
             if cursor.fetchone() != (sys.argv[6],):
                 raise RuntimeError("Existing copy lacks this generation's completed restore witness")
+        copy_failure_stage = CopyFailureStage.ATTACHMENTS
         runner.validate_native_attachments()
     else:
         raise RuntimeError("Unknown fresh testing restore phase")
+    copy_failure_stage = CopyFailureStage.PRE_REGISTRY_SANITIZE
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
     if globals().get("sanitize_source_only") is True:
         # An upgrade rehearsal preserves this sanitized source-version state
@@ -280,6 +288,7 @@ try:
     else:
         finish_copy_upgrade(runner)
 except BaseException:
+    print(COPY_FAILURE_STAGE_MARKER + '=' + copy_failure_stage, flush=True)
     if restored and sys.argv[5] == "fresh":
         runner._drop_database_after_failed_restore()
     raise
@@ -302,6 +311,8 @@ def rehearsal_copy_runner(*, sanitize_source_only: bool) -> str:
 
 COPY_UPGRADE_FUNCTION = r"""
 def finish_copy_upgrade(runner):
+    global copy_failure_stage
+    copy_failure_stage = CopyFailureStage.MODULE_UPDATE
     modules = [name.strip() for name in (os.environ.get("ODOO_UPDATE_MODULES") or "").split(",") if name.strip()]
     if not modules or "AUTO" in modules:
         raise RuntimeError("Fresh copy needs exact declared module intent")
@@ -315,8 +326,11 @@ def finish_copy_upgrade(runner):
     print("odoo_module_update_modules_configured=true", flush=True)
     if globals().get("rehearsal_timing_marker"):
         print(rehearsal_timing_marker+"module_update_completed="+datetime.now(timezone.utc).isoformat(), flush=True)
+    copy_failure_stage = CopyFailureStage.CORE_SCHEMA
     runner.assert_core_schema_healthy()
+    copy_failure_stage = CopyFailureStage.USERS
     runner.ensure_gpt_users()
+    copy_failure_stage = CopyFailureStage.POST_SANITIZE
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
     print("testing_copy_sanitized=true", flush=True)
 """
@@ -787,6 +801,7 @@ def command(arguments, *, stdin=None, stdout=None):
     if result.returncode:
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
+        emit_copy_command_failure(result)
         if arguments[0]=='docker' and ('readback_failed_predicate='+ReadbackPredicate.ATTACHMENTS).encode() in (result.stdout or b'').splitlines():
             raise CopyReadbackRefused(ReadbackPredicate.ATTACHMENTS)
         raise RuntimeError("Fresh testing copy command did not pass")
