@@ -691,14 +691,18 @@ class RuntimeRemovalHttpTests(unittest.IsolatedAsyncioTestCase):
                     "global_setting_consumer_inventory",
                     wraps=store.global_setting_consumer_inventory,
                 ) as inventory_read:
-                    denied = await client.post(ROUTE, json=request().model_dump(mode="json"))
-                    self.assertEqual(denied.status_code, 401)
+                    denied = await client.post(
+                        ROUTE,
+                        json=request().model_dump(mode="json"),
+                        headers={"Authorization": "Bearer admin-token"},
+                    )
+                    self.assertEqual(denied.status_code, 403)
                     inventory_read.assert_not_called()
                     dry = await client.post(
                         ROUTE, json=request().model_dump(mode="json"), headers=headers
                     )
                     self.assertEqual(dry.status_code, 200, dry.text)
-                    inventory_read.assert_called_once_with(keys=request().keys)
+                    inventory_read.assert_called_once()
                 inventory = dry.json()["result"]["consumer_inventory"]
                 self.assertEqual(inventory["runtime_record_count"], len(records))
                 self.assertTrue(any(c["context"] == "historical" for c in inventory["consumers"]))

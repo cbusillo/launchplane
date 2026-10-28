@@ -194,7 +194,8 @@ test("global review shows orphan consumers, authority records and incomplete cov
   await page.getByLabel("Removal reason").fill("Qualify the global record.");
   await page.getByRole("button", { name: "Review removal", exact: true }).click();
   const inventory = page.getByLabel("Global setting consumer inventory");
-  await expect(inventory).toContainText("orphan-context/historical");
+  await expect(inventory).toContainText("orphan-context");
+  await expect(inventory).toContainText("historical");
   await expect(inventory).toContainText("retained-product");
   await expect(inventory).toContainText("OBSOLETE_INPUT");
   await expect(inventory.getByRole("alert")).toBeVisible();

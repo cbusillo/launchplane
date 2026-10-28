@@ -87,11 +87,17 @@ of every stored runtime record, product lane and preview profile, target overlay
 and matching runtime secret-binding metadata. Enumeration includes inactive
 profiles, undeclared contexts, historical lane names and global bindings. Preview
 profile matches describe explicit overrides only; they do not resolve the
-template. Lane entries have null `selected_keys` because their effective values
+template. Matching runtime/secret requirements and preview key policies are
+listed separately, including omitted/copied/required/template URL/domain names.
+An unspecified requirement context applies to all product lanes; it is not
+evidence of a global plain-setting source. Declarations do not prove runtime
+consumption. Lane entries have null `selected_keys` because their effective values
 have not been evaluated. An empty list for a source means no selected name in
 that source, not an unused setting. Counts describe the complete enumerated
 tables; each displayed consumer and authority list is capped separately and
 reports truncation.
+Matching entries appear before unmatched entries. The page shows displayed and
+total counts, so even a list containing only matches cannot imply full coverage.
 
 The inventory also lists every saved reconciliation request and production
 recipient, including completed and failed records. These are potential authority

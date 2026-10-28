@@ -14,14 +14,24 @@ from tests.test_reviewed_runtime_setting_removal import runtime
 
 class SettingConsumerInventoryTests(unittest.TestCase):
     def test_orphan_records_retired_profiles_and_global_secret_metadata_are_included(self) -> None:
-        profile = LaunchplaneProductProfileRecord.model_validate(
-            _odoo_profile_payload_with_prod_lane("retired-site")
-        )
+        payload = _odoo_profile_payload_with_prod_lane("retired-site")
+        payload["expected_config"] = {
+            "runtime_environment_keys": [{"key": "REMOVE"}],
+            "managed_secret_bindings": [
+                {"binding_key": "REMOVE", "context": "old-site", "instance": "prod"}
+            ],
+        }
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
         profile = profile.model_copy(
             update={
                 "lifecycle_state": "retired",
                 "preview": profile.preview.model_copy(
-                    update={"context": "old-site", "override_env": {"REMOVE": "private-preview"}}
+                    update={
+                        "context": "old-site",
+                        "override_env": {"REMOVE": "private-preview"},
+                        "copied_env_keys": ("REMOVE",),
+                        "omitted_env_keys": ("REMOVE",),
+                    }
                 ),
             }
         )
@@ -67,6 +77,12 @@ class SettingConsumerInventoryTests(unittest.TestCase):
         self.assertTrue(any(c.context == "orphan" for c in result.consumers))
         self.assertTrue(any(c.product == profile.product for c in result.consumers))
         self.assertEqual(by_kind["secret_binding"][0].selected_keys, ("REMOVE",))
+        self.assertEqual(by_kind["runtime_requirement"][0].selected_keys, ("REMOVE",))
+        self.assertEqual(by_kind["secret_requirement"][0].context, "old-site")
+        self.assertEqual(
+            {c.scope for c in result.consumers if c.kind == "preview_policy"},
+            {"copied_env_keys", "omitted_env_keys"},
+        )
         self.assertEqual(result.runtime_record_count, 3)
         self.assertFalse(result.truncated)
         wire = result.model_dump_json()
@@ -87,7 +103,10 @@ class SettingConsumerInventoryTests(unittest.TestCase):
             )
             for n in range(3)
         )
-        records = (runtime(), runtime(scope="context", context="undeclared"))
+        records = (
+            runtime(env={"OTHER": "unmatched"}),
+            runtime(scope="context", context="undeclared"),
+        )
         result = setting_consumer_inventory(
             keys=("REMOVE",),
             records=iter(records),
@@ -102,4 +121,5 @@ class SettingConsumerInventoryTests(unittest.TestCase):
         self.assertEqual(result.total_consumers, len(records))
         self.assertEqual(result.authority_record_count, len(authorities))
         self.assertEqual(len(result.consumers), 1)
+        self.assertEqual(result.consumers[0].context, "undeclared")
         self.assertEqual(len(result.authority_records), 1)

@@ -14,7 +14,16 @@ from control_plane.contracts.secret_record import SecretBinding
 class SettingConsumer(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    kind: Literal["runtime_record", "lane", "preview_profile", "target_overlay", "secret_binding"]
+    kind: Literal[
+        "runtime_record",
+        "lane",
+        "preview_profile",
+        "preview_policy",
+        "runtime_requirement",
+        "secret_requirement",
+        "target_overlay",
+        "secret_binding",
+    ]
     product: str = ""
     context: str = ""
     instance: str = ""
@@ -91,6 +100,31 @@ def setting_consumer_inventory(
             )
             for lane in profile.lanes
         )
+        for requirement in profile.expected_config.runtime_environment_keys:
+            if requirement.key in selected:
+                consumers.append(
+                    SettingConsumer(
+                        kind="runtime_requirement",
+                        product=profile.product,
+                        context=requirement.context,
+                        instance=requirement.instance,
+                        selected_keys=(requirement.key,),
+                    )
+                )
+        for binding_requirement in profile.expected_config.managed_secret_bindings:
+            if (
+                binding_requirement.integration == "runtime_environment"
+                and binding_requirement.binding_key in selected
+            ):
+                consumers.append(
+                    SettingConsumer(
+                        kind="secret_requirement",
+                        product=profile.product,
+                        context=binding_requirement.context,
+                        instance=binding_requirement.instance,
+                        selected_keys=(binding_requirement.binding_key,),
+                    )
+                )
         if profile.preview.context:
             consumers.append(
                 SettingConsumer(
@@ -103,6 +137,24 @@ def setting_consumer_inventory(
                     ),
                 )
             )
+            for scope, names in (
+                ("required_template_env_keys", profile.preview.required_template_env_keys),
+                ("copied_env_keys", profile.preview.copied_env_keys),
+                ("omitted_env_keys", profile.preview.omitted_env_keys),
+                ("preview_url_env_keys", profile.preview.preview_url_env_keys),
+                ("preview_domain_env_keys", profile.preview.preview_domain_env_keys),
+            ):
+                if matches := tuple(sorted(selected.intersection(names))):
+                    consumers.append(
+                        SettingConsumer(
+                            kind="preview_policy",
+                            product=profile.product,
+                            context=profile.preview.context,
+                            instance=profile.preview.template_instance,
+                            scope=scope,
+                            selected_keys=matches,
+                        )
+                    )
     for target in targets:
         target_count += 1
         consumers.append(
@@ -125,7 +177,14 @@ def setting_consumer_inventory(
                 )
             )
     consumers.sort(
-        key=lambda item: (item.kind, item.product, item.context, item.instance, item.scope)
+        key=lambda item: (
+            not bool(item.selected_keys),
+            item.kind,
+            item.product,
+            item.context,
+            item.instance,
+            item.scope,
+        )
     )
     authorities = sorted(
         authority_records,
