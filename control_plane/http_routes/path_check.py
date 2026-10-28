@@ -1,7 +1,6 @@
 """``GET /v1/products/{product}/path-check``: what stands between the caller
 and the end of a product's path, in one read."""
 
-from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
 
 from fastapi import Depends, Path, Query
@@ -28,6 +27,7 @@ from control_plane.service_auth import (
     director_agent_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.timestamps import utc_now_timestamp
 
 PRODUCT_PATH_CHECK_ROUTE = "/v1/products/{product}/path-check"
 
@@ -137,7 +137,7 @@ def register_product_path_check_read_routes(
                 profile=profile,
                 trace_id=trace_id,
             ),
-            generated_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            generated_at=utc_now_timestamp(),
         )
         return ProductPathCheckResponse(
             trace_id=trace_id,

@@ -2,7 +2,6 @@
 
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -34,6 +33,7 @@ from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_SOURCE_BO
 from control_plane.launchplane_reconcile_authorization import (
     launchplane_reconcile_authorization_allows,
 )
+from control_plane.timestamps import utc_now_timestamp
 
 
 class TestingRecoveryStore(Protocol):
@@ -151,7 +151,7 @@ def service_testing_operation(operation: OdooStableTargetReplacementOperationRec
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return utc_now_timestamp()
 
 
 @contextmanager

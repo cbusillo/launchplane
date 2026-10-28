@@ -4,7 +4,6 @@ import json
 import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from typing import Literal, Protocol, cast
 
@@ -109,6 +108,7 @@ from control_plane.production_backup_authority import (
     resolve_production_backup_authority,
 )
 from control_plane.integration_readback import integration_credential_warnings
+from control_plane.timestamps import utc_now_timestamp
 
 
 from control_plane.preview_inventory_evidence import (
@@ -1098,9 +1098,7 @@ def _production_backup_authority_read_models(
         (lane.instance,),
     ):
         return ()
-    generated_at = (
-        datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    )
+    generated_at = utc_now_timestamp()
     try:
         authority_store = require_production_backup_authority_store(record_store)
     except TypeError:
