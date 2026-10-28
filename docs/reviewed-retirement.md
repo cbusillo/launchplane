@@ -20,11 +20,18 @@ context cannot be substituted. This is separate from product-config's merge
 writer and does not change its ownership or global-target refusal.
 
 The authenticated Director agent can prepare previews and read back results.
-An existing admin can review with `secret.list`. Apply requires
-the signed-in immutable-ID administrator and existing `product_config.apply`
-authority for the exact selected scope, product and context. A `local_admin`,
-workflow, `local_operator` or terminal token cannot apply, even with a matching preview.
-Browser origin/fetch metadata/CSRF checks still apply. No new grant is installed.
+An existing admin can review with `secret.list`. Apply requires existing
+`product_config.apply` authority for the exact selected scope, product and
+context. The signed-in immutable-ID administrator keeps its existing scopes.
+The authenticated Director `local_operator` can also apply an instance-scoped
+removal for an exclusively owned, enabled product preview context with
+`instance: preview`. That context/instance pair must not alias a stable lane.
+This narrow path for the Director's agent rejects testing, production, context and global
+selections; other caller credentials, `local_admin`, workflow and terminal credentials
+cannot use it. The trusted Director marker alone does not make a terminal token
+writable, and standing read authority never supplies the required write grant.
+The same scope and permission checks run before receipt replay. Browser
+origin/fetch metadata/CSRF checks still apply. No new grant is installed.
 
 Dry-run saves a service-owned review containing the complete original record,
 request, reviewer and active authority binding. Its wire response contains only
