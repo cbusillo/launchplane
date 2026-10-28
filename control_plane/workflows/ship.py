@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from control_plane.timestamps import utc_now_timestamp as utc_now_timestamp
+from control_plane import timestamps
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import DelegatedExecutor
@@ -16,6 +16,8 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
+
+utc_now_timestamp = timestamps.utc_now_timestamp
 
 
 def generate_deployment_record_id(*, context_name: str, instance_name: str) -> str:
