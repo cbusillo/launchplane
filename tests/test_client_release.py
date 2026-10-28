@@ -1586,7 +1586,10 @@ class ClientReleaseTests(unittest.TestCase):
             dispatch.assert_not_called()
         operation = self.store.read_odoo_prod_promotion_operation_record(source.operation_id)
         self.assertEqual(operation.status, "pending", operation.error_message)
-        self.assertEqual(operation.error_code, "lane_movement.source_order_unavailable")
+        self.assertEqual(
+            operation.error_code,
+            LaneMovementRefused("source_order_unavailable").record_failure().code,
+        )
         self.assertEqual(self.store.list_deployment_records(), original_records)
         assert operation.authorization is not None
         self.assertEqual(operation.authorization.release_decision_record_id, accepted.record_id)

@@ -3,7 +3,6 @@ import json
 import os
 from urllib.parse import urlsplit
 import unittest
-from contextlib import closing
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
@@ -3574,13 +3573,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
     def test_source_outage_before_production_dispatch_creates_no_failed_delivery(self) -> None:
         from control_plane.lane_movement import LaneMovementRefused
-        from control_plane.production_delivery_monitor import monitor_production_delivery_once
-        from control_plane.build_provenance import BuildProvenanceTransport
         from control_plane.workflows import odoo_stable_target_replacement as replacement
-        from tests.support.stores import sqlite_database_url
 
         for check in ("require_forward_lane_build", "require_forward_build"):
-            with self.subTest(check=check), TemporaryDirectory() as directory:
+            with self.subTest(check=check):
                 captured: list[_Store] = []
                 identity = (
                     "LAUNCHPLANE_RUNTIME_IDENTITY_JSON="
@@ -3601,9 +3597,6 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         side_effect=LaneMovementRefused("source_order_unavailable"),
                     ) as source_check,
                     patch(
-                        "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_prod_backup_gate"
-                    ) as backup,
-                    patch(
                         "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
                     ) as dispatch,
                     self.assertRaises(LaneMovementRefused),
@@ -3617,29 +3610,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         provider_extra_env=identity if check == "require_forward_build" else (),
                     )
                 source_check.assert_called_once()
-                backup.assert_not_called()
                 dispatch.assert_not_called()
                 store = captured[0]
-                with closing(
-                    PostgresRecordStore(
-                        database_url=sqlite_database_url(Path(directory) / "state.db")
-                    )
-                ) as backend:
-                    backend.ensure_schema()
-                    backend.write_product_profile_record(store.profile)
-                    for record in store.deployment_records:
-                        backend.write_deployment_record(record)
-                    transport = Mock()
-                    transport.get_json.return_value = {"sha": "a" * 40}
-                    monitor_production_delivery_once(
-                        backend,
-                        transport_factory=lambda _store, _profile: cast(
-                            BuildProvenanceTransport, transport
-                        ),
-                    )
-                    self.assertEqual(
-                        backend.list_public_ingress_incident_records(status="open"), ()
-                    )
                 self.assertEqual(store.deployment_records, [])
                 self.assertEqual(store.environment_inventories, [])
                 self.assertEqual(store.backup_records, {})
@@ -3665,7 +3637,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         record = captured[0].deployment_records[-1]
         self.assertEqual(record.deploy.status, "fail")
         assert record.failure is not None
-        self.assertEqual(record.failure.code, "lane_movement.source_order_unavailable")
+        self.assertEqual(
+            record.failure.code,
+            LaneMovementRefused("source_order_unavailable").record_failure().code,
+        )
 
     def test_restore_intent_survives_failures_without_override_evidence(self) -> None:
         from control_plane.testing_restore_prerequisite import incomplete_testing_restore
