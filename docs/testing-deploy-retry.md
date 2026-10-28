@@ -14,7 +14,7 @@ testing lane. The standing permission applies only to this testing-only route;
 the mixed production/testing replacement action keeps its existing policy.
 No new grant is part of this operation. All lane, custody, artifact, generation,
 review and worker safeguards still apply.
-Terminal-agent credentials retain their existing read-only transport boundary.
+Terminal-agent credentials are not admitted on this retry route.
 
 1. Read the product's reconcile requests and take `desired_artifact_id` and
    `desired_commit` from its testing plan. Fix the underlying failure first.

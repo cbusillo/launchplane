@@ -32,7 +32,7 @@ exact product/lane. The authenticated Director agent may send through its existi
 authentication marker establishes that identity; a principal name or scoped
 policy rule does not. Other callers still require existing
 `public_ingress_monitor.run_once` access in the Launchplane service context.
-Terminal-agent credentials retain their read-only mutation boundary. The drill
+Terminal-agent credentials are not admitted for sending this drill. The drill
 does not authorize real monitor execution. This capability installs no grants and
 does not work around a denial. Use the supported authorization denial procedure
 when an existing identity cannot send.

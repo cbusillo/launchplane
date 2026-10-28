@@ -109,9 +109,9 @@ standing permission for the product's declared lanes, including testing and
 production. It stays classified as
 `write`, with an explicit standing declaration in the same action catalog. It
 changes Launchplane's monitoring records, not the live site, credentials, access
-or merge authority. Only this monitoring route admits the Director's terminal
-transport to its existing browser/bearer mutation path; other terminal mutation
-restrictions remain. Exact product/lane/check and private endpoint validation,
+or merge authority. Terminal admission follows the
+[authentication and endpoint contracts](service-boundary.md#authentication).
+Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
@@ -143,20 +143,13 @@ authority or a product's lanes. The Director's `local_operator` may apply;
 terminal transport is refused. Reviewed plan digest, idempotency and
 current-record comparison still govern apply.
 
-The expected-config declaration path remains additive for the authenticated
-Director agent. It may add a positive external-provider purpose to an existing
-nonlocal requirement, preserving its other metadata. Clearing purpose, enabling
-or retiring existing generation intent, or adding a provider declaration that
-shadows a local key requires the existing `product_profile.expected_config.apply`
-authority; a live product also retains its admin boundary. Inert planning retains
-its existing read/plan permission. Completed exact-key receipts replay before
-current-state retirement checks, while a new write compares the same captured
-profile that passed those checks. Odoo's driver-owned local passwords cannot
-be declared external through any profile input path. No grant is added here.
+Expected-configuration declaration authority and its authenticated Director-agent
+declaration exception are defined in the
+[product profile contract](service-boundary.md#product-profile-endpoints).
 
 The existing testing-retry route also admits the authenticated Director agent
 through the existing `local_operator` bearer transport under the standing
-permission. Terminal-agent credentials retain their read-only transport boundary.
+permission. Terminal-agent credentials are not admitted on this retry route.
 This is a testing-only reconciler wakeup, not
 inherited authority for `odoo_target_replacement_apply.execute`, whose mixed
 production/testing scope keeps its policy checks. Other callers still require
@@ -224,12 +217,6 @@ caller-supplied claim. Product-level metadata uses the `launchplane` context;
 separate context and instance rules support both scopes. Requests authorize
 the returned product and collections filter each returned record. Revocation
 continues to apply to these scoped rules and to all explicit write permissions.
-
-Expected-configuration dry runs also preserve existing explicit grants: a
-`local_operator` granted `product_profile.expected_config.apply` may inspect the inert
-plan for a live product without changing its profile. The corresponding apply
-still refuses with `live_product_requires_operator`; browser CSRF and read-only
-identity restrictions remain in force.
 
 Product-config likewise lets the authenticated Director agent plan undeclared
 non-secret settings on a Live product, including testing, production and context

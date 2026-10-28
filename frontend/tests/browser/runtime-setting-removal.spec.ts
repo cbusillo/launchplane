@@ -27,6 +27,7 @@ async function setup(page: Page, outcome = "ok", admin = true) {
       surviving_value_count: outcome === "retirement-only" ? 0 : 1,
       unprintable_survivor_count: 0, retirement_intent_count: 2, record_deleted: false,
       requires_compatible_readers_and_rollback: outcome === "retirement-only",
+      instance_plain_setting_effects: body.keys.map((key: string) => ({ key, source_after: "context", effect: "changed" })),
       plan_sha256: digest, review_id: `runtime-removal-${digest}`, applied: body.mode === "apply",
       ...(body.mode === "readback" ? { readback_matches: !outcome.endsWith("mismatch") } : {}),
     } } });
@@ -59,6 +60,7 @@ test("stored removal reviews exact scope, invalidates edits, applies and reads b
   await expect(page.getByRole("heading", { name: "Remove stored settings", level: 1 })).toBeFocused();
   await expect(page.getByRole("button", { name: "Remove reviewed settings" })).toHaveCount(0);
   await review(page);
+  await expect(page.getByLabel("Context fallback comparison")).toContainText("OBSOLETE_INPUT");
   await confirm(page);
   await page.getByLabel("Removal reason").fill("Changed reason requires a fresh review.");
   await expect(page.getByRole("button", { name: "Remove reviewed settings" })).toBeDisabled();

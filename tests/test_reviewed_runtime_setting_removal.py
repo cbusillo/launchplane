@@ -15,6 +15,7 @@ from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.runtime_setting_removal import (
     RuntimeSettingRemovalRequest,
     RuntimeSettingRemovalPlan,
+    RuntimeSettingRemovalStale,
     REVIEW_ROUTE,
     ROUTE,
 )
@@ -165,6 +166,138 @@ class RuntimeRemovalTests(unittest.TestCase):
                 "reviewed_plan_sha256": dry.plan_sha256,
             }
         ), operator
+
+    def reviewed_testing(self) -> tuple[RuntimeSettingRemovalRequest, GitHubHumanIdentity]:
+        payload = policy().model_dump(mode="json")
+        payload["github_humans"].append(
+            {
+                "github_ids": [101],
+                "roles": ["admin"],
+                "products": ["site"],
+                "contexts": ["cm"],
+                "instances": ["testing"],
+                "actions": ["product_config.apply", "secret.list"],
+            }
+        )
+        replacement = _record(
+            policy=LaunchplaneAuthzPolicy.model_validate(payload), revision=self.active.revision + 1
+        )
+        self.store.compare_and_write_authz_policy_record(
+            expected_record=self.active, replacement_record=replacement
+        )
+        self.active = replacement
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(
+                _odoo_profile_payload_with_prod_lane("site")
+            )
+        )
+        self.store.write_runtime_environment_record(
+            runtime(scope="instance", context="cm", instance="testing")
+        )
+        body = request(product="site", scope="instance", context="cm", instance="testing")
+        identity = admin()
+        dry = self.store.runtime_setting_removal(request=body, identity=identity, trace_id="trace")
+        return body.model_copy(
+            update={
+                "mode": "apply",
+                "review_id": dry.review_id,
+                "reviewed_plan_sha256": dry.plan_sha256,
+            }
+        ), identity
+
+    def test_preview_review_omits_context_fallback_and_ignores_context_edits(self) -> None:
+        body, operator = self.reviewed_preview()
+        self.store.write_runtime_environment_record(
+            runtime(scope="context", context="cm", env={"REMOVE": "different-private-value"})
+        )
+        result = self.store.runtime_setting_removal(
+            request=body, identity=operator, trace_id="apply", idempotency_key="preview-context"
+        )
+        self.assertTrue(result.applied)
+        self.assertIsNone(result.instance_plain_setting_effects)
+        self.assertIsNone(result.context_values_sha256)
+
+    def test_instance_review_reports_context_fallback_without_values(self) -> None:
+        body, operator = self.reviewed_testing()
+        self.store.write_runtime_environment_record(
+            runtime(scope="context", context="cm", env={"REMOVE": "different-private-value"})
+        )
+        result = self.store.runtime_setting_removal(
+            request=body.model_copy(update={"mode": "dry-run"}), identity=operator, trace_id="trace"
+        ).model_dump(mode="json", exclude_none=True)
+        self.assertEqual(
+            result["instance_plain_setting_effects"],
+            [{"key": "REMOVE", "source_after": "context", "effect": "changed"}],
+        )
+        self.assertNotIn("private-value", json.dumps(result))
+
+    def test_instance_apply_refuses_changed_or_new_context_fallback(self) -> None:
+        for original_context in (None, "original-context-value"):
+            with self.subTest(original_context=original_context):
+                if original_context is not None:
+                    self.store.write_runtime_environment_record(
+                        runtime(scope="context", context="cm", env={"REMOVE": original_context})
+                    )
+                body, operator = self.reviewed_testing()
+                self.store.write_runtime_environment_record(
+                    runtime(scope="context", context="cm", env={"REMOVE": "changed-context-value"})
+                )
+                with self.assertRaises(RuntimeSettingRemovalStale):
+                    self.store.runtime_setting_removal(
+                        request=body,
+                        identity=operator,
+                        trace_id="apply",
+                        idempotency_key=f"drift-{original_context is not None}",
+                    )
+                remaining = self.store.list_runtime_environment_records(
+                    context_name="cm", instance_name="testing"
+                )
+                lane = next(record for record in remaining if record.scope == "instance")
+                self.assertIn("REMOVE", lane.env)
+
+    def test_instance_review_compares_normalized_site_values_without_global_fallback(self) -> None:
+        body, operator = self.reviewed_testing()
+        self.store.write_runtime_environment_record(
+            runtime(scope="context", context="cm", env={"SAME": 1, "EMPTY": ""})
+        )
+        self.store.write_runtime_environment_record(
+            runtime(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={"SAME": "1", "EMPTY": "", "GLOBAL_ONLY": "global-value"},
+            )
+        )
+        self.store.write_runtime_environment_record(runtime(env={"GLOBAL_ONLY": "global-value"}))
+        result = self.store.runtime_setting_removal(
+            request=body.model_copy(
+                update={"mode": "dry-run", "keys": ("SAME", "GLOBAL_ONLY", "EMPTY")}
+            ),
+            identity=operator,
+            trace_id="trace",
+        )
+        effects = result.instance_plain_setting_effects
+        assert effects is not None
+        self.assertEqual(
+            {item.key: (item.source_after, item.effect) for item in effects},
+            {
+                "EMPTY": ("context", "unchanged"),
+                "GLOBAL_ONLY": (None, "absent"),
+                "SAME": ("context", "unchanged"),
+            },
+        )
+
+    def test_instance_apply_ignores_unselected_context_and_global_changes(self) -> None:
+        body, operator = self.reviewed_testing()
+        self.store.write_runtime_environment_record(
+            runtime(scope="context", context="cm", env={"UNRELATED": "new-context-value"})
+        )
+        self.store.write_runtime_environment_record(runtime(env={"REMOVE": "new-global-value"}))
+        result = self.store.runtime_setting_removal(
+            request=body, identity=operator, trace_id="apply", idempotency_key="unrelated-context"
+        )
+        self.assertTrue(result.applied)
+        self.assertTrue(result.readback_matches)
 
     def test_preview_removal_refuses_other_scopes_and_identity_types(self) -> None:
         body, operator = self.reviewed_preview()

@@ -12,13 +12,7 @@ HTTP ingress, the GitHub Actions OIDC trust model, the claim-to-permission
 mapping, and the first stable API payloads Launchplane should accept.
 
 Detailed route descriptions below document current or staged implementation
-contracts; they are not proof of current deployment or authorization. The
-reconciled target is tracked in issue `#2240`: one scoped delegated-engineering
-capability including diagnostic reads, equal Codex CLI and Codex Lab
-clients, narrow Client review without operational authority, and provider-neutral
-Launchplane merge/delivery orchestration. Its ordinary-agent delegated-delivery
-part is retired (see `DIRECTION.md`); the rest stays inactive until the Director
-approves its grants.
+contracts; they are not proof of current deployment or authorization.
 
 It exists to keep new cross-product work aligned with Launchplane's target form:
 
@@ -1066,8 +1060,8 @@ The `/v1/manager-preview-approval/github-webhook` URL and its
 for signed trusted-maintenance evidence. Manager approval itself is retired; the
 webhook records no approval and the manager reconcile route is deleted.
 
-Historical work-request, shared preview-readiness and product-profile list
-reads, plus engineering-review routes, retain the
+Historical Every Code work-request, shared preview-readiness and product-profile
+list reads, plus advisory engineering-review record routes, retain the
 existing `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` bearer identity. The retired local
 worker cannot create or mutate Every Code requests through the service; the
 credential name does not select an executable or grant new authority.
@@ -1080,24 +1074,6 @@ DB-backed review authority and each claimed run to match both values before a
 scoped review credential is decrypted or returned.
 
 
-Local terminal agents that need Launchplane context use a separate read-only
-bearer credential, not the browser OAuth session cookie and not
-`LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`. Configure
-`LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN` on the service and provide the same
-secret to the trusted local terminal agent out of band. Configure
-`LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and
-`LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` to identify the local Director subject and
-token label used by `terminal_agents` authz policy rules; both identity values
-are required whenever the bearer token is configured. The service accepts this
-identity on redacted `GET` routes and the inert ordinary-agent enrollment
-proposal route only when exactly one managed rule authorizes that request. It
-cannot dispatch product config writes, prod promotion, destructive cleanup,
-authz policy mutation, read-model POSTs, or plaintext secret reveal routes.
-Policy still scopes which redacted read actions and product/context pairs the
-agent can access, such as `product_environment.read` for product environment and
-config-status diagnostics. Enrollment proposal authority creates no principal,
-credential, session, grant, activation, or worker start on its own.
-
 Trusted Director terminals that need to make Launchplane-owned admin mutations
 without a browser session can use separate Director-agent bearer credentials.
 Configure `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` on the service and provide the same
@@ -1106,8 +1082,8 @@ secret to trusted local agents through
 `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
 `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` to identify the actor in audit and
 idempotency records; both identity values are required whenever the bearer token
-is configured. Routine admin authority is DB-backed by `local_operators`
-authz policy rules, scoped by subject, token label, product, context, and action.
+is configured. Admission and authority follow each endpoint
+and the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission).
 
 Rare `local_admin` operations use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` with configured
 `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT` and `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`.
@@ -1117,7 +1093,7 @@ token alone does not grant blanket access. Director-agent write requests must
 include a non-empty `reason`; product-config apply is also rejected until the
 service has recorded a matching Director-agent dry-run for the same payload. These
 requests still use Launchplane records, redacted responses, runtime key-safety
-policy, and managed secret storage. Terminal-agent credentials remain read-only.
+policy, and managed secret storage.
 
 `GET /v1/previews/readiness` returns a compact agent-safe projection of Every
 Code preview gate records. It requires `every_code_preview_gate.read` for
@@ -1392,7 +1368,7 @@ path for merge train policy records. It requires database storage and
 and `apply`, and writes the supplied typed record only in apply mode. GitHub
 Actions OIDC callers, signed-in GitHub human sessions, and `local_operator`/`local_admin`
 bearer callers may use the route when policy grants the action; terminal-agent
-credentials remain read-only. Apply requests preserve `Idempotency-Key`
+credentials are not admitted on this route. Apply requests preserve `Idempotency-Key`
 replay/conflict handling when callers provide a key; dry-runs remain stateless
 and repeatable. Shared and production policy changes should use this route rather
 than direct DB CLI writes from an arbitrary checkout.
@@ -1416,8 +1392,6 @@ GitHub Actions workflow
 
 ## Authentication
 
-Machine callers should authenticate with GitHub Actions OIDC.
-
 Human browser callers authenticate with GitHub OAuth. Launchplane owns the
 browser session after OAuth callback and sets an `HttpOnly`, `SameSite=Lax`
 session cookie signed with `LAUNCHPLANE_SESSION_SECRET`. Sessions are backed by
@@ -1435,11 +1409,19 @@ active DB policy could not be loaded, and `409` means a fenced schema exposed an
 ambiguous active-policy state. These responses occur before route-specific
 authorization or handler execution.
 
-Local terminal agents should use the dedicated terminal-agent read bearer token
-when they only need redacted Launchplane context from a trusted admin shell.
-This avoids copying browser session cookies into terminal processes and keeps
-agent credentials independent from GitHub Actions OIDC and Every Code worker
-automation.
+Local terminal agents that need Launchplane context use a separate terminal-agent
+bearer credential, not the browser OAuth session cookie and not
+`LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`. Configure
+`LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN` on the service and provide the same
+secret to the trusted local terminal agent out of band. Configure
+`LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and
+`LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` to identify the local Director subject and
+token label used by `terminal_agents` authz policy rules; both identity values
+are required whenever the bearer token is configured. The configured terminal
+bearer authenticates as the Director's `terminal_agent` identity. Its authority
+follows the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission),
+subject to each endpoint's admission and safety contract. Where that permission
+is inherited, `terminal_agents` policy rules do not narrow it.
 
 ### Identity Types
 
@@ -1450,8 +1432,9 @@ authorization checks and audit records consume them:
   claims, including the immutable numeric repository and repository-owner IDs.
 - `github_human`: browser-session humans from GitHub OAuth and Launchplane
   session cookies.
-- `terminal_agent`: read-only trusted terminal agents authenticated by the
-  dedicated terminal-agent bearer token.
+- `terminal_agent`: trusted terminal agents authenticated by the dedicated
+  terminal-agent bearer token; admission and authority are route-specific as
+  described above.
 - `local_operator`: reason-bearing admin automation authenticated by the
   dedicated `local_operator` bearer token.
 - `local_admin`: rare privileged admin automation authenticated by the dedicated
@@ -1490,10 +1473,6 @@ That keeps the audience tied to the Launchplane service identity instead of to a
 temporary repo or local CLI name.
 
 ## Authorization Model
-
-Launchplane should authorize machine callers from workflow identity claims,
-not from human repo-admin status and not from copied long-lived service
-tokens.
 
 The first policy model should be allow-list based and fail closed.
 
@@ -1622,14 +1601,12 @@ subject model before diagnostics or downstream intent contracts consume them:
   are context-only; write, prod, destructive, secret-backed, and policy-admin
   actions require explicit matching policy grants for the workflow identity.
 - `terminal_agent`: trusted local terminal agents authenticated by the dedicated
-  read bearer token. These subjects are always read-only context consumers and
-  cannot use POST routes, product mutations, authz policy changes, destructive
-  cleanup, or secret-backed actions even if a policy rule is too broad.
+  terminal-agent bearer token, with admission and authority defined in
+  [Authentication](#authentication).
 - `local_operator`: trusted Director terminal agents authenticated by the dedicated
-  write bearer token. Their authority comes only from exact `local_operators`
-  policy rules (subject, token label, product, context, action) on routes that
-  accept this identity. Product-config writes require a non-empty reason, and
-  product-config apply also requires a matching recorded dry-run.
+  write bearer token, with authority following the
+  [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission)
+  and each endpoint's admission and safeguards.
 - `github_human`: browser-session humans with `read_only` or `admin` role from
   GitHub human policy rules or bootstrap admin email matching. Read-only humans
   are `limited_remote_user` consumers: even if a rule is accidentally broad,
@@ -1961,7 +1938,19 @@ without an additional grant. This exception cannot remove requirements or
 publish Client credential requests through `owner_input`, and does not extend
 to other agent identities. Other callers and removals require
 `product_profile.expected_config.apply` for the target product in the
-Launchplane service context. The route loads the existing DB-backed product profile,
+Launchplane service context.
+On a Live product, `local_operator` apply outside the Director add-only exception
+returns `live_product_requires_operator` even with that grant; inert dry runs
+require existing plan or apply authority unless the Director declaration exception
+applies. Browser CSRF remains in force; terminal-agent credentials are not
+admitted on this declaration route. The Director may add a positive external-provider
+purpose to an existing nonlocal requirement while preserving its other metadata.
+Clearing purpose, enabling or retiring existing generation intent, or declaring
+a provider that shadows a local key requires `product_profile.expected_config.apply` and retains
+the Live-product admin boundary. Odoo's driver-owned local passwords cannot be
+declared external through any profile input path. Completed exact-key receipts
+replay before current-state retirement checks; new writes compare the same
+captured profile that passed those checks. The route loads the existing DB-backed product profile and
 appends supplied runtime keys or managed secret binding requirements only when
 absent, and removes requirements named in `remove_runtime_environment_keys` or
 `remove_managed_secret_bindings`. Adding and removing the same identity in one
@@ -2156,7 +2145,7 @@ runtime values, and write-only managed secret values. Dry-run requires the
 `product_config.plan` action; apply requires `product_config.apply`. The route
 accepts GitHub Actions OIDC callers, signed-in GitHub human sessions, and the
 dedicated `local_operator` bearer credential, but terminal-agent read bearer
-credentials remain read-only and cannot execute the mutation. Signed-in humans
+credentials are not admitted on this route. Signed-in humans
 and `local_operator`/`local_admin` identities require a non-empty `reason`; their apply
 requests also require an `Idempotency-Key` and a previously recorded matching
 dry-run. Matching uses the normalized target, runtime input, and managed-secret
@@ -2278,8 +2267,9 @@ site's own setting. Because no declaration vouches for it, Launchplane refuses
 it with `runtime_setting_refused` when it is not an env key name, names a
 declared managed-secret binding, or looks like a credential by name or value.
 On a `live` product, the `local_operator` credential cannot apply an
-undeclared setting (`live_product_requires_operator`), the same guard as
-declaring a key. The authenticated Director agent may dry-run those settings
+undeclared setting (`live_product_requires_operator`). Expected-config
+declarations follow the [product profile contract](#product-profile-endpoints).
+The authenticated Director agent may dry-run those settings
 on testing, production or context scope; planning persists only its own review
 evidence and grants no apply authority. Other scoped callers retain their
 existing authorization and live-product guard. `retired_provider_keys` adds keys
@@ -4430,6 +4420,13 @@ The privileged-operation API is a typed governed surface, not an execution
 proxy. Human create/read/cancel routes are under
 `/v1/privileged-operations/plans`; the counts-only agent read is under
 `/v1/agent/privileged-operations/plans/{operation_id}`.
+
+`POST /v1/agent/privileged-operations/plans` accepts `terminal_agent` and
+`local_operator` proposal identities under the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission)
+or the existing managed proposal rule. Its closed descriptors are
+`managed-authz-policy-set`, `managed-merge-train-policy-import` and
+`production-backup-policy`; secret rotation and retired delivery descriptors
+are refused. A proposal records inert review intent, never approval or execution.
 
 The human list route returns a strict versioned semantic review projection, and
 `GET /v1/privileged-operations/plans/{operation_id}/review` returns the same

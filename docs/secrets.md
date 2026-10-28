@@ -342,9 +342,6 @@ authentication before creating a separate private token file.
   runtime worker commands, host/user metadata, and non-secret operation settings
   from DB-backed runtime-environment records. Private keys, tokens, and
   known-host material must come from managed secret bindings.
-- GitHub workflows should not carry provider credentials such as `DOKPLOY_HOST`,
-  `DOKPLOY_TOKEN`, or project names; they should call Launchplane with OIDC and
-  operation intent.
 - Runner-host hygiene cross-repository evidence uses a dedicated GitHub App.
   Store its non-secret client ID in the documented repository variable and its
   private key in `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY`.
@@ -857,8 +854,9 @@ decryption key state denies the reveal or resolution.
   do not need a runtime key-safety target.
 - Trusted local agents that need to call the deployed service instead of a
   browser session should source `~/.config/launchplane/local-operator.env` and
-  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine Director-agent writes. Exact
-  authority is DB-backed by `local_operators` authz policy rules. Rare privileged
+  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine Director-agent writes under
+  the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission)
+  and endpoint admission. Rare privileged
   Director-agent writes can use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` only when matching
   `local_admins` authz policy rules grant the action. Write requests sent with
   either token must include a reason. Product-config apply also requires a
