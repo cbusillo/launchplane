@@ -906,12 +906,6 @@ Production policy changes are a Director decision made through the supported
 DB-native administration route; total-lockout recovery remains explicitly
 deferred.
 
-The ordinary-agent delegated-delivery pilot is retired (see
-[DIRECTION.md](../DIRECTION.md#retired)); issue
-[#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes its code.
-Do not stage or install its `operator.ordinary-agent-delivery-administration`
-managed set.
-
 After parity and administration gates pass, protected desired-set secrets and
 routine authorization workflows must be retired. GitHub may remain an identity
 provider and transport for already-authorized workloads. No total-lockout
@@ -1052,21 +1046,10 @@ records are history only, not authority.
 
 ### Retained Agent Delivery Administration Records
 
-The retired `ordinary-agent-delivery-administration` candidate is no longer
-accepted by authorization-candidate preparation, including replay. Its producer
-and exclusive activation checks are deleted. Existing managed-policy records
-remain readable through their ordinary plan and semantic-review readers.
-
-The exact administration-request recognizer remains for historical semantic
-projection. The administration state and removal predicates remain consumed by
-`authz_grant_service` and the PostgreSQL policy compare-and-write guard, so
-removing stored administration access still checks retained activation history.
-Schema-3 parsing and retained record validation remain supported.
-
-The separate delivery-policy compiler remains consumed by
-`privileged_operation_registry._validate_ordinary_agent_policy_preparation` to
-reconstruct the request from inventory and merge-policy baselines and reject
-shape drift. It does not restore candidate production or ordinary delivery.
+The retired `ordinary-agent-delivery-administration` candidate and its replay
+are no longer accepted by authorization-candidate preparation. Stored records
+remain readable, and administration-rule removal stays guarded by activation
+history. Schema-3 parsing and retained request validation remain supported.
 
 ### Preparing Administrator Product Evidence Access
 

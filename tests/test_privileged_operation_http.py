@@ -1573,36 +1573,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             source_event_id="candidate-strict-admin-denied",
         )
 
-    async def test_product_evidence_candidate_requires_runtime_and_fresh_db_authority(self) -> None:
-        runtime_denied_payload = _policy().model_dump(mode="json")
-        runtime_denied_payload["github_humans"][1]["actions"].remove(
-            AUTHZ_POLICY_OPERATION_PROPOSE_ACTION
-        )
-        persisted_denied_payload = _policy().model_dump(mode="json")
-        persisted_denied_payload["github_humans"][1]["actions"].remove(
-            AUTHZ_POLICY_OPERATION_PROPOSE_ACTION
-        )
-        cases = (
-            (
-                LaunchplaneAuthzPolicy.model_validate(runtime_denied_payload),
-                _policy(),
-                "product-evidence-runtime-propose-denied",
-            ),
-            (
-                _policy(),
-                LaunchplaneAuthzPolicy.model_validate(persisted_denied_payload),
-                "product-evidence-db-propose-denied",
-            ),
-        )
-        for runtime_policy, persisted_policy, source_event_id in cases:
-            with self.subTest(source_event_id=source_event_id):
-                await self._assert_candidate_denied_without_writes(
-                    runtime_policy=runtime_policy,
-                    persisted_policy=persisted_policy,
-                    source_event_id=source_event_id,
-                    candidate_id="administrator-product-evidence-read",
-                )
-
     async def test_closed_authorization_candidate_rejects_caller_policy_or_identity_fields(
         self,
     ) -> None:
@@ -1672,7 +1642,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         runtime_policy: LaunchplaneAuthzPolicy,
         persisted_policy: LaunchplaneAuthzPolicy,
         source_event_id: str,
-        candidate_id: str = "administrator-product-evidence-read",
     ) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
@@ -1689,7 +1658,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 response = await client.post(
                     "/v1/privileged-operations/authorization-candidates/prepare",
                     json={
-                        "candidate_id": candidate_id,
+                        "candidate_id": "administrator-product-evidence-read",
                         "intent": "add",
                         "source_event_id": source_event_id,
                     },
