@@ -44,6 +44,14 @@ class ProductionBackupNotAdmissible(GenericWebPromotionAdmissionRefused):
         self.reason = reason
 
 
+def _backup_admission_refusal(
+    message: str, *, reason: Literal["expired", "superseded", "busy"], promotion_action: str
+) -> click.ClickException:
+    if promotion_action == GENERIC_WEB_PROMOTION_BACKUP_ACTION:
+        return ProductionBackupNotAdmissible(message, reason=reason)
+    return click.ClickException(message)
+
+
 def backup_capture_freshness_refusal(
     binding: ProductionBackupGateWorkerRequest,
     evidence: dict[str, str],
@@ -225,8 +233,10 @@ def require_production_promotion_backup(
         now = datetime.fromisoformat(admitted_at) if admitted_at else cutover_recovery.began_at
     freshness = backup_capture_freshness_refusal(binding, evidence, now=now)
     if freshness == "expired":
-        raise ProductionBackupNotAdmissible(
-            "Production backup evidence is stale or future-dated.", reason="expired"
+        raise _backup_admission_refusal(
+            "Production backup evidence is stale or future-dated.",
+            reason="expired",
+            promotion_action=promotion_action,
         )
     if freshness:
         raise click.ClickException("Production backup evidence has an invalid or future timestamp.")
@@ -247,8 +257,10 @@ def require_production_promotion_backup(
             and other.started_at
             and other.started_at >= operation.started_at
         ):
-            raise ProductionBackupNotAdmissible(
-                "Production backup evidence was superseded by another capture.", reason="superseded"
+            raise _backup_admission_refusal(
+                "Production backup evidence was superseded by another capture.",
+                reason="superseded",
+                promotion_action=promotion_action,
             )
     for promotion in promotions:
         if promotion.record_id == active_promotion_record_id:
@@ -303,7 +315,11 @@ def production_promotion_backup_guard(
         raise click.ClickException("Production promotion admission does not bind its backup.")
     with record_store.production_backup_source_lock(_source_key(operation)) as check_lock:
         if check_lock is None:
-            raise ProductionBackupNotAdmissible("Production backup source is busy.", reason="busy")
+            raise _backup_admission_refusal(
+                "Production backup source is busy.",
+                reason="busy",
+                promotion_action=promotion_action,
+            )
 
         effects_started = False
         protection_evidence = {"source_lock_status": "held"}

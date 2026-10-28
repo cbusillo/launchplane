@@ -2759,6 +2759,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         operation = self.store.list_verireel_prod_backup_gate_operation_records()[0]
         record = self.store.read_backup_gate_record(operation.backup_record_id)
         self.store.write_backup_gate_record(record.model_copy(update={"status": "fail"}))
+        self.assertEqual(len(self.advance()), 1)
         self.assertEqual(self.advance(), ())
         self.assertEqual(self.provider.deployed_artifacts, [])
 

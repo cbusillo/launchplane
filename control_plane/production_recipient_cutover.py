@@ -62,6 +62,7 @@ from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_depl
 from control_plane.workflows.generic_web_promotion import _verify_health_evidence_with_identity
 from control_plane.workflows.production_promotion_backup import (
     GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+    ProductionBackupNotAdmissible,
     backup_capture_freshness_refusal,
     _read_operation,
     _source_key,
@@ -949,7 +950,11 @@ class RecipientCutoverAdapter:
         )
         with self.store.production_backup_source_lock(_source_key(operation)) as locked:
             if locked is None:
-                raise ProviderMutationRejectedError(ValueError("Production backup source is busy."))
+                raise ProviderMutationRejectedError(
+                    ProductionBackupNotAdmissible(
+                        "Production backup source is busy.", reason="busy"
+                    )
+                )
 
             def backup_check() -> BackupGateEvidence:
                 locked()

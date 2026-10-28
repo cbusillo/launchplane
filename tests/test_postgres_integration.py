@@ -9845,8 +9845,9 @@ class RealPostgresProviderOperationTests(unittest.TestCase):
                     plan = case.continue_backup(decision)
                     with store.production_backup_source_lock(_source_key(original)) as held:
                         self.assertIsNotNone(held)
-                        with self.assertRaises(BackupContinuationRefused):
+                        with self.assertRaises(BackupContinuationRefused) as refusal:
                             case.continue_backup(decision, digest=plan.review_digest, apply=True)
+                        self.assertEqual(refusal.exception.code, "backup_source_busy")
                         self.assertEqual(store.read_backup_gate_record(backup.record_id), backup)
                         self.assertEqual(
                             store.read_verireel_prod_backup_gate_operation_record(operation_id),
@@ -13499,6 +13500,15 @@ class RealPostgresRecipientReleaseSettingsTests(unittest.TestCase):
 
     def test_native_drill_and_ordinary_settings_handoff(self) -> None:
         self.fixture.test_native_drill_keeps_authority_through_publication_and_inverse()
+
+    def test_continuation_after_native_release_hands_off_to_ordinary(self) -> None:
+        self.fixture.test_later_ordinary_release_can_continue_after_completed_native_publication()
+
+    def test_native_second_backup_continuation_preserves_inverse(self) -> None:
+        self.fixture.test_native_second_backup_can_continue_after_completed_inverse()
+
+    def test_native_busy_source_has_no_delivery_failure(self) -> None:
+        self.fixture.test_busy_native_source_leaves_the_release_waiting_without_delivery_failure()
 
 
 class RealPostgresRecipientWriterTests(unittest.TestCase):

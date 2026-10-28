@@ -18663,7 +18663,10 @@ class PostgresRecordStore(HumanSessionStore):
         resumed: VeriReelProdBackupGateOperationRecord,
         expected_backup: BackupGateRecord,
     ) -> bool:
-        from control_plane.client_release_backup_continuation import require_continuable_backup
+        from control_plane.client_release_backup_continuation import (
+            BackupContinuationRefused,
+            require_continuable_backup,
+        )
         from control_plane.workflows.production_promotion_backup import _source_key
 
         if expected.binding is None:
@@ -18672,7 +18675,7 @@ class PostgresRecordStore(HumanSessionStore):
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
             if not self._try_production_backup_source_lock(session, _source_key(expected)):
-                return False
+                raise BackupContinuationRefused("backup_source_busy")
             row = session.scalar(
                 select(LaunchplaneVeriReelProdBackupGateOperationRow)
                 .where(

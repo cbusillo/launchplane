@@ -17,6 +17,7 @@ from control_plane.client_release import (
     client_release_step_operation_id,
     client_release_steps,
     client_release_grant_allows,
+    native_release_recipient,
     read_client_release_step_views,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -144,14 +145,13 @@ def require_continuable_backup(
             promotion.backup_gate.evidence.get("infrastructure_backup_record_id"),
         ):
             raise BackupContinuationRefused("backup_capture_already_consumed")
-    from control_plane.production_recipient import custody
     from control_plane.production_recipient_cutover import (
         _attempt_execution_started,
         cutover_reconciliation_key,
     )
 
-    recipient = custody(store, operation.product, operation.context)
-    if recipient is not None and recipient.phase != "retired" and recipient.execution:
+    recipient = native_release_recipient(store, profile, decision_record_id=decision.record_id)
+    if recipient is not None and recipient.execution:
         step = ClientReleaseStep("promote", steps[index].attempt)
         request = client_release_promotion_request(profile, decision, operation.backup_record_id)
         key = build_provider_operation_key(

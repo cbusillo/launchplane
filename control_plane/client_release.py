@@ -1691,10 +1691,13 @@ def _advance(
                 _generic_web_drill_target(store, profile, decision)
             return _queue_backup(store, profile, decision, step, context, authorized_at)
         backup_record_id = str(getattr(previous, "backup_record_id", ""))
-        if profile.driver_id == "generic-web" and (
-            refusal := _release_backup_refusal(store, profile, backup_record_id)
-        ):
-            raise ClientReleaseNotReady(refusal)
+        if profile.driver_id == "generic-web":
+            try:
+                refusal = _release_backup_refusal(store, profile, backup_record_id)
+            except (FileNotFoundError, ValueError, click.ClickException):
+                refusal = ""
+            if refusal:
+                raise ClientReleaseNotReady(refusal)
         return _queue_promotion(
             store,
             control_plane_root,
