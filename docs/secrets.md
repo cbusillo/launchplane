@@ -165,7 +165,8 @@ Provider qualification remains separate. The lane must have an explicit
 `dev_store` integration allowance with evidence of its independently isolated
 test account. The testing lane's **Testing integration allowances** panel reviews
 and saves that allowance through the existing service, preserving the other
-allowances. It retains the original metadata request and operation key after an
+allowances. If the review would change another allowance, the panel requires a
+fresh read and review. It retains the original metadata request and operation key after an
 uncertain response, including after reload. A testing class or an
 allowance cannot make a live-capable key safe. Launchplane cannot inspect the
 provider's permissions; the admin verifies them before entry. `pre_live` and

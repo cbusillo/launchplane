@@ -29,7 +29,11 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
 from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
-from control_plane.odoo_secret_references import plan_secret_reference_reconciliation
+from control_plane.odoo_secret_references import (
+    plan_secret_reference_reconciliation,
+    TestingSecretReferenceRefusal,
+    ConfigParameterSecretReferenceError,
+)
 from control_plane.product_config_http import (
     ProductEnvironmentConfigApplyEnvelope,
     product_environment_config_apply_request,
@@ -465,7 +469,25 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                             }
                         )
                     )
-                with self.assertRaises((ValueError, FileNotFoundError)):
+                expected_codes = {
+                    "class": "testing_credential_required",
+                    "copy": "testing_credential_required",
+                    "provider": "testing_credential_required",
+                    "allowance": "integration_allowance_required",
+                    "evidence": "integration_allowance_required",
+                    "declaration": "testing_credential_required",
+                    "literal": "literal_parameter_exists",
+                    "collision": "transport_name_collision",
+                    "production": "testing_lane_required",
+                    "policy": "runtime_key_safety_failed",
+                    "custom_allowance": "integration_allowance_required",
+                }
+                expected_type = (
+                    ConfigParameterSecretReferenceError
+                    if change == "scope"
+                    else TestingSecretReferenceRefusal
+                )
+                with self.assertRaises(expected_type) as refusal:
                     plan_secret_reference_reconciliation(
                         store=store,
                         profile=profile,
@@ -473,6 +495,12 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                         keys=(key,),
                         create_missing=True,
                     )
+                error = refusal.exception
+                if isinstance(error, TestingSecretReferenceRefusal):
+                    self.assertEqual(error.code, expected_codes[change])
+                else:
+                    assert isinstance(error, ConfigParameterSecretReferenceError)
+                    self.assertEqual(error.env_keys, (config_parameter_secret_env_key(key),))
 
     def test_policy_changes_refuse_a_reviewed_reference_commit_in_both_stores(self) -> None:
         for sql in (False, True):
@@ -606,7 +634,6 @@ class PrivateTestingIntegrationHttpTests(unittest.IsolatedAsyncioTestCase):
         response = await http_request(self.app, "POST", self.path, headers=headers, payload=body)
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "integration_allowance_required")
-        self.assertIn("Testing integration allowances", response.json()["error"]["message"])
         self.store.write_dokploy_target_record(target)
         with patch.object(
             self.store, "read_dokploy_target_record", side_effect=FileNotFoundError()

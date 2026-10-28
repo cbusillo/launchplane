@@ -17,6 +17,7 @@ test("private testing integration entry and reference recovery", { tag: "@layout
   const referenceApplies: Array<{ body: unknown; key: string }> = [];
   const allowanceApplies: Array<{ body: unknown; key: string }> = [];
   let allowances = [{ integration: "other", kind: "read_only_source", reason: "Existing independent source", evidence: "Existing proof" }];
+  let staleRead = true;
   let saved = false;
   const referenceResult = () => ({ product: "atlas-commerce", context: data.config!.context, instance: "testing",
     entries: [{ key: "printnode.api_key", runtime_key: bindingKey, action: saved ? "already_agrees" : "add_reference" }],
@@ -27,14 +28,23 @@ test("private testing integration entry and reference recovery", { tag: "@layout
       const scope = { product: "atlas-commerce", context: data.config!.context, instance: "testing" };
       if (route.request().method() === "POST") {
         const body = route.request().postDataJSON();
+        const names = new Set([...allowances.map(item => item.integration), ...body.allowances.map((item: { integration: string }) => item.integration)]);
+        const changes = [...names].map(integration => {
+          const before = allowances.find(item => item.integration === integration);
+          const after = body.allowances.find((item: { integration: string }) => item.integration === integration);
+          return { integration, action: !after ? "remove" : !before ? "add" : JSON.stringify(before) === JSON.stringify(after) ? "unchanged" : "update" };
+        });
         if (body.mode === "apply") {
           allowanceApplies.push({ body, key: route.request().headers()["idempotency-key"] });
           allowances = body.allowances;
           if (allowanceApplies.length === 1) { await route.abort("failed"); return; }
         }
         await route.fulfill({ json: { status: "accepted", trace_id: "allowance", records: scope,
-          result: { ...scope, plan_sha256: "b".repeat(64), read_back_matches: body.mode === "apply" } } });
-      } else await route.fulfill({ json: { status: "accepted", trace_id: "allowance-read", records: scope, result: { ...scope, allowances } } });
+          result: { ...scope, changes, plan_sha256: "b".repeat(64), read_back_matches: body.mode === "apply" } } });
+      } else {
+        await route.fulfill({ json: { status: "accepted", trace_id: "allowance-read", records: scope, result: { ...scope, allowances } } });
+        if (staleRead) { staleRead = false; allowances = [...allowances, { integration: "concurrent", kind: "read_only_source", reason: "Another admin's update", evidence: "Concurrent proof" }]; }
+      }
       return;
     }
     if (path.endsWith("/odoo-secret-references/reconcile")) {
@@ -75,6 +85,11 @@ test("private testing integration entry and reference recovery", { tag: "@layout
   await allowancePanel.getByLabel("Testing account reason").fill("Independent testing account");
   await allowancePanel.getByLabel("Isolation evidence").fill("Dedicated account and testing printer verified");
   await allowancePanel.getByRole("button", { name: "Review testing allowance" }).click();
+  await expect(allowancePanel.getByText(/Other lane allowances changed/)).toBeVisible();
+  await expect(allowancePanel.getByRole("button", { name: "Save testing allowance" })).toHaveCount(0);
+  await allowancePanel.getByRole("button", { name: "Read stored testing allowances" }).click();
+  await expect(allowancePanel.getByText("concurrent: read only source", { exact: true })).toBeVisible();
+  await allowancePanel.getByRole("button", { name: "Review testing allowance" }).click();
   await allowancePanel.getByRole("checkbox").check();
   await allowancePanel.getByRole("button", { name: "Save testing allowance" }).click();
   await expect(allowancePanel.getByText(/allowance outcome is uncertain/)).toBeVisible();
@@ -82,6 +97,7 @@ test("private testing integration entry and reference recovery", { tag: "@layout
   await allowancePanel.getByRole("button", { name: "Retry original allowance apply" }).click();
   await expect(allowancePanel.getByText("printnode: dev store", { exact: true })).toBeVisible();
   await expect(allowancePanel.getByText("other: read only source", { exact: true })).toBeVisible();
+  await expect(allowancePanel.getByText("concurrent: read only source", { exact: true })).toBeVisible();
   await waitForState(() => allowanceApplies.length).toBe(2);
   expect(allowanceApplies[1]).toEqual(allowanceApplies[0]);
   const field = page.locator(".product-config-field").filter({ hasText: bindingKey });

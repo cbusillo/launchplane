@@ -67,6 +67,11 @@ export function TestingIntegrationAllowancePanel({ config, fixtureMode }: {
     ] };
     setReview(null); setConfirmed(false); setError(""); plan.reset();
     const response = await plan.run(request);
+    if (response && (!Array.isArray(response.result?.changes) || response.result.changes.some(change =>
+      !change || typeof change.integration !== "string" || (change.integration !== name && change.action !== "unchanged")))) {
+      setError("Other lane allowances changed. Read stored testing allowances and review again.");
+      return;
+    }
     if (response && typeof response.result?.plan_sha256 === "string") {
       setReview({ ...request, mode: "apply", reviewed_plan_sha256: response.result.plan_sha256 });
     }

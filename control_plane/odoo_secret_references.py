@@ -171,9 +171,12 @@ def selected_config_parameter_bindings(
     selected: dict[str, SecretBinding] = {}
     for key in keys:
         parameter = parameters.get(key)
-        if (parameter is None and not create_missing) or (
-            parameter is not None and parameter.value.source != "secret_binding"
-        ):
+        if parameter is not None and parameter.value.source != "secret_binding":
+            raise TestingSecretReferenceRefusal(
+                "literal_parameter_exists",
+                "This parameter already has a literal value. Review its existing intent separately before changing how it is supplied.",
+            )
+        if parameter is None and not create_missing:
             raise ValueError("An existing secret-backed config parameter is required.")
         env_key = config_parameter_secret_env_key(key)
         env_keys = (env_key,)
@@ -366,10 +369,12 @@ def plan_secret_reference_reconciliation(
     authority = read_secret_reference_authority(store, record)
     parameters = {item.key: item for item in record.config_parameters}
     added = set(keys) - set(parameters)
-    if added and (
-        not create_missing or runtime_key_safety_environment_class(record.instance) != "testing"
-    ):
-        raise ValueError("New secret references require an explicit testing lane request.")
+    if added and not create_missing:
+        raise ValueError("New secret references require an explicit creation request.")
+    if added and runtime_key_safety_environment_class(record.instance) != "testing":
+        raise TestingSecretReferenceRefusal(
+            "testing_lane_required", "New private integration references require a testing lane."
+        )
     selected = selected_config_parameter_bindings(
         record, authority, keys, create_missing=create_missing
     )
