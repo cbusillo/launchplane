@@ -251,10 +251,6 @@ def main(argv):
 sys.exit(main(sys.argv[1:]))
 """
 
-# Stands in for PostgreSQL: FAKE_ODOO_DB describes ir_config_parameter values and,
-# per table, whether any row matches the catalog's "configured" predicate. A table
-# missing from "tables" does not exist. The real SQL is proved separately against
-# PostgreSQL; this fake only has to answer the program's four query shapes.
 _FAKE_PSYCOPG2 = """\
 import json
 import os
@@ -309,6 +305,9 @@ class _Cursor:
             self.rows = [(key,) for key in params[0] if str(config.get(key) or "").strip()]
         elif query.startswith("SELECT to_regclass"):
             self.rows = [(params[0] in tables,)]
+        elif query.startswith("SELECT attname"):
+            columns = self.database.get("payment_columns", {"code": "character varying", "state": "character varying"})
+            self.rows = list(columns.items())
         elif "key = 'shopify.shop_url_key'" in query:
             value = str(config.get("shopify.shop_url_key") or "")
             self.rows = [(bool(value) and _store_handle(value) in params[0],)]
@@ -359,10 +358,16 @@ def connect(**_kwargs):
 
 
 def _fake_database(
-    config: dict[str, str] | None = None, tables: dict[str, bool] | None = None
+    config: dict[str, str] | None = None,
+    tables: dict[str, bool] | None = None,
+    payment_columns: dict[str, str] | None = None,
 ) -> str:
     return json.dumps(
-        {"config": {**CONNECTION_ISOLATION_PARAMETERS, **(config or {})}, "tables": tables or {}}
+        {
+            "config": {**CONNECTION_ISOLATION_PARAMETERS, **(config or {})},
+            "tables": tables or {},
+            **({"payment_columns": payment_columns} if payment_columns is not None else {}),
+        }
     )
 
 
@@ -1531,6 +1536,34 @@ def main(arguments: list[str]) -> int:
             run.docker_log.index("exec readback -i"),
             run.docker_log.index(f"start {WEB_CONTAINER_ID}"),
         )
+
+    def test_native20_payment_schema_releases_web_after_successful_readback(self) -> None:
+        run = self._run(
+            _render_preview_script(),
+            FAKE_ODOO_DB=_fake_database(
+                tables={"payment_provider": False},
+                payment_columns={
+                    "code": "character varying",
+                    "active": "boolean",
+                    "is_live": "boolean",
+                },
+            ),
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("integration_readback_ok=true", run.stdout.splitlines())
+        self.assertTrue(run.web_restarted, run.docker_log)
+
+    def test_unknown_payment_schema_keeps_web_stopped_even_with_allowance(self) -> None:
+        run = self._run(
+            _render_script(_policies(allowed=("payment",))),
+            FAKE_ODOO_DB=_fake_database(
+                tables={"payment_provider": False}, payment_columns={"code": "character varying"}
+            ),
+        )
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("Unsupported payment_provider schema", run.stderr)
+        self.assertFalse(run.web_restarted, run.docker_log)
+        self.assertNotIn("write readback-passed", run.docker_log)
 
     def test_protected_store_key_fails_even_with_a_shopify_allowance(self) -> None:
         run = self._run(

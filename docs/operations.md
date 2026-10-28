@@ -3705,6 +3705,12 @@ alone is not proof that an existing testing copy has been repaired.
     `invalid` never delivers, and a wire-transfer or demo payment provider
     reaches no service, so neither counts. Odoo generates its web-push keys on
     the lane itself, so `web_push` is checked only right after a restore.
+    Payment readback recognizes Odoo 19's `state` and Odoo 20's boolean
+    `active`/`is_live` schema. Enabled and test providers in 19, and active
+    providers in either mode in 20, require the existing payment allowance.
+    Disabled or archived providers retain their exemption. An unsupported
+    payment schema fails the readback even when its table is empty or an
+    allowance exists.
   - Values are compared inside PostgreSQL and never leave the database. The
     schedule log reports `integration_readback_ok`, the number of settings
     checked, and `integration_readback_refused` or `integration_readback_allowed`
