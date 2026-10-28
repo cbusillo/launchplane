@@ -6,7 +6,7 @@ def rehearsal_source_reader(values):
         if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.:-]*',values[name]):
             raise RuntimeError('Unsupported source coordinate')
     filestore=values['ODOO_UPSTREAM_FILESTORE_PATH']
-    if not re.fullmatch(r'/[A-Za-z0-9_./-]+',filestore) or '..' in Path(filestore).parts:
+    if not re.fullmatch(r'/[A-Za-z0-9_./-]+',filestore) or Path(filestore).parent==Path(filestore) or '..' in Path(filestore).parts:
         raise RuntimeError('Unsupported source filestore')
     directory=Path(values.get('DATA_WORKFLOW_SSH_DIR') or '/home/ubuntu/.ssh')
     key=values.get('DATA_WORKFLOW_SSH_KEY','')

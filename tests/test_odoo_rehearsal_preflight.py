@@ -320,6 +320,14 @@ class PreflightHostTests(unittest.TestCase):
         self.assertEqual(self.run_program(), {"type": "failed"})
         self.assertEqual([command[0] for command in self.commands], ["docker"])
 
+    def test_root_equivalent_filestores_refuse_before_ssh(self) -> None:
+        for filestore in ("/", "//", "/.", "/./", "///././"):
+            with self.subTest(filestore=filestore):
+                self.source["ODOO_UPSTREAM_FILESTORE_PATH"] = filestore
+                self.commands.clear()
+                self.assertEqual(self.run_program(), {"type": "failed"})
+                self.assertEqual([command[0] for command in self.commands], ["docker"])
+
     def test_source_denial_preserves_identity_and_never_tries_an_alternate_command(self) -> None:
         self.source_response = {"type": "denied", "private_detail": "private source refusal"}
         self.assertEqual(self.run_program(), {"type": "denied"})
