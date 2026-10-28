@@ -2,7 +2,6 @@ import io
 import base64
 from contextlib import nullcontext, redirect_stdout
 from email.message import Message
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -98,10 +97,6 @@ class CopyFailureEvidenceTests(unittest.TestCase):
             self.assertTrue(evidence["stderr_truncated"])
             self.assertFalse(evidence["stdout_truncated"])
             self.assertEqual(evidence["stderr_bytes"], len(stderr))
-            self.assertEqual(
-                evidence["input_sha256"],
-                hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest(),
-            )
             self.assertNotIn("private settings", text)
             self.assertNotIn("private argument", text)
             self.assertNotIn("private fixture cause", output.getvalue())

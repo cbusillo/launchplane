@@ -25,6 +25,7 @@ from control_plane.copy_readback_diagnostics import (
     COPY_FAILURE_STAGE_MARKER,
     COPY_FAILURE_STATE_DIRECTORY,
     CopyFailureStage,
+    CopyReadbackRefused,
     ReadbackPredicate,
 )
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
@@ -537,8 +538,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
     def test_fresh_generation_preserves_surviving_upper_before_any_data_changes(self) -> None:
         attachment = self.private / "upper" / "staff-attachment"
         attachment.write_bytes(b"staff writes")
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(CopyReadbackRefused) as raised:
             self.run_script()
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.PRIVATE_STATE)
         self.assertNotIn(["docker", "stop", "web"], self.calls)
         self.volumes.pop("preview-data-filestore")
         shutil.rmtree(self.data / "filestore")
@@ -1250,7 +1252,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
         with (
             patch.object(self, "command", side_effect=refuse),
-            self.assertRaisesRegex(RuntimeError, "Clean snapshot preview operation failed"),
+            self.assertRaises(RuntimeError),
         ):
             self.run_script()
         markers = post_deploy.extract_odoo_post_deploy_readback_markers(

@@ -83,8 +83,7 @@ after binding the original reservation, attempt, completed provider job,
 package/action versions and execution server. No provider job needs to run to
 read it. Those private runbooks own the host and guest selectors; a
 control-plane host is not necessarily the operation's execution server.
-The file records the SHA-256 of the expanded host input, using
-`json.dumps(spec, sort_keys=True)`, as audit metadata. The evidence ID in the
+The file records a digest of the expanded host input as audit metadata. The evidence ID in the
 bound job's log is its retrieval reference; this is not a new service-side
 verification or original-settlement receipt. It also records creation time,
 stage and exit status. It never records command arguments, stdin or the input
