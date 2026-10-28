@@ -93,11 +93,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import sys
 from threading import Thread
 from playwright.sync_api import sync_playwright
-from control_plane.workflows.generic_web_deploy import GenericWebPostDeployGuard
-from control_plane.workflows.verireel_testing_post_deploy import (
-    _TestingPageExchanges,
-    launch_testing_browser,
-)
+from control_plane.testing_browser import launch_testing_browser
 from control_plane.odoo_walkthrough_browser import require_safe_browser_control
 
 heading = "Isolated testing browser"
@@ -125,13 +121,11 @@ try:
         try:
             with browser.new_context(service_workers="block") as browser_context:
                 page = browser_context.new_page()
-                guard = GenericWebPostDeployGuard()
                 base_url = f"http://{sys.argv[1]}:{server.server_port}"
-                exchanges = _TestingPageExchanges(page, base_url, guard)
                 response = page.goto(f"{base_url}/sign-up", wait_until="load")
                 assert response is not None
-                exchanges.finish_response(response)
-                assert guard.exchanges and all(guard.exchanges.values())
+                assert response.status == 200
+                response.body()
                 assert page.locator("h1").inner_text() == heading
                 page.set_content("""<input id="business" name="name">
                     <input id="private-password" type="password">
@@ -160,7 +154,7 @@ try:
                     except ValueError:
                         continue
                     raise AssertionError("Sensitive or iframe control was accepted")
-                exchanges.close()
+                page.close()
         finally:
             browser.close()
 finally:

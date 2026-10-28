@@ -147,7 +147,7 @@ class GenericWebTransitionTests(unittest.TestCase):
                 {**draft(before), "owner": {"github_login": "another"}}
             )
 
-    def test_a_transition_cannot_drop_the_existing_post_deploy_qualification(self) -> None:
+    def test_legacy_transition_can_remove_retired_testing_browser_declaration(self) -> None:
         before = profile()
         valid = ProductGenericWebTransitionRequest.model_validate(draft(before))
         lanes = tuple(
@@ -158,8 +158,14 @@ class GenericWebTransitionTests(unittest.TestCase):
             )
             for item in valid.lanes
         )
-        with self.assertRaises(ValueError):
-            build_generic_web_transition_plan(before, valid.model_copy(update={"lanes": lanes}))
+        _, replacement = build_generic_web_transition_plan(
+            before, valid.model_copy(update={"lanes": lanes})
+        )
+        self.assertTrue(
+            all(
+                not lane.generic_web_extensions.verification_extension for lane in replacement.lanes
+            )
+        )
         with self.assertRaises(ValueError):
             build_generic_web_transition_plan(
                 before.model_copy(update={"driver_id": "odoo"}), valid

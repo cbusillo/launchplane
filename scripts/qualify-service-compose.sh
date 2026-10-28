@@ -248,7 +248,7 @@ check_testing_browser() {
     run_interruptible "${compose[@]}" exec -T "$service" /app/.venv/bin/python - <<'PY'
 import time
 from playwright.sync_api import sync_playwright
-from control_plane.workflows.verireel_testing_post_deploy import launch_testing_browser
+from control_plane.testing_browser import launch_testing_browser
 deadline = time.monotonic() + 60
 while True:
     try:
