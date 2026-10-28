@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
+from control_plane.timestamps import utc_now_timestamp as _utc_now
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
@@ -3960,10 +3961,6 @@ def _labels(pull_request: dict[str, object]) -> set[str]:
 def _fingerprint(payload: dict[str, object]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _artifact_digest(record_store: ProductReconcileStore, artifact_id: str) -> str:
