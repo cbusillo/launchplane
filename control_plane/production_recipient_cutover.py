@@ -1836,8 +1836,6 @@ class RecipientCutoverAdapter:
                     target_type="compose",
                     deploy_mode="compose",
                     deployment_id=deployment_id,
-                    started_at=identity.deployed_at,
-                    finished_at=stamp,
                 ),
                 destination_health=health,
                 updated_at=stamp,

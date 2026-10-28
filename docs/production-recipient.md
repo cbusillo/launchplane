@@ -427,8 +427,9 @@ endpoints and append-only backup source revisions in one PostgreSQL transaction.
 The commit repeats custody, authority, release and execution-lease checks.
 Verification of a deployed recipient includes the Compose deployer's canonical
 image-reference stamps, each bound to the exact immutable image. Unknown keys
-and changed managed inputs still refuse. Successful native deployment evidence
-records its completion time, including a drill's resume of the same recipient.
+and changed managed inputs still refuse. Both canonical image keys render from
+the same verified artifact. A cold prepared recipient may still lack deployer
+stamps; once deployment is dispatched, every stamp must match.
 
 A shared testing writer can be coordinated through
 `POST /v1/products/{product}/production-recipient/testing-writer`, using

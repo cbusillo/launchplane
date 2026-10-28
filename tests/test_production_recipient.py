@@ -18,6 +18,7 @@ from control_plane.contracts.production_recipient import (
     ProductionRecipientRequest,
     RecipientServiceLimits,
 )
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.production_recipient import (
     ROUTE,
     ProductionRecipientAdapter,
@@ -25,6 +26,7 @@ from control_plane.production_recipient import (
     plan,
     qualified_render,
     read_provider_compose,
+    runtime_values,
 )
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.runtime_environments import SiteRuntimeEnvironment
@@ -303,10 +305,28 @@ class ProductionRecipientTests(unittest.TestCase):
         saved = custody(self.store, self.product, self.context)
         assert saved is not None
         self.adapter.verify(saved)
+        from control_plane.dokploy import api
+
+        provider = self.provider[saved.target_id]
+        original_environment = str(provider["env"])
+        values = api.parse_dokploy_env_text(original_environment)
+        for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS:
+            values.pop(key, None)
+            provider["env"] = api.serialize_dokploy_env_text(values)
+            self.adapter.verify(saved)
+        provider["env"] = original_environment
         self.assertTrue(saved.qualified_at)
         output = json.dumps(plan(saved))
         self.assertNotIn(self.values["DB_PASSWORD"], output)
         self.assert_old_preserved()
+
+    def test_canonical_image_placeholders_share_the_verified_artifact(self) -> None:
+        for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS:
+            with self.subTest(image_key=key):
+                self.document["services"]["web"]["image"] = "${" + key + "}"
+                record = self.adapter.current()
+                rendered = qualified_render(record, runtime_values(self.store, self.root, record))
+                self.assertEqual(rendered["services"]["web"]["image"], record.image_reference)
 
     def test_unencodable_input_retains_prior_fences_without_configure_checkpoint(self) -> None:
         from control_plane.dokploy import api

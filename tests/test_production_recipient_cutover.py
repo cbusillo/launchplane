@@ -21,7 +21,7 @@ from control_plane.contracts.production_backup_authority import ProductionBackup
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
-from control_plane.production_recipient import custody, runtime_values
+from control_plane.production_recipient import custody
 from control_plane.production_recipient_cutover import (
     RecipientCutoverAdapter,
     RecipientCutoverRequest,
@@ -343,7 +343,6 @@ class RecipientCutoverTests(unittest.TestCase):
             target_id=current.target_id,
             artifact_id=current.image_reference,
             runtime_identity=kwargs["runtime_identity"],
-            runtime_environment=runtime_values(self.store, self.fixture.root, current),
             before_provider_mutation=kwargs["before_provider_mutation"],
         )
         kwargs["before_provider_mutation"]("deploy_trigger")
@@ -416,13 +415,6 @@ class RecipientCutoverTests(unittest.TestCase):
         self.assertEqual(
             self.store.read_deployment_record(inventory.deployment_record_id).runtime_identity,
             inventory.runtime_identity,
-        )
-        deployment = self.store.read_deployment_record(inventory.deployment_record_id)
-        self.assertTrue(deployment.deploy.finished_at)
-        self.assertEqual(deployment.deploy.finished_at, inventory.updated_at)
-        self.assertLessEqual(
-            datetime.fromisoformat(deployment.deploy.started_at),
-            datetime.fromisoformat(deployment.deploy.finished_at),
         )
         self.assertEqual(self.run_release().response_status_code, 202)
         self.assertEqual(self.deploys, 1)
