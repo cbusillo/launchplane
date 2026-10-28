@@ -12,9 +12,16 @@ agent-instruction filename, including any directory-specific guidance.
 
 ## Development
 
-Use `uv` with the interpreter pinned in [.python-version](.python-version), and
-Node 22.12 or later with the pnpm version in
-[frontend/package.json](frontend/package.json). CI uses the same Python pin.
+Use `uv` with the Launchplane service and development runtime selected by
+[.python-version](.python-version). The supported-product floor remains the
+separate `requires-python` contract in [pyproject.toml](pyproject.toml); reusable
+workflows likewise retain caller-selected interpreters. Node and pnpm are selected
+by `engines.node` and `packageManager` in
+[frontend/package.json](frontend/package.json). CI reads these authorities.
+Docker image tags must be literal at Dockerfile parse time, so its Python runtime
+and Node image major are necessary copies reviewed against those files. The
+PyCharm preparation version in `.github/github.json` is likewise a literal IDE
+integration setting and follows the runtime pin.
 From the repository root:
 
 ```bash

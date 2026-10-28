@@ -14,10 +14,10 @@ RUN apt-get update \
 
 WORKDIR /app
 
-RUN corepack enable \
-    && corepack prepare pnpm@10.10.0 --activate
-
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml /app/frontend/
+RUN corepack enable \
+    && corepack prepare "$(node -p "require('./frontend/package.json').packageManager")" --activate
+
 WORKDIR /app/frontend
 RUN pnpm install --frozen-lockfile
 

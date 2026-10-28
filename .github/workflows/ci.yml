@@ -389,7 +389,7 @@ jobs:
           save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
-        run: uv python install 3.14
+        run: uv python install
 
       - name: Run Ruff
         run: uv run --extra dev ruff check .
@@ -439,7 +439,7 @@ jobs:
           save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
-        run: uv python install 3.14
+        run: uv python install
 
       - name: Run Ruff
         run: uv run --extra dev ruff check .
@@ -662,7 +662,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: frontend/package.json
 
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -672,7 +672,7 @@ jobs:
           save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
-        run: uv python install 3.14
+        run: uv python install
 
       - name: Set up Docker Compose
         run: bash scripts/setup-ci-compose.sh
@@ -683,7 +683,7 @@ jobs:
       - name: Enable pnpm
         run: |
           corepack enable
-          corepack prepare pnpm@10.10.0 --activate
+          corepack prepare "$(node -p "require('./frontend/package.json').packageManager")" --activate
 
       - name: Resolve pnpm store path
         id: pnpm-store
@@ -694,9 +694,9 @@ jobs:
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: >-
-            ${{ runner.os }}-node-22-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+            ${{ runner.os }}-node-${{ hashFiles('frontend/package.json') }}-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-node-22-pnpm-checkout-
+            ${{ runner.os }}-node-${{ hashFiles('frontend/package.json') }}-pnpm-checkout-
 
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
@@ -719,7 +719,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: frontend/package.json
 
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -729,12 +729,12 @@ jobs:
           save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
-        run: uv python install 3.14
+        run: uv python install
 
       - name: Enable pnpm
         run: |
           corepack enable
-          corepack prepare pnpm@10.10.0 --activate
+          corepack prepare "$(node -p "require('./frontend/package.json').packageManager")" --activate
 
       - name: Resolve pnpm store path
         id: pnpm-store
@@ -745,9 +745,9 @@ jobs:
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: >-
-            ${{ runner.os }}-node-22-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+            ${{ runner.os }}-node-${{ hashFiles('frontend/package.json') }}-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-node-22-pnpm-checkout-
+            ${{ runner.os }}-node-${{ hashFiles('frontend/package.json') }}-pnpm-checkout-
 
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
@@ -780,18 +780,18 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: frontend/package.json
 
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       - name: Install Python
-        run: uv python install 3.14
+        run: uv python install
 
       - name: Enable pnpm
         run: |
           corepack enable
-          corepack prepare pnpm@10.10.0 --activate
+          corepack prepare "$(node -p "require('./frontend/package.json').packageManager")" --activate
 
       - name: Resolve pnpm store path
         id: pnpm-store
@@ -802,9 +802,9 @@ jobs:
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: >-
-            ${{ runner.os }}-node-22-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+            ${{ runner.os }}-node-${{ hashFiles('frontend/package.json') }}-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-node-22-pnpm-checkout-
+            ${{ runner.os }}-node-${{ hashFiles('frontend/package.json') }}-pnpm-checkout-
 
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
@@ -844,12 +844,12 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: frontend/package.json
 
       - name: Enable pnpm
         run: |
           corepack enable
-          corepack prepare pnpm@10.10.0 --activate
+          corepack prepare "$(node -p "require('./frontend/package.json').packageManager")" --activate
 
       - name: Resolve pnpm store path
         id: pnpm-store
@@ -860,9 +860,9 @@ jobs:
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: >-
-            ${{ runner.os }}-node-22-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+            ${{ runner.os }}-node-${{ hashFiles('frontend/package.json') }}-pnpm-checkout-${{ hashFiles('frontend/pnpm-lock.yaml') }}
           restore-keys: |
-            ${{ runner.os }}-node-22-pnpm-checkout-
+            ${{ runner.os }}-node-${{ hashFiles('frontend/package.json') }}-pnpm-checkout-
 
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
@@ -907,7 +907,7 @@ jobs:
           save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
-        run: uv python install 3.14
+        run: uv python install
 
       - name: Clear residual unittest history
         run: rm -f "${UNITTEST_TIMINGS_CACHE}"
@@ -918,11 +918,11 @@ jobs:
         with:
           path: ${{ env.UNITTEST_TIMINGS_CACHE }}
           key: >-
-            ${{ runner.os }}-python-3.14-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ runner.os }}-python-${{ hashFiles('.python-version') }}-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ${{ runner.os }}-python-3.14-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-
-            ${{ runner.os }}-python-3.14-unittest-timings-${{ github.ref_name }}-
-            ${{ runner.os }}-python-3.14-unittest-timings-
+            ${{ runner.os }}-python-${{ hashFiles('.python-version') }}-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-
+            ${{ runner.os }}-python-${{ hashFiles('.python-version') }}-unittest-timings-${{ github.ref_name }}-
+            ${{ runner.os }}-python-${{ hashFiles('.python-version') }}-unittest-timings-
 
       - name: Freeze unittest timing snapshot
         run: |
@@ -992,12 +992,12 @@ jobs:
           save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
-        run: uv python install 3.14
+        run: uv python install
 
       - name: Install Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: frontend/package.json
 
       - name: Prepare unittest artifact directories
         run: |
@@ -1074,7 +1074,7 @@ jobs:
           save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
-        run: uv python install 3.14
+        run: uv python install
 
       - name: Require successful test shards
         run: |
@@ -1162,7 +1162,7 @@ jobs:
         with:
           path: ${{ env.UNITTEST_TIMINGS_CACHE }}
           key: >-
-            ${{ runner.os }}-python-3.14-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ runner.os }}-python-${{ hashFiles('.python-version') }}-unittest-timings-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   test_fork:
     if: >-
@@ -1186,12 +1186,12 @@ jobs:
           save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
-        run: uv python install 3.14
+        run: uv python install
 
       - name: Install Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: frontend/package.json
 
       - name: Run unit tests
         run: uv run --extra dev python -m unittest
@@ -1250,7 +1250,7 @@ jobs:
           save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install Python
-        run: uv python install 3.14
+        run: uv python install
 
       - name: Run PostgreSQL integration tests
         env:
@@ -1276,7 +1276,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: frontend/package.json
       - name: Set up Docker Compose
         run: bash scripts/setup-ci-compose.sh
       - name: Run affected whole test modules

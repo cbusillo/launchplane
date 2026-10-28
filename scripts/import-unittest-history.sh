@@ -2,7 +2,7 @@
 set -euo pipefail
 
 validate_history() {
-  uv run --no-project --no-config --python 3.14 python - "$1" <<'PY'
+  uv run --no-project --no-config --python "$(cat .python-version)" python - "$1" <<'PY'
 import math
 from pathlib import Path
 import sys
