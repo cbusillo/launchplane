@@ -557,6 +557,14 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
         )
         continue_operation = store.continue_precapture_backup_operation
         admitted: list[LaunchplaneIdempotencyRecord] = []
+        origin = ProviderTargetOrigin(
+            product=current.product,
+            context=current.context,
+            instance="prod",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=current.retained_target_id.target_id,
+        )
 
         def reserve_before_cas(**kwargs: Any) -> bool:
             result = store.reserve_mutation(
@@ -567,14 +575,7 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
                 lease_owner="fixture-concurrent-worker",
                 reconciliation_key=saved.reconciliation_key,
                 provider_target_key=saved.provider_target_key,
-                provider_target_origin=ProviderTargetOrigin(
-                    product=current.product,
-                    context=current.context,
-                    instance="prod",
-                    provider_id="dokploy",
-                    target_type="compose",
-                    target_id=current.retained_target_id.target_id,
-                ),
+                provider_target_origin=origin,
             )
             self.assertEqual(result.status, "acquired")
             admitted.append(result.record)
