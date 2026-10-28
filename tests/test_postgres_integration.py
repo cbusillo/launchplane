@@ -16672,9 +16672,12 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             from control_plane.http_app import create_launchplane_fastapi_app as factory
 
             def create_app(**arguments: Any) -> Any:
-                for name, value in arguments.items():
-                    if name.endswith("_scheduler"):
-                        self.assertIsNone(value)
+                schedulers = {
+                    name: value for name, value in arguments.items() if name.endswith("_scheduler")
+                }
+                self.assertTrue(schedulers)
+                for value in schedulers.values():
+                    self.assertIsNone(value)
                 return factory(**arguments)
 
             with (
@@ -16683,7 +16686,11 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                     service_bootstrap, "create_launchplane_fastapi_app", side_effect=create_app
                 ),
                 patch.dict(
-                    os.environ, {"LAUNCHPLANE_POLICY_TOML": "schema_version = 1"}, clear=True
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_POLICY_TOML": f"schema_version = {LaunchplaneAuthzPolicy().schema_version}"
+                    },
+                    clear=True,
                 ),
             ):
                 before = database_snapshot(connection)
@@ -16709,6 +16716,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             RecoveryRequired,
             VERIFICATION_BLOCKED_EVENT,
         )
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
         from control_plane.storage.schema_migration import migrate_schema
 
         with _isolated_postgres_database() as url:
@@ -16718,7 +16726,11 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             with (
                 engine.connect() as connection,
                 patch.dict(
-                    os.environ, {"LAUNCHPLANE_POLICY_TOML": "schema_version = 1"}, clear=True
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_POLICY_TOML": f"schema_version = {LaunchplaneAuthzPolicy().schema_version}"
+                    },
+                    clear=True,
                 ),
             ):
                 with self.assertRaises(RecoveryRequired) as failure:

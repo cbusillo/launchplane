@@ -175,44 +175,6 @@ class StoppedWriterHoldTests(unittest.TestCase):
         observed["State"]["OOMKilled"] = True
         self.assertFalse(host.clean_original_exit(observed, state))
 
-    def test_docker_restart_backoff_waits_without_signaling_an_exited_original(self) -> None:
-        from tests.test_database_maintenance_host import state_file
-
-        with TemporaryDirectory() as directory:
-            path = state_file(Path(directory))
-            state = json.loads(path.read_text())
-            name = state["api"]
-            state["stop_requested"] = [name]
-            state["resume_started"] = True
-            original = state["originals"][name]
-            restarting = {
-                "Image": state["image_id"],
-                "Config": {"Labels": {"com.docker.compose.project": state["project"]}},
-                "HostConfig": {"RestartPolicy": original["restart_policy"]},
-                "State": {
-                    "Running": True,
-                    "Restarting": True,
-                    "Pid": 0,
-                    "StartedAt": original["started_at"],
-                },
-            }
-            healthy = {**restarting, "State": {"Running": True, "StartedAt": "restarted"}}
-            observations = iter([restarting])
-            with (
-                patch.object(
-                    host, "inspect_container", side_effect=lambda _: next(observations, healthy)
-                ),
-                patch.object(host, "wait_for_exit", return_value=healthy) as wait,
-                patch.object(
-                    host, "signal_original", side_effect=host.RecoveryRequired("Exited process")
-                ) as send,
-                patch.object(host, "run"),
-                patch.object(time, "sleep"),
-            ):
-                self.assertEqual(host.resume_original(name, state), name)
-                send.assert_not_called()
-                wait.assert_called_once_with(name, state)
-
     def test_every_policy_is_rearmed_even_when_the_api_is_still_exiting(self) -> None:
         from tests.test_database_maintenance_host import state_file
 
@@ -255,6 +217,154 @@ class StoppedWriterHoldTests(unittest.TestCase):
                 with self.assertRaises(TimeoutError):
                     host.release(path)
             self.assertFalse(json.loads(path.read_text()).get("released", False))
+
+    def test_restart_backoff_never_counts_as_a_recovered_process(self) -> None:
+        from tests.test_database_maintenance_host import state_file
+
+        with TemporaryDirectory() as directory:
+            state = json.loads(state_file(Path(directory)).read_text())
+            state["resume_started"] = True
+            observed = {
+                "Image": state["image_id"],
+                "Config": {"Labels": {"com.docker.compose.project": state["project"]}},
+                "HostConfig": {"RestartPolicy": state["originals"][state["api"]]["restart_policy"]},
+                "State": {"Running": True, "Restarting": True, "Pid": 0, "StartedAt": "new"},
+            }
+            elapsed = [0.0]
+            with (
+                patch.object(host, "inspect_container", return_value=observed),
+                patch.object(host, "run") as run,
+                patch.object(time, "monotonic", side_effect=lambda: elapsed[0]),
+                patch.object(
+                    time,
+                    "sleep",
+                    side_effect=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+                ),
+            ):
+                with self.assertRaises(RuntimeError):
+                    host.resume_original(state["api"], state)
+                run.assert_not_called()
+
+    def test_recovery_waits_for_an_exiting_signal_target_but_preserves_real_identity_failures(
+        self,
+    ) -> None:
+        from tests.test_database_maintenance_host import state_file
+
+        for failure in ("pid_gone", "membership_gone", "restarting", "foreign_membership"):
+            with self.subTest(failure=failure), TemporaryDirectory() as directory:
+                state = json.loads(state_file(Path(directory)).read_text())
+                name = state["api"]
+                original = state["originals"][name]
+                state.update(resume_started=True, stop_requested=[name])
+                running = {
+                    "Image": state["image_id"],
+                    "Config": {"Labels": {"com.docker.compose.project": state["project"]}},
+                    "HostConfig": {"RestartPolicy": original["restart_policy"]},
+                    "State": {
+                        "Running": True,
+                        "Pid": original["pid"],
+                        "StartedAt": original["started_at"],
+                    },
+                }
+                backoff = {**running, "State": {**running["State"], "Restarting": True, "Pid": 0}}
+                healthy = {
+                    **running,
+                    "State": {"Running": True, "Pid": original["pid"] + 1, "StartedAt": "new"},
+                }
+                sequence = {
+                    "pid_gone": [running, backoff],
+                    "membership_gone": [running, running, backoff],
+                    "restarting": [running, backoff, backoff],
+                    "foreign_membership": [running, running, running],
+                }
+                observations = iter(sequence[failure])
+                membership = "foreign" if failure == "foreign_membership" else name
+                with (
+                    patch.object(
+                        host, "inspect_container", side_effect=lambda _: next(observations, healthy)
+                    ),
+                    patch.object(
+                        os,
+                        "pidfd_open",
+                        create=True,
+                        return_value=77,
+                        side_effect=ProcessLookupError() if failure == "pid_gone" else None,
+                    ),
+                    patch.object(os, "close"),
+                    patch.object(
+                        Path,
+                        "read_text",
+                        return_value="0::/docker/" + membership,
+                        side_effect=FileNotFoundError() if failure == "membership_gone" else None,
+                    ),
+                    patch.object(signal, "pidfd_send_signal", create=True) as send,
+                    patch.object(time, "sleep"),
+                ):
+                    if failure == "foreign_membership":
+                        with self.assertRaises(host.RecoveryRequired):
+                            host.resume_original(name, state)
+                    else:
+                        self.assertEqual(host.resume_original(name, state), name)
+                    send.assert_not_called()
+
+    def test_readback_requires_two_healthy_samples_of_the_same_live_process(self) -> None:
+        from tests.test_database_maintenance_host import state_file
+
+        with TemporaryDirectory() as directory:
+            state = json.loads(state_file(Path(directory)).read_text())
+            state["resume_started"] = True
+            name = state["api"]
+            first = {
+                "Running": True,
+                "Pid": state["originals"][name]["pid"] + 1,
+                "StartedAt": "first",
+            }
+            stable = {**first, "Pid": first["Pid"] + 1, "StartedAt": "stable"}
+            backoff = {**first, "Restarting": True, "Pid": 0}
+            for pair in (
+                (backoff, backoff),
+                ({**first, "Pid": 0}, stable),
+                (first, {**stable, "Health": {"Status": "unhealthy"}}),
+                (first, stable),
+            ):
+                with self.subTest(pair=pair):
+                    sequence = iter([first, *pair])
+                    elapsed = [0.0]
+                    reads = []
+
+                    def inspect(_name: str) -> dict[str, Any]:
+                        current = next(sequence, stable)
+                        reads.append((elapsed[0], current))
+                        return {
+                            "Image": state["image_id"],
+                            "Config": {"Labels": {"com.docker.compose.project": state["project"]}},
+                            "State": current,
+                        }
+
+                    with (
+                        patch.object(host, "inspect_container", side_effect=inspect),
+                        patch.object(time, "monotonic", side_effect=lambda: elapsed[0]),
+                        patch.object(
+                            time,
+                            "sleep",
+                            side_effect=lambda seconds: elapsed.__setitem__(
+                                0, elapsed[0] + seconds
+                            ),
+                        ),
+                    ):
+                        self.assertEqual(host.resume_original(name, state), name)
+                    earlier, later = reads[-2:]
+                    self.assertGreater(later[0], earlier[0])
+                    self.assertEqual(
+                        (earlier[1]["Pid"], earlier[1]["StartedAt"]),
+                        (later[1]["Pid"], later[1]["StartedAt"]),
+                    )
+                    for _, observed in reads[-2:]:
+                        self.assertGreater(observed["Pid"], 0)
+                        self.assertFalse(observed.get("Restarting"))
+                        self.assertEqual(
+                            observed.get("Health", {}).get("Status", "healthy"), "healthy"
+                        )
 
     def test_socket_refresh_survives_the_same_database_process_restart(self) -> None:
         import socket

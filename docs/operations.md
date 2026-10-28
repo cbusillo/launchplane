@@ -5919,13 +5919,15 @@ is called database damage merely because health is unavailable.
 Release starts the exact original API first and requires its container health
 before explicitly starting other workers in parallel. The original policies
 have already been restored after the bound database/health proof. Healthy readback
-is still required for every original, including an automatically restarted one. A partial resume records progress; subsequent cleanup retries
+requires a live, non-restarting PID with unchanged process start across two seconds
+for every original, including an automatically restarted one. This is bounded
+startup evidence; normal live monitoring owns later failures. A partial resume records progress; subsequent cleanup retries
 reuse the safe proof because legitimate resumed writes may have changed rows.
 They never stop healthy services again or demand the old full hashes again. A crash after
 starting a stopped original, before progress is recorded, may leave its same
 container ID/image/project running with a newer PID. Only the already bound safe
-proof and persisted resume-start intent allow that exact-original retry and
-policy readback. On a no-commit release, durable resume intent
+proof and persisted resume-start intent allow that exact-original retry. Original
+policy readback precedes resumption. On a no-commit release, durable resume intent
 and absence of `commit-pending.json` allow the same exact-original retry; the
 host's releasing flag and state lock prevent a later commit. Unverified changed
 identities still refuse.

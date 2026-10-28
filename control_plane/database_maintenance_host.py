@@ -265,7 +265,7 @@ def socket_identity(path: Path) -> tuple[int, int]:
 def refresh_verification_socket(state: dict[str, Any]) -> None:
     require_database_cluster(state)
     postgres = inspect_container(state["postgres"])
-    if not postgres["State"]["Running"]:
+    if not running_process(postgres["State"]):
         raise RuntimeError("The original PostgreSQL container is not ready.")
     directory = Path(
         run("docker", "exec", state["postgres"], "readlink", "-f", "/var/run/postgresql").strip()
@@ -487,6 +487,19 @@ def clean_original_exit(observed: dict[str, Any], state: dict[str, Any]) -> bool
     return not observed["State"].get("OOMKilled") and observed["State"].get("ExitCode") in permitted
 
 
+def running_process(observed: dict[str, Any]) -> bool:
+    return bool(
+        observed["Running"] and not observed.get("Restarting") and observed.get("Pid", 0) > 0
+    )
+
+
+def healthy_process(observed: dict[str, Any]) -> bool:
+    return (
+        running_process(observed)
+        and observed.get("Health", {}).get("Status", "healthy") == "healthy"
+    )
+
+
 def wait_for_exit(identifier: str, state: dict[str, Any]) -> dict[str, Any]:
     deadline = time.monotonic() + STOP_WAIT_SECONDS
     if not state.get("resume_started") and state.get("stop_deadline"):
@@ -580,7 +593,7 @@ def stop_services(state_path: Path) -> dict[str, Any]:
     return dict(state)
 
 
-def rearm_original_policies(state_path: Path, state: dict[str, Any]) -> None:
+def rearm_original_policies(state: dict[str, Any]) -> None:
     for identifier in state["containers"]:
         observed = inspect_container(identifier)
         if (
@@ -592,10 +605,6 @@ def rearm_original_policies(state_path: Path, state: dict[str, Any]) -> None:
         run("docker", "update", "--restart=" + str(policy["Name"]), identifier, timeout=10)
         if inspect_container(identifier)["HostConfig"]["RestartPolicy"] != policy:
             raise RuntimeError("The original recovery restart policy was not read back.")
-        state.setdefault("rearmed_containers", [])
-        if identifier not in state["rearmed_containers"]:
-            state["rearmed_containers"].append(identifier)
-        save(state_path, state)
 
 
 def resume_original(identifier: str, state: dict[str, Any]) -> str:
@@ -624,30 +633,32 @@ def resume_original(identifier: str, state: dict[str, Any]) -> str:
         observed["State"]["StartedAt"] == state["originals"][identifier]["started_at"]
     ):
         if (
-            observed["State"]["Running"]
-            and not observed["State"].get("Restarting")
+            running_process(observed["State"])
             and observed["State"]["Pid"] == state["originals"][identifier]["pid"]
         ):
-            signal_original(identifier, state)
+            try:
+                signal_original(identifier, state)
+            except (ProcessLookupError, FileNotFoundError, RecoveryRequired):
+                current = inspect_container(identifier)["State"]
+                original = state["originals"][identifier]
+                if (
+                    running_process(current)
+                    and current["Pid"] == original["pid"]
+                    and current["StartedAt"] == original["started_at"]
+                ):
+                    raise
         observed = wait_for_exit(identifier, state)
     if not observed["State"]["Running"]:
         run("docker", "start", identifier, timeout=60)
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         observed = inspect_container(identifier)["State"]
-        if observed["Running"] and observed.get("Health", {}).get("Status", "healthy") == "healthy":
+        if healthy_process(observed):
             time.sleep(2)
-            if inspect_container(identifier)["State"]["Running"]:
-                policy = state["originals"][identifier]["restart_policy"]
-                run(
-                    "docker",
-                    "update",
-                    "--restart=" + str(policy["Name"]),
-                    identifier,
-                    timeout=10,
-                )
-                if inspect_container(identifier)["HostConfig"]["RestartPolicy"] != policy:
-                    raise RuntimeError("The original restart policy was not restored.")
+            current = inspect_container(identifier)["State"]
+            if healthy_process(current) and all(
+                current[key] == observed[key] for key in ("Pid", "StartedAt")
+            ):
                 return identifier
         time.sleep(1)
     raise RuntimeError("An original service did not recover with healthy readback.")
@@ -911,7 +922,7 @@ def finish_release(state_path: Path) -> None:
         errors = []
         state["resume_started"] = True
         save(state_path, state)
-        rearm_original_policies(state_path, state)
+        rearm_original_policies(state)
         if state["api"] not in resumed:
             resumed.add(resume_original(state["api"], state))
             state["resumed_containers"] = sorted(resumed)
@@ -1076,7 +1087,9 @@ def consume_automatic_attempt(state: dict[str, Any], progress: dict[str, Any]) -
 def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     api = inspect_container(arguments.api_container)
     labels = api["Config"]["Labels"]
-    if labels.get("com.docker.compose.service") != "launchplane" or not api["State"]["Running"]:
+    if labels.get("com.docker.compose.service") != "launchplane" or not running_process(
+        api["State"]
+    ):
         raise ValueError("A running Launchplane API container is required.")
     root = Path(arguments.state_root)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1117,10 +1130,9 @@ def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         "label=com.docker.compose.project=" + state["project"],
     ).split():
         item = inspect_container(identifier)
-        if (
-            item["Config"]["Labels"].get("com.docker.compose.oneoff", "").lower() == "true"
-            or not item["State"]["Running"]
-        ):
+        if item["Config"]["Labels"].get(
+            "com.docker.compose.oneoff", ""
+        ).lower() == "true" or not running_process(item["State"]):
             raise ValueError("A one-off or stopped service needs disposition before maintenance.")
         if item["Config"]["Labels"].get("com.docker.compose.service") == "launchplane-browser":
             if any(

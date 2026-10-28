@@ -595,6 +595,7 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 )
                 return ""
 
+            self.rearm.stop()
             with (
                 patch.object(host, "terminate_keeper"),
                 patch.object(host, "operator_container", return_value=None),
@@ -634,7 +635,7 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 patch.object(time, "sleep"),
             ):
                 self.assertEqual(host.resume_original("own-api", state), "own-api")
-                self.assertEqual(run.call_args.args[:2], ("docker", "update"))
+                run.assert_not_called()
                 (root / "commit-pending.json").write_text("{}")
                 with self.assertRaises(RuntimeError):
                     host.resume_original("own-api", state)

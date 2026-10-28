@@ -148,16 +148,22 @@ class DatabaseMaintenanceSchemaSnapshotTests(unittest.TestCase):
 
 
 class DatabaseMaintenanceHealthTests(unittest.TestCase):
-    def test_slow_startup_and_shutdown_remain_transient(self) -> None:
+    def test_failed_startup_is_blocked_but_startup_and_shutdown_timeouts_are_transient(
+        self,
+    ) -> None:
         from control_plane import database_maintenance_health as health
         from control_plane.drivers import native_routes
 
-        for started in (False, True):
-            with self.subTest(started=started):
+        for started, alive, expected in (
+            (False, False, RecoveryRequired),
+            (False, True, TimeoutError),
+            (True, True, TimeoutError),
+        ):
+            with self.subTest(started=started, alive=alive):
                 store = MagicMock()
                 server = Mock(started=started, should_exit=False)
                 worker = Mock()
-                worker.is_alive.side_effect = lambda: started or not server.should_exit
+                worker.is_alive.side_effect = lambda: alive and (started or not server.should_exit)
                 elapsed = [0.0]
                 response = MagicMock(status=200)
                 response.read.return_value = b'{"status":"ok"}'
@@ -166,9 +172,10 @@ class DatabaseMaintenanceHealthTests(unittest.TestCase):
                 opener.open.return_value = response
                 with (
                     patch.dict(
-                        os.environ, {"LAUNCHPLANE_POLICY_TOML": "schema_version = 1"}, clear=True
+                        os.environ, {"LAUNCHPLANE_POLICY_TOML": "synthetic-policy"}, clear=True
                     ),
                     patch.object(health, "schema_migration_action", return_value="current"),
+                    patch.object(health, "parse_authz_policy_toml"),
                     patch.object(native_routes, "_validate_native_descriptor_driver_routes"),
                     patch.object(native_routes, "_validate_native_fastapi_driver_routes"),
                     patch.object(health, "create_launchplane_service_application"),
@@ -184,8 +191,10 @@ class DatabaseMaintenanceHealthTests(unittest.TestCase):
                         ),
                     ),
                 ):
-                    with self.assertRaises(TimeoutError):
+                    with self.assertRaises(expected) as result:
                         health.verify_service_health(store)
+                    if isinstance(result.exception, RecoveryRequired):
+                        self.assertEqual(result.exception.event, VERIFICATION_BLOCKED_EVENT)
                 self.assertTrue(server.should_exit)
                 worker.join.assert_called_once()
 
