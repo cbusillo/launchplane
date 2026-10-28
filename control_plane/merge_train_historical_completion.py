@@ -223,6 +223,7 @@ def assess_merge_train_historical_completion(
     normalized_repository = repository.strip().lower()
     normalized_base_branch = base_branch.strip()
     required = (
+        "list_merge_train_controller_state_alias_records",
         "list_merge_train_controller_state_records",
         "list_merge_train_policy_records",
         "list_merge_train_batch_landing_plan_records",
