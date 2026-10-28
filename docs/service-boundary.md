@@ -721,8 +721,10 @@ successful browser sign-out, and concurrent revocation during CSRF consumption
 clears an ended cookie while a live session still requires valid CSRF proof.
 
 GitHub throttling, server errors and transport failures during identity reads
-return the same pending-verification response without deleting the session or
-extending its claims or cookie. A replacement credential already returned by
+retain the session without extending its claims. Already-current claims remain
+usable within their existing ceiling. Stale claims receive
+`503 identity_provider_unavailable` without cookie renewal or automatic retries.
+A replacement credential already returned by
 GitHub is encrypted and committed before retry, so its single-use predecessor
 is not exchanged again. Uncertain token exchanges still require a new sign-in;
 the service cannot safely replay a refresh whose replacement was not received.
@@ -730,7 +732,7 @@ the service cannot safely replay a refresh whose replacement was not received.
 ### Human OAuth credential retirement
 
 A valid logout removes its current database session and encrypted credential.
-Definitive identity rejection, malformed credentials and uncertain token exchanges
+Definitive identity rejection, malformed identity responses or credentials and uncertain token exchanges
 also remove local custody. Temporary identity-read failures retain custody for
 retry without extending authorization. Neither path makes a GitHub revocation
 request. Client sessions retain no OAuth credential. Current-row
@@ -1426,6 +1428,11 @@ above owns renewal, provider verification, credential custody, Client
 confinement, concurrency and logout. See
 [credential retirement](#human-oauth-credential-retirement) for the local/provider
 and backup boundaries. OAuth login state lasts 10 minutes (600 seconds).
+
+The testing integration-allowance read uses the same browser-session identity
+dependency as other product reads. It retains the existing product, context and
+instance authorization checks. A valid browser session must not be rejected as
+missing a bearer token when the Managed secrets screen reads this metadata.
 
 Every non-health `/v1` operation documents the refresh boundary: `503` means the
 active DB policy could not be loaded, and `409` means a fenced schema exposed an

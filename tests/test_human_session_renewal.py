@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from requests import PreparedRequest, Response, Session, Timeout
 from requests.adapters import BaseAdapter
+from requests.exceptions import JSONDecodeError
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 import unittest
@@ -165,6 +166,20 @@ class HumanSessionRenewalTests(unittest.TestCase):
         self.assertIsNone(self.refresh())
         self.client.revalidate.assert_not_called()
 
+    def test_temporary_verification_failure_keeps_only_already_current_claims_usable(self) -> None:
+        from control_plane.service_human_auth import GitHubIdentityUnavailable
+
+        self.advance_to_refresh()
+        self.client.revalidate.side_effect = GitHubIdentityUnavailable("private-provider-response")
+        self.assertEqual(self.refresh(), self.session)
+        self.assertEqual(self.store.read_session(self.session.session_id), self.session)
+        self.now = self.session.created_at + timedelta(
+            seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS
+        )
+        with self.assertRaises(GitHubIdentityUnavailable):
+            self.refresh()
+        self.assertEqual(self.store.read_session(self.session.session_id), self.session)
+
     def test_corrupt_ciphertext_fails_closed_without_provider_call(self) -> None:
         self.session = replace(self.session, oauth_credential="v1.broken")
         self.store.write_session(self.session)
@@ -307,6 +322,7 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
                             session, client=self.client, authz_policy=_policy()
                         )
                     self.assertNotIn("synthetic-private", str(raised.exception))
+                    self.assertIsNone(raised.exception.credential)
                     stored = store.read_session(session.session_id)
                     assert stored is not None
                     self.assertEqual(stored.claims_verified_at, session.claims_verified_at)
@@ -378,14 +394,24 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
         self.http.get.assert_not_called()
 
     def test_provider_http_errors_and_malformed_memberships_fail_closed(self) -> None:
-        for status in (302, 401, 403, 429, 503):
-            with self.subTest(status=status):
+        for status, headers in (
+            (302, {}),
+            (401, {}),
+            (403, {}),
+            (403, {"X-RateLimit-Remaining": "0"}),
+            (403, {"Retry-After": "60"}),
+            (429, {}),
+            (503, {}),
+        ):
+            with self.subTest(status=status, headers=headers):
                 self.http.get.side_effect = None
-                self.http.get.return_value = Mock(status_code=status)
+                self.http.get.return_value = Mock(status_code=status, headers=headers)
                 from control_plane.service_human_auth import GitHubIdentityUnavailable
 
                 error_type = (
-                    GitHubIdentityUnavailable if status >= 500 or status == 429 else PermissionError
+                    GitHubIdentityUnavailable
+                    if status >= 500 or status == 429 or headers
+                    else PermissionError
                 )
                 with self.assertRaises(error_type):
                     self.revalidate(GitHubOAuthCredential("access"))
@@ -395,6 +421,12 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             self.revalidate(GitHubOAuthCredential("access"))
+        self.http.get.side_effect = None
+        self.http.get.return_value = Mock(status_code=200)
+        self.http.get.return_value.json.side_effect = JSONDecodeError("invalid", "private", 0)
+        with self.assertRaises(ValueError) as malformed:
+            self.revalidate(GitHubOAuthCredential("access"))
+        self.assertNotIsInstance(malformed.exception, GitHubIdentityUnavailable)
 
     def test_membership_pagination_reaches_later_policy_match(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(

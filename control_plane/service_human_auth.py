@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import base64
@@ -16,7 +16,7 @@ import warnings
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlsplit
 
-from requests.exceptions import RequestException
+from requests.exceptions import JSONDecodeError, RequestException
 
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
 from control_plane.service_human_credentials import GitHubOAuthCredential, HumanCredentialCipher
@@ -425,6 +425,8 @@ class GitHubOAuthClient:
                 identity = self._fetch_identity(
                     client, authz_policy=authz_policy, deadline=deadline
                 )
+            except JSONDecodeError:
+                raise ValueError("GitHub identity response is invalid.") from None
             except (GitHubIdentityUnavailable, RequestException):
                 raise GitHubIdentityUnavailable(
                     "GitHub identity provider is unavailable.", credential=credential
@@ -441,7 +443,13 @@ class GitHubOAuthClient:
         response = client.get(
             url, timeout=min(OAUTH_REQUEST_TIMEOUT_SECONDS, remaining), allow_redirects=False
         )
-        if response.status_code == 429 or response.status_code >= 500:
+        headers = getattr(response, "headers", {})
+        rate_limited = (
+            response.status_code == 403
+            and isinstance(headers, Mapping)
+            and (headers.get("X-RateLimit-Remaining") == "0" or bool(headers.get("Retry-After")))
+        )
+        if rate_limited or response.status_code == 429 or response.status_code >= 500:
             raise GitHubIdentityUnavailable("GitHub identity provider is unavailable.")
         if response.status_code != 200:
             raise PermissionError("GitHub identity could not be verified.")
@@ -756,10 +764,10 @@ class HumanSessionManager:
             self.revoke(session)
             return None
 
-        verification_failure: GitHubIdentityUnavailable | None = None
+        verification_pending = False
 
         def refresh(current: LaunchplaneHumanSession) -> LaunchplaneHumanSession | None:
-            nonlocal verification_failure
+            nonlocal verification_pending
             now = self._now()
             verified_at = current.claims_verified_at or current.created_at
             if current.expires_at <= now or verified_at > now:
@@ -791,7 +799,7 @@ class HumanSessionManager:
                     ),
                 )
             except GitHubIdentityUnavailable as error:
-                verification_failure = error
+                verification_pending = True
                 if error.credential is None:
                     return current
                 return replace(
@@ -814,9 +822,14 @@ class HumanSessionManager:
             refreshed = self._session_store.update_session(
                 session.session_id, refresh, skip_locked=True
             )
-            if verification_failure is not None:
+            if verification_pending:
+                fresh = self._fresh_session(refreshed)
+                if fresh is not None:
+                    return fresh
                 _LOGGER.warning("Human session provider verification temporarily unavailable.")
-                raise verification_failure from None
+                raise GitHubIdentityUnavailable(
+                    "GitHub identity provider is unavailable."
+                ) from None
             return refreshed
         except HumanSessionUpdateBusy:
             # An exchange is in progress, not failed. A follower may use only
