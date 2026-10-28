@@ -3347,6 +3347,8 @@ time, registered reader placement and opaque host identity, source database size
 from `pg_database_size`, actual source Odoo version, apparent and allocated
 filestore bytes, and opaque backing groups with non-root available bytes.
 Source reads reuse capture's existing SSH identity and strict known-host trust.
+Preflight and capture reject filesystem-root filestore paths, including aliases
+such as `//` and `/./`, before issuing a source command.
 This requires no workstation-to-host SSH login. It creates no rehearsal record,
 password, capture, provider schedule, application or host-custody directory.
 Existing `operations.read` authority covers it; a refusal never selects another
