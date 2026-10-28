@@ -321,7 +321,7 @@ class PrivateTestingIntegrationTests(unittest.TestCase):
                     "allowed_integrations": [],
                     "connection_isolation_required": False,
                     "protected_shopify_store_handles": [],
-                    "verify_secret_parameters": verify,
+                    "verify_parameter_presence": verify,
                 }
                 payload = {
                     "config_parameters": [

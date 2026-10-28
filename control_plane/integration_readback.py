@@ -207,7 +207,7 @@ class IntegrationReadbackPolicy:
     families: tuple[IntegrationFamily, ...]
     allowed_integrations: tuple[str, ...]
     protected_shopify_store_handles: tuple[str, ...]
-    verify_secret_parameters: bool = False
+    verify_parameter_presence: bool = False
 
     @property
     def required(self) -> bool:
@@ -229,7 +229,7 @@ class IntegrationReadbackPolicy:
             "allowed_integrations": list(self.allowed_integrations),
             "connection_isolation_required": bool(self.families),
             "protected_shopify_store_handles": list(self.protected_shopify_store_handles),
-            "verify_secret_parameters": self.verify_secret_parameters,
+            "verify_parameter_presence": self.verify_parameter_presence,
         }
         return base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
 
@@ -255,7 +255,7 @@ def integration_readback_policy(
             if workflow_mode == "restore" or not family.restore_only
         )
     return IntegrationReadbackPolicy(
-        verify_secret_parameters=runtime_key_safety_environment_class(instance_name) == "testing",
+        verify_parameter_presence=runtime_key_safety_environment_class(instance_name) == "testing",
         families=families,
         allowed_integrations=tuple(
             allowance.integration for allowance in policies.integration_allowances
@@ -374,7 +374,7 @@ allowed = []
 checked = 0
 parameter_keys = []
 encoded_payload = os.environ.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "")
-if encoded_payload and spec.get("verify_secret_parameters", False):
+if encoded_payload and spec.get("verify_parameter_presence", False):
     payload = json.loads(base64.b64decode(encoded_payload, validate=True))
     parameter_keys = sorted({
         item["key"] for item in payload.get("config_parameters", [])
