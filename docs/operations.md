@@ -2034,6 +2034,15 @@ notification. It neither changes production nor resolves any existing incident.
 Failures after a deploy starts, other rejections, and uncertain outcomes remain
 delivery incidents.
 An artifact's later successful production delivery resolves its delivery incident.
+A fully completed Client-accepted native recipient release can also recover an
+older recipient's delivery incident. Its entire release plan, including any
+rollback drill, must pass. The currently published authority must still belong
+to that recipient, with fresh health and matching runtime identity observed
+after final completion. Every retained failure must identify an earlier
+recipient's current terminal release receipt proving either no writer effect
+or successful protective rollback. Unknown effects, unrecognized traces,
+newer failures, incomplete releases and later unaccepted decisions keep the
+incident open. Historical failures and original operation receipts remain.
 A failed generic-web rollback deployment also recovers when a later rollback on
 the same production lane passes, even when its target artifact differs. Every
 failure retained in the incident must identify a failed rollback deployment for
@@ -2048,7 +2057,7 @@ time. Different failures at the same time retain distinct observations, while an
 exact replay is idempotent. A concurrent new failure defers recovery to the next
 monitor pass without opening a monitoring-unavailable incident.
 Recovery uses the ordinary passing observation and preserves the original failure.
-Runtime health alone, a newer forward delivery of another artifact, an unsuccessful
+Runtime health alone, an unrelated forward delivery of another artifact, an unsuccessful
 rollback, or a rollback on another lane cannot resolve that failure.
 The service's independent delivery-monitor thread checks terminal deployment,
 promotion and queued Odoo release failures once per minute, including products
