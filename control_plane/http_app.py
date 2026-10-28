@@ -4587,6 +4587,14 @@ def create_launchplane_fastapi_app(
                     client=github_oauth_client,
                     authz_policy=resolved_authz_policy_runtime.policy,
                 )
+            except GitHubIdentityUnavailable:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=next_trace_id(),
+                    code="identity_provider_unavailable",
+                    message="GitHub identity verification is temporarily unavailable. Retry later.",
+                    headers={"Cache-Control": "no-store"},
+                ) from None
             except HumanSessionUpdateBusy:
                 raise _launchplane_http_error(
                     status_code=503,
@@ -8285,7 +8293,7 @@ def create_launchplane_fastapi_app(
             ) from error
 
     async def read_integration_allowances(
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         product: Annotated[str, Query()] = "",
         context: Annotated[str, Query()] = "",
@@ -8344,7 +8352,7 @@ def create_launchplane_fastapi_app(
 
     async def apply_integration_allowances(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
