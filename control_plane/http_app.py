@@ -5330,7 +5330,7 @@ def create_launchplane_fastapi_app(
                 message="Browser route repair requires the signed-in administrator.",
             )
 
-    def read_domain_repair_identity(
+    def read_target_setup_identity(
         request: Request,
         response: Response,
         setup_request: DokployTargetSetupEnvelope,
@@ -5346,7 +5346,7 @@ def create_launchplane_fastapi_app(
         )
         if isinstance(identity, GitHubHumanIdentity):
             require_route_repair_administrator(identity)
-            if (
+            if setup_request.onboarding is None and (
                 setup_request.operation != "repair-domain-authority"
                 or setup_request.browser_review is None
             ):
@@ -5354,7 +5354,7 @@ def create_launchplane_fastapi_app(
                     status_code=403,
                     trace_id=next_trace_id(),
                     code="authorization_denied",
-                    message="Browser setup is limited to reviewed domain authority repair.",
+                    message="Browser setup requires reviewed domain repair or new-product allocation.",
                 )
             return identity
         if setup_request.browser_review is not None:
@@ -26073,7 +26073,7 @@ def create_launchplane_fastapi_app(
     async def setup_dokploy_target(
         request: Request,
         setup_request: DokployTargetSetupEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_domain_repair_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_target_setup_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse | JSONResponse:
@@ -26095,6 +26095,9 @@ def create_launchplane_fastapi_app(
         # lane's tracked binding. Both require exclusive context ownership.
         lane_owner = _lane_setup_context_owner(
             record_store=database_store, context=setup_request.context
+        )
+        native_onboarding = setup_request.onboarding is not None and (
+            isinstance(identity, GitHubHumanIdentity) or director_agent_identity(identity)
         )
         service_scoped = resolved_authz_policy_runtime.allows(
             identity=identity,
@@ -26129,6 +26132,7 @@ def create_launchplane_fastapi_app(
             and not disposable_rebuild_setup
             and not first_testing_setup
             and not director_source_completion
+            and not native_onboarding
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -26168,6 +26172,7 @@ def create_launchplane_fastapi_app(
             or disposable_rebuild_setup
             or first_testing_setup
             or director_source_completion
+            or native_onboarding
         )
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
             can_setup_target
@@ -26318,7 +26323,7 @@ def create_launchplane_fastapi_app(
                 )
                 if legacy_replay is not None:
                     return legacy_replay
-        if setup_request.state_volume_path or ordinary_allocation:
+        if setup_request.state_volume_path or ordinary_allocation or setup_request.onboarding:
             from control_plane.application_state_volume import ApplicationStateVolumeAdapter
             from control_plane.application_state_volume_errors import StateVolumeRefusal
 

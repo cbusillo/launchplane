@@ -2888,6 +2888,52 @@ handoff; a record-backed report does not establish current provider health.
 
 ### Conventional generic-web onboarding
 
+#### Native target allocation
+
+`POST /v1/dokploy-targets/setup` accepts an `onboarding` intent for a new
+generic-web product. A CSRF-checked signed-in administrator or authenticated
+Director agent can use this bounded path without a workflow caller grant.
+It allocates an empty testing application in a new project and environment;
+it does not apply product profiles, runtime settings, policy or deployments.
+
+Supply the typed `GenericWebOnboardingIntent` and the corresponding ordinary
+target request with `operation: create-application`, `target_type: application`,
+`instance: testing`, `environment_name: testing` and an explicit `server_id`.
+Context, target, project, server, health path and source ref must match the
+intent. Existing placement ids, domains, repository source setup, replacement
+targets and state volumes are refused. Both testing and preview contexts must
+be unowned and free of target/deployment records, including previous product use.
+Those facts are checked before each provider write and under the authority
+guard before adoption.
+
+Start with `mode: dry-run` and a chosen `Idempotency-Key`. Save the exact
+request, key and response privately. The response supplies
+`target_request_sha256` and `onboarding_plan_sha256`. The target digest uses
+canonical JSON of the validated target request, excluding mode, reason,
+confirmation, retention controls, onboarding intent and the two review digests.
+The record-plan digest uses the existing onboarding intent contract. Send both
+back as `reviewed_target_request_sha256` and
+`reviewed_onboarding_plan_sha256` for apply or readback. Apply also requires
+the existing exact confirmation and a reason, and the saved plan under the
+same actor and key. These are native service digests, not the compatibility
+workflow's byte digest of its JSON artifact.
+
+On an uncertain outcome, preserve the original request, actor and key. Use
+`mode: readback` to inspect durable progress and `custody_sha256`, then resume
+with unchanged `mode: apply`, or retain with `retain_allocation: true` and
+`expected_allocation_custody_sha256` from that reviewed readback. Recovery uses
+the existing allocation machinery; it never repeats a positively recovered
+create, deletes resources or applies onboarding/policy records. Retained
+allocations keep their original custody and cannot resume creating resources.
+Apply the separately reviewed product-record plan only after allocation succeeds.
+
+Source support is not deployed qualification. Confirm the deployed schema,
+then prove plan/create/readback/original-key recovery/retention on isolated
+targets before removing the compatibility wrapper and its planner. Keep
+existing workflow allocations on their original actor/key recovery path.
+
+#### Compatibility workflow
+
 Use the manual `Product Onboarding` workflow for a new generic-web product.
 Start with `mode=dry_run` when admin review of the exact plan is useful, or
 use `mode=apply` for one dispatch that pauses at the protected
