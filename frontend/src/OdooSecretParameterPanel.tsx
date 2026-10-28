@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { readOdooSecretReferences, reconcileOdooSecretReferences } from "./api";
+import { readOdooReferenceMetadata, reconcileOdooReferenceMetadata } from "./api";
 import { AppLink } from "./router";
 import { TestingIntegrationAllowancePanel } from "./TestingIntegrationAllowancePanel";
 import type { ProductEnvironmentConfigStatus, SecretReferenceRequest, SecretReferenceResponse } from "./generated/openapi.ts";
@@ -19,8 +19,8 @@ export function OdooSecretParameterPanel({ config, fixtureMode }: {
   const [pending, setPending] = useState<SecretReferenceRequest | null>(() => {
     try { return JSON.parse(sessionStorage.getItem(storageKey) || "null"); } catch { return null; }
   });
-  const execute = (request: SecretReferenceRequest, options: Parameters<typeof reconcileOdooSecretReferences>[3]) =>
-    reconcileOdooSecretReferences(config.product, config.environment, request, options);
+  const execute = (request: SecretReferenceRequest, options: Parameters<typeof reconcileOdooReferenceMetadata>[3]) =>
+    reconcileOdooReferenceMetadata(config.product, config.environment, request, options);
   const plan = useBrowserOperationController({ scope: `${scope}:plan`, execute, readOnly: true,
     failureCertainty: productConfigFailureCertainty, failureFor: productConfigOperationFailure });
   const apply = useBrowserOperationController({ scope: `${scope}:apply`, execute,
@@ -59,7 +59,7 @@ export function OdooSecretParameterPanel({ config, fixtureMode }: {
   async function readBack() {
     setError("");
     try {
-      const result = await readOdooSecretReferences(config.product, config.environment);
+      const result = await readOdooReferenceMetadata(config.product, config.environment);
       setReview(result); setConfirmed(false);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Reference readback is unavailable."); }
   }

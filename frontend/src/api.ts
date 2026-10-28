@@ -599,11 +599,11 @@ export function applyProductEnvironmentConfig(
   );
 }
 
-export function readOdooSecretReferences(product: string, environment: string, signal?: AbortSignal): Promise<SecretReferenceResponse> {
+export function readOdooReferenceMetadata(product: string, environment: string, signal?: AbortSignal): Promise<SecretReferenceResponse> {
   return requestJson(`/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/odoo-secret-references/reconcile`, "GET", undefined, signal);
 }
 
-export function reconcileOdooSecretReferences(
+export function reconcileOdooReferenceMetadata(
   product: string, environment: string, body: ReconcileOdooSecretReferencesData["body"], options: BrowserOperationOptions,
 ): Promise<SecretReferenceResponse> {
   const route = BROWSER_WRITE_ROUTES.odooSecretReferences.replace("{product}", encodeURIComponent(product)).replace("{environment}", encodeURIComponent(environment));
