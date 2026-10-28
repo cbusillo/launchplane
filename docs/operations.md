@@ -2042,6 +2042,10 @@ after final completion. Every retained failure must identify that release or a
 retained recipient's settled native operation. All steps of a retained decision
 must have settled effects before its shared trace qualifies. A failed promotion
 needs a terminal receipt proving no writer effect or successful protective rollback.
+An abandoned preflight refusal qualifies only through the native exact-attempt
+proof and its failed undeployed promotion; absence of a reservation alone is
+insufficient. Failed backups qualify only through the existing positive
+pre-capture absence proof; provider timeouts and uncertain captures stay fenced.
 Unknown effects, unrecognized traces,
 newer failures, incomplete releases and later unaccepted decisions keep the
 incident open. Historical failures and original operation receipts remain.

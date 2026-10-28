@@ -2,16 +2,18 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 import unittest
+import subprocess
 from unittest.mock import Mock, patch
 
 from control_plane import client_release as releases, production_recipient as recipient
-from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.product_profile_record import (
     ProductLaneHealthCheck,
     ProductLaneHealthMonitoringPolicy,
 )
 from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
+from control_plane.integration_allowances import canonical_sha256
+from control_plane.provider_operations import build_provider_operation_key
 from control_plane.production_recipient_cutover import RecipientCutoverAdapter
 from control_plane.production_delivery_monitor import (
     _scan_failures,
@@ -19,6 +21,7 @@ from control_plane.production_delivery_monitor import (
     record_production_delivery_failure,
 )
 from control_plane.storage.postgres import (
+    PostgresRecordStore,
     LaunchplaneIdempotencyRow,
     LaunchplaneProductionRecipientRow,
 )
@@ -29,6 +32,13 @@ from control_plane.workflows.public_ingress_monitor import (
 from tests import test_production_recipient_cutover as cutover_tests
 from tests import test_production_recipient_release_settings as settings_tests
 from tests.test_production_recipient_writer_fence import WriterFenceHarness
+from tests.test_production_backup_provider import BackupHost
+from control_plane.workflows.production_backup_gate_operation_worker import (
+    run_production_backup_gate_operation_worker_once,
+)
+from control_plane.contracts.production_backup_authority import (
+    ProxmoxGuestBackupDestinationReference,
+)
 
 
 class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
@@ -61,8 +71,22 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
             self.old_case.capture_next_backup()
             self.old_case.advance()
             self.old_case.advance()
-        self.old_case.capture_next_backup()
-        if self.old_failure == "fenced":
+        if self.old_failure.startswith("backup"):
+            self.fail_backup()
+        elif self.old_failure in {"preflight", "checkpointed"}:
+            self.old_case.capture_next_backup()
+
+            def refuse(_record: Any, checkpoint: Any, _lease: Any) -> None:
+                if self.old_failure == "checkpointed":
+                    checkpoint(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+                raise ValueError("The upstream preflight failed")
+
+            with patch.object(RecipientCutoverAdapter, "verify_upstreams", side_effect=refuse):
+                releases.advance_client_releases(
+                    store=old.store, control_plane_root=old.fixture.root
+                )
+        elif self.old_failure == "fenced":
+            self.old_case.capture_next_backup()
             self.store = old.store
             self.product, self.context = old.record.product, old.record.context
             self.base = old.fixture.root.resolve() / "writer-custody"
@@ -92,6 +116,7 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
                 self.fence(operation_id)
             self.old_case.advance()
         else:
+            self.old_case.capture_next_backup()
             with patch(
                 "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
                 side_effect=ValueError("Destination health failed"),
@@ -107,10 +132,12 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
         self.old_views = releases.read_client_release_step_views(
             store=old.store, profile=self.old_case.profile, decision=self.old_decision
         )
-        failed_step = next(view for view in self.old_views if view.status == "fail")
-        old_receipt = old.store.read_idempotency_record_by_id(failed_step.operation_id)
-        assert old_receipt is not None
-        self.old_receipt = old_receipt
+        self.old_operation_id = releases.client_release_step_operation_id(
+            profile=self.old_case.profile,
+            decision=self.old_decision,
+            step=releases.ClientReleaseStep("promote", self.old_attempt),
+        )
+        self._old_receipt = old.store.read_idempotency_record_by_id(self.old_operation_id)
         self.old_candidate = self.old_decision.checklist.candidate.artifact_id
         self.old_observations = old.store.list_public_ingress_observation_records(
             check_name_prefix="production-delivery-"
@@ -131,7 +158,7 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
         self.profile = self.new_case.profile
         self.lane = next(lane for lane in self.profile.lanes if lane.instance == "prod")
         self.clock = max(
-            datetime.now(timezone.utc), datetime.fromisoformat(self.old_receipt.updated_at)
+            datetime.now(timezone.utc), datetime.fromisoformat(self.old_incident.latest_observed_at)
         ) + timedelta(seconds=2)
         self.decision = self.new_case.case.decision.model_copy(
             update={"decided_at": self.clock.isoformat()}
@@ -184,6 +211,49 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
         transport = Mock()
         transport.get_json.return_value = {"sha": self.record.request.source_commit}
         self.factory = Mock(return_value=transport)
+
+    @property
+    def old_receipt(self) -> LaunchplaneIdempotencyRecord:
+        assert self._old_receipt is not None
+        return self._old_receipt
+
+    def fail_backup(self) -> None:
+        old = self.old_case.case.fixture
+        operation_id = self.old_case.advance()[0]
+        operation = old.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        assert operation.binding is not None
+        source = operation.binding.source_target.destination
+        assert isinstance(source, ProxmoxGuestBackupDestinationReference)
+        backend = BackupHost()
+        backend.source = source
+
+        def provider(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if "vzdump" in command:
+                raise subprocess.TimeoutExpired(command, 1)
+            return backend.run(command, **kwargs)
+
+        with (
+            patch(
+                "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
+                side_effect=ValueError("Capture credential lookup failed")
+                if self.old_failure == "backup_preflight"
+                else None,
+                return_value={
+                    "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "synthetic",
+                    "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "synthetic",
+                },
+            ),
+            patch(
+                "control_plane.workflows.production_backup_provider.subprocess.run",
+                side_effect=provider,
+            ),
+        ):
+            result = run_production_backup_gate_operation_worker_once(
+                record_store=old.store,
+                control_plane_root_path=old.fixture.root,
+                lease_owner="monitor-history-backup",
+            )
+        self.assertTrue(result.terminal_write_committed)
 
     def configure(self, case: cutover_tests.RecipientCutoverTests) -> None:
         self.seed(case)
@@ -238,7 +308,10 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
             else:
                 receipt = old.store.read_idempotency_record_by_id(view.operation_id)
                 if receipt is not None:
-                    self.store.write_idempotency_record(receipt)
+                    if receipt.state == "completed":
+                        self.store.write_idempotency_record(receipt)
+                    else:
+                        self.seed_receipt(receipt)
         for promotion in old.store.list_promotion_records(
             context_name=self.prior.context, to_instance_name="prod"
         ):
@@ -274,7 +347,9 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
     def seed_receipt(self, receipt: LaunchplaneIdempotencyRecord) -> None:
         with self.store._session_factory() as session:
             row = session.get(LaunchplaneIdempotencyRow, receipt.record_id)
-            assert row is not None
+            if row is None:
+                row = self.store._idempotency_row(receipt)
+                session.add(row)
             self.store._sync_idempotency_row(row, receipt)
             session.commit()
 
@@ -323,6 +398,11 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
         )
 
     def assert_recovered(self) -> None:
+        receipts = tuple(
+            self.store.read_idempotency_record_by_id(view.operation_id)
+            for view in self.old_views
+            if view.kind != "backup"
+        )
         before = self.store.list_delivery_failure_observations(
             incident_id=self.old_incident.incident_id
         )
@@ -339,7 +419,12 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
             before,
         )
         self.assertEqual(
-            self.store.read_idempotency_record_by_id(self.old_receipt.record_id), self.old_receipt
+            tuple(
+                self.store.read_idempotency_record_by_id(view.operation_id)
+                for view in self.old_views
+                if view.kind != "backup"
+            ),
+            receipts,
         )
 
 
@@ -446,6 +531,25 @@ class AcceptedRecipientDeliveryRecoveryTests(NativeDeliveryHistory):
             self.assert_open()
         self.assertTrue(raced)
 
+    def test_missing_current_publication_refreshes_all_incidents_then_reports_unknown(self) -> None:
+        self.seed_custody(self.record.model_copy(update={"publication": {}}))
+        self.assert_open()
+        for incident in (self.old_incident, self.current_incident):
+            self.assertEqual(
+                self.store.read_public_ingress_incident_record(
+                    incident.incident_id
+                ).latest_observed_at,
+                self.now.isoformat(),
+            )
+        owned = {self.old_incident.incident_id, self.current_incident.incident_id}
+        self.assertTrue(
+            {
+                incident.incident_id
+                for incident in self.store.list_public_ingress_incident_records(status="open")
+            }
+            - owned
+        )
+
 
 class FencedRecipientDeliveryRecoveryTests(NativeDeliveryHistory):
     old_failure = "fenced"
@@ -479,3 +583,73 @@ class PartialRecipientDeliveryRecoveryTests(NativeDeliveryHistory):
             ).status,
             "open",
         )
+
+
+class ReleasedPreflightDeliveryRecoveryTests(NativeDeliveryHistory):
+    old_failure = "preflight"
+
+    def test_abandoned_preflight_recovers_without_recreating_its_reservation(self) -> None:
+        self.assert_recovered()
+        self.assertIsNone(self.store.read_idempotency_record_by_id(self.old_operation_id))
+
+    def test_a_retained_unknown_reservation_still_fences_preflight_recovery(self) -> None:
+        saved = self.prior.execution["reservation:" + self.old_operation_id]
+        self.seed_receipt(
+            LaunchplaneIdempotencyRecord.model_validate({**saved, "state": "reconcile_required"})
+        )
+        self.assert_open()
+
+    def test_dispatched_attempt_stays_fenced_without_a_current_reservation(self) -> None:
+        saved = LaunchplaneIdempotencyRecord.model_validate(
+            self.prior.execution["reservation:" + self.old_operation_id]
+        )
+        key = build_provider_operation_key(
+            scope=saved.scope,
+            route_path=saved.route_path,
+            idempotency_key=saved.idempotency_key,
+            request_fingerprint=saved.request_fingerprint,
+            reconciliation_key=saved.reconciliation_key,
+        )
+        prior = self.prior.model_copy(
+            update={
+                "execution": {
+                    **self.prior.execution,
+                    canonical_sha256(key) + ":old_pause_dispatched_at": self.now.isoformat(),
+                }
+            }
+        )
+        self.seed_custody(
+            self.record.model_copy(
+                update={
+                    "prior_attempts": [prior.model_dump(mode="json", exclude={"prior_attempts"})]
+                }
+            )
+        )
+        self.assert_open()
+
+
+class ReleasedFinalPreflightDeliveryRecoveryTests(ReleasedPreflightDeliveryRecoveryTests):
+    old_attempt = 2
+
+
+class CheckpointedPreflightDeliveryRecoveryTests(NativeDeliveryHistory):
+    old_failure = "checkpointed"
+
+    def test_checkpointed_preflight_keeps_unknown_effects_fenced(self) -> None:
+        self.assert_open()
+
+
+class PrecaptureBackupDeliveryRecoveryTests(NativeDeliveryHistory):
+    old_failure = "backup_preflight"
+    old_attempt = 2
+
+    def test_positively_precapture_backup_failure_is_settled(self) -> None:
+        self.assert_recovered()
+
+
+class UncertainBackupDeliveryRecoveryTests(NativeDeliveryHistory):
+    old_failure = "backup_timeout"
+    old_attempt = 2
+
+    def test_terminal_backup_timeout_keeps_uncertain_capture_fenced(self) -> None:
+        self.assert_open()

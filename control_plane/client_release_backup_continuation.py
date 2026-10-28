@@ -1,8 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
-from typing import Literal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,6 +24,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
+from control_plane.contracts.production_recipient import ProductionRecipientRecord
 from control_plane.integration_allowances import canonical_sha256
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
 from control_plane.provider_operations import build_provider_operation_key
@@ -98,12 +98,30 @@ def native_backup_continuation_context(
     step: ClientReleaseStep,
     backup_record_id: str,
 ) -> tuple[str, dict[str, Any]]:
+    return released_recipient_attempt_context(
+        store,
+        profile,
+        decision,
+        step,
+        backup_record_id,
+        native_release_recipient(store, profile, decision_record_id=decision.record_id),
+    )
+
+
+def released_recipient_attempt_context(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
+    backup_record_id: str,
+    recipient: ProductionRecipientRecord | None,
+) -> tuple[str, dict[str, Any]]:
     from control_plane.production_recipient_cutover import (
         _attempt_execution_started,
         cutover_reconciliation_key,
+        recipient_promotion_record_id,
     )
 
-    recipient = native_release_recipient(store, profile, decision_record_id=decision.record_id)
     native_context: dict[str, Any] = {}
     excluded_promotion_id = ""
     if recipient is not None:
@@ -158,7 +176,7 @@ def native_backup_continuation_context(
                 != cutover_reconciliation_key(recipient.plan_sha256)
             ):
                 raise BackupContinuationRefused("recipient_release_execution_already_started")
-        excluded_promotion_id = "promotion-recipient-" + canonical_sha256(key)[:24]
+        excluded_promotion_id = recipient_promotion_record_id(key)
         try:
             pending = store.read_promotion_record(excluded_promotion_id)
         except FileNotFoundError:

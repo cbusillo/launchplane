@@ -913,6 +913,7 @@ def _recover_delivery_failures(
     now: str,
     index: DeliveryEvidenceIndex,
 ) -> None:
+    recipient_evidence_failed = False
     for incident in store.list_public_ingress_incident_records(
         product=profile.product,
         context_name=lane.context,
@@ -968,12 +969,17 @@ def _recover_delivery_failures(
             and (recovery := _later_passing_rollback(store, lane, failed_at, now, index))
         ):
             recovery_summary = f"The failed production rollback recovered through {recovery}."
-        elif recovery := _later_completed_recipient_release(
-            store, profile, lane, key, failures, failed_at, now
-        ):
-            recovery_summary = (
-                f"The retained failed recipient recovered through accepted release {recovery}."
-            )
+        else:
+            try:
+                recovery = _later_completed_recipient_release(
+                    store, profile, lane, key, failures, failed_at, now
+                )
+            except (ValueError, KeyError, TypeError, FileNotFoundError):
+                recipient_evidence_failed = True
+                _LOGGER.exception("Could not verify recipient delivery for %s", profile.product)
+            else:
+                if recovery:
+                    recovery_summary = f"The retained failed recipient recovered through accepted release {recovery}."
         if recovery_summary:
             try:
                 _observe(
@@ -1014,6 +1020,8 @@ def _recover_delivery_failures(
                 if previous.targets and urlsplit(previous.targets[0].url).query
                 else None,
             )
+    if recipient_evidence_failed:
+        raise ValueError("Current recipient delivery evidence is unavailable.")
 
 
 def _later_completed_recipient_release(
@@ -1152,10 +1160,17 @@ def _settled_recipient_release_traces(
     from control_plane.client_release import (
         CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
         _covering_decision,
+        client_release_steps,
         read_client_release_step_views,
     )
-    from control_plane.integration_allowances import canonical_sha256
-    from control_plane.production_recipient_cutover import cutover_reconciliation_key
+    from control_plane.client_release_backup_continuation import (
+        require_precapture_failure,
+        released_recipient_attempt_context,
+    )
+    from control_plane.production_recipient_cutover import (
+        cutover_reconciliation_key,
+        recipient_promotion_record_id,
+    )
     from control_plane.provider_operations import build_provider_operation_key
 
     trace = "client-release-" + decision.record_id
@@ -1175,12 +1190,51 @@ def _settled_recipient_release_traces(
     views = read_client_release_step_views(store=store, profile=profile, decision=decision)
     if not views:
         return set()
-    for view in views:
+    steps = client_release_steps(decision.release_start)
+    for index, (step, view) in enumerate(zip(steps, views, strict=True)):
         if view.status == "not_started":
+            if view.kind != "promote" or not record.execution.get(
+                "reservation:" + view.operation_id
+            ):
+                continue
+            if record.phase != "preflight_refused" or any(
+                later.status != "not_started"
+                or record.execution.get("reservation:" + later.operation_id)
+                for later in views[index + 1 :]
+            ):
+                return set()
+            backup = store.read_verireel_prod_backup_gate_operation_record(
+                views[index - 1].operation_id
+            )
+            promotion_id, context = released_recipient_attempt_context(
+                store,
+                profile,
+                decision,
+                step,
+                backup.backup_record_id,
+                record,
+            )
+            pending = context.get("promotion")
+            if not pending or PromotionRecord.model_validate(pending).failure is None:
+                return set()
+            traces.update((promotion_id, view.operation_id))
             continue
         if view.kind == "backup":
-            if view.status != "pass":
+            if view.status == "pass":
+                continue
+            if view.status != "fail":
                 return set()
+            operation = store.read_verireel_prod_backup_gate_operation_record(view.operation_id)
+            require_precapture_failure(operation)
+            if (
+                operation.binding is None
+                or (operation.product, operation.context, operation.instance)
+                != (record.product, record.context, "prod")
+                or _time(operation.finished_at) > _time(finished_before)
+            ):
+                return set()
+            if view.failure is not None:
+                traces.update((view.failure.record_id, view.failure.trace_id))
             continue
         receipt = store.read_idempotency_record_by_id(view.operation_id)
         if (
@@ -1216,7 +1270,7 @@ def _settled_recipient_release_traces(
                 request_fingerprint=receipt.request_fingerprint,
                 reconciliation_key=receipt.reconciliation_key,
             )
-            traces.add("promotion-recipient-" + canonical_sha256(provider_key)[:24])
+            traces.add(recipient_promotion_record_id(provider_key))
         traces.update((receipt.record_id, receipt.response_trace_id))
         if view.failure is not None:
             traces.update((view.failure.record_id, view.failure.trace_id))
