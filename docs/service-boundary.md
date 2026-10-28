@@ -1952,11 +1952,12 @@ to other agent identities. Other callers and removals require
 Launchplane service context.
 On a Live product, `local_operator` apply outside the Director add-only exception
 returns `live_product_requires_operator` even with that grant; inert dry runs
-retain existing read/plan authority. Browser CSRF and read-only identity
+require existing plan or apply authority unless the Director declaration exception
+applies. Browser CSRF and read-only identity
 restrictions remain in force. The Director may add a positive external-provider
 purpose to an existing nonlocal requirement while preserving its other metadata.
 Clearing purpose, enabling or retiring existing generation intent, or declaring
-a provider that shadows a local key requires the explicit action and retains
+a provider that shadows a local key requires `product_profile.expected_config.apply` and retains
 the Live-product admin boundary. Odoo's driver-owned local passwords cannot be
 declared external through any profile input path. Completed exact-key receipts
 replay before current-state retirement checks; new writes compare the same

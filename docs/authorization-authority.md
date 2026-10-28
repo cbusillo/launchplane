@@ -144,7 +144,7 @@ terminal transport is refused. Reviewed plan digest, idempotency and
 current-record comparison still govern apply.
 
 Expected-configuration declaration authority and its authenticated Director-agent
-add-only exception are defined in the
+declaration exception are defined in the
 [product profile contract](service-boundary.md#product-profile-endpoints).
 
 The existing testing-retry route also admits the authenticated Director agent
