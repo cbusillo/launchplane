@@ -41,15 +41,13 @@ Agent context callers are identified as compact agent consumers:
   from exact workflow, repository, event, product, context, and action policy
   rules.
 - `owner_local_agent`: trusted local terminal agent using
-  `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`. Authentication does not grant
-  unrestricted mutation authority; each admitted route applies its own identity,
-  policy, scope, and safety checks. See the canonical
-  [terminal-agent authentication and route-specific contracts](service-boundary.md#authentication).
+  `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`. The canonical
+  [authentication contract](service-boundary.md#authentication) owns its Director
+  identity, standing permission and endpoint-specific admission.
 - `owner_local_agent`: trusted local admin using
   `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` from
-  `~/.config/launchplane/local-operator.env`. This identity is limited by exact
-  DB-backed `local_operators` authz policy rules and must include a reason for
-  write requests. Apply-shaped product-config mutations require a previously
+  `~/.config/launchplane/local-operator.env`. Its authority follows the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission)
+  and each endpoint; write requests require a reason. Apply-shaped product-config mutations require a previously
   recorded matching dry-run.
 - `owner_local_agent`: trusted local admin using `LAUNCHPLANE_LOCAL_ADMIN_TOKEN`.
   This identity is limited by exact DB-backed `local_admins` authz policy rules

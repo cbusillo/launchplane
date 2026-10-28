@@ -1062,22 +1062,6 @@ DB-backed review authority and each claimed run to match both values before a
 scoped review credential is decrypted or returned.
 
 
-Local terminal agents that need Launchplane context use a separate terminal-agent
-bearer credential, not the browser OAuth session cookie and not
-`LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`. Configure
-`LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN` on the service and provide the same
-secret to the trusted local terminal agent out of band. Configure
-`LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and
-`LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` to identify the local Director subject and
-token label used by `terminal_agents` authz policy rules; both identity values
-are required whenever the bearer token is configured. The bearer establishes
-the `terminal_agent` identity but grants no unrestricted mutation authority.
-Each registered route decides whether that identity is admitted and then
-enforces its own exact policy, product/context scope, mode, evidence, and safety
-checks. The current route-specific POST exceptions include scoped write-intent
-evaluation, controller operations, and bounded disposable-runtime operations;
-they do not create a general terminal mutation surface.
-
 Trusted Director terminals that need to make Launchplane-owned admin mutations
 without a browser session can use separate Director-agent bearer credentials.
 Configure `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` on the service and provide the same
@@ -1086,8 +1070,8 @@ secret to trusted local agents through
 `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
 `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` to identify the actor in audit and
 idempotency records; both identity values are required whenever the bearer token
-is configured. Routine admin authority is DB-backed by `local_operators`
-authz policy rules, scoped by subject, token label, product, context, and action.
+is configured. Admission and authority follow each endpoint
+and the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission).
 
 Rare `local_admin` operations use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` with configured
 `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT` and `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`.
@@ -1396,8 +1380,6 @@ GitHub Actions workflow
 
 ## Authentication
 
-Machine callers should authenticate with GitHub Actions OIDC.
-
 Human browser callers authenticate with GitHub OAuth. Launchplane owns the
 browser session after OAuth callback and sets an `HttpOnly`, `SameSite=Lax`
 session cookie signed with `LAUNCHPLANE_SESSION_SECRET`. Sessions are backed by
@@ -1415,11 +1397,19 @@ active DB policy could not be loaded, and `409` means a fenced schema exposed an
 ambiguous active-policy state. These responses occur before route-specific
 authorization or handler execution.
 
-Local terminal agents should use the dedicated terminal-agent read bearer token
-when they only need redacted Launchplane context from a trusted admin shell.
-This avoids copying browser session cookies into terminal processes and keeps
-agent credentials independent from GitHub Actions OIDC and Every Code worker
-automation.
+Local terminal agents that need Launchplane context use a separate terminal-agent
+bearer credential, not the browser OAuth session cookie and not
+`LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`. Configure
+`LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN` on the service and provide the same
+secret to the trusted local terminal agent out of band. Configure
+`LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and
+`LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` to identify the local Director subject and
+token label used by `terminal_agents` authz policy rules; both identity values
+are required whenever the bearer token is configured. The configured terminal
+bearer authenticates as the Director's `terminal_agent` identity. Its authority
+follows the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission),
+subject to each endpoint's admission and safety contract. Where that permission
+is inherited, `terminal_agents` policy rules do not narrow it.
 
 ### Identity Types
 
@@ -1471,10 +1461,6 @@ That keeps the audience tied to the Launchplane service identity instead of to a
 temporary repo or local CLI name.
 
 ## Authorization Model
-
-Launchplane should authorize machine callers from workflow identity claims,
-not from human repo-admin status and not from copied long-lived service
-tokens.
 
 The first policy model should be allow-list based and fail closed.
 
@@ -1603,10 +1589,8 @@ subject model before diagnostics or downstream intent contracts consume them:
   are context-only; write, prod, destructive, secret-backed, and policy-admin
   actions require explicit matching policy grants for the workflow identity.
 - `terminal_agent`: trusted local terminal agents authenticated by the dedicated
-  terminal-agent bearer token. Authentication alone grants no general write
-  authority; registered routes apply their identity-specific policy, scope,
-  mode, evidence, and safety contracts, including the bounded POST exceptions
-  described in [Authentication](#authentication).
+  terminal-agent bearer token, with admission and authority defined in
+  [Authentication](#authentication).
 - `local_operator`: trusted Director terminal agents authenticated by the dedicated
   write bearer token. Their authority comes only from exact `local_operators`
   policy rules (subject, token label, product, context, action) on routes that

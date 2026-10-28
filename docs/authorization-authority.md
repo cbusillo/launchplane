@@ -149,7 +149,7 @@ declaration exception are defined in the
 
 The existing testing-retry route also admits the authenticated Director agent
 through the existing `local_operator` bearer transport under the standing
-permission. Terminal-agent credentials retain their read-only transport boundary.
+permission. Terminal-agent credentials are not admitted on this retry route.
 This is a testing-only reconciler wakeup, not
 inherited authority for `odoo_target_replacement_apply.execute`, whose mixed
 production/testing scope keeps its policy checks. Other callers still require

@@ -342,9 +342,6 @@ authentication before creating a separate private token file.
   runtime worker commands, host/user metadata, and non-secret operation settings
   from DB-backed runtime-environment records. Private keys, tokens, and
   known-host material must come from managed secret bindings.
-- GitHub workflows should not carry provider credentials such as `DOKPLOY_HOST`,
-  `DOKPLOY_TOKEN`, or project names; they should call Launchplane with OIDC and
-  operation intent.
 - Runner-host hygiene cross-repository evidence uses a dedicated GitHub App.
   Store its non-secret client ID in the documented repository variable and its
   private key in `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY`.
