@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import hashlib
-import json
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -103,15 +103,12 @@ def build_ingress_route_audit_record_id(
     domains: tuple[str, ...],
 ) -> str:
     normalized_trace_id = require_text(trace_id, "ingress route audit id requires trace_id")
-    material = json.dumps(
+    digest = nonvalidating_compact_sorted_json_sha256(
         {
             "trace_id": normalized_trace_id,
             "product": product.strip(),
             "context": context.strip(),
             "domains": sorted(domain.strip().lower() for domain in domains if domain.strip()),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+        }
+    )[:16]
     return f"ingress-route-audit-{normalized_trace_id}-{digest}"
