@@ -129,8 +129,11 @@ Disallowed metadata examples:
 - authz grants, admin subjects, token labels, or workflow policy catalogs
 - Launchplane route batches, idempotency catalogs, or copied provider payloads
 
-Product repositories should run Launchplane's changed-file authority gate before
-merge once the local baseline is clean:
+Launchplane's changed-file authority scanner audits an explicit product checkout:
+existing repositories retain their [dedicated reusable config-authority gate](../.github/workflows/reusable-product-repo-config-authority.yml)
+as compatibility, with `launchplane-revision` matching the called workflow SHA.
+This scanner invocation describes the Launchplane-side audit, not a product-owned
+Launchplane tool checkout or a new-product gate requirement:
 
 ```bash
 uv run launchplane service audit-config-authority \
@@ -360,7 +363,7 @@ the inventory keeps the previous-good image without a product repo change.
 Cleanup consumers must check both `artifact_ids` and `image_references` from the
 protected inventory. Some active-preview protections come from ready PR feedback
 records that carry immutable and refresh image references but no artifact id, so
-an artifact-id-only cleanup filter can still delete a live preview tag. Existing cleanup uses the shared protected-artifacts request action's
+an artifact-id-only cleanup filter can still delete a live preview tag. Existing cleanup uses [`setup-protected-artifacts-request-client`](../.github/actions/setup-protected-artifacts-request-client/action.yml)'s
 `render-request` interface and `protected_artifacts` extraction. Whole-product
 reads require `artifact_protection.read` with wildcard context for that product;
 context-specific reads use the matching scoped grant. Product-owned registry

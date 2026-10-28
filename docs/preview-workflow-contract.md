@@ -28,6 +28,28 @@ the new-product contract rather than duplicating it here.
 
 ## Retained Preview Safety
 
+After native generic-web provider teardown succeeds, the destroy route records
+the matching preview as `destroyed` and clears its active and serving generation
+links before returning success. A destroy for a preview that was never recorded
+is a successful no-op with `destroy_outcome=no_preview_recorded` when no provider
+resource evidence exists. Reusable feedback maps that outcome to `cleared`.
+Provider teardown failure leaves durable preview state unchanged, and managed
+failure comments claim that a preview may remain only when the feedback request
+contains preview URL or image evidence or Launchplane finds an active preview
+record with a canonical URL; otherwise the failure wording remains neutral about
+resource existence. Driver-transport extensions retain ownership of their own
+destroy transition. Because provider and record mutations cannot share a
+transaction, retrying destroy after a record-write failure is the supported
+convergence path; an already-absent provider application is treated as a
+successful teardown so that retry can repair the record.
+
+Preview refresh readiness should allow the serving runtime identity to converge
+after a provider deploy trigger. A health response that still reports the prior
+deployment/artifact/source identity for the same product, context, preview slug,
+and environment kind remains a polling signal until the route timeout; a
+different product, context, preview slug, or environment kind remains a hard
+mismatch.
+
 New preview settings accept only `data_transport_mode="none"` (ordinary preview
 provisioning with the declared environment copying) or `"driver"` (executed
 driver-owned preparation). Clone, bootstrap, migration/seed modes and generic
@@ -70,7 +92,7 @@ Product-local preview slugs are not substitutes for Launchplane's canonical
 preview and generation identities.
 
 Because product callers pin reusable workflows while the service deploys
-independently, add any future destroy outcome to the reusable workflow allowlist
+independently, add any future destroy outcome to the `reusable-preview-feedback-status.yml` allowlist
 and roll caller pins forward before the deployed service starts emitting it.
 
 ## Route Handoff

@@ -71,12 +71,9 @@ ingress workflow identity from the active policy and fails closed when no single
 template exists; admins do not hand-author authz JSON or edit a per-product
 policy secret.
 
-After a product repository is archived or its onboarding GitHub App installation
-is gone, preserve the existing `Generic Web Preview Authorization`
-`operation=retire` cleanup until the grant retirement and readback complete. It
-resolves immutable authority from the active product preview rules and does not
-require a repository lookup. See the [onboarding cleanup runbook](operations.md#conventional-generic-web-onboarding). Do not remove that cleanup merely because new
-products have no caller grant.
+Existing caller-rule retirement after archival or App offboarding follows the
+[canonical preview-authorization contract](service-boundary.md#product-profile-endpoints).
+Keep that cleanup until retirement and independent readback complete.
 
 New-product build and handoff requirements are canonical in
 [artifact provenance](artifact-provenance.md) and
@@ -158,5 +155,3 @@ Before treating the repo as Launchplane-ready:
 - A non-prod deploy or preview path has been exercised through Launchplane.
 - Product workflows do not mutate providers directly.
 - Product workflows do not render Launchplane evidence or PR feedback markdown.
-- Any remaining Launchplane adapter scripts are small, temporary, and listed as
-  migration candidates.
