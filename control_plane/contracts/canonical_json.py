@@ -46,7 +46,7 @@ def canonical_json_bytes(payload: object) -> bytes:
 
 def nonvalidating_compact_sorted_json_sha256(payload: object) -> str:
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
