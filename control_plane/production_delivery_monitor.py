@@ -28,6 +28,8 @@ from control_plane.contracts.product_profile_record import (
     product_lane_monitoring_probe_effective,
 )
 from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.production_recipient import ProductionRecipientRecord
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.generic_web_source_qualification import (
     GenericWebPromotionAdmissionRefused,
     GenericWebPromotionSourceRefused,
@@ -1031,7 +1033,8 @@ def _later_completed_recipient_release(
         return ""
     from control_plane.client_release import (
         CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
-        read_client_release_step_views,
+        _covering_decision,
+        read_client_release_run,
     )
     from control_plane.production_recipient import custody
     from control_plane.production_recipient_publication import require_owned_publication_rows
@@ -1040,6 +1043,13 @@ def _later_completed_recipient_release(
     if not decisions:
         return ""
     decision = decisions[0]
+    if (
+        _covering_decision(
+            store, profile.product, decision_record_id=decision.record_id, recovering=True
+        )
+        is None
+    ):
+        return ""
     record = custody(store, profile.product, lane.context)
     if (
         decision.decision != "accepted"
@@ -1055,10 +1065,10 @@ def _later_completed_recipient_release(
         or record.execution.get("release_trace") != "client-release-" + decision.record_id
     ):
         return ""
-    steps = read_client_release_step_views(store=store, profile=profile, decision=decision)
-    if not steps or any(step.status != "pass" or step.failure for step in steps):
+    run = read_client_release_run(store=store, profile=profile, decision=decision)
+    if run is None or run.state != "passed":
         return ""
-    final = store.read_idempotency_record_by_id(steps[-1].operation_id)
+    final = store.read_idempotency_record_by_id(run.steps[-1].operation_id)
     if (
         final is None
         or final.state != "completed"
@@ -1070,43 +1080,38 @@ def _later_completed_recipient_release(
         or not _time(failed_at) < _time(final.updated_at) <= _time(now)
     ):
         return ""
-    settled_traces: set[str] = set()
+    settled_traces = (
+        _settled_recipient_release_traces(store, profile, record, decision, final.updated_at)
+        if key
+        in {_candidate_key(record.image_reference), _candidate_key(record.request.source_commit)}
+        else set()
+    )
     for prior in record.prior_attempts:
-        request = prior.get("request", {})
-        if key not in {
-            _candidate_key(prior.get("image_reference", "")),
-            _candidate_key(request.get("source_commit", "")),
-        }:
-            continue
-        execution = prior.get("execution", {})
-        original = execution.get("original_reservation", {})
-        receipt = store.read_idempotency_record_by_id(original.get("record_id", ""))
-        if (
-            receipt is None
-            or receipt.state != "completed"
-            or receipt.scope != CLIENT_RELEASE_IDEMPOTENCY_SCOPE
-        ):
-            continue
-        outcome = receipt.response_payload.get("result", {})
-        if (
-            outcome.get("recipient_plan_sha256") != prior.get("plan_sha256")
-            or outcome.get("promotion_status") != "fail"
-            or not (
-                outcome.get("writer_effect") == "none" or outcome.get("rollback_status") == "pass"
+        try:
+            previous = ProductionRecipientRecord.model_validate(prior)
+            if (
+                previous.phase not in {"rolled_back", "preflight_refused"}
+                or (previous.product, previous.context) != (record.product, record.context)
+                or key
+                not in {
+                    _candidate_key(previous.image_reference),
+                    _candidate_key(previous.request.source_commit),
+                }
+            ):
+                continue
+            trace = previous.execution.get("release_trace", "")
+            if not trace.startswith("client-release-"):
+                continue
+            previous_decision = store.read_release_review_decision_record(
+                product=profile.product, record_id=trace.removeprefix("client-release-")
             )
-            or not receipt.updated_at
-            or _time(receipt.updated_at) > _time(final.updated_at)
-        ):
-            continue
-        settled_traces.update(
-            trace
-            for trace in (
-                receipt.record_id,
-                receipt.response_trace_id,
-                execution.get("promotion_record_id"),
+            settled_traces.update(
+                _settled_recipient_release_traces(
+                    store, profile, previous, previous_decision, final.updated_at
+                )
             )
-            if trace
-        )
+        except (ValueError, KeyError, TypeError, FileNotFoundError):
+            continue
     if any(
         _delivery_failure_reference(failure).trace_id not in settled_traces for failure in failures
     ):
@@ -1135,6 +1140,88 @@ def _later_completed_recipient_release(
     ):
         return ""
     return decision.record_id
+
+
+def _settled_recipient_release_traces(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    record: ProductionRecipientRecord,
+    decision: ReleaseReviewDecisionRecord,
+    finished_before: str,
+) -> set[str]:
+    from control_plane.client_release import (
+        CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+        _covering_decision,
+        read_client_release_step_views,
+    )
+    from control_plane.integration_allowances import canonical_sha256
+    from control_plane.production_recipient_cutover import cutover_reconciliation_key
+    from control_plane.provider_operations import build_provider_operation_key
+
+    trace = "client-release-" + decision.record_id
+    if (
+        decision.decision != "accepted"
+        or _covering_decision(
+            store, profile.product, decision_record_id=decision.record_id, recovering=True
+        )
+        is None
+        or decision.checklist.repository != profile.repository
+        or decision.checklist.candidate.artifact_id != record.image_reference
+        or decision.checklist.candidate.source_commit != record.request.source_commit
+        or record.execution.get("release_trace") != trace
+    ):
+        return set()
+    traces: set[str] = set()
+    views = read_client_release_step_views(store=store, profile=profile, decision=decision)
+    if not views:
+        return set()
+    for view in views:
+        if view.status == "not_started":
+            continue
+        if view.kind == "backup":
+            if view.status != "pass":
+                return set()
+            continue
+        receipt = store.read_idempotency_record_by_id(view.operation_id)
+        if (
+            view.status not in {"pass", "fail"}
+            or receipt is None
+            or receipt.state != "completed"
+            or receipt.scope != CLIENT_RELEASE_IDEMPOTENCY_SCOPE
+            or not receipt.updated_at
+            or _time(receipt.updated_at) > _time(finished_before)
+        ):
+            return set()
+        outcome = receipt.response_payload.get("result", {})
+        if outcome.get("recipient_plan_sha256") != record.plan_sha256:
+            return set()
+        if view.kind == "rollback":
+            if view.status != "pass" or outcome.get("rollback_status") != "pass":
+                return set()
+        else:
+            if receipt.reconciliation_key != cutover_reconciliation_key(record.plan_sha256):
+                return set()
+            if view.status == "fail" and (
+                outcome.get("rollback_status") == "fail"
+                or not (
+                    outcome.get("writer_effect") == "none"
+                    or outcome.get("rollback_status") == "pass"
+                )
+            ):
+                return set()
+            provider_key = build_provider_operation_key(
+                scope=receipt.scope,
+                route_path=receipt.route_path,
+                idempotency_key=receipt.idempotency_key,
+                request_fingerprint=receipt.request_fingerprint,
+                reconciliation_key=receipt.reconciliation_key,
+            )
+            traces.add("promotion-recipient-" + canonical_sha256(provider_key)[:24])
+        traces.update((receipt.record_id, receipt.response_trace_id))
+        if view.failure is not None:
+            traces.update((view.failure.record_id, view.failure.trace_id))
+    traces.discard("")
+    return traces | {trace} if traces else set()
 
 
 def _is_rollback_deployment(record: DeploymentRecord) -> bool:

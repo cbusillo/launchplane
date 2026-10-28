@@ -2034,13 +2034,15 @@ notification. It neither changes production nor resolves any existing incident.
 Failures after a deploy starts, other rejections, and uncertain outcomes remain
 delivery incidents.
 An artifact's later successful production delivery resolves its delivery incident.
-A fully completed Client-accepted native recipient release can also recover an
-older recipient's delivery incident. Its entire release plan, including any
+A fully completed Client-accepted native recipient release can also recover its
+own or an older recipient's delivery incident. Its entire release plan, including any
 rollback drill, must pass. The currently published authority must still belong
 to that recipient, with fresh health and matching runtime identity observed
-after final completion. Every retained failure must identify an earlier
-recipient's current terminal release receipt proving either no writer effect
-or successful protective rollback. Unknown effects, unrecognized traces,
+after final completion. Every retained failure must identify that release or a
+retained recipient's settled native operation. All steps of a retained decision
+must have settled effects before its shared trace qualifies. A failed promotion
+needs a terminal receipt proving no writer effect or successful protective rollback.
+Unknown effects, unrecognized traces,
 newer failures, incomplete releases and later unaccepted decisions keep the
 incident open. Historical failures and original operation receipts remain.
 A failed generic-web rollback deployment also recovers when a later rollback on
