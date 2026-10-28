@@ -14,11 +14,12 @@ RUN apt-get update \
 
 WORKDIR /app
 
-RUN corepack enable \
-    && corepack prepare pnpm@10.10.0 --activate
-
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml /app/frontend/
+COPY frontend/package.json /app/frontend/
 WORKDIR /app/frontend
+RUN corepack enable \
+    && corepack install
+
+COPY frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml /app/frontend/
 RUN pnpm install --frozen-lockfile
 
 COPY pyproject.toml uv.lock README.md /app/
@@ -60,14 +61,21 @@ RUN github_cli_x_mod_version=v0.41.0 \
 FROM mirror.gcr.io/library/golang:1.27.3-bookworm AS artifact-scanner
 
 ARG TRIVY_VERSION=v0.76.0
+ARG TRIVY_GO_JOSE_VERSION=v4.1.6
 
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local
 
-RUN go install -trimpath \
+RUN mkdir -p /tmp/artifact-scanner-build \
+    && cd /tmp/artifact-scanner-build \
+    && go mod init launchplane.local/artifact-scanner-build \
+    && go get "github.com/aquasecurity/trivy/cmd/trivy@${TRIVY_VERSION}" \
+    && go get "github.com/go-jose/go-jose/v4@${TRIVY_GO_JOSE_VERSION}" \
+    && go build -trimpath -o /go/bin/trivy \
         -ldflags="-s -w -extldflags=-static -X github.com/aquasecurity/trivy/pkg/version/app.ver=${TRIVY_VERSION#v}" \
-        "github.com/aquasecurity/trivy/cmd/trivy@${TRIVY_VERSION}" \
+        github.com/aquasecurity/trivy/cmd/trivy \
     && go version -m /go/bin/trivy | grep -F "github.com/aquasecurity/trivy" | grep -F "${TRIVY_VERSION}" \
+    && go version -m /go/bin/trivy | grep -F "github.com/go-jose/go-jose/v4" | grep -F "${TRIVY_GO_JOSE_VERSION}" \
     && /go/bin/trivy --version
 
 FROM python-base AS runtime
