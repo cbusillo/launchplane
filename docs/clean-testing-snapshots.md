@@ -86,9 +86,8 @@ reports `copy_failure_exit_status` from its failed child command.
 The host forwards these markers without forwarding the child's output or
 traceback. The stage identifies the first failure before rollback or cleanup;
 it does not prove the underlying application cause or authorize another copy.
-Missing clean-snapshot proof retains the observed schedule and deployment
-identities in the readback failure evidence. Provider completion and these
-diagnostics do not settle custody or establish a usable preview.
+Provider completion and these diagnostics do not settle custody or establish a
+usable preview.
 
 A new preview selects one completed same-product snapshot. An existing preview
 with a qualified completed deployment keeps its data and needs no snapshot

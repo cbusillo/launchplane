@@ -1146,9 +1146,7 @@ def run_compose_post_deploy_update(
     require_integration_readback_evidence(evidence, readback_policy)
     if fresh_testing_generation is not None and fresh_testing_generation.clean_snapshot_enabled:
         if evidence.get("clean_testing_snapshot_completed") != "true" or not schedule_server_id:
-            raise OdooPostDeployReadbackFailure(
-                "Testing refresh lacks its clean snapshot capture proof.", evidence=evidence
-            )
+            raise ValueError("Testing refresh lacks its clean snapshot capture proof.")
         for key in ("clean_snapshot_database_sha256", "clean_snapshot_filestore_sha256"):
             if re.fullmatch(r"[a-f0-9]{64}", evidence.get(key, "")) is None:
                 raise OdooPostDeployReadbackFailure(
@@ -1159,9 +1157,7 @@ def run_compose_post_deploy_update(
         clean_preview_snapshot is not None
         and evidence.get("clean_preview_snapshot_restored") != "true"
     ):
-        raise OdooPostDeployReadbackFailure(
-            "Preview lacks its clean snapshot restore proof.", evidence=evidence
-        )
+        raise ValueError("Preview lacks its clean snapshot restore proof.")
     if clean_preview_snapshot is not None:
         actual = evidence.get("clean_preview_snapshot_id", "")
         if re.fullmatch(r"[a-f0-9]{64}", actual) is None:

@@ -929,11 +929,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertTrue(self.ready_before_web)
 
     def service_schedule(
-        self,
-        snapshot: CleanTestingSnapshot,
-        *,
-        elapsed_seconds: int = 0,
-        evidence_updates: dict[str, str] | None = None,
+        self, snapshot: CleanTestingSnapshot, *, elapsed_seconds: int = 0
     ) -> dict[str, str]:
         environment = {
             "ODOO_DB_NAME": self.database,
@@ -951,7 +947,6 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             return {
                 "log_available": "true",
                 **post_deploy.extract_odoo_post_deploy_readback_markers({"logs": logs}),
-                **(evidence_updates or {}),
             }
 
         with (
@@ -1005,17 +1000,6 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(evidence["clean_preview_snapshot_restored"], "true")
         self.assertTrue(self.ready_before_web)
-
-    def test_missing_restore_proof_retains_the_observed_schedule_identity(self) -> None:
-        observed = {
-            "schedule_id": "observed-schedule",
-            "schedule_deployment_id": "observed-deployment",
-            "clean_preview_snapshot_restored": "false",
-        }
-        with self.assertRaises(post_deploy.OdooPostDeployReadbackFailure) as caught:
-            self.service_schedule(self.snapshot, evidence_updates=observed)
-        for key, value in observed.items():
-            self.assertEqual(caught.exception.evidence[key], value)
 
     def test_completed_restore_retry_records_actual_and_requested_snapshot_provenance(self) -> None:
         self.run_script()

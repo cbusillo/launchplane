@@ -264,6 +264,7 @@ try:
         runner.overwrite_database(dump)
         copy_failure_stage = CopyFailureStage.ATTACHMENTS
         runner.validate_native_attachments()
+        copy_failure_stage = CopyFailureStage.RESTORE
         dump.unlink()
         runner.connect_to_db()
         with runner.local.db_conn.cursor() as cursor:
@@ -795,21 +796,22 @@ class TestingProviderDenied(Exception):
     pass
 
 
-def command(arguments, *, stdin=None, stdout=None):
+def command(arguments, *, stdin=None, stdout=None, diagnose_failure=False):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
-        emit_copy_command_failure(result)
+        if diagnose_failure:
+            emit_copy_command_failure(result)
         if arguments[0]=='docker' and ('readback_failed_predicate='+ReadbackPredicate.ATTACHMENTS).encode() in (result.stdout or b'').splitlines():
             raise CopyReadbackRefused(ReadbackPredicate.ATTACHMENTS)
         raise RuntimeError("Fresh testing copy command did not pass")
     return result.stdout or b""
 
 
-def docker(*arguments, stdin=None):
-    return command(["docker", *arguments], stdin=stdin)
+def docker(*arguments, stdin=None, diagnose_failure=False):
+    return command(["docker", *arguments], stdin=stdin, diagnose_failure=diagnose_failure)
 
 
 def one_inspection(identifier):
@@ -1187,7 +1189,7 @@ def restore_main():
             arguments.extend(["-e", key + "=" + value])
         output = docker(*arguments, runner, "python3", "-", dump_path, database, spec["readback_spec"],
             base64.b64encode(spec["readback_program"].encode()).decode(), "resume" if resume else "fresh",
-            spec["copy_binding_sha256"], gen.get("source_mode", "ssh"), stdin=spec["runner"].encode()).decode()
+            spec["copy_binding_sha256"], gen.get("source_mode", "ssh"), stdin=spec["runner"].encode(), diagnose_failure=True).decode()
         markers = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
         if any(markers.get(key) != "true" for key in ("testing_copy_sanitized", "testing_copy_pre_registry_sanitized", "odoo_module_update_completed", "odoo_module_update_modules_configured")):
             raise RuntimeError("Testing copy lacks sanitization or module update proof")

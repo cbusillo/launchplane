@@ -356,6 +356,35 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertNotIn("private", output)
         self.assertNotIn(["docker", "start", "web"], self.calls)
 
+    def test_recovered_retirement_error_does_not_replace_the_runner_failure(self) -> None:
+        self.spec["generation"]["clean_snapshot_enabled"] = True
+        original = self.command
+        runner_exit = 137
+
+        def fail(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if command[:3] == ["docker", "volume", "ls"]:
+                return subprocess.CompletedProcess(command, 3, stdout=b"", stderr=b"private")
+            if kwargs.get("input") == self.spec["runner"].encode():
+                return subprocess.CompletedProcess(
+                    command,
+                    runner_exit,
+                    stdout=f"{COPY_FAILURE_STAGE_MARKER}={CopyFailureStage.MODULE_UPDATE}\n".encode(),
+                    stderr=b"private",
+                )
+            return original(command, **kwargs)
+
+        with patch.object(self, "command", side_effect=fail):
+            status, output = self.run_program()
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+
+        self.assertNotEqual(status, 0)
+        self.assertIn("clean_snapshot_retirement_deferred=true", output.splitlines())
+        evidence = extract_odoo_post_deploy_readback_markers({"logs": output})
+        self.assertEqual(evidence[COPY_FAILURE_STAGE_MARKER], CopyFailureStage.MODULE_UPDATE)
+        self.assertEqual(evidence[COPY_FAILURE_EXIT_MARKER], str(runner_exit))
+        self.assertNotIn("private", output)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+
     def test_real_restore_renderer_fits_schedule_transport_for_ssh_and_native_copy(self) -> None:
         from control_plane.dokploy.api import validate_dokploy_schedule_script
         from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
@@ -1462,6 +1491,9 @@ class TestingCopyBoundaryTests(unittest.TestCase):
     def test_failed_module_update_reports_the_original_boundary(self) -> None:
         self.boundary_case("module-update")
 
+    def test_failed_restore_witness_is_not_reported_as_attachment_validation(self) -> None:
+        self.boundary_case("witness")
+
     def test_completed_source_copy_can_resume_without_overwriting_data(self) -> None:
         self.boundary_case("normal", phase="resume")
 
@@ -1608,6 +1640,8 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     return iter(self.cursor)
 
                 def execute(self, query: str, params: Any = ()) -> None:
+                    if fault == "witness" and query.startswith("INSERT INTO ir_config_parameter"):
+                        raise RuntimeError("private witness failure")
                     if query == "SET TRANSACTION READ ONLY":
                         return
                     if "FROM pg_database" in query:
@@ -1827,7 +1861,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     else CopyFailureStage.MODULE_UPDATE
                     if fault == "module-update"
                     else CopyFailureStage.RESTORE
-                    if fault in {"restore-partial", "foreign-witness"}
+                    if fault in {"restore-partial", "foreign-witness", "witness"}
                     else CopyFailureStage.PRE_REGISTRY_SANITIZE
                 )
                 self.assertIn(

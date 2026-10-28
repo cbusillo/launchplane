@@ -66,17 +66,18 @@ import time
 import uuid
 
 
-def command(arguments, *, stdin=None):
+def command(arguments, *, stdin=None, diagnose_failure=False):
     result = subprocess.run(arguments, input=stdin, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
-        emit_copy_command_failure(result)
+        if diagnose_failure:
+            emit_copy_command_failure(result)
         raise RuntimeError('Clean snapshot preview operation failed')
     return result.stdout
 
 
-def docker(*arguments, stdin=None):
-    return command(['docker', *arguments], stdin=stdin)
+def docker(*arguments, stdin=None, diagnose_failure=False):
+    return command(['docker', *arguments], stdin=stdin, diagnose_failure=diagnose_failure)
 
 
 def one_inspection(identifier):
@@ -166,7 +167,7 @@ def restore_preview_snapshot(containers, source_lock):
             arguments.extend(['-e', key + '=' + value])
         output = docker(*arguments, runner, 'python3', '-I', '-', dump, database, spec['readback_spec'],
             base64.b64encode(spec['readback_program'].encode()).decode(), 'resume' if present == '1' else 'fresh', witness,
-            'clean-snapshot', stdin=spec['runner'].encode()).decode()
+            'clean-snapshot', stdin=spec['runner'].encode(), diagnose_failure=True).decode()
         markers = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
         if any(markers.get(key) != 'true' for key in ('testing_copy_sanitized',
             'testing_copy_pre_registry_sanitized', 'odoo_module_update_completed',
