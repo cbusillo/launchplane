@@ -26,8 +26,8 @@ context. The signed-in immutable-ID administrator keeps its existing scopes.
 The authenticated Director `local_operator` can also apply an instance-scoped
 removal for an exclusively owned, enabled product preview context with
 `instance: preview`. That context/instance pair must not alias a stable lane.
-This narrow operator path rejects testing, production, context and global
-selections; generic operators, `local_admin`, workflow and terminal credentials
+This narrow path for the Director's agent rejects testing, production, context and global
+selections; other caller credentials, `local_admin`, workflow and terminal credentials
 cannot use it. The trusted Director marker alone does not make a terminal token
 writable, and standing read authority never supplies the required write grant.
 The same scope and permission checks run before receipt replay. Browser
