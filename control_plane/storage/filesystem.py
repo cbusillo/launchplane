@@ -275,6 +275,7 @@ from control_plane.storage.product_authority_bundle import (
     SecretRecordConflictError,
     require_bundle_context_owner,
     require_absent_products,
+    require_runtime_key_safety_policies,
     ProductAuthorityBundle,
     ProductProfileConflictError,
     ProviderTargetWrite,
@@ -543,6 +544,17 @@ class FilesystemRecordStore:
             require_absent_products(bundle.absent_product_ids, profiles)
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
+            if bundle.expected_runtime_key_safety_policies is not None:
+                require_runtime_key_safety_policies(
+                    bundle.expected_runtime_key_safety_policies,
+                    (
+                        item
+                        for item in self._list_models_locked(
+                            RuntimeKeySafetyPolicyRecord, "launchplane_runtime_key_safety_policies"
+                        )
+                        if item.status == "active"
+                    ),
+                )
             for model_type, record_type, expected_records in (
                 (DokployTargetRecord, "dokploy_targets", bundle.expected_dokploy_targets),
                 (DokployTargetIdRecord, "dokploy_target_ids", bundle.expected_dokploy_target_ids),
@@ -677,9 +689,12 @@ class FilesystemRecordStore:
     ) -> None:
         for write in bundle.odoo_instance_override_writes:
             record_id = f"{write.record.context}-{write.record.instance}"
-            current = self._read_model_locked(
-                OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
-            )
+            try:
+                current = self._read_model_locked(
+                    OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
+                )
+            except FileNotFoundError:
+                current = None
             if not odoo_instance_override_records_match(current, write.expected_record):
                 raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             self._stage_product_authority_bundle_write(

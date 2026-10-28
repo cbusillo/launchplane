@@ -71,10 +71,11 @@ function selectUiOperations(openapi, manifestKey, method, selectedPaths) {
         `Canonical OpenAPI operation id drift for ${routePath}: expected ${operationId}, got ${pathItem[method].operationId ?? "missing"}.`,
       );
     }
-    if (Object.hasOwn(selectedPaths, routePath)) {
+    if (selectedPaths[routePath]?.[method]) {
       throw new Error(`Canonical OpenAPI selects the UI route more than once: ${routePath}`);
     }
     selectedPaths[routePath] = {
+      ...selectedPaths[routePath],
       ...(pathItem.parameters ? { parameters: pathItem.parameters } : {}),
       [method]: pathItem[method],
     };

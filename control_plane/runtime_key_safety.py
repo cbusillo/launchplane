@@ -108,6 +108,17 @@ def is_integration_runtime_key(key_name: str, *, extra_markers: Iterable[str] = 
     )
 
 
+def runtime_key_required_integrations(
+    key_name: str, *, extra_markers: Iterable[str] = ()
+) -> frozenset[str]:
+    custom_markers = set(runtime_key_matching_markers(key_name, extra_markers)) - set(
+        DEFAULT_INTEGRATION_KEY_MARKERS
+    )
+    return frozenset(runtime_key_integrations(key_name)) | frozenset(
+        marker.lower() for marker in custom_markers
+    )
+
+
 def _key_parts(key_name: str) -> tuple[str, ...]:
     return tuple(part for part in key_name.upper().replace(".", "_").split("_") if part)
 

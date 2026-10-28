@@ -58,6 +58,7 @@ from control_plane.integration_readback import (
     INTEGRATION_READBACK_CHECKED_MARKER,
     INTEGRATION_READBACK_OK_MARKER,
     INTEGRATION_READBACK_PASSED_PATH,
+    INTEGRATION_READBACK_NAME_LIST_MARKERS,
     INTEGRATION_READBACK_PROGRAM,
     IntegrationReadbackPolicy,
     integration_readback_marker_is_safe,
@@ -266,6 +267,7 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
         "clean_preview_snapshot_id",
     }
     | READBACK_FAILURE_MARKERS
+    | INTEGRATION_READBACK_NAME_LIST_MARKERS
 )
 ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
     "odoo_module_update_completed",
@@ -3047,7 +3049,7 @@ enforce_integration_readback() {{
     fi
     echo "Checking integration settings for ${{database_name}}"
     local readback_status=0
-    docker exec -i "${{script_runner_container_id}}" python3 - "${{database_name}}" "${{integration_readback_spec}}" <<'PY' || readback_status=$?
+    docker exec -i "${{workflow_environment[@]}}" "${{script_runner_container_id}}" python3 - "${{database_name}}" "${{integration_readback_spec}}" <<'PY' || readback_status=$?
 {INTEGRATION_READBACK_PROGRAM}PY
     if [ "${{readback_status}}" -ne 0 ]; then
         echo "integration_readback_ok=false"

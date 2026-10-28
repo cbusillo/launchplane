@@ -11,6 +11,7 @@ from control_plane.contracts.odoo_import_parameters import import_parameter_runt
 OdooOverrideApplyPhase = Literal["restore", "deploy", "promotion", "preview", "manual"]
 OdooOverrideApplyStatus = Literal["skipped", "pending", "pass", "fail"]
 OdooOverrideValueSource = Literal["literal", "secret_binding", "runtime_environment"]
+ODOO_CONFIG_PARAMETER_KEY_PATTERN = r"[a-z][a-z0-9_.]{0,127}"
 _ODOO_XMLID_RE = re.compile(r"^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_-]+)+$")
 
 
