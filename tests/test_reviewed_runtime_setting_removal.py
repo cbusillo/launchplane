@@ -15,6 +15,7 @@ from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.runtime_setting_removal import (
     RuntimeSettingRemovalRequest,
     RuntimeSettingRemovalPlan,
+    RuntimeSettingRemovalStale,
     REVIEW_ROUTE,
     ROUTE,
 )
@@ -228,7 +229,6 @@ class RuntimeRemovalTests(unittest.TestCase):
             result["instance_plain_setting_effects"],
             [{"key": "REMOVE", "source_after": "context", "effect": "changed"}],
         )
-        self.assertNotIn("different-private-value", json.dumps(result))
         self.assertNotIn("private-value", json.dumps(result))
 
     def test_instance_apply_refuses_changed_or_new_context_fallback(self) -> None:
@@ -242,7 +242,7 @@ class RuntimeRemovalTests(unittest.TestCase):
                 self.store.write_runtime_environment_record(
                     runtime(scope="context", context="cm", env={"REMOVE": "changed-context-value"})
                 )
-                with self.assertRaisesRegex(ValueError, "changed"):
+                with self.assertRaises(RuntimeSettingRemovalStale):
                     self.store.runtime_setting_removal(
                         request=body,
                         identity=operator,
