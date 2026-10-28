@@ -24,9 +24,14 @@ from control_plane.contracts.merge_train_historical_completion import (
     MergeTrainHistoricalCompletionProviderEvidence,
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
-from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.filesystem import (
+    FilesystemRecordStore,
+    _merge_train_controller_storage_id,
+)
+from control_plane.storage.historical_completion import _SessionSnapshotStore
 from control_plane.storage.postgres import (
     LaunchplaneMergeTrainBatchLandingPlanRow,
+    LaunchplaneMergeTrainControllerStateRow,
     LaunchplaneOrdinaryAgentEffectRow,
     PostgresRecordStore,
 )
@@ -276,6 +281,106 @@ class HistoricalEffectRepositoryFenceTests(unittest.TestCase):
 class PortableHistoricalEffectPreflightTests(unittest.TestCase):
     def database_url(self) -> str:
         return "sqlite+pysqlite:///:memory:"
+
+    def test_preflight_preserves_inert_controller_alias_and_fences_unresolved_alias(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _HistoricalCompletionFixture(Path(directory))
+            sql_store = PostgresRecordStore(database_url=self.database_url())
+            self.addCleanup(sql_store.close)
+            sql_store.ensure_schema()
+            sql_store.write_merge_train_policy_record(fixture.policy_record)
+            sql_store.write_merge_train_batch_candidate_record(fixture.candidate_record)
+            sql_store.write_merge_train_batch_landing_plan_record(fixture.landing_record)
+            sql_store.write_merge_train_controller_state_record(fixture.controller)
+            repository = fixture.controller.repository.swapcase()
+            alias = fixture.controller.model_copy(
+                update={
+                    "repository": repository,
+                    "controller_key": f"merge-train-controller:{repository.replace('/', ':')}:{BASE_BRANCH}",
+                    "status": "idle",
+                    "active_action": "",
+                    "active_phase": "",
+                    "active_record_id": "",
+                    "step_payload": {},
+                    "reconciliation_status": "clean",
+                    "reconciliation_detail": "",
+                }
+            )
+            for store in (fixture.store, sql_store):
+                for unresolved in (False, True):
+                    with self.subTest(store=type(store).__name__, unresolved=unresolved):
+                        retained = alias.model_copy(
+                            update={
+                                "ordinary_job_binding": OrdinaryAgentJobBinding(
+                                    request_id="retained-request",
+                                    scope_sha256="d" * 64,
+                                    binding_revision=1,
+                                )
+                                if unresolved
+                                else None,
+                            }
+                        )
+                        payload = retained.model_dump(mode="json")
+                        if isinstance(store, FilesystemRecordStore):
+                            path = store._write_model(
+                                "launchplane_merge_train_controller_states",
+                                _merge_train_controller_storage_id(retained.controller_key),
+                                retained,
+                            )
+                            before = path.read_bytes()
+                        else:
+                            with store._session_factory() as session, session.begin():
+                                session.merge(
+                                    LaunchplaneMergeTrainControllerStateRow(
+                                        **{
+                                            name: getattr(retained, name)
+                                            for name in (
+                                                "controller_key",
+                                                "repository",
+                                                "base_branch",
+                                                "status",
+                                                "policy_key",
+                                                "policy_sha256",
+                                                "updated_at",
+                                                "lease_owner",
+                                                "lease_expires_at",
+                                                "active_action",
+                                                "active_phase",
+                                            )
+                                        },
+                                        payload=payload,
+                                    )
+                                )
+                        transport = _ReadOnlyTransport(responses=_provider_responses())
+                        if isinstance(store, FilesystemRecordStore):
+                            result = _assess(fixture, store=store, transport=transport)
+                            self.assertEqual(path.read_bytes(), before)
+                        else:
+                            with store._session_factory() as session:
+                                scoped = _SessionSnapshotStore(
+                                    store, session
+                                ).list_merge_train_controller_state_records(
+                                    repository=repository.lower(),
+                                    base_branch=BASE_BRANCH,
+                                )
+                                self.assertIn(
+                                    retained.controller_key,
+                                    {record.controller_key for record in scoped},
+                                )
+                                row = session.get(
+                                    LaunchplaneMergeTrainControllerStateRow, retained.controller_key
+                                )
+                                assert row is not None
+                                self.assertEqual(row.payload, payload)
+                            result = _assess(fixture, store=store, transport=transport)
+                        self.assertEqual(
+                            result.evidence_eligible, not unresolved, result.model_dump_json()
+                        )
+                        if unresolved:
+                            self.assertEqual(result.reason_code, "controller_busy")
+                            self.assertEqual(transport.requests, [])
+                        else:
+                            self.assertTrue(transport.requests)
 
     def assert_preflight(
         self, *, repository: str, base_branch: str, state: str, excluded: bool

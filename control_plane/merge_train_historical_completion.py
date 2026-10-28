@@ -11,7 +11,11 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchLandingPlan,
     MergeTrainBatchLandingPlanRecord,
 )
-from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+    MergeTrainControllerReconciliationRequiredError,
+    select_canonical_merge_train_controller_state,
+)
 from control_plane.contracts.merge_train_historical_completion import (
     MergeTrainHistoricalCompletionProviderEvidence,
     MergeTrainHistoricalCompletionSelector,
@@ -323,11 +327,15 @@ def read_historical_completion_snapshot(
     controllers = store.list_merge_train_controller_state_records(
         repository=repository,
         base_branch=base_branch,
-        limit=2,
     )
-    if len(controllers) != 1:
+    try:
+        controller = select_canonical_merge_train_controller_state(
+            controllers, repository=repository, base_branch=base_branch
+        )
+    except MergeTrainControllerReconciliationRequiredError as error:
+        raise HistoricalCompletionAssessmentFailure("indeterminate", "controller_busy") from error
+    if controller is None:
         raise HistoricalCompletionAssessmentFailure("indeterminate", "controller_unavailable")
-    controller = controllers[0]
     if controller.status == "running" or controller.lease_owner or controller.lease_expires_at:
         raise HistoricalCompletionAssessmentFailure("indeterminate", "controller_busy")
     if controller.status != "reconcile_required" or controller.active_action != "land_batch":

@@ -329,6 +329,8 @@ from control_plane.contracts.merge_train_controller_state import (
     build_merge_train_controller_key,
     build_merge_train_controller_resume_detail,
     build_merge_train_controller_state_record,
+    require_canonical_merge_train_controller_state,
+    select_canonical_merge_train_controller_state,
 )
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
@@ -7284,6 +7286,7 @@ class PostgresRecordStore(HumanSessionStore):
         row: LaunchplaneMergeTrainControllerStateRow,
         record: MergeTrainControllerStateRecord,
     ) -> None:
+        record = require_canonical_merge_train_controller_state(record)
         row.repository = record.repository
         row.base_branch = record.base_branch
         row.status = record.status
@@ -24869,9 +24872,36 @@ class PostgresRecordStore(HumanSessionStore):
             )
         return payloads
 
+    def _require_inert_merge_train_controller_aliases(
+        self, session: Any, *, repository: str, base_branch: str
+    ) -> None:
+        rows = session.scalars(
+            select(LaunchplaneMergeTrainControllerStateRow)
+            .where(
+                func.lower(LaunchplaneMergeTrainControllerStateRow.repository)
+                == repository.lower(),
+                LaunchplaneMergeTrainControllerStateRow.base_branch == base_branch,
+            )
+            .with_for_update()
+        )
+        records = []
+        for row in rows:
+            record = self._read_payload(
+                model_type=MergeTrainControllerStateRecord, payload=row.payload
+            )
+            if record.controller_key != row.controller_key:
+                raise ValueError("Stored merge controller identity disagrees with its payload.")
+            records.append(record)
+        select_canonical_merge_train_controller_state(
+            records, repository=repository, base_branch=base_branch
+        )
+
     def _require_legacy_merge_train_target_unbound(
         self, session: Any, *, repository: str, base_branch: str
     ) -> None:
+        self._require_inert_merge_train_controller_aliases(
+            session, repository=repository, base_branch=base_branch
+        )
         if any(
             payload.get("ordinary_job_binding") is not None
             for payload in self._ordinary_agent_active_progress(
@@ -25083,6 +25113,7 @@ class PostgresRecordStore(HumanSessionStore):
     def write_merge_train_controller_state_record(
         self, record: MergeTrainControllerStateRecord
     ) -> None:
+        record = require_canonical_merge_train_controller_state(record)
         self._write_legacy_merge_train_row(
             LaunchplaneMergeTrainControllerStateRow(
                 controller_key=record.controller_key,
@@ -25119,7 +25150,9 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[MergeTrainControllerStateRecord, ...]:
         filters: list[object] = []
         if repository:
-            filters.append(LaunchplaneMergeTrainControllerStateRow.repository == repository.lower())
+            filters.append(
+                func.lower(LaunchplaneMergeTrainControllerStateRow.repository) == repository.lower()
+            )
         if base_branch:
             filters.append(LaunchplaneMergeTrainControllerStateRow.base_branch == base_branch)
         if status:
@@ -25277,11 +25310,15 @@ class PostgresRecordStore(HumanSessionStore):
         expected_lease_acquired_at: str,
         lease_seconds: int,
     ) -> MergeTrainControllerStateRecord:
+        record = require_canonical_merge_train_controller_state(record)
         if record.ordinary_job_binding is not None:
             raise OrdinaryAgentSessionAdmissionDenied("ordinary_controller_requires_joined_write")
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._advisory_lock_merge_train_controller(session, record.controller_key)
+            self._require_inert_merge_train_controller_aliases(
+                session, repository=record.repository, base_branch=record.base_branch
+            )
             observed_at = self._database_mutation_timestamp(session)
             row = session.scalar(
                 select(LaunchplaneMergeTrainControllerStateRow)
@@ -25678,6 +25715,9 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[MergeAdmissionRecord, bool]:
         with self._session_factory() as session:
             self._advisory_lock_merge_train_controller(session, record.controller_key)
+            self._require_inert_merge_train_controller_aliases(
+                session, repository=record.repository, base_branch=record.base_branch
+            )
             controller_row = session.scalar(
                 select(LaunchplaneMergeTrainControllerStateRow)
                 .where(

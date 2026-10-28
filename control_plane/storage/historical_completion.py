@@ -59,7 +59,7 @@ class _SessionSnapshotStore(HistoricalCompletionSnapshotStore):
         row_type = LaunchplaneMergeTrainControllerStateRow
         filters: list[object] = []
         if repository:
-            filters.append(row_type.repository == repository)
+            filters.append(func.lower(row_type.repository) == repository.lower())
         if base_branch:
             filters.append(row_type.base_branch == base_branch)
         if status:

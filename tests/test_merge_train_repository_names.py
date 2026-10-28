@@ -4,18 +4,31 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+    MergeTrainControllerReconciliationRequiredError,
+    build_merge_train_controller_state_record,
+)
+from control_plane.merge_train_admission import MergeTrainControllerStatusReadModel
+from control_plane.contracts.merge_train_admission import MergeTrainAdmissionDecision
+from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAgentJobBinding
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlan,
     MergeTrainStackCollapsePlanRecord,
 )
-from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.filesystem import (
+    FilesystemRecordStore,
+    _merge_train_controller_storage_id,
+)
 from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 from control_plane.storage.postgres import (
     LaunchplaneMergeTrainPrFeedbackRow,
+    LaunchplaneMergeTrainControllerStateRow,
     LaunchplaneMergeTrainStackCollapsePlanRow,
     PostgresRecordStore,
 )
 from tests.test_merge_train_controller import _stack_collapse_record
+from tests.test_merge_readiness import _merge_admission
 
 
 REPOSITORY = "Example/Merge-Train-Repo"
@@ -195,6 +208,244 @@ class RepositoryNameStorageTests(unittest.TestCase):
             collapse = session.get(LaunchplaneMergeTrainStackCollapsePlanRow, _collapse().record_id)
             assert feedback is not None and collapse is not None
             return feedback.payload, collapse.payload
+
+    def _seed_controller_alias(
+        self, *, repository: str = REPOSITORY, base_branch: str = "Release", **changes: object
+    ) -> MergeTrainControllerStateRecord:
+        record = build_merge_train_controller_state_record(
+            repository=repository,
+            base_branch=base_branch,
+            policy_key=f"{repository.lower()}:{base_branch}",
+            policy_sha256="a" * 64,
+            updated_at="2026-09-29T00:00:00Z",
+        ).model_copy(
+            update={
+                "repository": repository,
+                "controller_key": f"merge-train-controller:{repository.replace('/', ':')}:{base_branch}",
+                **changes,
+            }
+        )
+        if isinstance(self.store, FilesystemRecordStore):
+            self.store._write_model(
+                "launchplane_merge_train_controller_states",
+                _merge_train_controller_storage_id(record.controller_key),
+                record,
+            )
+        else:
+            with self.store._session_factory() as session, session.begin():
+                session.merge(
+                    LaunchplaneMergeTrainControllerStateRow(
+                        **{
+                            name: getattr(record, name)
+                            for name in (
+                                "controller_key",
+                                "repository",
+                                "base_branch",
+                                "status",
+                                "policy_key",
+                                "policy_sha256",
+                                "updated_at",
+                                "lease_owner",
+                                "lease_expires_at",
+                                "active_action",
+                                "active_phase",
+                            )
+                        },
+                        payload=record.model_dump(mode="json"),
+                    )
+                )
+        return record
+
+    def test_controller_history_keeps_its_key_and_remains_readable_in_status(self) -> None:
+        legacy = self._seed_controller_alias()
+        canonical = build_merge_train_controller_state_record(
+            repository=REPOSITORY,
+            base_branch=legacy.base_branch,
+            policy_key=legacy.policy_key,
+            policy_sha256=legacy.policy_sha256,
+            updated_at="2026-10-01T00:00:00Z",
+        )
+        self.store.write_merge_train_controller_state_record(canonical)
+        for repository in (REPOSITORY, REPOSITORY.lower(), REPOSITORY.swapcase()):
+            found = self.store.list_merge_train_controller_state_records(
+                repository=repository, base_branch=legacy.base_branch
+            )
+            self.assertEqual(
+                {item.controller_key for item in found},
+                {legacy.controller_key, canonical.controller_key},
+            )
+        observed = self.store.read_merge_train_controller_state_record(legacy.controller_key)
+        self.assertEqual(observed.model_dump(), legacy.model_dump())
+        status = MergeTrainControllerStatusReadModel(
+            repository=REPOSITORY,
+            base_branch=legacy.base_branch,
+            generated_at=canonical.updated_at,
+            admission=MergeTrainAdmissionDecision(
+                repository=REPOSITORY,
+                base_branch=legacy.base_branch,
+                status="admitted",
+                reason_code="no_prior_run",
+                requested_at=canonical.updated_at,
+                next_allowed_at=canonical.updated_at,
+                detail="Synthetic controller history read.",
+            ),
+            controller_state=observed,
+            controller_records=(),
+        )
+        self.assertEqual(status.controller_state, observed)
+        self.assertEqual(
+            self.store.list_merge_train_controller_state_records(
+                repository=REPOSITORY, base_branch=legacy.base_branch.swapcase()
+            ),
+            (),
+        )
+
+    def test_historical_controller_identity_cannot_be_written_as_mutation_authority(self) -> None:
+        legacy = self._seed_controller_alias()
+        with self.assertRaises(ValueError):
+            self.store.write_merge_train_controller_state_record(legacy)
+        with self.assertRaises(ValueError):
+            self.store.compare_and_set_merge_train_controller_state_record(
+                record=legacy,
+                expected_lease_owner="",
+                expected_lease_acquired_at="",
+                lease_seconds=60,
+            )
+        self.assertEqual(
+            self.store.read_merge_train_controller_state_record(legacy.controller_key), legacy
+        )
+
+    def _acquire_controller(
+        self, *, base_branch: str = "Release"
+    ) -> MergeTrainControllerStateRecord:
+        return self.store.acquire_merge_train_controller_state_record(
+            repository=REPOSITORY.lower(),
+            base_branch=base_branch,
+            policy_key=f"{REPOSITORY.lower()}:{base_branch}",
+            policy_sha256="a" * 64,
+            lease_owner="canonical-owner",
+            lease_seconds=60,
+            initial_active_action="merge_train_controller_run_once",
+            initial_active_phase="select_next_action",
+            adoptable_active_actions=("merge_train_controller_run_once",),
+        )
+
+    def test_canonical_lease_and_cas_leave_inert_historical_identity_unchanged(self) -> None:
+        legacy = self._seed_controller_alias()
+        leased = self._acquire_controller()
+        checkpoint = self.store.compare_and_set_merge_train_controller_state_record(
+            record=leased.model_copy(update={"active_record_id": "selected-candidate"}),
+            expected_lease_owner=leased.lease_owner,
+            expected_lease_acquired_at=leased.lease_acquired_at,
+            lease_seconds=60,
+        )
+        self.assertEqual(checkpoint.active_record_id, "selected-candidate")
+        self.assertEqual(
+            self.store.read_merge_train_controller_state_record(legacy.controller_key), legacy
+        )
+
+    def test_bound_alias_blocks_canonical_cas_without_releasing_its_lease(self) -> None:
+        leased = self._acquire_controller()
+        self._seed_controller_alias(
+            ordinary_job_binding=OrdinaryAgentJobBinding(
+                request_id="retained-request",
+                scope_sha256="b" * 64,
+                binding_revision=1,
+            )
+        )
+        with self.assertRaises(MergeTrainControllerReconciliationRequiredError):
+            self.store.compare_and_set_merge_train_controller_state_record(
+                record=leased,
+                expected_lease_owner=leased.lease_owner,
+                expected_lease_acquired_at=leased.lease_acquired_at,
+                lease_seconds=60,
+            )
+        self.assertEqual(
+            self.store.read_merge_train_controller_state_record(leased.controller_key), leased
+        )
+
+    def test_alias_progress_and_reconciliation_cannot_hide_behind_idle_status(self) -> None:
+        for changes in (
+            {"active_record_id": "pending-provider-effect"},
+            {"active_pull_request_number": 1},
+            {"step_payload": {"expected_effect_sha": "retained-effect"}},
+            {"reconciliation_status": "adopted"},
+            {"reconciliation_detail": "unresolved historical observation"},
+        ):
+            with self.subTest(changes=changes):
+                self._seed_controller_alias(**changes)
+                with self.assertRaises(MergeTrainControllerReconciliationRequiredError):
+                    self._acquire_controller()
+
+    def test_bound_controller_alias_still_blocks_an_existing_guarded_admission(self) -> None:
+        admission = _merge_admission()
+        policy_sha256 = admission.readiness.policy.fingerprints.merge_train.current_sha256
+        assert policy_sha256 is not None
+        controller = MergeTrainControllerStateRecord(
+            controller_key=admission.controller_key,
+            repository=admission.repository,
+            base_branch=admission.base_branch,
+            policy_key=f"{admission.repository}:{admission.base_branch}",
+            policy_sha256=policy_sha256,
+            status="running",
+            updated_at=admission.created_at,
+            lease_owner=admission.lease_owner,
+            lease_acquired_at=admission.lease_acquired_at,
+            lease_expires_at=admission.lease_expires_at,
+            heartbeat_at=admission.lease_acquired_at,
+            active_action="land_batch",
+            active_phase="merge_batch_entries",
+            active_pull_request_number=admission.pull_request_number,
+            step_payload={
+                "expected_effect_sha": admission.expected_effect_sha,
+                "landing_plan_id": admission.landing_plan_id,
+            },
+        )
+        self.store.write_merge_train_controller_state_record(controller)
+        self._seed_controller_alias(
+            repository=admission.repository.swapcase(), base_branch=admission.base_branch
+        )
+        stored, created = self.store.create_guarded_merge_admission_record_if_absent(
+            admission, admitted_at=admission.created_at
+        )
+        self.assertTrue(created)
+        self._seed_controller_alias(
+            repository=admission.repository.swapcase(),
+            base_branch=admission.base_branch,
+            ordinary_job_binding=OrdinaryAgentJobBinding(
+                request_id="retained-request",
+                scope_sha256="b" * 64,
+                binding_revision=1,
+            ),
+        )
+        with self.assertRaises(MergeTrainControllerReconciliationRequiredError):
+            self.store.create_guarded_merge_admission_record_if_absent(
+                admission, admitted_at=admission.created_at
+            )
+        self.assertEqual(self.store.list_merge_admission_records(), (stored,))
+
+    def test_expired_historical_controller_still_fences_canonical_acquisition(self) -> None:
+        legacy = self._seed_controller_alias(
+            status="running",
+            lease_owner="historical-owner",
+            lease_acquired_at="2026-09-29T00:00:00Z",
+            lease_expires_at="2026-09-29T00:01:00Z",
+            heartbeat_at="2026-09-29T00:00:00Z",
+            active_action="merge_train_controller_run_once",
+            active_phase="select_next_action",
+        )
+        with self.assertRaises(MergeTrainControllerReconciliationRequiredError):
+            self.store.acquire_merge_train_controller_state_record(
+                repository=REPOSITORY.lower(),
+                base_branch=legacy.base_branch,
+                policy_key=legacy.policy_key,
+                policy_sha256=legacy.policy_sha256,
+                lease_owner="canonical-owner",
+                lease_seconds=60,
+                initial_active_action="merge_train_controller_run_once",
+                initial_active_phase="select_next_action",
+                adoptable_active_actions=("merge_train_controller_run_once",),
+            )
 
 
 class RepositoryNameSQLStorageTests(RepositoryNameStorageTests):
