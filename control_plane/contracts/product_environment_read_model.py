@@ -760,9 +760,11 @@ def build_product_site_overview(
     if profile.preview.enabled:
         warnings += _preview_refresh_warnings(record_store, profile)
     if preview_summary.untracked_observed_slugs:
-        warnings += (
-            f"{len(preview_summary.untracked_observed_slugs)} previews are present without a "
-            "current status. Check preview cleanup.",
+        warnings += _untracked_preview_warnings(
+            record_store=record_store,
+            profile=profile,
+            slugs=preview_summary.untracked_observed_slugs,
+            action_allowed=action_allowed,
         )
     trust_state = _combine_trust_states(
         (summary.trust_state for summary in environment_summaries),
@@ -781,6 +783,53 @@ def build_product_site_overview(
         provenance=_profile_provenance(profile),
         available_actions=available_actions,
     )
+
+
+def _untracked_preview_warnings(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    slugs: tuple[str, ...],
+    action_allowed: ActionAllowed,
+) -> tuple[str, ...]:
+    from control_plane.preview_reservation_recovery import (
+        classify_preview_reservation,
+        held_preview_reservations,
+    )
+
+    warnings: list[str] = []
+    unresolved = set(slugs)
+    recovery_warnings: set[str] = set()
+    if action_allowed("preview.read", profile.product, profile.preview.context, ()):
+        try:
+            for reservation in held_preview_reservations(record_store, product=profile.product):
+                status = classify_preview_reservation(
+                    reservation, profile=profile, store=record_store
+                )
+                number = status["target_pull_request_number"]
+                slug = profile.preview.slug_template.format(number=number)
+                if slug not in slugs:
+                    continue
+                guidance = (
+                    "Inspect the original operation before retrying or cleaning up."
+                    if status["original_binding_available"]
+                    else "Original operation evidence is missing; retain resources and recover that evidence."
+                )
+                recovery_warnings.add(
+                    f"PR #{number}: Preview operation is recorded as {reservation.state}. {guidance}"
+                )
+                unresolved.discard(slug)
+        except (SQLAlchemyError, ValueError, OSError):
+            logging.getLogger(__name__).warning(
+                "Untracked preview recovery status could not be read.", exc_info=True
+            )
+            warnings.append("Preview recovery status is unavailable; retain untracked resources.")
+    warnings.extend(sorted(recovery_warnings))
+    if unresolved:
+        warnings.append(
+            f"{len(unresolved)} previews are present without a current status. Check preview cleanup."
+        )
+    return tuple(warnings)
 
 
 def _preview_refresh_warnings(

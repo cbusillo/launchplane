@@ -97,6 +97,55 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
     def database_url(self) -> str:
         return _sqlite_database_url(self.root / "state.sqlite3")
 
+    def test_observed_preview_without_lifecycle_keeps_its_original_recovery_status(self) -> None:
+        from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+        from control_plane.contracts.product_environment_read_model import (
+            build_product_site_overview,
+        )
+
+        number = self.issued.plan_request.pr_number
+        self.store.write_preview_inventory_scan_record(
+            PreviewInventoryScanRecord(
+                scan_id="observed-without-lifecycle",
+                context=self.profile.preview.context,
+                product=self.profile.product,
+                repository=self.profile.repository,
+                scanned_at=datetime.now(timezone.utc).isoformat(),
+                source="provider",
+                status="pass",
+                preview_count=1,
+                preview_slugs=(self.issued.preview_slug,),
+            )
+        )
+        for missing_original in (False, True):
+            with self.subTest(missing_original=missing_original):
+                if missing_original:
+                    self.reservation = self.replace_record(state="reconcile_required")
+                    self.remove_original_intent()
+                before = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+                overview = build_product_site_overview(
+                    record_store=self.store,
+                    product=self.profile.product,
+                    action_allowed=lambda *_: True,
+                )
+                attention = tuple(w for w in overview.warnings if f"PR #{number}:" in w)
+                self.assertEqual(len(attention), 1)
+                self.assertIn(self.reservation.state, attention[0])
+                self.assertNotIn("without a current status", " ".join(overview.warnings))
+                self.assertEqual(
+                    overview.preview.untracked_observed_slugs, (self.issued.preview_slug,)
+                )
+                self.assertEqual(self.store.list_preview_records(), ())
+                self.assertEqual(
+                    self.store.read_idempotency_record_by_id(self.reservation.record_id), before
+                )
+                denied = build_product_site_overview(
+                    record_store=self.store,
+                    product=self.profile.product,
+                    action_allowed=lambda _action, product, *_: product == "launchplane",
+                )
+                self.assertFalse(any(f"PR #{number}:" in w for w in denied.warnings))
+
     def test_exact_preview_bootstrap_withdrawal_preserves_original_and_template(self) -> None:
         self.reservation = self.replace_record(
             state="completed",
