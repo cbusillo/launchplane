@@ -5672,7 +5672,7 @@ python3 database_maintenance_host.py hold --api-container API_CONTAINER \
 
 `plan` reads exact project/container/image/database identities, current DB-backed
 own target, provider queue/history and self-deploy workflows. It creates only
-private evidence and a temporary non-serving operator. The operator uses the
+private evidence and a temporary non-serving helper. The helper uses the
 existing `.env` in place and the actual API image ID, with no ports, logs,
 restart policy, runtime volumes, Odoo copy or prepared-public mounts. Its root
 is read-only, temporary storage is RAM-backed, and its only host mount is private
@@ -5698,9 +5698,9 @@ Before any freeze, `hold` installs and reads back a persistent systemd calendar
 timer/service, records every original restart policy, and suppresses automatic
 restart on those exact IDs. Private fsync'd state and watchdog files survive
 reboot. The watchdog runs release at the recorded deadline, including after a
-missed deadline during reboot. That oneshot service is the single recovery owner:
+missed deadline during reboot. That oneshot service is the single recovery process:
 EOF cleanup, the deadline and explicit release requests join the same systemd job.
-The keeper ends at COMMIT; only that recovery owner verifies committed state.
+The keeper ends at COMMIT; only that process verifies committed state.
 Each automatic recovery entry consumes a fsync'd budget in the existing private
 state before external commands, including an unavailable ownership read. The
 health refreeze phase has its own phase-bound budget. Reloading systemd or
@@ -5795,7 +5795,7 @@ refuse. The database container remains network-none, without NET_ADMIN or
 SYS_ADMIN, and its PostgreSQL OS user must have no effective capabilities. Join
 only that exact namespace with `--network container:<isolated-postgres-container>`.
 Read back matching namespace identities and both processes' zero core limits as
-operator evidence; the network guard does not inspect its PostgreSQL peer or
+helper evidence; the network guard does not inspect its PostgreSQL peer or
 replace those process-limit observations:
 
 ```bash
