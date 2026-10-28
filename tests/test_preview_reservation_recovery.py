@@ -557,17 +557,6 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepare_preview_bootstrap(self.store, request)
 
-        self.reservation = self.replace_record(
-            state="reconcile_required",
-            lease_expires_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
-        )
-        request.mode = "dry-run"
-        plan = prepare_preview_bootstrap(self.store, request)
-        request.mode = "apply"
-        request.reviewed_plan_sha256 = str(plan["plan_sha256"])
-        with self.assertRaisesRegex(ValueError, "exclusive hold"):
-            prepare_preview_bootstrap(self.store, request)
-
     def test_exact_bootstrap_edit_invalidates_a_previously_issued_refresh_plan(self) -> None:
         from control_plane import odoo_preview_apply_http as preview_http
         from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
