@@ -1058,6 +1058,13 @@ def _release_run_blocked_reason(
                 views[next_index - 1].operation_id
             )
             if refusal := _release_backup_refusal(store, profile, backup.backup_record_id):
+                from control_plane.client_release_backup_continuation import (
+                    require_continuable_backup,
+                )
+
+                require_continuable_backup(
+                    store, backup, store.read_backup_gate_record(backup.backup_record_id)
+                )
                 return refusal
         except (FileNotFoundError, ValueError, click.ClickException):
             return "The release's backup authority or evidence is unavailable. An agent must reconcile it before deployment."

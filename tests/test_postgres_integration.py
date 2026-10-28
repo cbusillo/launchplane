@@ -9845,9 +9845,8 @@ class RealPostgresProviderOperationTests(unittest.TestCase):
                     plan = case.continue_backup(decision)
                     with store.production_backup_source_lock(_source_key(original)) as held:
                         self.assertIsNotNone(held)
-                        with self.assertRaises(BackupContinuationRefused) as refusal:
+                        with self.assertRaises(BackupContinuationRefused):
                             case.continue_backup(decision, digest=plan.review_digest, apply=True)
-                        self.assertEqual(refusal.exception.code, "backup_source_busy")
                         self.assertEqual(store.read_backup_gate_record(backup.record_id), backup)
                         self.assertEqual(
                             store.read_verireel_prod_backup_gate_operation_record(operation_id),

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from control_plane import client_release as releases
 from control_plane.client_release_backup_continuation import (
+    BackupContinuationRefused,
     BackupContinuationReview,
     continue_release_backup,
 )
@@ -17,6 +18,7 @@ from control_plane.contracts.promotion_record import ArtifactIdentityReference
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.production_recipient import custody
+from control_plane.production_recipient_cutover import RecipientCutoverAdapter
 from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
 from control_plane.release_request import record_release_request
@@ -310,6 +312,63 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
         self.continue_expired_backup(backup_id)
         self.advance()
         self.assertTrue(self.case.fixture.new_running)
+
+    def test_expired_native_preflight_refusal_shows_reconciliation_instead_of_continuation(
+        self,
+    ) -> None:
+        fixture = self.case.fixture
+        backup_id = self.capture_next_backup()
+        operation = next(
+            row
+            for row in fixture.store.list_verireel_prod_backup_gate_operation_records()
+            if row.backup_record_id == backup_id
+        )
+        with expired_backup_clock(fixture.store, operation.operation_id):
+            continuable = releases.read_client_release_run(
+                store=fixture.store, profile=self.profile, decision=self.case.decision
+            )
+        assert continuable is not None
+        with patch.object(
+            RecipientCutoverAdapter,
+            "verify_upstreams",
+            side_effect=ValueError("Upstream preflight unavailable"),
+        ):
+            self.assertEqual(
+                releases.advance_client_releases(
+                    store=fixture.store, control_plane_root=fixture.fixture.root
+                ),
+                (),
+            )
+        before = custody(fixture.store, fixture.record.product, fixture.record.context)
+        with (
+            expired_backup_clock(fixture.store, operation.operation_id),
+            patch(
+                "control_plane.client_release_backup_continuation.guest_capture_metadata",
+                return_value=(),
+            ),
+        ):
+            run = releases.read_client_release_run(
+                store=fixture.store, profile=self.profile, decision=self.case.decision
+            )
+            with self.assertRaises(BackupContinuationRefused):
+                continue_release_backup(
+                    store=fixture.store,
+                    root=fixture.fixture.root,
+                    product=self.profile.product,
+                    decision_record_id=self.case.decision.record_id,
+                    review=BackupContinuationReview(reason="Inspect the expired capture"),
+                    actor="local:fixture",
+                    trace_id="fixture-preflight-refusal",
+                )
+        assert run is not None
+        self.assertEqual(run.state, "waiting")
+        self.assertTrue(run.blocked_reason)
+        self.assertNotEqual(run.blocked_reason, continuable.blocked_reason)
+        self.assertEqual(
+            custody(fixture.store, fixture.record.product, fixture.record.context), before
+        )
+        self.assertFalse(fixture.actions)
+        self.assertEqual(fixture.deploys, 0)
 
     def test_busy_native_source_leaves_the_release_waiting_without_delivery_failure(self) -> None:
         fixture = self.case.fixture
