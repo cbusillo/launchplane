@@ -965,8 +965,21 @@ def _recipient_release_refusal(
 def _release_backup_refusal(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
     backup_record_id: str,
 ) -> str:
+    from control_plane.client_release_backup_continuation import (
+        BackupContinuationRefused,
+        native_backup_continuation_context,
+    )
+
+    try:
+        excluded_promotion_id, _context = native_backup_continuation_context(
+            store, profile, decision, step, backup_record_id
+        )
+    except BackupContinuationRefused:
+        excluded_promotion_id = ""
     try:
         require_production_promotion_backup(
             record_store=store,
@@ -975,6 +988,7 @@ def _release_backup_refusal(
             instance="prod",
             promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
             backup_record_id=backup_record_id,
+            active_promotion_record_id=excluded_promotion_id,
         )
     except ProductionBackupNotAdmissible:
         return "The release needs a fresh verified backup. An agent can continue its existing backup before deployment."
@@ -1057,7 +1071,13 @@ def _release_run_blocked_reason(
             backup = store.read_verireel_prod_backup_gate_operation_record(
                 views[next_index - 1].operation_id
             )
-            if refusal := _release_backup_refusal(store, profile, backup.backup_record_id):
+            if refusal := _release_backup_refusal(
+                store,
+                profile,
+                decision,
+                client_release_steps(decision.release_start)[next_index],
+                backup.backup_record_id,
+            ):
                 from control_plane.client_release_backup_continuation import (
                     require_continuable_backup,
                 )
@@ -1700,7 +1720,7 @@ def _advance(
         backup_record_id = str(getattr(previous, "backup_record_id", ""))
         if profile.driver_id == "generic-web":
             try:
-                refusal = _release_backup_refusal(store, profile, backup_record_id)
+                refusal = _release_backup_refusal(store, profile, decision, step, backup_record_id)
             except (FileNotFoundError, ValueError, click.ClickException):
                 refusal = ""
             if refusal:

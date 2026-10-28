@@ -18666,6 +18666,7 @@ class PostgresRecordStore(HumanSessionStore):
         expected: VeriReelProdBackupGateOperationRecord,
         resumed: VeriReelProdBackupGateOperationRecord,
         expected_backup: BackupGateRecord,
+        expected_native_context: dict[str, Any],
     ) -> bool:
         from control_plane.client_release_backup_continuation import (
             BackupContinuationRefused,
@@ -18716,7 +18717,11 @@ class PostgresRecordStore(HumanSessionStore):
             outer = getattr(self._disposable_authority_context, "observation_read_session", None)
             self._disposable_authority_context.observation_read_session = session
             try:
-                require_continuable_backup(self, expected, expected_backup)
+                if (
+                    require_continuable_backup(self, expected, expected_backup)
+                    != expected_native_context
+                ):
+                    raise BackupContinuationRefused("backup_continuation_review_changed")
             finally:
                 self._disposable_authority_context.observation_read_session = outer
             pending_backup = expected_backup.model_copy(

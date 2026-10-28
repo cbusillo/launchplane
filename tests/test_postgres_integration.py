@@ -13509,6 +13509,21 @@ class RealPostgresRecipientReleaseSettingsTests(unittest.TestCase):
     def test_native_busy_source_has_no_delivery_failure(self) -> None:
         self.fixture.test_busy_native_source_leaves_the_release_waiting_without_delivery_failure()
 
+    def test_first_preflight_expiry_preserves_original_release(self) -> None:
+        self.fixture.test_expired_native_preflight_continues_original_first_promotion()
+
+    def test_final_preflight_expiry_preserves_original_drill(self) -> None:
+        self.fixture.test_expired_native_preflight_continues_original_final_promotion()
+
+    def test_pre_snapshot_refusal_preserves_original_drill(self) -> None:
+        self.fixture.test_expired_native_preflight_before_snapshot_continues_original_final_promotion()
+
+    def test_native_backup_continuation_rechecks_custody_and_promotion(self) -> None:
+        self.fixture.test_native_preflight_continuation_rechecks_reviewed_custody_and_promotion()
+
+    def test_native_backup_continuation_rechecks_current_and_dispatched_attempt(self) -> None:
+        self.fixture.test_native_preflight_continuation_refuses_current_or_dispatched_attempt()
+
 
 class RealPostgresRecipientWriterTests(unittest.TestCase):
     def test_repeatable_writer_cycles_use_real_custody(self) -> None:

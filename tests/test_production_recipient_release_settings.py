@@ -12,9 +12,12 @@ from control_plane.client_release_backup_continuation import (
     BackupContinuationRefused,
     BackupContinuationReview,
     continue_release_backup,
+    require_continuable_backup,
 )
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.promotion_record import ArtifactIdentityReference
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
@@ -24,6 +27,8 @@ from control_plane.production_recipient_publication import republication_snapsho
 from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 from control_plane.dokploy import api
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
+from control_plane.integration_allowances import canonical_sha256
+from control_plane.provider_operations import build_provider_operation_key
 from control_plane.release_request import record_release_request
 from control_plane.workflows.production_promotion_backup import GENERIC_WEB_PROMOTION_BACKUP_ACTION
 from control_plane.release_review import (
@@ -367,63 +372,291 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
         self.advance()
         self.assertTrue(self.case.fixture.new_running)
 
-    def test_expired_native_preflight_refusal_shows_reconciliation_instead_of_continuation(
-        self,
-    ) -> None:
+    def refuse_native_preflight(self, *, attempt: int, before_snapshot: bool = False) -> str:
         fixture = self.case.fixture
+        if attempt == 2:
+            self.capture_next_backup()
+            self.advance()
+            self.advance()
         backup_id = self.capture_next_backup()
-        operation = next(
-            row
-            for row in fixture.store.list_verireel_prod_backup_gate_operation_records()
-            if row.backup_record_id == backup_id
-        )
-        with expired_backup_clock(fixture.store, operation.operation_id):
-            continuable = releases.read_client_release_run(
-                store=fixture.store, profile=self.profile, decision=self.case.decision
+        effects = fixture.deploys, list(fixture.actions)
+        refusal = (
+            patch(
+                "control_plane.production_recipient_cutover.require_writer_exclusive",
+                side_effect=ValueError,
             )
-        assert continuable is not None
-        self.assertTrue(continuable.blocked_reason)
-        with patch.object(
-            RecipientCutoverAdapter,
-            "verify_upstreams",
-            side_effect=ValueError("Upstream preflight unavailable"),
-        ):
+            if before_snapshot
+            else patch.object(
+                RecipientCutoverAdapter,
+                "verify_upstreams",
+                side_effect=ValueError("Upstream preflight unavailable"),
+            )
+        )
+        with refusal:
             self.assertEqual(
                 releases.advance_client_releases(
                     store=fixture.store, control_plane_root=fixture.fixture.root
                 ),
                 (),
             )
-        before = custody(fixture.store, fixture.record.product, fixture.record.context)
-        with (
-            expired_backup_clock(fixture.store, operation.operation_id),
-            patch(
-                "control_plane.client_release_backup_continuation.guest_capture_metadata",
-                return_value=(),
-            ),
-        ):
-            run = releases.read_client_release_run(
-                store=fixture.store, profile=self.profile, decision=self.case.decision
+        record = custody(fixture.store, fixture.record.product, fixture.record.context)
+        assert record is not None
+        self.assertEqual(record.phase, "preflight_refused")
+        self.assertIsNone(
+            fixture.store.read_idempotency_record(
+                scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                idempotency_key=releases._step_key(
+                    self.case.decision, releases.ClientReleaseStep("promote", attempt)
+                ),
             )
-            with self.assertRaises(BackupContinuationRefused):
-                continue_release_backup(
-                    store=fixture.store,
-                    root=fixture.fixture.root,
-                    product=self.profile.product,
-                    decision_record_id=self.case.decision.record_id,
-                    review=BackupContinuationReview(reason="Inspect the expired capture"),
-                    actor="local:fixture",
-                    trace_id="fixture-preflight-refusal",
-                )
-        assert run is not None
-        self.assertEqual(run.state, "waiting")
-        self.assertTrue(run.blocked_reason)
-        self.assertNotEqual(run.blocked_reason, continuable.blocked_reason)
-        self.assertEqual(
-            custody(fixture.store, fixture.record.product, fixture.record.context), before
         )
-        self.assertFalse(fixture.actions)
-        self.assertEqual(fixture.deploys, 0)
+        self.assertEqual((fixture.deploys, fixture.actions), effects)
+        return backup_id
+
+    def test_expired_native_preflight_continues_original_first_promotion(self) -> None:
+        backup_id = self.refuse_native_preflight(attempt=1)
+        fixture = self.case.fixture
+        record = custody(fixture.store, fixture.record.product, fixture.record.context)
+        assert record is not None
+        operation = next(
+            row
+            for row in fixture.store.list_verireel_prod_backup_gate_operation_records()
+            if row.backup_record_id == backup_id
+        )
+        triggered = record.model_copy(
+            update={
+                "execution": {
+                    **record.execution,
+                    "trigger_requested_at": record.qualified_at,
+                }
+            }
+        )
+        with (
+            patch.object(
+                fixture.store,
+                "read_production_recipient",
+                return_value=triggered.model_dump(mode="json"),
+            ),
+            expired_backup_clock(fixture.store, operation.operation_id),
+        ):
+            with self.assertRaises(BackupContinuationRefused):
+                require_continuable_backup(
+                    fixture.store, operation, fixture.store.read_backup_gate_record(backup_id)
+                )
+        self.continue_expired_backup(backup_id)
+        self.advance()
+        self.assertTrue(self.case.fixture.new_running)
+        self.assertFalse(self.case.fixture.old_running)
+
+    def test_expired_native_preflight_continues_original_final_promotion(self) -> None:
+        backup_id = self.refuse_native_preflight(attempt=2)
+        deployments = self.case.fixture.deploys
+        self.continue_expired_backup(backup_id)
+        ready = releases.read_client_release_run(
+            store=self.case.fixture.store, profile=self.profile, decision=self.case.decision
+        )
+        assert ready is not None
+        self.assertFalse(ready.blocked_reason)
+        self.advance()
+        run = releases.read_client_release_run(
+            store=self.case.fixture.store, profile=self.profile, decision=self.case.decision
+        )
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+        self.assertEqual(self.case.fixture.deploys, deployments)
+        self.assertTrue(self.case.fixture.new_running)
+        self.assertFalse(self.case.fixture.old_running)
+
+    def test_expired_native_preflight_before_snapshot_continues_original_final_promotion(
+        self,
+    ) -> None:
+        backup_id = self.refuse_native_preflight(attempt=2, before_snapshot=True)
+        fixture = self.case.fixture
+        record = custody(fixture.store, fixture.record.product, fixture.record.context)
+        assert record is not None
+        operation_id = releases.client_release_step_operation_id(
+            profile=self.profile,
+            decision=self.case.decision,
+            step=releases.ClientReleaseStep("promote", 2),
+        )
+        self.assertNotIn("reservation:" + operation_id, record.execution)
+        self.continue_expired_backup(backup_id)
+        self.advance()
+        run = releases.read_client_release_run(
+            store=fixture.store, profile=self.profile, decision=self.case.decision
+        )
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+
+    def test_native_preflight_continuation_rechecks_reviewed_custody_and_promotion(self) -> None:
+        backup_id = self.refuse_native_preflight(attempt=2)
+        fixture = self.case.fixture
+        store = fixture.store
+        original = next(
+            row
+            for row in store.list_verireel_prod_backup_gate_operation_records()
+            if row.backup_record_id == backup_id
+        )
+        continue_operation = store.continue_precapture_backup_operation
+        for changed in ("custody", "promotion"):
+            with self.subTest(changed=changed):
+
+                def drift_before_cas(**kwargs: Any) -> bool:
+                    current = custody(store, fixture.record.product, fixture.record.context)
+                    assert current is not None
+                    if changed == "custody":
+                        replacement = current.model_copy(
+                            update={
+                                "execution": {**current.execution, "fixture_review_drift": True}
+                            }
+                        )
+                        store.write_production_recipient(
+                            expected=current.model_dump(mode="json"),
+                            replacement=replacement.model_dump(mode="json"),
+                        )
+                    else:
+                        pending = next(
+                            row
+                            for row in store.list_promotion_records(
+                                context_name=fixture.record.context, to_instance_name="prod"
+                            )
+                            if row.backup_record_id == backup_id
+                        )
+                        store.write_promotion_record(
+                            pending.model_copy(
+                                update={
+                                    "post_deploy_update": pending.post_deploy_update.model_copy(
+                                        update={"detail": "Changed after review"}
+                                    )
+                                }
+                            )
+                        )
+                    return continue_operation(**kwargs)
+
+                with patch.object(
+                    store, "continue_precapture_backup_operation", side_effect=drift_before_cas
+                ):
+                    with self.assertRaises(BackupContinuationRefused):
+                        self.continue_expired_backup(backup_id)
+                self.assertEqual(
+                    store.read_verireel_prod_backup_gate_operation_record(original.operation_id),
+                    original,
+                )
+
+    def test_native_preflight_continuation_refuses_current_or_dispatched_attempt(self) -> None:
+        backup_id = self.refuse_native_preflight(attempt=2)
+        fixture = self.case.fixture
+        store = fixture.store
+        current = custody(store, fixture.record.product, fixture.record.context)
+        assert current is not None
+        operation_id = releases.client_release_step_operation_id(
+            profile=self.profile,
+            decision=self.case.decision,
+            step=releases.ClientReleaseStep("promote", 2),
+        )
+        saved = LaunchplaneIdempotencyRecord.model_validate(
+            current.execution["reservation:" + operation_id]
+        )
+        continue_operation = store.continue_precapture_backup_operation
+        admitted: list[LaunchplaneIdempotencyRecord] = []
+        origin = ProviderTargetOrigin(
+            product=current.product,
+            context=current.context,
+            instance="prod",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=current.retained_target_id.target_id,
+        )
+
+        def reserve_before_cas(**kwargs: Any) -> bool:
+            result = store.reserve_mutation(
+                scope=saved.scope,
+                route_path=saved.route_path,
+                idempotency_key=saved.idempotency_key,
+                request_fingerprint=saved.request_fingerprint,
+                lease_owner="fixture-concurrent-worker",
+                reconciliation_key=saved.reconciliation_key,
+                provider_target_key=saved.provider_target_key,
+                provider_target_origin=origin,
+            )
+            self.assertEqual(result.status, "acquired")
+            admitted.append(result.record)
+            return continue_operation(**kwargs)
+
+        with patch.object(
+            store, "continue_precapture_backup_operation", side_effect=reserve_before_cas
+        ):
+            with self.assertRaises(BackupContinuationRefused):
+                self.continue_expired_backup(backup_id)
+        self.assertEqual(store.read_idempotency_record_by_id(saved.record_id), admitted[-1])
+        self.assertEqual(
+            store.release_reserved_mutation(reservation=admitted[-1]).status, "released"
+        )
+        key = build_provider_operation_key(
+            scope=saved.scope,
+            route_path=saved.route_path,
+            idempotency_key=saved.idempotency_key,
+            request_fingerprint=saved.request_fingerprint,
+            reconciliation_key=saved.reconciliation_key,
+        )
+        operation = next(
+            row
+            for row in store.list_verireel_prod_backup_gate_operation_records()
+            if row.backup_record_id == backup_id
+        )
+        for suffix in (":old_pause_fenced", ":rollback_completed_at"):
+            with self.subTest(marker=suffix):
+                witnessed = current.model_copy(
+                    update={
+                        "execution": {
+                            **current.execution,
+                            canonical_sha256(key) + suffix: saved.created_at,
+                        }
+                    }
+                )
+                with (
+                    patch.object(
+                        store,
+                        "read_production_recipient",
+                        return_value=witnessed.model_dump(mode="json"),
+                    ),
+                    expired_backup_clock(store, operation.operation_id),
+                ):
+                    with self.assertRaises(BackupContinuationRefused):
+                        require_continuable_backup(
+                            store, operation, store.read_backup_gate_record(backup_id)
+                        )
+        replacement = current.model_copy(
+            update={
+                "execution": {
+                    **current.execution,
+                    canonical_sha256(key) + ":old_pause_dispatched_at": saved.created_at,
+                }
+            }
+        )
+        store.write_production_recipient(
+            expected=current.model_dump(mode="json"),
+            replacement=replacement.model_dump(mode="json"),
+        )
+        with self.assertRaises(BackupContinuationRefused):
+            self.continue_expired_backup(backup_id)
+
+    def test_native_preflight_continuation_refuses_another_backup_consumer(self) -> None:
+        backup_id = self.refuse_native_preflight(attempt=2)
+        fixture = self.case.fixture
+        pending = next(
+            row
+            for row in fixture.store.list_promotion_records(
+                context_name=fixture.record.context, to_instance_name="prod"
+            )
+            if row.backup_record_id == backup_id
+        )
+        competing = pending.model_copy(update={"record_id": pending.record_id + "-other"})
+        fixture.store.write_promotion_record(competing)
+        with self.assertRaises(BackupContinuationRefused):
+            self.continue_expired_backup(backup_id)
+        self.assertEqual(fixture.store.read_promotion_record(competing.record_id), competing)
 
     def test_busy_native_source_leaves_the_release_waiting_without_delivery_failure(self) -> None:
         fixture = self.case.fixture
