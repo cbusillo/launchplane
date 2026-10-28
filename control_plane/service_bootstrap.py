@@ -132,6 +132,7 @@ def create_launchplane_service_application(
     verifier: TokenVerifier,
     service_record_store: PostgresRecordStore,
     control_plane_root_path: Path | None = None,
+    start_schedulers: bool = True,
 ) -> FastAPI:
     resolved_fastapi_policy = resolve_launchplane_authz_policy(
         record_store=service_record_store,
@@ -171,18 +172,28 @@ def create_launchplane_service_application(
             service_record_store,
             control_plane_root=control_plane_root_path or control_plane_root(),
             public_url=github_oauth_config.public_url if github_oauth_config else "",
-        ),
+        )
+        if start_schedulers
+        else None,
         discussion_reminder_scheduler=DiscussionReminderScheduler(
             service_record_store,
             control_plane_root=control_plane_root_path or control_plane_root(),
             public_url=github_oauth_config.public_url if github_oauth_config else "",
-        ),
-        health_monitor_scheduler=HealthMonitorScheduler(service_record_store),
-        testing_drill_scheduler=OdooTestingDrillScheduler(service_record_store),
+        )
+        if start_schedulers
+        else None,
+        health_monitor_scheduler=HealthMonitorScheduler(service_record_store)
+        if start_schedulers
+        else None,
+        testing_drill_scheduler=OdooTestingDrillScheduler(service_record_store)
+        if start_schedulers
+        else None,
         preview_lifecycle_scheduler=PreviewLifecycleScheduler(
             service_record_store,
             control_plane_root=control_plane_root_path or control_plane_root(),
-        ),
+        )
+        if start_schedulers
+        else None,
         bearer_identity_config=_bearer_identity_config_from_env(),
         human_session_manager=human_session_manager,
         github_oauth_client=github_oauth_client,
