@@ -5328,8 +5328,10 @@ optional `inputs.fishbowl_source` reference: `context`, `instance` and
 `version_id`, using the managed `copy_from` reference shape. Obtain the version
 from `product-secret-bindings-read`; select the product's existing **testing**
 Fishbowl password binding, never production's binding or a plaintext value.
-This option is for a disposable PR preview nobody is using. It does not touch
-the testing database, import history, promote or release anything.
+This option is for a disposable PR preview nobody is using. Qualification reads
+the testing database through a read-only session and requires its installed
+importer and shared payload addons. It does not write testing data, run an import,
+promote or release anything.
 
 The service requires an exact testing binding classified `shared_safe`, with
 `read_only_source` sharing evidence, plus testing's existing Fishbowl
@@ -5349,7 +5351,10 @@ overrides preserve persisted parameters; installed producer defaults apply only
 when the parameter is absent. Legacy field environments and copied defaults are
 not a fallback. Uninstalled addons, missing password delivery, conflicting or
 secret-backed non-secret authority, unverified TLS and drift refuse the optional
-source. Ordinary previews without the source remain available. Planning compares the
+source. The existing `source_unqualified` refusal includes the bounded failure
+stage when proved, such as `capacity`, `addon_state` or `source_resolution`.
+An absent stage remains unknown; it does not establish a missing binding.
+Ordinary previews without the source remain available. Planning compares the
 selected managed password with delivered metadata in memory; it does not copy
 the password into its response or evidence digest.
 
@@ -5576,6 +5581,13 @@ Each source child has a ten-second deadline; container execution has a
 budget. Runtime probes share the existing concurrency bound and unknown-result
 cooldown, keyed separately by binding/version and container. Successful results
 are never cached. An unreachable source does not hide other source results.
+Each source includes a nullable, value-free `failure_stage` from the shared
+prerequisite vocabulary. Capacity, installed-addon and qualification failures
+remain refused while retaining their proved stage; unavailable facts stay
+unknown. A global reader failure is projected to each selected source, while
+a source-local failure preserves unrelated observations. A cooldown or
+single-flight refusal reports `capacity`, not a cached earlier failure reason.
+No raw exceptions, connection parameters or credentials appear in these stages.
 Only the documented read privileges above are accepted; role grants, partial
 revokes, incomplete/unrecognized syntax and drift remain unknown.
 

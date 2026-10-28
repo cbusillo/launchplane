@@ -20,6 +20,7 @@ from control_plane import odoo_runtime_reads as reads
 from control_plane.odoo_diagnostic_identity import DIAGNOSTIC_IDENTITY_UNAVAILABLE
 from control_plane.odoo_runtime_source_grants import runtime_grants
 from control_plane.odoo_source_probe import GrantStatus
+from control_plane.odoo_source_prerequisite_programs import FailureStage
 from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -37,7 +38,10 @@ from control_plane.contracts.runtime_identity import (
 )
 
 if TYPE_CHECKING:
-    from control_plane.odoo_runtime_source_prerequisites import PrerequisiteStore
+    from control_plane.odoo_runtime_source_prerequisites import (
+        PrerequisiteStore,
+        SourceConsumerEvidence,
+    )
 
 
 SOURCE_PREFIXES = {
@@ -81,6 +85,7 @@ class SourceDiagnostic(BaseModel):
     parameters: tuple[ParameterAgreement, ...] = ()
     managed_connection_grants: Literal["read_only", "unsafe", "unknown"] = "unknown"
     applied_connection_grants: GrantStatus = "unknown"
+    failure_stage: FailureStage | None = None
 
 
 class ImportDiagnosticResult(BaseModel):
@@ -359,7 +364,9 @@ def runtime_origin_grants(
     product: str,
     control_plane_root: Path,
     database_url: str | None,
-) -> dict[str, GrantStatus]:
+) -> dict[str, "SourceConsumerEvidence"]:
+    from control_plane.odoo_runtime_source_prerequisites import SourceConsumerEvidence, SourceName
+
     keys = {
         name: (
             source.binding.binding_id,
@@ -371,7 +378,10 @@ def runtime_origin_grants(
         for name, source in selected.items()
     }
     active = {}
-    results: dict[str, GrantStatus] = {name: "unknown" for name in selected}
+    results = {
+        name: SourceConsumerEvidence(source=cast(SourceName, name), failure_stage="capacity")
+        for name in selected
+    }
     with _PROBE_LOCK:
         now = time.monotonic()
         for expired in [key for key, until in _FAILED_PROBES.items() if until <= now]:
@@ -403,7 +413,7 @@ def runtime_origin_grants(
         with _PROBE_LOCK:
             for name, key in active.items():
                 _ACTIVE_PROBES.discard(key)
-                if results[name] == "unknown":
+                if results[name].grants == "unknown":
                     _FAILED_PROBES[key] = time.monotonic() + 60
 
 
@@ -603,8 +613,13 @@ def diagnose_runtime_source_grants(
             runtime="verified",
             sources=tuple(
                 result.model_copy(
-                    update={"applied_connection_grants": grants.get(result.source, "unknown")}
+                    update={
+                        "applied_connection_grants": grants[result.source].grants,
+                        "failure_stage": grants[result.source].failure_stage,
+                    }
                 )
+                if result.source in grants
+                else result
                 for result in sources
             ),
         )
