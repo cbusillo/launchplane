@@ -3,6 +3,7 @@ import json
 import os
 from urllib.parse import urlsplit
 import unittest
+from contextlib import closing
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
@@ -3321,6 +3322,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         revoke_on_pending: bool = False,
         provider_extra_env: tuple[str, ...] = (),
         ordinary_deploy: bool = False,
+        before_apply: Callable[[_Store], None] | None = None,
     ) -> tuple[OdooStableTargetReplacementApplyResult, Mock, Mock, _Store]:
         profile = _opw_profile_with_prelaunch_policy(enabled=True)
         if live:
@@ -3552,6 +3554,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 side_effect=_matching_runtime_identity_healthcheck,
             ),
         ):
+            if before_apply is not None:
+                before_apply(store)
             result = execute_odoo_stable_target_replacement_apply(
                 control_plane_root=Path("."),
                 record_store=store,
@@ -3567,6 +3571,101 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             )
 
         return result, post_deploy, verify, store
+
+    def test_source_outage_before_production_dispatch_creates_no_failed_delivery(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+        from control_plane.production_delivery_monitor import monitor_production_delivery_once
+        from control_plane.build_provenance import BuildProvenanceTransport
+        from control_plane.workflows import odoo_stable_target_replacement as replacement
+        from tests.support.stores import sqlite_database_url
+
+        for check in ("require_forward_lane_build", "require_forward_build"):
+            with self.subTest(check=check), TemporaryDirectory() as directory:
+                captured: list[_Store] = []
+                identity = (
+                    "LAUNCHPLANE_RUNTIME_IDENTITY_JSON="
+                    + json.dumps(
+                        {
+                            "product": "odoo-tenant-opw",
+                            "context": "opw",
+                            "instance": "prod",
+                            "artifact_id": "old-artifact",
+                            "source_git_ref": "old-source",
+                        }
+                    ),
+                )
+                with (
+                    patch.object(
+                        replacement,
+                        check,
+                        side_effect=LaneMovementRefused("source_order_unavailable"),
+                    ) as source_check,
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_prod_backup_gate"
+                    ) as backup,
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
+                    ) as dispatch,
+                    self.assertRaises(LaneMovementRefused),
+                ):
+                    self._apply_upstream_restore(
+                        override_record=None,
+                        post_deploy_results=(),
+                        live=True,
+                        ordinary_deploy=True,
+                        before_apply=captured.append,
+                        provider_extra_env=identity if check == "require_forward_build" else (),
+                    )
+                source_check.assert_called_once()
+                backup.assert_not_called()
+                dispatch.assert_not_called()
+                store = captured[0]
+                with closing(
+                    PostgresRecordStore(
+                        database_url=sqlite_database_url(Path(directory) / "state.db")
+                    )
+                ) as backend:
+                    backend.ensure_schema()
+                    backend.write_product_profile_record(store.profile)
+                    for record in store.deployment_records:
+                        backend.write_deployment_record(record)
+                    transport = Mock()
+                    transport.get_json.return_value = {"sha": "a" * 40}
+                    monitor_production_delivery_once(
+                        backend,
+                        transport_factory=lambda _store, _profile: cast(
+                            BuildProvenanceTransport, transport
+                        ),
+                    )
+                    self.assertEqual(
+                        backend.list_public_ingress_incident_records(status="open"), ()
+                    )
+                self.assertEqual(store.deployment_records, [])
+                self.assertEqual(store.environment_inventories, [])
+                self.assertEqual(store.backup_records, {})
+
+    def test_source_outage_before_testing_dispatch_keeps_failed_record(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        captured: list[_Store] = []
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.require_forward_lane_build",
+                side_effect=LaneMovementRefused("source_order_unavailable"),
+            ),
+            self.assertRaises(LaneMovementRefused),
+        ):
+            self._apply_upstream_restore(
+                override_record=None,
+                post_deploy_results=(),
+                test_instance="testing",
+                ordinary_deploy=True,
+                before_apply=captured.append,
+            )
+        record = captured[0].deployment_records[-1]
+        self.assertEqual(record.deploy.status, "fail")
+        assert record.failure is not None
+        self.assertEqual(record.failure.code, "lane_movement.source_order_unavailable")
 
     def test_restore_intent_survives_failures_without_override_evidence(self) -> None:
         from control_plane.testing_restore_prerequisite import incomplete_testing_restore
