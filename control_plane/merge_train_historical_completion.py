@@ -11,7 +11,10 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchLandingPlan,
     MergeTrainBatchLandingPlanRecord,
 )
-from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+    merge_train_controller_alias_reconciliation_detail,
+)
 from control_plane.contracts.merge_train_historical_completion import (
     MergeTrainHistoricalCompletionProviderEvidence,
     MergeTrainHistoricalCompletionSelector,
@@ -116,6 +119,10 @@ class HistoricalCompletionPreflightResponse(BaseModel):
 
 
 class HistoricalCompletionSnapshotStore(Protocol):
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]: ...
+
     def list_merge_train_controller_state_records(
         self,
         *,
@@ -216,6 +223,7 @@ def assess_merge_train_historical_completion(
     normalized_repository = repository.strip().lower()
     normalized_base_branch = base_branch.strip()
     required = (
+        "list_merge_train_controller_state_alias_records",
         "list_merge_train_controller_state_records",
         "list_merge_train_policy_records",
         "list_merge_train_batch_landing_plan_records",
@@ -325,6 +333,12 @@ def read_historical_completion_snapshot(
         base_branch=base_branch,
         limit=2,
     )
+    if merge_train_controller_alias_reconciliation_detail(
+        store.list_merge_train_controller_state_alias_records(
+            repository=repository, base_branch=base_branch
+        )
+    ):
+        raise HistoricalCompletionAssessmentFailure("indeterminate", "controller_busy")
     if len(controllers) != 1:
         raise HistoricalCompletionAssessmentFailure("indeterminate", "controller_unavailable")
     controller = controllers[0]

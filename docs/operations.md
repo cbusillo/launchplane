@@ -5783,6 +5783,15 @@ The private `held` receipt binds hold ID, keeper identity, exported snapshot,
 transaction, cluster and aggregate schema/full-row/sequence checksums. Trigger
 metadata includes enabled state and function bodies. No SQL definition, payload,
 column default, ciphertext or individual credential-column hash is emitted.
+Schema fingerprints normalize PostgreSQL's equivalent placement of unbounded
+varchar-to-text casts only within literal arrays that are the complete operand
+of ANY or ALL. Values, comparison operations, other casts and other metadata remain distinct;
+an unsupported difference still refuses the rehearsal. Deparsing uses fixed
+string and search-path settings in a savepoint, restores the caller's settings
+and releases the savepoint before exporting the keeper snapshot. A SQL error
+rolls back that savepoint without discarding the caller's earlier work or locks.
+After changing fingerprint behavior, deploy the source first and take a new hold
+and full backup. An older diagnostic receipt cannot authorize a later window.
 Stream the complete custom dump through the existing private transport:
 
 ```bash

@@ -18,6 +18,7 @@ from control_plane.contracts.merge_train_batch import MergeTrainHeldOutReason
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerLastResult,
     MergeTrainControllerStateRecord,
+    merge_train_controller_alias_reconciliation_detail,
 )
 from control_plane.contracts.merge_train_admission import MergeTrainAdmissionDecision
 from control_plane.contracts.merge_admission_record import MergeAdmissionRecord
@@ -217,6 +218,10 @@ class MergeTrainControllerStatusReadModel(BaseModel):
 
 
 class MergeTrainRunHistoryStore(Protocol):
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]: ...
+
     def latest_merge_train_run_record(
         self, *, repository: str, base_branch: str
     ) -> MergeTrainRunRecord | None: ...
@@ -456,6 +461,11 @@ def build_merge_train_controller_status_read_model(
         controller_diagnostics=_controller_lease_diagnostics(
             controller_state=controller_state,
             generated_at=generated_at,
+            alias_detail=merge_train_controller_alias_reconciliation_detail(
+                store.list_merge_train_controller_state_alias_records(
+                    repository=repository, base_branch=base_branch
+                )
+            ),
         ),
         controller_records=_summarize_controller_records(
             store=store,
@@ -816,9 +826,18 @@ def _controller_lease_diagnostics(
     *,
     controller_state: MergeTrainControllerStateRecord | None,
     generated_at: str,
+    alias_detail: str = "",
 ) -> MergeTrainControllerLeaseDiagnostics | None:
     if controller_state is None:
-        return None
+        return (
+            MergeTrainControllerLeaseDiagnostics(
+                status="unavailable",
+                reconciliation_status="required",
+                reconciliation_detail=alias_detail,
+            )
+            if alias_detail
+            else None
+        )
     return MergeTrainControllerLeaseDiagnostics(
         status=controller_state.status,
         owner=controller_state.lease_owner or controller_state.last_owner,
@@ -835,8 +854,10 @@ def _controller_lease_diagnostics(
             timestamp=controller_state.heartbeat_at,
         ),
         lease_expires_at=controller_state.lease_expires_at,
-        reconciliation_status=controller_state.reconciliation_status,
-        reconciliation_detail=controller_state.reconciliation_detail,
+        reconciliation_status="required"
+        if alias_detail
+        else controller_state.reconciliation_status,
+        reconciliation_detail=alias_detail or controller_state.reconciliation_detail,
     )
 
 

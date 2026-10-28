@@ -17,6 +17,7 @@ from control_plane.contracts.production_recipient import (
     ProductionRecipientRecord,
     ProductionRecipientRequest,
 )
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.dokploy import api, compose, source
 from control_plane.dokploy.network_capacity import (
     BridgeNetworkCapacityRefused,
@@ -297,7 +298,7 @@ def runtime_values(
         ):
             raise ValueError("Candidate ports must differ from production ports.")
         values[key] = str(value)
-    values["DOCKER_IMAGE_REFERENCE"] = record.image_reference
+    values.update(dict.fromkeys(COMPOSE_IMAGE_REFERENCE_ENV_KEYS, record.image_reference))
     if any(
         looks_like_credential(key, value) and key not in environment.secret_keys
         for key, value in values.items()
@@ -684,7 +685,13 @@ class ProductionRecipientAdapter:
                 "The provider source differs from the reviewed immutable source."
             )
         values = runtime_values(self.store, self.root, record, published=published)
-        allowed_environments = [values]
+        actual_environment = api.parse_dokploy_env_text(str(payload.get("env") or ""))
+        unstarted_values = {
+            key: value
+            for key, value in values.items()
+            if key not in COMPOSE_IMAGE_REFERENCE_ENV_KEYS or key in actual_environment
+        }
+        allowed_environments = [unstarted_values]
         if record.execution.get("runtime_identity"):
             from control_plane.contracts.runtime_identity import (
                 RuntimeIdentity,
@@ -698,9 +705,9 @@ class ProductionRecipientAdapter:
                 ),
             }
             allowed_environments = (
-                [values] if not record.execution.get("trigger_requested_at") else []
+                [unstarted_values] if not record.execution.get("trigger_requested_at") else []
             ) + [deployed_values]
-        if api.parse_dokploy_env_text(str(payload.get("env") or "")) not in allowed_environments:
+        if actual_environment not in allowed_environments:
             raise RecipientAuthorityChanged(
                 "The provider environment differs from managed production inputs."
             )

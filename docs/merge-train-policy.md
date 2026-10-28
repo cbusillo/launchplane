@@ -247,6 +247,17 @@ the current lease is still valid. The lease record stores holder, expiry,
 active action/phase, and reconciliation detail under Launchplane storage, not
 in workflow inputs or checked-in config.
 
+Scoped current-state lists use the canonical repository spelling; exact-key and
+unscoped history reads preserve older identities with their original payloads.
+Alias observations match repository names without regard to case and branches
+exactly. An alias is inert only when idle, unbound, without lease or active work,
+and cleanly reconciled. Unresolved aliases fence canonical writes, acquisition,
+CAS, guarded admission and historical completion under the existing controller
+lock. Status diagnostics, dry runs, readiness and stall observations expose that
+blocker without rewriting the current controller or changing scheduler cadence.
+Peer quota reads retain canonical evidence independently of aliases. No read
+rewrites or adopts history.
+
 Every GitHub effect that can cross a crash window has a durable pre-effect
 checkpoint. Candidate construction can safely reset and deterministically
 rebuild its temporary ref. Landing records each merged PR before advancing.

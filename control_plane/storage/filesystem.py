@@ -79,8 +79,11 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
+    MergeTrainControllerReconciliationRequiredError,
     MergeTrainControllerStateRecord,
     build_merge_train_controller_resume_detail,
+    require_canonical_merge_train_controller_state,
+    merge_train_controller_alias_reconciliation_detail,
 )
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
@@ -2327,8 +2330,12 @@ class FilesystemRecordStore:
     def write_merge_train_controller_state_record(
         self, record: MergeTrainControllerStateRecord
     ) -> Path:
+        record = require_canonical_merge_train_controller_state(record)
         record_type = "launchplane_merge_train_controller_states"
         with self._exclusive_record_lock(record_type, record.controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=record.repository, base_branch=record.base_branch
+            )
             return self._write_model_locked(
                 record_type,
                 _merge_train_controller_storage_id(record.controller_key),
@@ -2338,12 +2345,10 @@ class FilesystemRecordStore:
     def read_merge_train_controller_state_record(
         self, controller_key: str
     ) -> MergeTrainControllerStateRecord:
-        return MergeTrainControllerStateRecord.model_validate(
-            self._read_model(
-                MergeTrainControllerStateRecord,
-                "launchplane_merge_train_controller_states",
-                _merge_train_controller_storage_id(controller_key),
-            ).model_dump(mode="json")
+        return self._read_model(
+            MergeTrainControllerStateRecord,
+            "launchplane_merge_train_controller_states",
+            _merge_train_controller_storage_id(controller_key),
         )
 
     def list_merge_train_controller_state_records(
@@ -2368,6 +2373,28 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        return tuple(
+            record
+            for record in self.list_merge_train_controller_state_records()
+            if record.repository.lower() == repository.lower()
+            and record.repository != repository.lower()
+            and record.base_branch == base_branch
+        )
+
+    def _require_inert_merge_train_controller_aliases(
+        self, *, repository: str, base_branch: str
+    ) -> None:
+        detail = merge_train_controller_alias_reconciliation_detail(
+            self.list_merge_train_controller_state_alias_records(
+                repository=repository, base_branch=base_branch
+            )
+        )
+        if detail:
+            raise MergeTrainControllerReconciliationRequiredError(detail)
 
     def acquire_merge_train_controller_state_record(
         self,
@@ -2405,6 +2432,9 @@ class FilesystemRecordStore:
         )
         storage_id = _merge_train_controller_storage_id(controller_key)
         with self._exclusive_record_lock(record_type, controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=repository, base_branch=base_branch
+            )
             observed_at = _utc_now_timestamp()
             record_path = self._record_path(record_type, storage_id)
             current_record = (
@@ -2474,9 +2504,13 @@ class FilesystemRecordStore:
         expected_lease_acquired_at: str,
         lease_seconds: int,
     ) -> MergeTrainControllerStateRecord:
+        record = require_canonical_merge_train_controller_state(record)
         record_type = "launchplane_merge_train_controller_states"
         storage_id = _merge_train_controller_storage_id(record.controller_key)
         with self._exclusive_record_lock(record_type, record.controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=record.repository, base_branch=record.base_branch
+            )
             observed_at = _utc_now_timestamp()
             try:
                 current_record = self._read_model_locked(
@@ -2664,6 +2698,9 @@ class FilesystemRecordStore:
         controller_record_type = "launchplane_merge_train_controller_states"
         controller_storage_id = _merge_train_controller_storage_id(record.controller_key)
         with self._exclusive_record_lock(controller_record_type, record.controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=record.repository, base_branch=record.base_branch
+            )
             controller_path = self._record_path(
                 controller_record_type,
                 controller_storage_id,
