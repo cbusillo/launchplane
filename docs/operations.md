@@ -1056,15 +1056,6 @@ provider payload data.
 > described in this doc remain only until their deletion (#2606, #2740); do not
 > extend them or onboard a product onto them.
 
-Launchplane should eventually expose API ingress for at least:
-
-- deployment evidence
-- promotion evidence
-- inventory refresh triggers or derived writes
-- preview generation evidence
-- preview destroyed evidence
-- driver-triggered runtime actions where Launchplane owns execution
-
 The first explicit version of that boundary, including the OIDC claim mapping
 and endpoint list, lives in [`service-boundary.md`](service-boundary.md).
 Agent-facing read context and scoped write-intent consumption rules live in
@@ -1131,9 +1122,6 @@ runtime memos belong in product repos; this repo keeps only the shared driver
 and record contracts.
 
 The service uses GitHub OIDC bearer tokens and DB-backed authz policy records.
-Additional evidence routes should land against the same authn/authz boundary
-rather than creating separate ad hoc ingress patterns.
-
 Managed authz policy reconciliation is a native FastAPI service route. It
 requires DB-backed policy storage, enforces `authz_policy_grant.write`,
 preserves signed-in GitHub human-session callers, and keeps dry-runs stateless.

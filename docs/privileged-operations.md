@@ -42,12 +42,8 @@ policy mutation. Remaining deletion is tracked by
 
 ## Agent Policy Proposals
 
-The configured `local_operator` identity may submit prepared access-policy and merge-train
-policy requests to `POST /v1/agent/privileged-operations/plans`. This requires
-exactly one explicit managed proposal rule in both runtime policy and a fresh
-active policy record. The two existing descriptors are
-`managed-authz-policy-set` and `managed-merge-train-policy-import`; secret
-rotation and retired delivery descriptors are not accepted by this surface.
+Agent proposal admission and supported descriptors are defined by the
+[privileged-operation API contract](service-boundary.md#privileged-operation-api).
 
 The request carries the descriptor, request, reason, related issue, and a stable
 `source_event_id`. Reuse that source event when a response is interrupted:
