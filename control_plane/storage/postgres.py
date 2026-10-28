@@ -19431,9 +19431,7 @@ class PostgresRecordStore(HumanSessionStore):
             LaunchplaneDeploymentRow.instance,
             LaunchplaneDeploymentRow.record_id,
             LaunchplaneDeploymentRow.deploy_started_at,
-            LaunchplaneDeploymentRow.payload["deploy"]["status"].as_string(),
             LaunchplaneDeploymentRow.deploy_finished_at,
-            LaunchplaneDeploymentRow.payload["failure"].as_string().is_not(None),
         ).where(
             or_(
                 *(
@@ -19451,9 +19449,7 @@ class PostgresRecordStore(HumanSessionStore):
             instance,
             record_id,
             started_at,
-            status,
             finished_at,
-            failure,
         ) in session.execute(statement):
             try:
                 started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
@@ -19465,9 +19461,31 @@ class PostgresRecordStore(HumanSessionStore):
             except ValueError:
                 normalized = ""
             states.setdefault((context, instance), []).append(
-                DeploymentMonitorState(normalized, record_id, status, finished_at, bool(failure))
+                DeploymentMonitorState(normalized, record_id, None, finished_at, False)
             )
-        return states
+        latest_ids = {
+            max(records, key=lambda item: (item.started_at, item.record_id)).record_id
+            for records in states.values()
+        }
+        details = {
+            record_id: (status, bool(failure))
+            for record_id, status, failure in session.execute(
+                select(
+                    LaunchplaneDeploymentRow.record_id,
+                    LaunchplaneDeploymentRow.payload["deploy"]["status"].as_string(),
+                    LaunchplaneDeploymentRow.payload["failure"].as_string().is_not(None),
+                ).where(LaunchplaneDeploymentRow.record_id.in_(latest_ids))
+            )
+        }
+        return {
+            pair: [
+                item._replace(status=details[item.record_id][0], failed=details[item.record_id][1])
+                if item.record_id in details
+                else item
+                for item in records
+            ]
+            for pair, records in states.items()
+        }
 
     def list_deployment_records(
         self,

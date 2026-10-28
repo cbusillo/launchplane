@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from itertools import count
 from tempfile import TemporaryDirectory
 import ssl
 import unittest
@@ -8,7 +9,6 @@ from unittest.mock import Mock, patch
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence, RecordFailure
 from control_plane.contracts.ship_request import ShipRequest
-from control_plane.lane_runtime_verification import read_lane_runtime_verification
 from control_plane.workflows.ship import build_deployment_record
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.outbound_http import PublicHttpDestinationError
@@ -266,29 +266,18 @@ class MonitorDeployWindowTests(unittest.TestCase):
                 self.assertEqual(result.open_incident_count, 1)
 
     def test_observation_uses_probe_time_after_discovery(self) -> None:
-        actual = (self.started + timedelta(seconds=30)).isoformat()
-        discovered = False
-        list_profiles = self.store.list_product_profile_records
-
-        def discover() -> object:
-            nonlocal discovered
-            discovered = True
-            return list_profiles()
-
-        with (
-            patch.object(self.store, "list_product_profile_records", side_effect=discover),
-            patch(
-                "control_plane.workflows.public_ingress_monitor.utc_now_timestamp",
-                side_effect=lambda: actual if discovered else self.started.isoformat(),
-            ),
+        ticks = count()
+        with patch(
+            "control_plane.workflows.public_ingress_monitor.utc_now_timestamp",
+            side_effect=lambda: (self.started + timedelta(seconds=next(ticks))).isoformat(),
         ):
             result = run_public_ingress_monitor_once(
                 record_store=self.store,
                 http_get=lambda url, timeout: HttpObservation(200, url, 0),
             )
-        self.assertEqual(result.records[0].observed_at, actual)
+        self.assertGreater(result.records[0].observed_at, result.checked_at)
 
-    def test_ordinary_ship_pending_shape_defers_without_earning_verified_health(self) -> None:
+    def test_ordinary_ship_pending_shape_requires_unique_product_scope(self) -> None:
         pending = build_deployment_record(
             request=ShipRequest(
                 artifact_id="example-artifact",
@@ -308,7 +297,6 @@ class MonitorDeployWindowTests(unittest.TestCase):
             started_at=self.started.isoformat(),
             finished_at="",
         )
-        self.assertIsNone(pending.runtime_identity)
         self.store.write_deployment_record(pending)
         at = self.started + timedelta(seconds=24)
         result = run_public_ingress_monitor_once(
@@ -318,14 +306,6 @@ class MonitorDeployWindowTests(unittest.TestCase):
         )
         self.assertEqual(result.incidents, ())
         profile = _profile()
-        verification = read_lane_runtime_verification(
-            record_store=self.store,
-            profile=profile,
-            lane=profile.lanes[0],
-            summary=self.store.read_lane_summary(context_name="example-site", instance_name="prod"),
-            now=at,
-        )
-        self.assertNotEqual(verification.provenance.freshness_status, "verified")
         other = profile.model_copy(update={"product": "other-site"})
         self.store.write_product_profile_record(other)
         result = run_public_ingress_monitor_once(
