@@ -220,6 +220,13 @@ def _build_odoo_preview_apply_inputs(
     )
     if result.status != "ready" or result.operation != "refresh":
         return result
+    _, bootstrap_sha256 = control_plane_odoo_instance_overrides.resolve_preview_website_bootstrap(
+        cast(Any, record_store),
+        context=profile.preview.context,
+        template_instance=profile.preview.template_instance,
+        preview_slug=result.preview_slug,
+    )
+    result = result.model_copy(update={"preview_website_bootstrap_sha256": bootstrap_sha256})
     if profile.preview.clean_testing_snapshot:
         if request.fishbowl_source is not None:
             raise ValueError("Snapshot previews cannot connect to an import source.")
@@ -1309,16 +1316,42 @@ def _odoo_preview_service_environment(
         if payload_key in preview_environment.setting_keys
         else ""
     )
-    try:
-        template_override_record = cast(Any, record_store).read_odoo_instance_override_record(
-            context_name=preview_profile.context,
-            instance_name=template_instance,
+    bootstrap_record, bootstrap_sha256 = (
+        control_plane_odoo_instance_overrides.resolve_preview_website_bootstrap(
+            cast(Any, record_store),
+            context=preview_profile.context,
+            template_instance=template_instance,
+            preview_slug=plan.preview_slug,
         )
-    except FileNotFoundError:
-        template_override_record = None
+    )
+    if (
+        bootstrap_sha256
+        and bootstrap_record is not None
+        and bootstrap_record.website_bootstrap is None
+    ):
+        required = (
+            environment_values.get(
+                control_plane_odoo_instance_overrides.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+                "",
+            )
+            .strip()
+            .lower()
+        )
+        carried = environment_values.get(payload_key, "")
+        if required not in {"", "0", "false", "no", "off"}:
+            raise ValueError("Carried Website intent conflicts with exact preview withdrawal.")
+        if carried:
+            try:
+                payload = OdooPostDeployPayload.model_validate_json(
+                    base64.b64decode(carried, validate=True)
+                )
+            except ValueError:
+                raise ValueError("Carried preview settings could not be validated.") from None
+            if payload.website_bootstrap is not None or payload.website_settings is not None:
+                raise ValueError("Carried Website intent conflicts with exact preview withdrawal.")
     preview_bootstrap_environment = (
         control_plane_odoo_instance_overrides.build_preview_website_bootstrap_environment(
-            template_override_record,
+            bootstrap_record,
             preview_url=plan.preview_url,
         )
     )
