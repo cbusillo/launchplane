@@ -695,8 +695,9 @@ revalidated directly. The implementation requests the existing `read:user`, `rea
 `user:email` OAuth scopes; it adds no scope or app-setting change. Every
 required endpoint must be readable with that authorization; missing membership
 or email access fails closed rather than accepting partial claims.
-Any failed provider request, invalid response, expired/unusable refresh token,
-changed identity or corrupt credential revokes the session and requires sign-in;
+Definitive provider rejection, invalid response, expired/unusable refresh token,
+uncertain token exchange, changed identity or corrupt credential revokes the
+session and requires sign-in;
 there is no stale-claims fallback or automatic retry of a token exchange.
 Sessions issued before credential retention can use their remaining fresh
 claims, then require one new sign-in.
@@ -1428,11 +1429,6 @@ above owns renewal, provider verification, credential custody, Client
 confinement, concurrency and logout. See
 [credential retirement](#human-oauth-credential-retirement) for the local/provider
 and backup boundaries. OAuth login state lasts 10 minutes (600 seconds).
-
-The testing integration-allowance read uses the same browser-session identity
-dependency as other product reads. It retains the existing product, context and
-instance authorization checks. A valid browser session must not be rejected as
-missing a bearer token when the Managed secrets screen reads this metadata.
 
 Every non-health `/v1` operation documents the refresh boundary: `503` means the
 active DB policy could not be loaded, and `409` means a fenced schema exposed an

@@ -24,9 +24,11 @@ from control_plane.service_human_auth import (
     GITHUB_ORGS_URL,
     GITHUB_TEAMS_URL,
     GITHUB_USER_URL,
+    GitHubIdentityUnavailable,
     GitHubOAuthClient,
     GitHubOAuthLogin,
     HumanSessionManager,
+    HumanSessionUpdateBusy,
     InMemoryHumanSessionStore,
     OAUTH_REFRESH_MARGIN_SECONDS,
     SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS,
@@ -167,8 +169,6 @@ class HumanSessionRenewalTests(unittest.TestCase):
         self.client.revalidate.assert_not_called()
 
     def test_temporary_verification_failure_keeps_only_already_current_claims_usable(self) -> None:
-        from control_plane.service_human_auth import GitHubIdentityUnavailable
-
         self.advance_to_refresh()
         self.client.revalidate.side_effect = GitHubIdentityUnavailable("private-provider-response")
         self.assertEqual(self.refresh(), self.session)
@@ -214,8 +214,6 @@ class HumanSessionRenewalTests(unittest.TestCase):
         self.assertIsNone(self.store.read_session_without_cleanup(expired.session_id))
 
     def test_busy_refresh_never_accepts_stale_claims_or_extends_cookie(self) -> None:
-        from control_plane.service_human_auth import HumanSessionUpdateBusy
-
         self.advance_to_refresh()
         with patch.object(self.store, "update_session", side_effect=HumanSessionUpdateBusy):
             self.assertEqual(self.refresh(), self.session)
@@ -297,8 +295,6 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
     def test_temporary_identity_failures_keep_rotated_credentials_without_replaying_exchange(
         self,
     ) -> None:
-        from control_plane.service_human_auth import GitHubIdentityUnavailable
-
         for failure in (429, 503, Timeout("synthetic-private-provider-response")):
             with self.subTest(failure=failure):
                 store = InMemoryHumanSessionStore()
@@ -406,8 +402,6 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
             with self.subTest(status=status, headers=headers):
                 self.http.get.side_effect = None
                 self.http.get.return_value = Mock(status_code=status, headers=headers)
-                from control_plane.service_human_auth import GitHubIdentityUnavailable
-
                 error_type = (
                     GitHubIdentityUnavailable
                     if status >= 500 or status == 429 or headers
@@ -560,8 +554,6 @@ class HostedRenewalHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_temporary_claim_verification_failure_is_retryable_without_ending_session(
         self,
     ) -> None:
-        from control_plane.service_human_auth import GitHubIdentityUnavailable
-
         with TemporaryDirectory() as directory:
             store = _HostedAuthzPolicyStore(
                 database_url=f"sqlite+pysqlite:///{Path(directory) / 'auth.sqlite3'}"
@@ -598,6 +590,14 @@ class HostedRenewalHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("identity", pending.json())
                 self.assertNotIn("synthetic-private", pending.text)
                 self.assertEqual(store.read_session(session.session_id), session)
+                with patch.object(
+                    manager, "refresh_authorization_claims", side_effect=HumanSessionUpdateBusy
+                ):
+                    busy = await client.get(
+                        "/v1/auth/session",
+                        headers={"Cookie": manager.session_cookie_header(session)},
+                    )
+                self.assertNotEqual(pending.json()["error"]["code"], busy.json()["error"]["code"])
                 oauth.revalidate.side_effect = None
                 oauth.revalidate.return_value = GitHubOAuthLogin(_identity(), credential)
                 recovered = await client.get(
@@ -608,8 +608,6 @@ class HostedRenewalHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(oauth.revalidate.call_count, 2)
 
     async def test_oauth_provider_outage_is_retryable_and_hides_provider_value(self) -> None:
-        from control_plane.service_human_auth import GitHubIdentityUnavailable
-
         manager = HumanSessionManager(config=_config(), session_store=InMemoryHumanSessionStore())
         oauth = _StubFastApiGitHubOAuthClient(_identity())
         app = create_launchplane_fastapi_app(
@@ -710,8 +708,6 @@ class HostedRenewalHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             now += timedelta(seconds=SESSION_RENEW_AFTER_SECONDS + 1)
             async with lifespan_client(app) as client:
-                from control_plane.service_human_auth import HumanSessionUpdateBusy
-
                 with patch.object(
                     manager, "refresh_authorization_claims", side_effect=HumanSessionUpdateBusy
                 ):

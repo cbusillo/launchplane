@@ -124,6 +124,7 @@ class HumanSessionStore(Protocol):
 
 class OAuthResponse(Protocol):
     status_code: int
+    headers: Mapping[str, str]
 
     def json(self) -> Any: ...
 
@@ -443,11 +444,9 @@ class GitHubOAuthClient:
         response = client.get(
             url, timeout=min(OAUTH_REQUEST_TIMEOUT_SECONDS, remaining), allow_redirects=False
         )
-        headers = getattr(response, "headers", {})
-        rate_limited = (
-            response.status_code == 403
-            and isinstance(headers, Mapping)
-            and (headers.get("X-RateLimit-Remaining") == "0" or bool(headers.get("Retry-After")))
+        rate_limited = response.status_code == 403 and (
+            response.headers.get("X-RateLimit-Remaining") == "0"
+            or bool(response.headers.get("Retry-After"))
         )
         if rate_limited or response.status_code == 429 or response.status_code >= 500:
             raise GitHubIdentityUnavailable("GitHub identity provider is unavailable.")

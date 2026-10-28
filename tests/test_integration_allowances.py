@@ -32,8 +32,10 @@ from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
     _AsgiResponse,
     _asgi_request,
+    _browser_mutation_headers,
     _github_human_identity,
     _github_oauth_config,
+    _github_human_product_config_policy,
 )
 from tests.support.auth import _identity, _StubVerifier
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
@@ -490,20 +492,12 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
                 context_name=_CONTEXT, instance_name="testing"
             )
             identity = _github_human_identity()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "schema_version": 2,
-                    "github_humans": [
-                        {
-                            "github_ids": [identity.github_id],
-                            "roles": [identity.role],
-                            "products": [_PRODUCT],
-                            "contexts": [_CONTEXT],
-                            "actions": ["product_environment.read"],
-                            "instances": ["testing"],
-                        }
-                    ],
-                }
+            policy = _github_human_product_config_policy(
+                actions=("product_environment.read",),
+                product=_PRODUCT,
+                context=_CONTEXT,
+                instances=("testing",),
+                schema_version=2,
             )
             manager = HumanSessionManager(
                 config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
@@ -525,11 +519,63 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(accepted.json()["result"]["allowances"], [])
             denied = await _asgi_request(app, "GET", f"{path}&instance=prod", headers=headers)
             self.assertEqual(denied.status_code, 403)
-            self.assertEqual(manager.read_cookie(headers["Cookie"]), session)
+            denied_plan = await _asgi_request(
+                app,
+                "POST",
+                INTEGRATION_ALLOWANCES_APPLY_ROUTE,
+                headers=_browser_mutation_headers(manager, session),
+                payload=_request_payload(),
+            )
+            self.assertEqual(denied_plan.status_code, 403)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=_github_human_product_config_policy(
+                    actions=("product_config.plan", "product_config.apply"),
+                    product=_PRODUCT,
+                    context=_CONTEXT,
+                    instances=("testing",),
+                    schema_version=2,
+                ),
+                human_session_manager=manager,
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            missing_csrf = await _asgi_request(
+                app,
+                "POST",
+                INTEGRATION_ALLOWANCES_APPLY_ROUTE,
+                headers=headers,
+                payload=_request_payload(),
+            )
+            self.assertEqual(missing_csrf.status_code, 403)
+            plan = await _asgi_request(
+                app,
+                "POST",
+                INTEGRATION_ALLOWANCES_APPLY_ROUTE,
+                headers=_browser_mutation_headers(manager, session),
+                payload=_request_payload(),
+            )
+            self.assertEqual(plan.status_code, 202, plan.text)
             self.assertEqual(
                 store.read_dokploy_target_record(context_name=_CONTEXT, instance_name="testing"),
                 before,
             )
+            applied = await _asgi_request(
+                app,
+                "POST",
+                INTEGRATION_ALLOWANCES_APPLY_ROUTE,
+                headers={
+                    **_browser_mutation_headers(manager, session),
+                    "Idempotency-Key": "browser-allowance-apply",
+                },
+                payload=_request_payload(
+                    mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+                ),
+            )
+            self.assertEqual(applied.status_code, 202, applied.text)
+            read_back = await _asgi_request(app, "GET", f"{path}&instance=testing", headers=headers)
+            self.assertEqual(read_back.status_code, 200)
+            self.assertTrue(read_back.json()["result"]["allowances"])
 
     async def test_dry_run_apply_replay_and_read(self) -> None:
         with TemporaryDirectory() as directory:
