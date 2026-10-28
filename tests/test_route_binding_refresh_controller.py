@@ -278,18 +278,19 @@ class RouteBindingRefreshControllerTests(unittest.TestCase):
     def test_target_limit_fails_closed_before_planning(self) -> None:
         first = _service_binding()
         second = first.model_copy(update={"product": "second-product"})
-
+        store = _Store(
+            profiles=(_profile(), _profile(product="second-product")),
+            bindings=(first, second),
+        )
         with self.assertRaises(RouteBindingRefreshTargetLimitExceeded):
             discover_active_odoo_testing_route_bindings(
-                _Store(
-                    profiles=(
-                        _profile(),
-                        _profile(product="second-product"),
-                    ),
-                    bindings=(first, second),
-                ),
+                store,
                 target_limit=1,
             )
+        scoped = discover_active_odoo_testing_route_bindings(
+            store, target_limit=1, include_record=lambda record: record.product == first.product
+        )
+        self.assertEqual([target.record for target in scoped], [first])
 
     def test_discovery_rejects_store_identity_mismatch(self) -> None:
         mismatched = _service_binding().model_copy(update={"context": "other-testing"})
@@ -373,6 +374,72 @@ def _write_refresh_fixture(
 
 
 class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refresh_excludes_ungranted_lanes_before_planning(self) -> None:
+        directory = self.enterContext(TemporaryDirectory())
+        store = PostgresRecordStore(
+            database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+        )
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        _write_refresh_fixture(store)
+        excluded = _service_binding().model_copy(
+            update={"product": "excluded-product", "context": "excluded-testing"}
+        )
+        store.write_product_profile_record(
+            _profile(
+                product=excluded.product,
+                lanes=(ProductLaneProfile(instance="testing", context=excluded.context),),
+            )
+        )
+        store.write_route_binding_record(excluded)
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_controller_policy(mode="plan" if mode == "dry-run" else mode),
+                    record_store_factory=lambda: store,
+                )
+                with (
+                    patch(
+                        "control_plane.http_app.utc_now_timestamp",
+                        return_value="2026-07-20T12:00:00Z",
+                    ),
+                    patch(
+                        "control_plane.route_binding_refresh_controller.plan_route_binding_reconcile",
+                        wraps=plan_route_binding_reconcile,
+                    ) as planner,
+                ):
+                    response = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/route-bindings/odoo-testing/controller/run-once",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": f"scoped-refresh-{mode}",
+                        },
+                        payload=_refresh_payload(mode=mode),
+                    )
+                self.assertEqual(response.status_code, 202, response.text)
+                result = response.json()["result"]
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(
+                    [outcome["product"] for outcome in result["outcomes"]], ["example-product"]
+                )
+                self.assertEqual(
+                    [call.kwargs["request"].product for call in planner.call_args_list],
+                    ["example-product"],
+                )
+                self.assertEqual(
+                    store.read_route_binding_record(
+                        product=excluded.product,
+                        context_name=excluded.context,
+                        instance_name=excluded.instance,
+                    ),
+                    excluded,
+                )
+                if mode == "apply":
+                    self.assertEqual(result["refreshed_count"], 1)
+
     async def test_director_native_refresh_preserves_legacy_and_production_authority(self) -> None:
         directory = self.enterContext(TemporaryDirectory())
         store = PostgresRecordStore(

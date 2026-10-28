@@ -22534,6 +22534,44 @@ def create_launchplane_fastapi_app(
                     message="The managed testing route observation was denied.",
                 ) from error
 
+        def binding_refresh_action(binding_record: EnvironmentRouteBindingRecord | None) -> str:
+            if binding_record is not None and binding_record.ingress.provider == "external":
+                return (
+                    "route_binding.external.apply"
+                    if refresh_request.mode == "apply"
+                    else "route_binding.external.plan"
+                )
+            if (
+                not remaining
+                and director_agent_identity(identity)
+                and binding_record is not None
+                and is_native_testing_binding(binding_record)
+            ):
+                return "route_binding.read"
+            return (
+                "route_binding.apply" if refresh_request.mode == "apply" else "route_binding.read"
+            )
+
+        excluded_binding = False
+
+        def include_refresh_binding(binding_record: EnvironmentRouteBindingRecord) -> bool:
+            nonlocal excluded_binding
+            allowed = (
+                resolved_authz_policy_runtime.evaluate(
+                    identity=identity,
+                    action=binding_refresh_action(binding_record),
+                    product=binding_record.product,
+                    context=binding_record.context,
+                    target=AuthorizationTarget(
+                        scope="instance", instances=(binding_record.instance,)
+                    ),
+                    record_context=False,
+                ).decision
+                == "allowed"
+            )
+            excluded_binding |= not allowed
+            return allowed
+
         try:
             if remaining:
                 stable_store = cast(
@@ -22544,12 +22582,14 @@ def create_launchplane_fastapi_app(
                     record_store=stable_store,
                     evaluated_at=utc_now_timestamp(),
                     target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
+                    include_record=include_refresh_binding,
                 )
             else:
                 controller_plan = control_plane_route_binding_refresh_controller.plan_odoo_testing_route_binding_refresh(
                     record_store=controller_store,
                     evaluated_at=utc_now_timestamp(),
                     target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
+                    include_record=include_refresh_binding,
                 )
         except (
             control_plane_route_binding_refresh_controller.RouteBindingRefreshTargetLimitExceeded
@@ -22569,36 +22609,55 @@ def create_launchplane_fastapi_app(
                 code="route_binding_refresh_target_invalid",
                 message=str(error),
             ) from error
-        binding_action = (
-            "route_binding.apply" if refresh_request.mode == "apply" else "route_binding.read"
-        )
+        if excluded_binding and not controller_plan.outcomes:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot refresh a discovered Odoo route binding.",
+            )
         for outcome in controller_plan.outcomes:
-            outcome_action = binding_action
             current = outcome.reconcile_plan.current_record if outcome.reconcile_plan else None
-            if (
-                not remaining
-                and director_agent_identity(identity)
-                and current is not None
-                and is_native_testing_binding(current)
-            ):
-                outcome_action = "route_binding.read"
-            if isinstance(
-                outcome.reconcile_plan,
-                control_plane_route_binding_external_reconcile.ExternalRouteBindingReconcilePlan,
-            ):
-                outcome_action = (
-                    "route_binding.external.apply"
-                    if refresh_request.mode == "apply"
-                    else "route_binding.external.plan"
-                )
             ensure_route_binding_allowed(
                 identity=identity,
                 trace_id=trace_id,
-                action=outcome_action,
+                action=binding_refresh_action(current),
                 product=outcome.product,
                 context_name=outcome.context,
                 instance_name=outcome.instance,
                 message="Workflow cannot refresh a discovered Odoo route binding.",
+            )
+
+        def replay_refresh_response(
+            stored_record: LaunchplaneIdempotencyRecord | None,
+        ) -> AcceptedEvidenceResponse:
+            if stored_record is None:
+                raise RuntimeError("Replayed Odoo route-binding refresh requires evidence.")
+            for stored_outcome in stored_record.response_payload["result"]["outcomes"]:
+                try:
+                    replay_binding = controller_store.read_route_binding_record(
+                        product=stored_outcome["product"],
+                        context_name=stored_outcome["context"],
+                        instance_name=stored_outcome["instance"],
+                    )
+                except FileNotFoundError:
+                    raise _launchplane_http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message="Workflow cannot read a prior Odoo route binding refresh.",
+                    ) from None
+                ensure_route_binding_allowed(
+                    identity=identity,
+                    trace_id=trace_id,
+                    action=binding_refresh_action(replay_binding),
+                    product=stored_outcome["product"],
+                    context_name=stored_outcome["context"],
+                    instance_name=stored_outcome["instance"],
+                    message="Workflow cannot read a prior Odoo route binding refresh.",
+                )
+            return replay_idempotent_response(
+                trace_id=trace_id, stored_record=stored_record, route_path=route_path
             )
 
         controller_reservation: LaunchplaneIdempotencyRecord | None = None
@@ -22615,11 +22674,7 @@ def create_launchplane_fastapi_app(
                 if preflight.record is None:
                     raise RuntimeError("Odoo route binding refresh preflight requires evidence.")
                 if preflight.status == "replayed":
-                    return replay_idempotent_response(
-                        trace_id=trace_id,
-                        stored_record=preflight.record,
-                        route_path=route_path,
-                    )
+                    return replay_refresh_response(preflight.record)
                 if preflight.status == "conflict":
                     raise _launchplane_http_error(
                         status_code=409,
@@ -22664,11 +22719,7 @@ def create_launchplane_fastapi_app(
             if reservation_result.status == "acquired":
                 controller_reservation = reservation_result.record
             elif reservation_result.status == "replayed":
-                return replay_idempotent_response(
-                    trace_id=trace_id,
-                    stored_record=reservation_result.record,
-                    route_path=route_path,
-                )
+                return replay_refresh_response(reservation_result.record)
             elif reservation_result.status == "conflict":
                 raise _launchplane_http_error(
                     status_code=409,
@@ -22894,11 +22945,7 @@ def create_launchplane_fastapi_app(
                     if completion_result.record is None:
                         raise RuntimeError("Replayed Odoo route-binding refresh requires evidence.")
                     controller_reservation = None
-                    return replay_idempotent_response(
-                        trace_id=trace_id,
-                        stored_record=completion_result.record,
-                        route_path=route_path,
-                    )
+                    return replay_refresh_response(completion_result.record)
                 if completion_result.status == "conflict":
                     raise _launchplane_http_error(
                         status_code=409,
