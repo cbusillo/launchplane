@@ -328,6 +328,7 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
                 store=fixture.store, profile=self.profile, decision=self.case.decision
             )
         assert continuable is not None
+        self.assertTrue(continuable.blocked_reason)
         with patch.object(
             RecipientCutoverAdapter,
             "verify_upstreams",

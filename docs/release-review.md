@@ -1282,7 +1282,7 @@ promotions still require their own supported recovery. Odoo continuation is not
 supported by this route. Inspecting release progress alone never retries
 anything. Known expired or superseded evidence leaves an unstarted release
 waiting for this continuation; a source-busy promotion before any effect also
-waits. Progress offers continuation only while the shared continuation admission
+waits. Progress offers continuation only while the shared capture-eligibility
 checks pass; a fenced capture instead requires reconciliation. The generic-web
 HTTP adapter reports these pre-dispatch refusals as `409 generic_web.admission_refused`
 with its fixed, redacted description. Continuation refusals return a bounded cause such as
