@@ -1,11 +1,15 @@
 import io
+import base64
+from contextlib import nullcontext, redirect_stdout
 from email.message import Message
+import hashlib
 import json
 import os
 from pathlib import Path
 import runpy
 import subprocess
 from tempfile import TemporaryDirectory
+from typing import Any
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -13,11 +17,100 @@ from unittest.mock import patch
 from control_plane.dokploy.connection_isolation import isolation_script, run_connection_isolation
 from control_plane.dokploy import api, post_deploy
 from control_plane.dokploy.source import DokployTargetDefinition
-from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.copy_readback_diagnostics import (
+    COPY_FAILURE_EVIDENCE_MARKER,
+    COPY_FAILURE_OUTPUT_BYTES,
+    COPY_FAILURE_STAGE_MARKER,
+    CopyFailureStage,
+    ReadbackPredicate,
+    copy_failure_diagnostics_library,
+)
 from control_plane.odoo_connection_isolation import (
     OdooConnectionIsolationMode,
     ConnectionIsolationPreconditionFailed,
 )
+
+
+class CopyFailureEvidenceTests(unittest.TestCase):
+    def test_private_evidence_retains_bounded_tails_and_only_an_input_digest(self) -> None:
+        spec = {"fixture_input": "private settings", "runner": "fixture source"}
+        namespace: dict[str, Any] = {"spec": spec}
+        exec(copy_failure_diagnostics_library(), namespace)
+        stdout = (f"{COPY_FAILURE_STAGE_MARKER}={CopyFailureStage.MODULE_UPDATE}\n").encode()
+        stderr = b"x" * COPY_FAILURE_OUTPUT_BYTES + b"\nValueError: private fixture cause\n"
+        result = subprocess.CompletedProcess(
+            ["fixture", "private argument"], 1, stdout=stdout, stderr=stderr
+        )
+        output = io.StringIO()
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            with patch.object(Path, "home", return_value=root), redirect_stdout(output):
+                namespace["emit_copy_command_failure"](result)
+                namespace["emit_copy_command_failure"](result)
+            identifiers = [
+                line.partition("=")[2]
+                for line in output.getvalue().splitlines()
+                if line.startswith(COPY_FAILURE_EVIDENCE_MARKER + "=")
+            ]
+            self.assertNotEqual(identifiers[0], identifiers[1])
+            path = root / ".local/state/launchplane-host/copy-failures" / (identifiers[0] + ".json")
+            text = path.read_text()
+            evidence = json.loads(text)
+            self.assertEqual(
+                base64.b64decode(evidence["stderr"]), stderr[-COPY_FAILURE_OUTPUT_BYTES:]
+            )
+            self.assertEqual(base64.b64decode(evidence["stdout"]), stdout)
+            self.assertTrue(evidence["stderr_truncated"])
+            self.assertFalse(evidence["stdout_truncated"])
+            self.assertEqual(evidence["stderr_bytes"], len(stderr))
+            self.assertEqual(
+                evidence["input_sha256"],
+                hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest(),
+            )
+            self.assertNotIn("private settings", text)
+            self.assertNotIn("private argument", text)
+            self.assertNotIn("private fixture cause", output.getvalue())
+            markers = post_deploy.extract_odoo_post_deploy_readback_markers(
+                {"logs": output.getvalue() + COPY_FAILURE_EVIDENCE_MARKER + "=../../private\n"}
+            )
+            self.assertEqual(markers[COPY_FAILURE_EVIDENCE_MARKER], identifiers[0])
+
+    def test_unsafe_or_unwritable_evidence_storage_keeps_closed_failure_diagnostics(self) -> None:
+        namespace: dict[str, Any] = {"spec": {}}
+        exec(copy_failure_diagnostics_library(), namespace)
+        result = subprocess.CompletedProcess(
+            ["fixture"],
+            1,
+            stdout=(f"{COPY_FAILURE_STAGE_MARKER}={CopyFailureStage.MODULE_UPDATE}\n").encode(),
+            stderr=b"private fixture cause",
+        )
+        for fault in ("alias", "permissions", "disk"):
+            with self.subTest(fault=fault), TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                directory = root / ".local/state/launchplane-host/copy-failures"
+                directory.parent.mkdir(parents=True)
+                outside = root / "outside"
+                outside.mkdir()
+                if fault == "alias":
+                    directory.symlink_to(outside, target_is_directory=True)
+                else:
+                    directory.mkdir(mode=0o755 if fault == "permissions" else 0o700)
+                output = io.StringIO()
+                with (
+                    patch.object(Path, "home", return_value=root),
+                    patch.object(os, "open", side_effect=OSError("private storage failure"))
+                    if fault == "disk"
+                    else nullcontext(),
+                    redirect_stdout(output),
+                ):
+                    namespace["emit_copy_command_failure"](result)
+                markers = post_deploy.extract_odoo_post_deploy_readback_markers(
+                    {"logs": output.getvalue()}
+                )
+                self.assertEqual(markers[COPY_FAILURE_EVIDENCE_MARKER], "unavailable")
+                self.assertEqual(markers[COPY_FAILURE_STAGE_MARKER], CopyFailureStage.MODULE_UPDATE)
+                self.assertEqual(list(outside.iterdir()), [])
+                self.assertNotIn("private", output.getvalue())
 
 
 class CopyReadbackDiagnosticsTests(unittest.TestCase):

@@ -64,3 +64,41 @@ The existing program behavior tests execute the installed archive for restore,
 rehearsal, resource and preview operations. Package tests exercise isolated
 execution, version readback, corrupt/interrupted delivery, aliases and the real
 provider materializer bound with the archive's actual bytes.
+
+## Private copy failure evidence
+
+When a preview-snapshot or fresh-testing copy runner fails, the host retains its
+captured stdout and stderr before discarding the in-memory result. The schedule
+and service expose only the existing stage/status and an opaque
+`copy_failure_evidence_id`. The private JSON file is on that same execution host:
+`$HOME/.local/state/launchplane-host/copy-failures/<id>.json`. The directory is
+private (0700), each new file is 0600, and aliases or unsafe permissions
+refuse retention. Storage failure reports `unavailable` without replacing the
+original copy failure or its recovery classification.
+
+Use the existing documented read-only host access to read that exact file,
+after binding the original reservation, attempt, completed provider job,
+package/action versions and execution server. No provider job needs to run to
+read it. The file records the SHA-256 of the expanded host input, using
+`json.dumps(spec, sort_keys=True)`, so the authorized original-input reader can
+check that binding without exporting settings. It also records creation time,
+stage and exit status. It never records command arguments, stdin or the input
+settings themselves. Each stream is base64-encoded and limited to its last
+1 MiB, with original byte count and truncation flag. Decode locally into private
+task evidence only; these bytes can contain business values or secrets and
+must never go into public logs, issues, PRs or CI artifacts.
+
+For example, after independently validating the hexadecimal ID and execution
+host, the existing host reader may read
+`cat "$HOME/.local/state/launchplane-host/copy-failures/<id>.json"` over its
+documented SSH transport. Decode `stdout` and `stderr` with base64 in the private
+evidence destination. Retention adds no credential, grant or new transport.
+Files stay with the host's retained operational evidence; there is no automatic
+pruning in this change. A later investigation may retire only its own evidence
+under the existing custody/cleanup rules.
+
+This takes effect only for newly executed reviewed host packages. Historical
+jobs that discarded their pipes cannot be reconstructed by deploying this
+change. A missing file, unavailable capture or truncated stream leaves the
+underlying cause unknown. Neither the diagnostic ID nor source delivery settles
+an original operation, proves a migration or permits replay.
