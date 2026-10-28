@@ -195,6 +195,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/owner-secret-inputs": "read_owner_secret_inputs",
     "/v1/release-review": "read_release_review",
     "/v1/release-review/access": "read_release_review_access",
+    "/v1/production-backup-gates/operations": "list_production_backup_gate_operations",
     "/v1/production-backup-gates/operations/{operation_id}": (
         "read_production_backup_gate_operation"
     ),
