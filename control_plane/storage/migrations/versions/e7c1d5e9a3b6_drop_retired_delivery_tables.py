@@ -38,6 +38,12 @@ RETIRED_TABLES = (
     "launchplane_provider_delivery_inspections",
 )
 
+RETIRED_TRIGGER_FUNCTIONS = (
+    "launchplane_ordinary_landing_identity_guard",
+    "launchplane_ordinary_read_identity_guard",
+    "launchplane_ordinary_provider_wait_guard",
+)
+
 
 def upgrade() -> None:
     connection = op.get_bind()
@@ -52,11 +58,7 @@ def upgrade() -> None:
     for name in selected:
         op.drop_table(name)
     if connection.dialect.name == "postgresql":
-        for name in (
-            "launchplane_ordinary_landing_identity_guard",
-            "launchplane_ordinary_read_identity_guard",
-            "launchplane_ordinary_provider_wait_guard",
-        ):
+        for name in RETIRED_TRIGGER_FUNCTIONS:
             op.execute(f"DROP FUNCTION IF EXISTS {name}()")
     # ordinary_effect_identity_guard and ordinary_append_only_guard still
     # protect retained effect/custody/activation history.
