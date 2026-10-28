@@ -735,47 +735,28 @@ available after an inspection-only refusal. See the full
 
 ### Failed first preview without lifecycle
 
-When a source-free Odoo preview fails before its first lifecycle publication,
-the Director agent can qualify the same retained target through the normal
-`POST /v1/drivers/odoo/preview-apply` path. No lifecycle or positive safety
-observation is backfilled. Qualification is read-only; the subsequent refresh
-uses the existing resource inspector and normal provider executor.
+A Director agent can qualify a retained failed first preview for the normal
+resource inspector without backfilling a lifecycle or positive safety facts:
 
-The agent first reads the retained original reservation and its saved intent
-and failure receipt, verifies it is completed and failed, and verifies current
-provider quiescence and exact product/profile/target ownership. An unresolved
-original uses its existing observation/settlement path first. Obtain a fresh
-service-issued refresh plan for the retained concrete Compose target. Its name,
-environment, context and preview instance must match the original. If the
-original allocated the target, its saved failure receipt must identify the same
-concrete Compose ID. Missing or contradictory target proof refuses recovery.
+1. Read the completed failed original and its saved intent/receipt. Verify fresh
+   provider quiescence, exact current profile/target ownership and existing
+   use/needed-copy protection. Settle an unresolved original through its own
+   observation path first. Both original and current plan must be source-free,
+   without Fishbowl input or a clean snapshot.
+2. Obtain a fresh service-issued refresh plan for the same concrete Compose
+   target. An originally allocated target needs its exact ID in the failure
+   receipt. Keep retained failed/refused packets unchanged.
+3. Submit that reviewed plan to `POST /v1/drivers/odoo/preview-apply` with its
+   issued key and `unrecorded_original_reservation_id` naming the failed
+   original. Keep the same authenticated caller throughout this new operation.
+4. After an uncertain reply, retain that exact request/key and use its supported
+   observation/replay. Never replay the completed original or change caller/key
+   to work around a fence.
 
-Submit the reviewed fresh plan with its own issued key, the original caller,
-and the envelope field `unrecorded_original_reservation_id` naming the retained
-failed original. This field is valid only for a Director-agent refresh with
-`data_transport_mode: none` and no clean snapshot. It is part of the request
-fingerprint and retained intent. It never selects destroy, upstream restore,
-snapshot replacement or a replay of the completed original. Scoped callers
-keep their existing route authority and cannot select this qualification.
-
-Every existing checkpoint rechecks original ownership and terminal failure,
-current profile/configuration, exact target and environment, all recorded and
-physical target aliases, other held operations, and protected use/data/resource
-reports, including expired reports. A lifecycle appearing in the meantime also
-refuses this path. Executor exclusion, leases, issued-plan expiry and native
-physical resource inspection stay in force. Unknown usage, custody and isolation
-are never relabeled as positive facts. The normal source-free refresh preserves
-the target's volumes and existing database; its established database-existence
-probe refuses an unknown result before bootstrap or maintenance.
-
-Only a real successful refresh publishes its verified serving generation.
-Failure publishes no active/serving/healthy success and leaves the completed
-original's request, intent, phase and receipt unchanged. Keep the exact new
-request and issued key after an uncertain reply; use the same operation's
-supported observation/replay. A completed reply reuses its receipt without a
-second provider effect. Drift after an effect retains the original operation's
-reconciliation fence. This procedure does not qualify staff use, imported data,
-only-copy custody or a production release.
+The normal source-free refresh keeps existing data/volumes and publishes a
+serving generation only after real success. Qualification changes no record or
+provider resource; failure publishes no successful lifecycle. This procedure
+supplies neither staff/data qualification nor release authority.
 
 ## Staging generic-web testing separation
 

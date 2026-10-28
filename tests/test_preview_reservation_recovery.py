@@ -97,42 +97,6 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
     def database_url(self) -> str:
         return _sqlite_database_url(self.root / "state.sqlite3")
 
-    def test_unrecorded_failed_preview_qualifies_without_publishing_lifecycle(self) -> None:
-        from control_plane.preview_reservation_recovery import require_unrecorded_preview_refresh
-
-        original = self.replace_record(
-            state="completed",
-            response_status_code=502,
-            response_trace_id="failed-original",
-            recorded_at=datetime.now(timezone.utc).isoformat(),
-            response_payload={"result": {"status": "fail", "compose_id": "failed-target"}},
-        )
-        retained = self.store.read_original_mutation_intent(original)
-        current = self.issued.model_copy(
-            update={
-                "dry_run_plan": self.issued.dry_run_plan.model_copy(
-                    update={"compose_ref": "failed-target"}
-                )
-            }
-        )
-        binding = require_unrecorded_preview_refresh(
-            self.store,
-            profile=self.profile,
-            issued_plan=current,
-            original_reservation_id=original.record_id,
-            operation_record_id="new-operation",
-        )
-        self.assertTrue(binding)
-        self.assertEqual(self.store.list_preview_records(), ())
-        self.assertEqual(self.store.list_preview_generation_records(), ())
-        self.assertEqual(self.store.read_idempotency_record_by_id(original.record_id), original)
-        self.assertEqual(self.store.read_original_mutation_intent(original), retained)
-        self.assertIsNone(
-            self.store.read_disposable_lane_safety(
-                self.profile.product, current.context, current.preview_slug
-            )
-        )
-
     def test_observed_preview_without_lifecycle_keeps_its_original_recovery_status(self) -> None:
         from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
         from control_plane.contracts.product_environment_read_model import (

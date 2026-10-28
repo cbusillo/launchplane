@@ -14,6 +14,8 @@ from control_plane.contracts.dokploy_target_record import (
 )
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.clean_testing_snapshot import CleanTestingSnapshot
+from control_plane.product_secret_copy import ProductSecretCopyFrom
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
@@ -35,7 +37,13 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.prepare_fixture()
 
-    def prepare_fixture(self, *, created: bool = True) -> None:
+    def prepare_fixture(
+        self,
+        *,
+        created: bool = True,
+        original_source: ProductSecretCopyFrom | None = None,
+        original_snapshot: CleanTestingSnapshot | None = None,
+    ) -> None:
         self.fixture = DirectorBoundedWritesFixture(self)
         self.store = self.fixture.store
         self.profile = self.fixture.profile
@@ -47,13 +55,16 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         original_request = self.request.model_copy(deep=True)
         if created:
             original_request.apply.dry_run_plan.compose_ref = "${created.composeId:preview}"
+        original_request.apply.dry_run_plan.clean_snapshot = original_snapshot
+        original_plan = _issued_plan(original_request)
+        original_plan.plan_request.fishbowl_source = original_source
         operation = prepare_odoo_preview_apply_operation(
             control_plane_root=self.fixture.root,
             record_store=self.store,
             profile=self.profile,
             apply_request=original_request,
             issued_plan=issue_odoo_preview_apply_plan(
-                result=_issued_plan(original_request), plan_id="original-failed-preview"
+                result=original_plan, plan_id="original-failed-preview"
             ),
             reservation_scope="original-preview",
             idempotency_key="original-failed-preview",
@@ -348,11 +359,12 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
             "reconcile_required",
             "successful",
             "missing_target",
+            "contradictory_target",
             "other_original",
             "executor",
         ):
             with self.subTest(scenario=scenario):
-                self.prepare_fixture()
+                self.prepare_fixture(created=scenario != "contradictory_target")
                 if scenario in {"running", "reconcile_required"}:
                     self.replace_original(
                         state=scenario,
@@ -373,6 +385,12 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
                     )
                 elif scenario == "missing_target":
                     self.replace_original(response_payload={"result": {"status": "fail"}})
+                elif scenario == "contradictory_target":
+                    self.replace_original(
+                        response_payload={
+                            "result": {"status": "fail", "compose_id": "different-target"}
+                        }
+                    )
                 elif scenario == "other_original":
                     assert self.original is not None
                     self.store.reserve_mutation(
@@ -527,3 +545,43 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
             refused = await self.fixture.preview_apply()
         self.assertEqual(refused.status_code, 409, refused.text)
         apply.assert_not_called()
+
+    def test_source_carrying_plan_or_original_cannot_use_source_free_qualification(self) -> None:
+        from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+        from control_plane.preview_reservation_recovery import require_unrecorded_preview_refresh
+
+        reference = ProductSecretCopyFrom(
+            context="cm", instance="testing", version_id="fixture-version"
+        )
+        snapshot = CleanTestingSnapshot(
+            snapshot_id="a" * 64,
+            product=self.profile.product,
+            context=self.profile.preview.context,
+            server_id="snapshot-server",
+            captured_at=datetime.now(timezone.utc).isoformat(),
+            database_sha256="b" * 64,
+            filestore_sha256="c" * 64,
+            storage_budget=OdooTestingDrillStorageBudget(
+                database_bytes=1, filestore_bytes=1, staging_bytes=1, reserve_bytes=1
+            ),
+        )
+        for scenario in ("current_import", "original_import", "original_snapshot"):
+            with self.subTest(scenario=scenario):
+                self.prepare_fixture(
+                    original_source=reference if scenario == "original_import" else None,
+                    original_snapshot=snapshot if scenario == "original_snapshot" else None,
+                )
+                current = _issued_plan(self.request)
+                if scenario == "current_import":
+                    current.plan_request.fishbowl_source = reference
+                assert self.original is not None
+                with self.assertRaises(ValueError):
+                    require_unrecorded_preview_refresh(
+                        self.store,
+                        profile=self.profile,
+                        issued_plan=current,
+                        original_reservation_id=self.original.record_id,
+                        operation_record_id="new-operation",
+                    )
+                self.assertEqual(self.store.list_preview_records(), ())
+                self.assert_original_preserved()

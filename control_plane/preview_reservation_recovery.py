@@ -300,7 +300,7 @@ def require_interrupted_preview_disposal(
     number: int,
     original_reservation_id: str,
 ) -> None:
-    from control_plane.disposable_lanes import require_disposable_lane
+    from control_plane.disposable_lanes import require_disposable_lane, require_unprotected_preview
 
     if store.read_product_profile_record(profile.product) != profile:
         raise ValueError("The preview profile changed before disposal.")
@@ -342,15 +342,7 @@ def require_interrupted_preview_disposal(
         )
     except FileNotFoundError:
         target = None
-    if (target is not None and target.policies.staff_testing_hold is not None) or (
-        report is not None
-        and (
-            report.usage == "in_use"
-            or report.data == "only_copy"
-            or report.production_resources in {"shared", "separation_ready"}
-        )
-    ):
-        raise ValueError("Interrupted preview disposal is held by use, data or shared resources.")
+    require_unprotected_preview(target, report)
 
 
 def require_current_preview_original_target(
@@ -449,6 +441,7 @@ def require_unrecorded_preview_refresh(
         or profile.preview.clean_testing_snapshot
         or profile.preview.data_transport_mode != "none"
         or issued_plan.dry_run_plan.clean_snapshot is not None
+        or issued_plan.plan_request.fishbowl_source is not None
     ):
         raise ValueError("Unrecorded preview recovery requires current source-free authority.")
     original = require_unrecorded_preview_original(
@@ -458,6 +451,11 @@ def require_unrecorded_preview_refresh(
         reservation_id=original_reservation_id,
     )
     retained = original_preview_intent(original, profile=profile, store=store)
+    if (
+        retained.issued_plan.plan_request.fishbowl_source is not None
+        or retained.issued_plan.dry_run_plan.clean_snapshot is not None
+    ):
+        raise ValueError("Unrecorded preview recovery requires a source-free original.")
     result = original.response_payload.get("result")
     if (
         original.state != "completed"
