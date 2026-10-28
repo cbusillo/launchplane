@@ -274,7 +274,7 @@ When creating a new website repo for Launchplane:
 - Publish immutable container images or artifacts from
   `.github/workflows/build.yml`, with the build manifest described in
   [artifact-provenance.md](artifact-provenance.md).
-- Use the existing admin onboarding operation to create the required product
+- Use the [existing admin onboarding operation](operations.md#conventional-generic-web-onboarding) to create the required product
   profile and target records. This remains compatibility work until a deployed
   service operation replaces every required mode; do not put its inputs or
   authorization policy in the product repository.

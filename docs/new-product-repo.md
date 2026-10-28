@@ -46,7 +46,7 @@ as Discord Blue's Every Code bridge port `8787`.
 
 ## Launchplane Records
 
-Onboarding still requires the existing admin operation to create the product
+Onboarding still requires the [existing admin operation](operations.md#conventional-generic-web-onboarding) to create the product
 profile and target records. That is an existing compatibility operation, not a
 product-repository integration contract; no deployed service replacement is
 claimed here. Keep its inputs in admin-owned state, outside the product

@@ -33,7 +33,7 @@ Odoo preview builds and lifecycle reconciliation follow
 [event-driven deploys](event-driven-deploys.md). The product publishes an
 immutable artifact and Launchplane verifies its source-control provenance.
 Launchplane's reconciler plans and applies previews without a product workflow
-calling the service. The generic-web feedback wrappers below remain for
+calling the service. Existing generic-web feedback wrappers remain for
 products that have not completed their staged migration.
 
 Launchplane owns isolated Odoo preview planning and smoke checks. The event reconciler supplies the verified manifest and PR facts, obtains a ready plan,
