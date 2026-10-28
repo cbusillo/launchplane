@@ -733,6 +733,31 @@ cancelling the old job or modifying an application. Original-key retry remains
 available after an inspection-only refusal. See the full
 [authorization and recovery contract](authorization-authority.md#reviewed-never-live-classification-and-preview-execution).
 
+### Failed first preview without lifecycle
+
+A Director agent can qualify a retained failed first preview for the normal
+resource inspector without backfilling a lifecycle or positive safety facts:
+
+1. Read the completed failed original and its saved intent/receipt. Verify fresh
+   provider quiescence, exact current profile/target ownership and existing
+   use/needed-copy protection. Settle an unresolved original through its own
+   observation path first. Both original and current plan must be source-free,
+   without Fishbowl input or a clean snapshot.
+2. Obtain a fresh service-issued refresh plan for the same concrete Compose
+   target. An originally allocated target needs its exact ID in the failure
+   receipt. Keep retained failed/refused packets unchanged.
+3. Submit that reviewed plan to `POST /v1/drivers/odoo/preview-apply` with its
+   issued key and `unrecorded_original_reservation_id` naming the failed
+   original. Keep the same authenticated caller throughout this new operation.
+4. After an uncertain reply, retain that exact request/key and use its supported
+   observation/replay. Never replay the completed original or change caller/key
+   to work around a fence.
+
+The normal source-free refresh keeps existing data/volumes and publishes a
+serving generation only after real success. Qualification changes no record or
+provider resource; failure publishes no successful lifecycle. This procedure
+supplies neither staff/data qualification nor release authority.
+
 ## Staging generic-web testing separation
 
 `POST /v1/live-target-runtime/apply` supports `separation_only=true` for an
