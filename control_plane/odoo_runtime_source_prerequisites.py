@@ -449,20 +449,27 @@ def read_source_consumers(
     sources: tuple[str, ...],
     expected_runtime: reads.OdooRuntimeConnection | None = None,
 ) -> SourceConsumerResult:
-    unknown = SourceConsumerResult(
-        runtime="unknown",
-        sources=tuple(
-            SourceConsumerEvidence(source=cast(SourceName, name)) for name in SOURCE_ADDONS
-        ),
-    )
+    def unknown(stage: FailureStage) -> SourceConsumerResult:
+        return SourceConsumerResult(
+            failure_stage=stage,
+            runtime="unknown",
+            sources=tuple(
+                SourceConsumerEvidence(source=cast(SourceName, name)) for name in SOURCE_ADDONS
+            ),
+        )
+
     if not _READ_SLOTS.acquire(blocking=False):
-        return unknown
+        return unknown("capacity")
+    stage: FailureStage = "authority"
     try:
         authority = _authority(store, product)
         bindings = import_authority(store, product)
         profile = bindings.profile
+        stage = "runtime_selection"
         selection = reads.select_stable_runtime(store, profile, "testing")
+        stage = "artifact"
         manifest = store.read_artifact_manifest(selection.identity.artifact_id)
+        stage = "runtime_connection"
         connection = reads.connect_runtime(
             store=store,
             selection=selection,
@@ -486,8 +493,10 @@ def read_source_consumers(
                 expected_runtime.app_name,
             )
         ):
-            return unknown
+            return unknown("drift")
+        stage = "producer_inventory"
         files = producer_files(manifest, connection, profile.repository)
+        stage = "runtime_inspection"
         before = reads.inspect_runtime_container(
             connection.host,
             connection.token,
@@ -499,6 +508,7 @@ def read_source_consumers(
         reads.require_runtime_identity(
             selection.identity, parse_runtime_identity_payload(before[RUNTIME_IDENTITY_ENV_KEY])
         )
+        stage = "authority"
         metadata = {name: dict(value) for name, value in authority.metadata.items()}
         password_keys = {
             name: config_parameter_secret_env_key(prefix + ".password")
@@ -530,6 +540,7 @@ def read_source_consumers(
         }.items():
             program = program.replace(key, value)
         frames: list[dict[str, object]] = []
+        stage = "transport"
         _read_remote(
             host=connection.host,
             token=connection.token,
@@ -555,18 +566,19 @@ def read_source_consumers(
             receive=frames.append,
             timeout_seconds=75,
         )
+        stage = "result_validation"
         if (
             len(frames) != 1
             or set(frames[0]) != {"type", "result"}
             or frames[0]["type"] != "complete"
             or len(json.dumps(frames)) > 16384
         ):
-            return unknown
+            return unknown(stage)
         result = SourceConsumerResult.model_validate_json(json.dumps(frames[0]["result"]))
         if {item.source for item in result.sources} != set(SOURCE_ADDONS) or len(
             result.sources
         ) != len(SOURCE_ADDONS):
-            return unknown
+            return unknown(stage)
         for source in result.sources:
             if source.parameters and (
                 mode != "preview"
@@ -574,14 +586,15 @@ def read_source_consumers(
                 or set(source.parameters) != {"host", "user", "db", "port", "ssl_verify"}
                 or any(not value or len(value) > 16384 for value in source.parameters.values())
             ):
-                return unknown
+                return unknown(stage)
             if (
                 source.source not in sources
                 or metadata[source.source]["binding"] != "selected"
                 or metadata[source.source]["secret_reference"] != "match"
             ):
                 if source.parameters or source.grants != "unknown":
-                    return unknown
+                    return unknown(stage)
+        stage = "drift"
         reads.assert_selection_current(store, selection)
         after = reads.inspect_runtime_container(
             connection.host,
@@ -598,7 +611,7 @@ def read_source_consumers(
             or store.read_artifact_manifest(selection.identity.artifact_id) != manifest
             or store.read_product_profile_record(product) != profile
         ):
-            return unknown
+            return unknown(stage)
         reads.assert_selection_current(store, selection)
         digest = nonvalidating_compact_sorted_json_sha256(
             {
@@ -611,6 +624,6 @@ def read_source_consumers(
         return result.model_copy(update={"evidence_sha256": digest})
     except Exception:
         _logger.debug("Qualified source read unavailable.")
-        return unknown
+        return unknown(stage)
     finally:
         _READ_SLOTS.release()

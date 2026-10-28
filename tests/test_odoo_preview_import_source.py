@@ -16,6 +16,7 @@ from control_plane.service_auth import (
 from tests.support.auth import _local_operator_policy, scoped_agent_test
 from tests.http_app_test_support import _asgi_request, _RejectingVerifier
 from tests.test_odoo_preview_apply_execution import _issued_plan
+from control_plane.odoo_preview_import_source import PreviewImportSourceError
 from control_plane import secrets
 from control_plane.odoo_runtime_source_prerequisites import (
     SourceConsumerResult,
@@ -421,6 +422,32 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         self.qualification = self.qualification.model_copy(update={"runtime": "unknown"})
         with self.assertRaises(ValueError):
             self.resolve()
+
+    def test_unqualified_source_reports_only_proven_failure_stage(self) -> None:
+        original = self.qualification
+        for stage in ("capacity", "addon_state", "source_resolution", None):
+            with self.subTest(stage=stage):
+                self.qualification = original.model_copy(
+                    update={
+                        "runtime": "unknown" if stage == "capacity" else "verified",
+                        "failure_stage": stage if stage == "capacity" else None,
+                        "sources": (
+                            original.sources[0].model_copy(
+                                update={
+                                    "parameters": {},
+                                    "failure_stage": None if stage == "capacity" else stage,
+                                }
+                            ),
+                        ),
+                    }
+                )
+                with self.assertRaises(PreviewImportSourceError) as caught:
+                    self.resolve()
+                self.assertEqual(caught.exception.code, "source_unqualified")
+                self.assertEqual(caught.exception.failure_stage, stage)
+                if stage:
+                    self.assertIn(stage, str(caught.exception))
+                self.assertNotIn("inventory", str(caught.exception))
 
     @scoped_agent_test
     async def test_preview_read_and_standing_metadata_read_cannot_move_source_value(self) -> None:

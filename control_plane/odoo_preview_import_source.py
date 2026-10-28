@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
+from control_plane.odoo_source_prerequisite_programs import FailureStage
 from control_plane.provider_key_adoption import looks_like_credential
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
@@ -39,9 +40,14 @@ FISHBOWL_CONNECTION_PARAMETERS = ("host", "user", "db", "port", "ssl_verify", "p
 
 
 class PreviewImportSourceError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, *, failure_stage: FailureStage | None = None
+    ) -> None:
+        if failure_stage is not None:
+            message = f"{message} Failure stage: {failure_stage}."
         super().__init__(message)
         self.code = code
+        self.failure_stage = failure_stage
 
 
 PREVIEW_FISHBOWL_SOURCE_ENV_KEY = "LAUNCHPLANE_PREVIEW_FISHBOWL_SOURCE"
@@ -173,7 +179,8 @@ def resolve_fishbowl_preview_source(
     if qualified.runtime != "verified" or source is None or not source.parameters:
         raise PreviewImportSourceError(
             "source_unqualified",
-            "The testing import source requires current producer and payload agreement.",
+            "The testing import source requires current installed producer and payload agreement.",
+            failure_stage=qualified.failure_stage or (source.failure_stage if source else None),
         )
     current = resolve_copy_source(
         store,

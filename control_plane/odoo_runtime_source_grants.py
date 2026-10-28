@@ -1,11 +1,13 @@
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from control_plane import odoo_runtime_reads as reads
-from control_plane.odoo_source_probe import GrantStatus
 
 if TYPE_CHECKING:
-    from control_plane.odoo_runtime_source_prerequisites import PrerequisiteStore
+    from control_plane.odoo_runtime_source_prerequisites import (
+        PrerequisiteStore,
+        SourceConsumerEvidence,
+    )
 
 
 def runtime_grants(
@@ -16,11 +18,15 @@ def runtime_grants(
     product: str,
     control_plane_root: Path,
     database_url: str | None,
-) -> dict[str, GrantStatus]:
-    from control_plane.odoo_runtime_source_prerequisites import read_source_consumers
+) -> dict[str, "SourceConsumerEvidence"]:
+    from control_plane.odoo_runtime_source_prerequisites import (
+        read_source_consumers,
+        SourceConsumerEvidence,
+        SourceName,
+    )
 
     if not sources or connection.selection.identity.instance != "testing":
-        return {name: "unknown" for name in sources}
+        return {name: SourceConsumerEvidence(source=cast(SourceName, name)) for name in sources}
     result = read_source_consumers(
         store=store,
         product=product,
@@ -30,9 +36,14 @@ def runtime_grants(
         sources=sources,
         expected_runtime=connection,
     )
+    observations = {source.source: source for source in result.sources}
     return {
-        name: next((source.grants for source in result.sources if source.source == name), "unknown")
-        if result.runtime == "verified"
-        else "unknown"
+        name: observations[name]
+        if result.runtime == "verified" and name in observations
+        else SourceConsumerEvidence(
+            source=cast(SourceName, name),
+            failure_stage=result.failure_stage
+            or (observations[name].failure_stage if name in observations else None),
+        )
         for name in sources
     }
