@@ -3927,6 +3927,32 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             dict[str, Any], json.loads(bytes.fromhex(output.getvalue().strip().split("=", 1)[1]))
         )
 
+    def test_capture_refuses_root_equivalent_filestores_before_source_commands(self) -> None:
+        ssh = self.fixture.root / "synthetic-ssh"
+        ssh.mkdir()
+        (ssh / "id_ed25519").write_text("synthetic reader identity")
+        (ssh / "known_hosts").write_text("synthetic pinned trust")
+        source = {
+            "ODOO_UPSTREAM_HOST": "source.invalid",
+            "ODOO_UPSTREAM_USER": "reader",
+            "ODOO_UPSTREAM_DB_USER": "fixture_db_reader",
+            "ODOO_UPSTREAM_DB_NAME": "fixture_db",
+            "DATA_WORKFLOW_SSH_DIR": str(ssh),
+        }
+        source_command = Mock(side_effect=AssertionError("Root source must not be captured"))
+        self.host["bounded_capture"] = source_command
+        for index, filestore in enumerate(("/", "//", "/.", "/./", "///././")):
+            with self.subTest(filestore=filestore):
+                root = self.fixture.root / f"root-source-{index}"
+                root.mkdir()
+                spec = {
+                    "source": {**source, "ODOO_UPSTREAM_FILESTORE_PATH": filestore},
+                    "record": {"storage": {"database_bytes": 1, "filestore_bytes": 1}},
+                }
+                with self.assertRaises(RuntimeError):
+                    self.host["capture"](spec, root, {}, "fixture_db")
+        source_command.assert_not_called()
+
     def test_partial_prepare_and_capture_report_custody_without_replaying(self) -> None:
         spec, root, _ = self.storage_fixture(
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
