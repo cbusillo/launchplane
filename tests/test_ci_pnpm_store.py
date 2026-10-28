@@ -26,8 +26,11 @@ store = Path(os.environ.get("npm_config_store_dir", str(Path.home() / "store")))
 if "store" in sys.argv:
     print(store)
 else:
+    directory = Path.cwd()
+    if "--dir" in sys.argv:
+        directory /= sys.argv[sys.argv.index("--dir") + 1]
     try:
-        shutil.copyfile(store / "package-object", Path.cwd() / "installed-object")
+        shutil.copyfile(store / "package-object", directory / "installed-object")
     except FileNotFoundError:
         print("ERR_PNPM_ENOENT: missing store file", file=sys.stderr)
         sys.exit(1)
@@ -98,7 +101,9 @@ class PnpmStoreTests(unittest.TestCase):
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((workspace / "installed-object").read_bytes(), b"package payload")
+        self.assertEqual(
+            (workspace / "frontend" / "installed-object").read_bytes(), b"package payload"
+        )
 
     def test_sibling_cache_replacement_cannot_remove_an_install_source(self) -> None:
         jobs = [

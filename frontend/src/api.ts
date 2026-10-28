@@ -1,4 +1,15 @@
 import { validateRemovalResponse } from "./runtime-setting-removal";
+import type { ApplyIntegrationAllowancesData, ApplyIntegrationAllowancesResponse, ReadIntegrationAllowancesData, ReadIntegrationAllowancesResponse } from "./generated/openapi.ts";
+
+export function readIntegrationAllowances(query: NonNullable<ReadIntegrationAllowancesData["query"]>, signal?: AbortSignal): Promise<ReadIntegrationAllowancesResponse> {
+  return requestJson(`/v1/product-config/integration-allowances?${new URLSearchParams(query as Record<string, string>)}`, "GET", undefined, signal);
+}
+
+export function applyIntegrationAllowances(body: ApplyIntegrationAllowancesData["body"], options: BrowserOperationOptions): Promise<ApplyIntegrationAllowancesResponse> {
+  const request: ApplyIntegrationAllowancesData = { url: BROWSER_WRITE_ROUTES.integrationAllowances, body,
+    headers: { "Idempotency-Key": options.idempotencyKey } };
+  return requestGeneratedPost(request, options.signal, options.onDispatch);
+}
 import type { BackupCredentialBindingRequest, AcceptedEvidenceResponse, QualifyProductionBackupPreflightData } from "./generated/openapi.ts";
 import type { DiscussionTopicsResponse } from "./generated/openapi.ts";
 import type { ApplyTestingHoldData, ApplyTestingHoldResponse, ReadTestingHoldData, ReadTestingHoldResponse } from "./generated/openapi.ts";
@@ -16,6 +27,7 @@ export function applyTestingHold(body: ApplyTestingHoldData["body"], options: Br
     headers: { "Idempotency-Key": options.idempotencyKey } };
   return requestGeneratedPost(request, options.signal, options.onDispatch);
 }
+import type { ReconcileOdooSecretReferencesData, SecretReferenceResponse } from "./generated/openapi.ts";
 import type {
   ApiErrorPayload,
   AuthSessionPayload,
@@ -585,6 +597,17 @@ export function applyProductEnvironmentConfig(
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
   );
+}
+
+export function readOdooReferenceMetadata(product: string, environment: string, signal?: AbortSignal): Promise<SecretReferenceResponse> {
+  return requestJson(`/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/odoo-secret-references/reconcile`, "GET", undefined, signal);
+}
+
+export function reconcileOdooReferenceMetadata(
+  product: string, environment: string, body: ReconcileOdooSecretReferencesData["body"], options: BrowserOperationOptions,
+): Promise<SecretReferenceResponse> {
+  const route = BROWSER_WRITE_ROUTES.odooSecretReferences.replace("{product}", encodeURIComponent(product)).replace("{environment}", encodeURIComponent(environment));
+  return requestJson(route, "POST", body, options.signal, options.idempotencyKey, options.onDispatch);
 }
 
 export function applyProductHealthMonitoring(

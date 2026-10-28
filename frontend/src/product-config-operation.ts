@@ -21,6 +21,7 @@ export interface ManagedSecretSelection {
   bindingKey: string;
   integration: string;
   identity: string;
+  secretClass?: ProductEnvironmentManagedSecretInput["secret_class"];
 }
 
 export function productConfigManagedSecretIdentity(
@@ -36,16 +37,17 @@ export function consumeManagedSecretValues(
   ownerSubmissions: ReadonlyMap<string, string> = new Map(),
 ): ProductEnvironmentManagedSecretInput[] {
   try {
-    return selections.map(({ bindingKey, integration, identity }) => {
+    return selections.map(({ bindingKey, integration, identity, secretClass }) => {
+      const classification = secretClass ? { secret_class: secretClass } : {};
       const submissionVersion = ownerSubmissions.get(identity);
       if (submissionVersion) {
-        return { binding_key: bindingKey, integration, owner_submission_version_id: submissionVersion };
+        return { binding_key: bindingKey, integration, owner_submission_version_id: submissionVersion, ...classification };
       }
       const value = inputs.get(identity)?.value ?? "";
       if (!value.trim()) {
         throw new Error(`Enter a value for ${bindingKey} (${integration}).`);
       }
-      return { binding_key: bindingKey, integration, value };
+      return { binding_key: bindingKey, integration, value, ...classification };
     });
   } finally {
     clearManagedSecretInputs(inputs);

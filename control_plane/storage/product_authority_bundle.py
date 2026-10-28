@@ -19,6 +19,7 @@ from control_plane.contracts.product_profile_record import (
     product_target_owner_products,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
@@ -47,6 +48,16 @@ class RuntimeEnvironmentConflictError(ValueError):
     """Raised when runtime configuration changed after bundle planning."""
 
 
+def require_runtime_key_safety_policies(
+    expected: tuple[RuntimeKeySafetyPolicyRecord, ...] | None,
+    current: Iterable[RuntimeKeySafetyPolicyRecord],
+) -> None:
+    if expected is not None and sorted(expected, key=lambda item: item.record_id) != sorted(
+        current, key=lambda item: item.record_id
+    ):
+        raise RuntimeEnvironmentConflictError("Runtime key-safety policy changed before commit.")
+
+
 class OdooInstanceOverrideConflictError(ValueError):
     """The reviewed override record changed before its reconciliation committed."""
 
@@ -67,11 +78,11 @@ class OdooInstanceOverrideWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     record: OdooInstanceOverrideRecord
-    expected_record: OdooInstanceOverrideRecord
+    expected_record: OdooInstanceOverrideRecord | None
 
     @model_validator(mode="after")
     def validate_route(self) -> "OdooInstanceOverrideWrite":
-        if (self.record.context, self.record.instance) != (
+        if self.expected_record is not None and (self.record.context, self.record.instance) != (
             self.expected_record.context,
             self.expected_record.instance,
         ):
@@ -247,6 +258,7 @@ class ProductAuthorityBundle(BaseModel):
     expected_product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
     absent_product_ids: tuple[str, ...] = ()
     expected_dokploy_targets: tuple[DokployTargetRecord, ...] = ()
+    expected_runtime_key_safety_policies: tuple[RuntimeKeySafetyPolicyRecord, ...] | None = None
     expected_dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     dokploy_targets: tuple[DokployTargetRecord, ...] = ()
     dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()

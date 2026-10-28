@@ -61,6 +61,7 @@ class CandidateHostProbeTests(unittest.TestCase):
         self.container_probe: CandidateContainerProbeTests | None = None
         self.integration_error: bytes | None = None
         self.integration_refused = False
+        self.parameter_missing = False
         namespace: dict[str, Any] = {"__name__": "probe_test"}
         exec(compile(probe.CANDIDATE_HOST_PROBE, "<candidate-probe>", "exec"), namespace)
         self.program = namespace["probe"]
@@ -87,7 +88,9 @@ class CandidateHostProbeTests(unittest.TestCase):
                         stderr=self.integration_error,
                     )
                 result = (
-                    b"integration_readback_ok=false\n"
+                    b"odoo_config_parameter_missing=acme.token\nintegration_readback_ok=false\n"
+                    if self.parameter_missing
+                    else b"integration_readback_ok=false\n"
                     if self.integration_refused
                     else b"integration_readback_ok=true\n"
                 )
@@ -255,6 +258,11 @@ class CandidateHostProbeTests(unittest.TestCase):
         self.assertEqual(frame["predicate"], ReadbackPredicate.INTEGRATIONS)
         self.assertEqual(frame["kind"], "refused")
         self.integration_refused = False
+        self.parameter_missing = True
+        frame = self.failure_frame()
+        self.assertEqual(frame["predicate"], ReadbackPredicate.SETTINGS)
+        self.assertEqual(frame["kind"], "refused")
+        self.parameter_missing = False
         container = CandidateContainerProbeTests()
         container.setUp()
         self.addCleanup(container.doCleanups)

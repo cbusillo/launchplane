@@ -13,8 +13,11 @@ agent-instruction filename, including any directory-specific guidance.
 ## Development
 
 Use `uv` with the interpreter pinned in [.python-version](.python-version), and
-Node 22.12 or later with the pnpm version in
-[frontend/package.json](frontend/package.json). CI uses the same Python pin.
+Node with the major pinned in [.node-version](.node-version). The compatibility
+floors remain in the package metadata, and Corepack reads the exact pnpm version
+from [frontend/package.json](frontend/package.json). CI reads both runtime pins.
+Docker base-image majors remain reviewed copies because `FROM` must resolve before
+a build can `COPY` repository version files.
 From the repository root:
 
 ```bash
