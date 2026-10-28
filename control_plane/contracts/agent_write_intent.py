@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyEvaluation
 from control_plane.service_auth import AgentAuthzAudit
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 AgentWriteIntentKind = Literal[
@@ -155,9 +154,7 @@ def build_agent_write_intent_record_id(
         "intent": request.model_dump(mode="json"),
         "evaluation": evaluation.model_dump(mode="json"),
     }
-    digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(payload)[:16]
     return f"agent-write-intent-{normalized_timestamp}-{digest}"
 
 

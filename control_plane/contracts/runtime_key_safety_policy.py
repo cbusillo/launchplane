@@ -1,9 +1,8 @@
-import hashlib
-import json
 import string
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 RuntimeEnvironmentClass = Literal["prod", "testing", "preview", "dev", "unknown"]
@@ -153,8 +152,7 @@ def runtime_key_safety_policy_sha256(record: RuntimeKeySafetyPolicyRecord) -> st
     # Keep hashes of records written before markers existed unchanged.
     if not payload["integration_key_markers"]:
         del payload["integration_key_markers"]
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 class RuntimeKeySafetyFinding(BaseModel):

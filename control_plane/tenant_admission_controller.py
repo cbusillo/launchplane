@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import hashlib
-import json
 from typing import Literal, Protocol, cast
 from urllib.parse import quote
 
@@ -51,6 +49,7 @@ from control_plane.tenant_admission_status import (
     get_tenant_admission_status,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 TENANT_ADMISSION_CONTROLLER_RUN_ONCE_ACTION = "tenant_admission.controller.run_once"
@@ -671,13 +670,7 @@ def require_tenant_admission_controller_store(
 def tenant_admission_controller_operation_id(
     request: TenantAdmissionControllerRunOnceEnvelope,
 ) -> str:
-    digest = hashlib.sha256(
-        json.dumps(
-            request.model_dump(mode="json"),
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(request.model_dump(mode="json"))
     return f"tenant-admission-merge-{digest}"
 
 
@@ -1301,16 +1294,10 @@ def _controller_scope_sha256(request: TenantAdmissionControllerRunOnceEnvelope) 
         "context": request.candidate.context,
         "base_branch": request.base_branch,
     }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def _model_sha256(model: BaseModel, *, exclude: set[str]) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            model.model_dump(mode="json", exclude=exclude, exclude_none=True),
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(
+        model.model_dump(mode="json", exclude=exclude, exclude_none=True)
+    )

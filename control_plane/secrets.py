@@ -28,6 +28,7 @@ from control_plane.contracts.secret_record import (
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR = "LAUNCHPLANE_SECRET_KEYS_JSON"
 LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR = "LAUNCHPLANE_MASTER_ENCRYPTION_KEY"
@@ -965,17 +966,13 @@ def reencrypt_secrets(
         for record, version in zip(records, versions, strict=True)
     )
     delivery_key_usage = record_store.ordinary_agent_delivery_key_usage()
-    plan_digest = hashlib.sha256(
-        json.dumps(
-            {
-                "active_key_id": active_key_id,
-                "entries": plan_entries,
-                "delivery_key_usage": delivery_key_usage,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    plan_digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "active_key_id": active_key_id,
+            "entries": plan_entries,
+            "delivery_key_usage": delivery_key_usage,
+        }
+    )
     key_usage = dict(delivery_key_usage)
     for version in versions:
         key_usage[version.key_id] = key_usage.get(version.key_id, 0) + 1

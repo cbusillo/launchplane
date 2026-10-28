@@ -22,6 +22,7 @@ from control_plane.storage.delivery_evidence import (
     filesystem_index,
     source_changed,
 )
+from control_plane.timestamps import utc_now_timestamp
 
 from control_plane.generic_web_source_qualification import (
     GenericWebSourceSnapshot,
@@ -349,7 +350,7 @@ class _AuthorityBundleStageManifest(BaseModel):
 
 
 def _utc_now_timestamp() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return utc_now_timestamp()
 
 
 def _lease_expires_at(*, observed_at: str, lease_seconds: int) -> str:

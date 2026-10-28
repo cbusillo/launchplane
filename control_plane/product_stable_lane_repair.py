@@ -18,6 +18,7 @@ from control_plane.contracts.product_profile_record import (
     validate_product_profile_history_transition,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 ProductStableLaneRepairMode = Literal["dry-run", "apply"]
@@ -346,9 +347,7 @@ def build_product_stable_lane_repair_plan(
         "reason": request.reason,
         "source_label": PRODUCT_STABLE_LANE_REPAIR_SOURCE,
     }
-    plan_sha256 = hashlib.sha256(
-        json.dumps(plan_evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    plan_sha256 = nonvalidating_compact_sorted_json_sha256(plan_evidence)
     return (
         ProductStableLaneRepairPlan(
             mode=request.mode,

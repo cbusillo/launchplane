@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.text_fields import require_text
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 PreviewPrFeedbackNotificationDestinationKind = Literal["discord"]
@@ -158,18 +157,14 @@ def build_preview_pr_feedback_notification_attempt_id(
     policy_id: str,
     destination_id: str,
 ) -> str:
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "feedback_id": feedback_id.strip(),
-                "event": event.strip(),
-                "policy_id": policy_id.strip(),
-                "destination_id": destination_id.strip(),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "feedback_id": feedback_id.strip(),
+            "event": event.strip(),
+            "policy_id": policy_id.strip(),
+            "destination_id": destination_id.strip(),
+        }
+    )[:16]
     return "-".join(
         _record_token(value)
         for value in (

@@ -4,8 +4,6 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-import hashlib
-import json
 import re
 from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
@@ -85,6 +83,7 @@ from control_plane.service_auth import (
     migrate_authz_policy_to_schema_v2,
     strict_immutable_github_human_administrator_ids,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 TimestampProvider = Callable[[], str]
@@ -928,12 +927,7 @@ class AuthzPolicyRequestError(ValueError):
 
 
 def _authz_rule_sha256(rule: AuthzPolicyRule) -> str:
-    canonical_json = json.dumps(
-        rule.model_dump(mode="json", exclude_none=True),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical_json.encode()).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(rule.model_dump(mode="json", exclude_none=True))
 
 
 @overload
@@ -2158,13 +2152,7 @@ def plan_managed_authz_policy_reconcile(
     desired_policy_sha256 = authz_policy_sha256(updated_policy)
     changed = current_record.policy_sha256 != desired_policy_sha256
     desired_set_payload = _desired_managed_set_payload(request.desired_policy)
-    desired_set_sha256 = hashlib.sha256(
-        json.dumps(
-            desired_set_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    desired_set_sha256 = nonvalidating_compact_sorted_json_sha256(desired_set_payload)
     candidate_revision = current_record.revision + int(changed)
     plan_payload = {
         "contract_version": 2,
@@ -2187,9 +2175,7 @@ def plan_managed_authz_policy_reconcile(
         plan_payload["workflow_rule_retirement"] = request.workflow_rule_retirement.model_dump(
             mode="json"
         )
-    plan_sha256 = hashlib.sha256(
-        json.dumps(plan_payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    plan_sha256 = nonvalidating_compact_sorted_json_sha256(plan_payload)
     if request.mode == "apply" and request.reviewed_plan_sha256 != plan_sha256:
         raise AuthzPolicyReviewedPlanConflictError(
             "Managed authz policy reviewed_plan_sha256 no longer matches the active policy "

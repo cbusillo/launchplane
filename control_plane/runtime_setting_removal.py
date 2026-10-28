@@ -1,19 +1,16 @@
 """Exact stored-key contraction; snapshots stay in service-owned review custody."""
 
-from typing import Literal
 import re
-import hashlib
-import json
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 
 
 def request_fingerprint(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 ROUTE = "/v1/admin/runtime-settings/removal"

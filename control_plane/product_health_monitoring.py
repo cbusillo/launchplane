@@ -1,21 +1,17 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthPolicy
 
-from control_plane.contracts.public_dns import PublicDnsExpectedTarget
-
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
     health_check_record_token,
 )
-from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneHealthCheck,
@@ -24,7 +20,8 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneMonitoringIntent,
     ProductLaneProfile,
 )
-
+from control_plane.contracts.public_dns import PublicDnsExpectedTarget
+from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthPolicy
 
 ProductHealthMonitoringMode = Literal["dry-run", "apply"]
 ProductHealthMonitoringOperation = Literal["create", "update", "unchanged"]
@@ -498,6 +495,4 @@ def _url_host(value: str) -> str:
 
 
 def _canonical_sha256(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(value)

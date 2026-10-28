@@ -4,7 +4,6 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
-import json
 from typing import Protocol
 
 from control_plane.repository_evidence import (
@@ -71,6 +70,7 @@ from control_plane.tenant_admission_controller import (
     TenantAdmissionControllerGitHubClient,
     TenantAdmissionTechnicalChecks,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 _MISSING_POLICY_SHA256 = hashlib.sha256(b"launchplane-policy-unavailable").hexdigest()
@@ -80,14 +80,7 @@ MERGE_ADMISSION_ALGORITHM_SHA256 = hashlib.sha256(
 
 
 def _canonical_sha256(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 class MergeAdmissionTechnicalCheckReader(Protocol):

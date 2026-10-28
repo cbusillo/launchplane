@@ -1,9 +1,9 @@
 """Original preview intent and recovery, independent of mutable desired state."""
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from dataclasses import dataclass
 from datetime import timedelta
 import hashlib
-import json
 import click
 from pathlib import Path
 from typing import Callable
@@ -94,12 +94,9 @@ def validate_original_preview_intent(
 def preview_reservation_reference(
     reservation: LaunchplaneIdempotencyRecord, retained_intent: dict[str, object]
 ) -> str:
-    snapshot = json.dumps(
-        {"reservation": reservation.model_dump(mode="json"), "original_intent": retained_intent},
-        sort_keys=True,
-        separators=(",", ":"),
+    return "preview-reservation-" + nonvalidating_compact_sorted_json_sha256(
+        {"reservation": reservation.model_dump(mode="json"), "original_intent": retained_intent}
     )
-    return "preview-reservation-" + hashlib.sha256(snapshot.encode()).hexdigest()
 
 
 def classify_preview_reservation(

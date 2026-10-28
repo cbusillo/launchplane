@@ -14,6 +14,7 @@ from control_plane.contracts.durable_operation_authorization import (
 from control_plane.contracts.odoo_prod_promotion_operation import (
     validate_release_operation_state,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 ODOO_PROD_ROLLBACK_ACTION = "odoo_prod_rollback.execute"
@@ -227,13 +228,9 @@ class OdooProdRollbackOperationRecord(BaseModel):
 def odoo_prod_rollback_request_fingerprint(
     *, product: str, request: OdooProdRollbackRequest
 ) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            {"product": product.strip(), "request": request.model_dump(mode="json")},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(
+        {"product": product.strip(), "request": request.model_dump(mode="json")}
+    )
 
 
 def build_odoo_prod_rollback_operation_id(

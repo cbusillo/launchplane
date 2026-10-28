@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import http.client
-import json
 import time
 from collections.abc import Callable, Mapping
 from typing import Literal
@@ -13,6 +11,7 @@ import click
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.dokploy import api
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 # project.all is unpaginated. Bound the upstream snapshot and each detail page.
 MAX_PROJECTS = 2000
@@ -197,11 +196,9 @@ def _read_inventory_membership(
         if len(environment_ids) > MAX_ENVIRONMENTS or len(target_ids) > MAX_TARGETS:
             raise InventoryUnavailable("snapshot_limit")
     projects.sort(key=lambda project: project.project_id)
-    digest = hashlib.sha256(
-        json.dumps(
-            [project.model_dump() for project in projects], sort_keys=True, separators=(",", ":")
-        ).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(
+        [project.model_dump() for project in projects]
+    )
     return projects, digest
 
 

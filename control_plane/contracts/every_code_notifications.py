@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 EveryCodeNotificationDestinationKind = Literal["discord"]
@@ -127,19 +126,15 @@ def build_every_code_notification_attempt_id(
     destination_id: str,
     lifecycle_key: str = "",
 ) -> str:
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "request_id": request_id.strip(),
-                "event": event.strip(),
-                "policy_id": policy_id.strip(),
-                "destination_id": destination_id.strip(),
-                "lifecycle_key": lifecycle_key.strip(),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "request_id": request_id.strip(),
+            "event": event.strip(),
+            "policy_id": policy_id.strip(),
+            "destination_id": destination_id.strip(),
+            "lifecycle_key": lifecycle_key.strip(),
+        }
+    )[:16]
     return "-".join(
         _record_token(value)
         for value in (

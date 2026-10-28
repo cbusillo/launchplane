@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 EveryCodeWorkRequestSource = Literal["github_issue_label", "manual", "reconciliation"]
@@ -80,15 +79,11 @@ def build_every_code_work_request_lifecycle_id(
     normalized_queued_at = queued_at.strip()
     if not normalized_request_id or not normalized_queued_at:
         raise ValueError("Every Code work request lifecycle id requires request_id and queued_at")
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "request_id": normalized_request_id,
-                "queued_at": normalized_queued_at,
-                "previous_lifecycle_id": previous_lifecycle_id.strip(),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "request_id": normalized_request_id,
+            "queued_at": normalized_queued_at,
+            "previous_lifecycle_id": previous_lifecycle_id.strip(),
+        }
+    )[:16]
     return f"every-code-lifecycle-{digest}"

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -22,6 +20,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
 )
 from control_plane.contracts.text_fields import require_text
 from control_plane.merge_train import DEPENDENCY_HEAD_HOLD_REASONS, MergeTrainDryRunResult
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 MergeTrainBatchCandidateStatus = Literal[
@@ -701,9 +700,7 @@ def build_merge_train_batch_candidate_record_id(
     digest_payload = record.model_dump(mode="json", exclude={"record_id"})
     if record.ordinary_job_binding is None:
         digest_payload.pop("ordinary_job_binding")
-    digest = hashlib.sha256(
-        json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(digest_payload)[:16]
     normalized_timestamp = record.updated_at.replace("-", "").replace(":", "")
     return f"merge-train-batch-candidate-{normalized_timestamp}-{digest}"
 
@@ -740,9 +737,7 @@ def build_merge_train_batch_landing_plan_record_id(
         digest_payload.pop("ordinary_job_binding")
     if record.landing_plan.candidate_pull_request_number is None:
         digest_payload["landing_plan"].pop("candidate_pull_request_number", None)
-    digest = hashlib.sha256(
-        json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(digest_payload)[:16]
     normalized_timestamp = record.updated_at.replace("-", "").replace(":", "")
     return f"merge-train-batch-landing-plan-{normalized_timestamp}-{digest}"
 
@@ -754,19 +749,15 @@ def build_merge_train_batch_id(
     normalized_base_branch = require_text(
         base_branch, "merge train batch id requires base_branch"
     ).replace("/", "-")
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "base_sha": require_text(base_sha, "merge train batch id requires base_sha"),
-                "entry_head_shas": [
-                    require_text(sha, "merge train batch id requires head sha")
-                    for sha in entry_head_shas
-                ],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "base_sha": require_text(base_sha, "merge train batch id requires base_sha"),
+            "entry_head_shas": [
+                require_text(sha, "merge train batch id requires head sha")
+                for sha in entry_head_shas
+            ],
+        }
+    )[:16]
     return f"merge-train-batch-{normalized_repository}-{normalized_base_branch}-{digest}"
 
 
@@ -853,9 +844,7 @@ def build_merge_train_batch_landing_plan_id(plan: MergeTrainBatchLandingPlan) ->
     digest_payload = plan.model_dump(mode="json", exclude={"plan_id"})
     if plan.candidate_pull_request_number is None:
         digest_payload.pop("candidate_pull_request_number", None)
-    digest = hashlib.sha256(
-        json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(digest_payload)[:16]
     return f"merge-train-landing-plan-{plan.batch_id}-{digest}"
 
 
@@ -881,11 +870,7 @@ def merge_train_batch_landing_plan_sha256(plan: MergeTrainBatchLandingPlan) -> s
                 "merge_commit_tree_sha",
             ):
                 entry.pop(field_name, None)
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
-            "utf-8"
-        )
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def _normalize_entries(
@@ -916,7 +901,5 @@ def build_ordinary_merge_train_candidate_ref(
 ) -> str:
     """A finite job revision owns a separate bounded ref, even for identical heads."""
     payload = {"binding": binding.model_dump(mode="json"), "batch_id": batch_id}
-    digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(payload)
     return f"refs/heads/launchplane/train/ordinary/{digest}"

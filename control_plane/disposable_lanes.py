@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
 from typing import Literal, Protocol
 
@@ -18,6 +17,7 @@ from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.lane_usage import evaluate_lane_usage
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 LaneConfigurationRecord = (
     RuntimeEnvironmentRecord
@@ -132,9 +132,7 @@ def disposable_lane_binding_sha256(
             key=lambda item: json.dumps(item, sort_keys=True),
         )
     )
-    return hashlib.sha256(
-        json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(bindings)
 
 
 @dataclass(frozen=True)

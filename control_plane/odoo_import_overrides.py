@@ -1,7 +1,5 @@
 """Plan removal of duplicated import literals and render from existing lane authority."""
 
-import hashlib
-import json
 from datetime import datetime, timezone
 from typing import Protocol, cast
 
@@ -23,6 +21,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     RuntimeEnvironmentSetExpectation,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 class ImportRuntimeStore(Protocol):
@@ -167,9 +166,7 @@ def plan_import_override_reconciliation(
         ),
         "keys": sorted(keys),
     }
-    digest = hashlib.sha256(
-        json.dumps(digest_input, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(digest_input)
     changed = any(entry.action != "already_referenced" for entry in entries)
     replacement = record.model_copy(
         update={

@@ -21,6 +21,7 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIde
 from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthEvidence
 from control_plane.contracts.sync_cycle_health import SyncCycleHealthEvidence
 from control_plane.contracts.text_fields import require_text
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 # Historical source-age incidents are retained as evidence, never failure alerts.
@@ -1078,19 +1079,15 @@ def build_public_ingress_notification_attempt_id(
     event_identity = incident_event_id.strip() or observation_id.strip()
     if not event_identity:
         raise ValueError("public ingress notification attempt requires event identity")
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "incident_id": incident_id.strip(),
-                "event": event.strip(),
-                "policy_id": policy_id.strip(),
-                "destination_id": destination_id.strip(),
-                "incident_event_id": event_identity,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "incident_id": incident_id.strip(),
+            "event": event.strip(),
+            "policy_id": policy_id.strip(),
+            "destination_id": destination_id.strip(),
+            "incident_event_id": event_identity,
+        }
+    )[:16]
     return "-".join(
         _record_token(value)
         for value in (
@@ -1115,21 +1112,17 @@ def build_public_ingress_incident_event_id(
     reminder_window_index: int | None = None,
     reminder_window_started_at: str = "",
 ) -> str:
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "incident_id": incident_id.strip(),
-                "event": event,
-                "material_fingerprint_sha256": material_fingerprint_sha256.strip().lower(),
-                "previous_event_id": previous_event_id.strip(),
-                "policy_id": policy_id.strip(),
-                "reminder_window_index": reminder_window_index,
-                "reminder_window_started_at": reminder_window_started_at.strip(),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:20]
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "incident_id": incident_id.strip(),
+            "event": event,
+            "material_fingerprint_sha256": material_fingerprint_sha256.strip().lower(),
+            "previous_event_id": previous_event_id.strip(),
+            "policy_id": policy_id.strip(),
+            "reminder_window_index": reminder_window_index,
+            "reminder_window_started_at": reminder_window_started_at.strip(),
+        }
+    )[:20]
     return "-".join(
         _record_token(value)
         for value in ("public-ingress-event", incident_id, event, digest)
@@ -1138,13 +1131,9 @@ def build_public_ingress_incident_event_id(
 
 
 def build_public_ingress_reminder_state_id(*, incident_id: str, policy_id: str) -> str:
-    digest = hashlib.sha256(
-        json.dumps(
-            {"incident_id": incident_id.strip(), "policy_id": policy_id.strip()},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {"incident_id": incident_id.strip(), "policy_id": policy_id.strip()}
+    )[:16]
     return "-".join(
         _record_token(value)
         for value in ("public-ingress-reminder", incident_id, policy_id, digest)
@@ -1155,23 +1144,13 @@ def build_public_ingress_reminder_state_id(*, incident_id: str, policy_id: str) 
 def public_ingress_material_fingerprint_sha256(
     fingerprint: PublicIngressIncidentMaterialFingerprint,
 ) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            fingerprint.model_dump(mode="json", exclude_none=True),
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(
+        fingerprint.model_dump(mode="json", exclude_none=True)
+    )
 
 
 def public_ingress_incident_record_sha256(record: PublicIngressIncidentRecord) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            record.model_dump(mode="json"),
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(record.model_dump(mode="json"))
 
 
 def public_ingress_failure_layer(code: PublicIngressFailureCode) -> PublicIngressFailureLayer:
