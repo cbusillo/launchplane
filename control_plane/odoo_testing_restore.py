@@ -803,7 +803,7 @@ def command(arguments, *, stdin=None, stdout=None, diagnose_failure=False):
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
         if diagnose_failure:
-            emit_copy_command_failure(result)
+            emit_copy_command_failure(result, spec)
         if arguments[0]=='docker' and ('readback_failed_predicate='+ReadbackPredicate.ATTACHMENTS).encode() in (result.stdout or b'').splitlines():
             raise CopyReadbackRefused(ReadbackPredicate.ATTACHMENTS)
         raise RuntimeError("Fresh testing copy command did not pass")
