@@ -1,5 +1,50 @@
 from collections.abc import Mapping
 from enum import StrEnum
+import re
+
+
+class CopyFailureStage(StrEnum):
+    RESTORE = "restore"
+    ATTACHMENTS = "attachments"
+    PRE_REGISTRY_SANITIZE = "pre_registry_sanitize"
+    MODULE_UPDATE = "module_update"
+    CORE_SCHEMA = "core_schema"
+    USERS = "users"
+    POST_SANITIZE = "post_sanitize"
+
+
+COPY_FAILURE_STAGE_MARKER = "copy_failure_stage"
+COPY_FAILURE_EXIT_MARKER = "copy_failure_exit_status"
+
+
+def copy_failure_marker_is_safe(key: str, value: str) -> bool:
+    if key == COPY_FAILURE_STAGE_MARKER:
+        return value in CopyFailureStage
+    return (
+        key == COPY_FAILURE_EXIT_MARKER
+        and re.fullmatch(r"-?[0-9]{1,3}", value) is not None
+        and -255 <= int(value) <= 255
+        and int(value) != 0
+    )
+
+
+def copy_failure_diagnostics_library() -> str:
+    return (
+        "class CopyFailureStage:\n"
+        + "\n".join(f"    {stage.name} = {stage.value!r}" for stage in CopyFailureStage)
+        + f"\nCOPY_FAILURE_STAGES = {tuple(stage.value for stage in CopyFailureStage)!r}\n"
+        + f"COPY_FAILURE_STAGE_MARKER = {COPY_FAILURE_STAGE_MARKER!r}\n"
+        + f"COPY_FAILURE_EXIT_MARKER = {COPY_FAILURE_EXIT_MARKER!r}\n"
+        + """
+def emit_copy_command_failure(result):
+    for line in (result.stdout or b'').decode(errors='replace').splitlines():
+        key, separator, value = line.partition('=')
+        if separator and key == COPY_FAILURE_STAGE_MARKER and value in COPY_FAILURE_STAGES:
+            print(key + '=' + value, flush=True)
+            break
+    print(COPY_FAILURE_EXIT_MARKER + '=' + str(result.returncode), flush=True)
+"""
+    )
 
 
 class ReadbackPredicate(StrEnum):

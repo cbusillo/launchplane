@@ -80,6 +80,15 @@ the staff-used database. Partial captures cannot become preview sources.
 
 ## Preview copy
 
+When the copy runner fails during restore or update, it reports
+`copy_failure_stage` from its closed set of execution stages. The host also
+reports `copy_failure_exit_status` from its failed child command.
+The host forwards these markers without forwarding the child's output or
+traceback. The stage identifies the first failure before rollback or cleanup;
+it does not prove the underlying application cause or authorize another copy.
+Provider completion and these diagnostics do not settle custody or establish a
+usable preview.
+
 A new preview selects one completed same-product snapshot. An existing preview
 with a qualified completed deployment keeps its data and needs no snapshot
 lookup, including before the product has published its first snapshot. There

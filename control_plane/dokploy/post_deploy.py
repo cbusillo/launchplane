@@ -69,7 +69,10 @@ from control_plane.runtime_key_safety import runtime_key_safety_environment_clas
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
 from control_plane.copy_readback_diagnostics import (
     READBACK_FAILURE_MARKERS,
+    COPY_FAILURE_EXIT_MARKER,
+    COPY_FAILURE_STAGE_MARKER,
     ReadbackPredicate,
+    copy_failure_marker_is_safe,
     readback_failure_evidence,
     readback_marker_is_safe,
 )
@@ -432,7 +435,7 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
             and int(site) > 0
             for site in sites
         )
-    if readback_marker_is_safe(key, value):
+    if readback_marker_is_safe(key, value) or copy_failure_marker_is_safe(key, value):
         return True
     if key in {"rehearsal_result", "rehearsal_child_failure", "recipient_recovery_retained"}:
         return bool(
@@ -2599,6 +2602,9 @@ def extract_odoo_post_deploy_readback_markers(deployment: api.JsonObject | None)
         if normalized_key == "website_bootstrap_company_email_skip_reason":
             continue
         if not _safe_odoo_post_deploy_marker(normalized_key, normalized_value):
+            continue
+        if normalized_key in {COPY_FAILURE_STAGE_MARKER, COPY_FAILURE_EXIT_MARKER}:
+            markers.setdefault(normalized_key, normalized_value)
             continue
         markers[normalized_key] = normalized_value
     return markers
