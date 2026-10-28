@@ -37,7 +37,7 @@ from control_plane.product_config_authority_events import (
 from control_plane.repository_inventory import get_repository_inventory_read_model
 from control_plane.merge_train_wake import MergeTrainEventReceipt
 from control_plane.workflows.launchplane import verify_github_webhook_signature
-from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.timestamps import utc_now_timestamp
 
 GITHUB_APP_WEBHOOK_ROUTE = "/v1/github/app-webhook"
 GITHUB_APP_WEBHOOK_SECRET_INTEGRATION = "github_app_webhook"

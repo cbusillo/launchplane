@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.timestamps import utc_now_timestamp as _utc_now_timestamp
+
 from control_plane.contracts.public_hosts import retained_hostname_identity
 from control_plane.provider_hold_attention import (
     PROVIDER_HOLD_PAGE_LIMIT,
@@ -1043,10 +1045,6 @@ def _try_odoo_synchronous_lane_lock(
             {"lock_name": f"launchplane:odoo-lane-synchronous-release:{lane_key}"},
         )
     )
-
-
-def _utc_now_timestamp() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 # Every match is a real calendar instant: February 29 and days past 28 in
