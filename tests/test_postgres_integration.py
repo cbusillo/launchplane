@@ -13515,6 +13515,9 @@ class RealPostgresRecipientReleaseSettingsTests(unittest.TestCase):
     def test_final_preflight_expiry_preserves_original_drill(self) -> None:
         self.fixture.test_expired_native_preflight_continues_original_final_promotion()
 
+    def test_pre_snapshot_refusal_preserves_original_drill(self) -> None:
+        self.fixture.test_expired_native_preflight_before_snapshot_continues_original_final_promotion()
+
     def test_native_backup_continuation_rechecks_custody_and_promotion(self) -> None:
         self.fixture.test_native_preflight_continuation_rechecks_reviewed_custody_and_promotion()
 

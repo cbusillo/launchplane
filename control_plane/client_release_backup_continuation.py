@@ -23,6 +23,8 @@ from control_plane.client_release import (
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.integration_allowances import canonical_sha256
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
 from control_plane.provider_operations import build_provider_operation_key
@@ -89,6 +91,94 @@ def require_precapture_failure(operation: VeriReelProdBackupGateOperationRecord)
         raise BackupContinuationRefused("backup_capture_outcome_not_proven_absent")
 
 
+def native_backup_continuation_context(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
+    backup_record_id: str,
+) -> tuple[str, dict[str, Any]]:
+    from control_plane.production_recipient_cutover import (
+        _attempt_execution_started,
+        cutover_reconciliation_key,
+    )
+
+    recipient = native_release_recipient(store, profile, decision_record_id=decision.record_id)
+    native_context: dict[str, Any] = {}
+    excluded_promotion_id = ""
+    if recipient is not None:
+        native_context["recipient"] = recipient.model_dump(mode="json")
+    if recipient is not None and recipient.execution:
+        step_key = _step_key(decision, step)
+        operation_id = client_release_step_operation_id(
+            profile=profile, decision=decision, step=step
+        )
+        request = client_release_promotion_request(profile, decision, backup_record_id)
+        key = build_provider_operation_key(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=step_key,
+            request_fingerprint=hashlib.sha256(request.model_dump_json().encode()).hexdigest(),
+            reconciliation_key=cutover_reconciliation_key(recipient.plan_sha256),
+        )
+        saved = recipient.execution.get("reservation:" + operation_id)
+        attempt_prefix = canonical_sha256(key) + ":"
+        repromote = bool(recipient.publication.get("inverse_backup_policies"))
+        if (
+            not (
+                recipient.phase == "preflight_refused"
+                or step.attempt == 2
+                and recipient.phase == "rolled_back"
+                and saved is None
+            )
+            or recipient.execution.get("native_inverse")
+            or repromote != (step.attempt == 2)
+            or recipient.execution.get("release_trace") != f"client-release-{decision.record_id}"
+            or _attempt_execution_started(recipient, key, repromote=repromote)
+            or recipient.execution.get(attempt_prefix + "old_pause_fenced")
+            or recipient.execution.get(attempt_prefix + "rollback_completed_at")
+            or store.read_idempotency_record(
+                scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                idempotency_key=step_key,
+            )
+            is not None
+        ):
+            raise BackupContinuationRefused("recipient_release_execution_already_started")
+        if saved is not None:
+            reservation = LaunchplaneIdempotencyRecord.model_validate(saved)
+            if (
+                reservation.record_id != operation_id
+                or reservation.scope != CLIENT_RELEASE_IDEMPOTENCY_SCOPE
+                or reservation.route_path != GENERIC_WEB_PROD_PROMOTION_ROUTE
+                or reservation.idempotency_key != step_key
+                or reservation.request_fingerprint
+                != hashlib.sha256(request.model_dump_json().encode()).hexdigest()
+                or reservation.reconciliation_key
+                != cutover_reconciliation_key(recipient.plan_sha256)
+            ):
+                raise BackupContinuationRefused("recipient_release_execution_already_started")
+        excluded_promotion_id = "promotion-recipient-" + canonical_sha256(key)[:24]
+        try:
+            pending = store.read_promotion_record(excluded_promotion_id)
+        except FileNotFoundError:
+            pending = None
+        native_context["promotion"] = pending.model_dump(mode="json") if pending else None
+        if pending is not None and (
+            recipient.phase != "preflight_refused"
+            or pending.deployment_record_id
+            or pending.deploy.status != "pending"
+            or pending.context != recipient.context
+            or pending.from_instance != "testing"
+            or pending.to_instance != "prod"
+            or pending.backup_record_id != backup_record_id
+            or pending.artifact_identity is None
+            or pending.artifact_identity.artifact_id != recipient.image_reference
+        ):
+            raise BackupContinuationRefused("backup_capture_already_consumed")
+    return excluded_promotion_id, native_context
+
+
 def require_continuable_backup(
     store: PostgresRecordStore,
     operation: VeriReelProdBackupGateOperationRecord,
@@ -138,85 +228,16 @@ def require_continuable_backup(
     views = read_client_release_step_views(store=store, profile=profile, decision=decision)
     if any(view.status != "not_started" for view in views[index + 1 :]):
         raise BackupContinuationRefused("later_release_step_already_started")
+    excluded_promotion_id, native_context = native_backup_continuation_context(
+        store,
+        profile,
+        decision,
+        ClientReleaseStep("promote", steps[index].attempt),
+        operation.backup_record_id,
+    )
     promotions = store.list_promotion_records(
         context_name=operation.context, to_instance_name=operation.instance
     )
-    from control_plane.production_recipient_cutover import (
-        _attempt_execution_started,
-        cutover_reconciliation_key,
-    )
-
-    recipient = native_release_recipient(store, profile, decision_record_id=decision.record_id)
-    native_context: dict[str, Any] = {}
-    excluded_promotion_id = ""
-    if recipient is not None:
-        native_context["recipient"] = recipient.model_dump(mode="json")
-    if recipient is not None and recipient.execution:
-        step = ClientReleaseStep("promote", steps[index].attempt)
-        step_key = _step_key(decision, step)
-        operation_id = client_release_step_operation_id(
-            profile=profile, decision=decision, step=step
-        )
-        request = client_release_promotion_request(profile, decision, operation.backup_record_id)
-        key = build_provider_operation_key(
-            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
-            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
-            idempotency_key=step_key,
-            request_fingerprint=hashlib.sha256(request.model_dump_json().encode()).hexdigest(),
-            reconciliation_key=cutover_reconciliation_key(recipient.plan_sha256),
-        )
-        saved = recipient.execution.get("reservation:" + operation_id)
-        attempt_prefix = canonical_sha256(key) + ":"
-        repromote = bool(recipient.publication.get("inverse_backup_policies"))
-        if (
-            not (
-                recipient.phase == "preflight_refused"
-                and saved is not None
-                or step.attempt == 2
-                and recipient.phase == "rolled_back"
-                and saved is None
-            )
-            or recipient.execution.get("native_inverse")
-            or repromote != (step.attempt == 2)
-            or recipient.execution.get("release_trace") != f"client-release-{decision.record_id}"
-            or _attempt_execution_started(recipient, key, repromote=repromote)
-            or recipient.execution.get(attempt_prefix + "old_pause_fenced")
-            or recipient.execution.get(attempt_prefix + "rollback_completed_at")
-            or store.read_idempotency_record(
-                scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
-                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
-                idempotency_key=step_key,
-            )
-            is not None
-        ):
-            raise BackupContinuationRefused("recipient_release_execution_already_started")
-        if saved is not None:
-            reservation = LaunchplaneIdempotencyRecord.model_validate(saved)
-            if (
-                reservation.record_id != operation_id
-                or reservation.state != "running"
-                or reservation.scope != CLIENT_RELEASE_IDEMPOTENCY_SCOPE
-                or reservation.route_path != GENERIC_WEB_PROD_PROMOTION_ROUTE
-                or reservation.idempotency_key != step_key
-                or reservation.request_fingerprint
-                != hashlib.sha256(request.model_dump_json().encode()).hexdigest()
-                or reservation.reconciliation_key
-                != cutover_reconciliation_key(recipient.plan_sha256)
-                or reservation.provider_effect_started_at
-            ):
-                raise BackupContinuationRefused("recipient_release_execution_already_started")
-        excluded_promotion_id = "promotion-recipient-" + canonical_sha256(key)[:24]
-        pending = next((row for row in promotions if row.record_id == excluded_promotion_id), None)
-        native_context["promotion"] = pending.model_dump(mode="json") if pending else None
-        if pending is not None and (
-            recipient.phase != "preflight_refused"
-            or pending.deployment_record_id
-            or pending.deploy.status not in {"pending", "fail"}
-            or pending.backup_record_id != operation.backup_record_id
-            or pending.artifact_identity is None
-            or pending.artifact_identity.artifact_id != recipient.image_reference
-        ):
-            raise BackupContinuationRefused("backup_capture_already_consumed")
     for promotion in promotions:
         if promotion.record_id == excluded_promotion_id:
             continue

@@ -12,6 +12,7 @@ from control_plane.client_release_backup_continuation import (
     BackupContinuationRefused,
     BackupContinuationReview,
     continue_release_backup,
+    require_continuable_backup,
 )
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -371,7 +372,7 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
         self.advance()
         self.assertTrue(self.case.fixture.new_running)
 
-    def refuse_native_preflight(self, *, attempt: int) -> str:
+    def refuse_native_preflight(self, *, attempt: int, before_snapshot: bool = False) -> str:
         fixture = self.case.fixture
         if attempt == 2:
             self.capture_next_backup()
@@ -379,11 +380,19 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
             self.advance()
         backup_id = self.capture_next_backup()
         effects = fixture.deploys, list(fixture.actions)
-        with patch.object(
-            RecipientCutoverAdapter,
-            "verify_upstreams",
-            side_effect=ValueError("Upstream preflight unavailable"),
-        ):
+        refusal = (
+            patch(
+                "control_plane.production_recipient_cutover.require_writer_exclusive",
+                side_effect=ValueError,
+            )
+            if before_snapshot
+            else patch.object(
+                RecipientCutoverAdapter,
+                "verify_upstreams",
+                side_effect=ValueError("Upstream preflight unavailable"),
+            )
+        )
+        with refusal:
             self.assertEqual(
                 releases.advance_client_releases(
                     store=fixture.store, control_plane_root=fixture.fixture.root
@@ -407,6 +416,31 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
 
     def test_expired_native_preflight_continues_original_first_promotion(self) -> None:
         backup_id = self.refuse_native_preflight(attempt=1)
+        fixture = self.case.fixture
+        record = custody(fixture.store, fixture.record.product, fixture.record.context)
+        assert record is not None
+        operation = next(
+            row
+            for row in fixture.store.list_verireel_prod_backup_gate_operation_records()
+            if row.backup_record_id == backup_id
+        )
+        triggered = record.model_copy(
+            update={
+                "execution": {
+                    **record.execution,
+                    "trigger_requested_at": record.qualified_at,
+                }
+            }
+        )
+        with patch.object(
+            fixture.store,
+            "read_production_recipient",
+            return_value=triggered.model_dump(mode="json"),
+        ):
+            with self.assertRaises(BackupContinuationRefused):
+                require_continuable_backup(
+                    fixture.store, operation, fixture.store.read_backup_gate_record(backup_id)
+                )
         self.continue_expired_backup(backup_id)
         self.advance()
         self.assertTrue(self.case.fixture.new_running)
@@ -416,6 +450,11 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
         backup_id = self.refuse_native_preflight(attempt=2)
         deployments = self.case.fixture.deploys
         self.continue_expired_backup(backup_id)
+        ready = releases.read_client_release_run(
+            store=self.case.fixture.store, profile=self.profile, decision=self.case.decision
+        )
+        assert ready is not None
+        self.assertFalse(ready.blocked_reason)
         self.advance()
         run = releases.read_client_release_run(
             store=self.case.fixture.store, profile=self.profile, decision=self.case.decision
@@ -425,6 +464,27 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
         self.assertEqual(self.case.fixture.deploys, deployments)
         self.assertTrue(self.case.fixture.new_running)
         self.assertFalse(self.case.fixture.old_running)
+
+    def test_expired_native_preflight_before_snapshot_continues_original_final_promotion(
+        self,
+    ) -> None:
+        backup_id = self.refuse_native_preflight(attempt=2, before_snapshot=True)
+        fixture = self.case.fixture
+        record = custody(fixture.store, fixture.record.product, fixture.record.context)
+        assert record is not None
+        operation_id = releases.client_release_step_operation_id(
+            profile=self.profile,
+            decision=self.case.decision,
+            step=releases.ClientReleaseStep("promote", 2),
+        )
+        self.assertNotIn("reservation:" + operation_id, record.execution)
+        self.continue_expired_backup(backup_id)
+        self.advance()
+        run = releases.read_client_release_run(
+            store=fixture.store, profile=self.profile, decision=self.case.decision
+        )
+        assert run is not None
+        self.assertEqual(run.state, "passed")
 
     def test_native_preflight_continuation_rechecks_reviewed_custody_and_promotion(self) -> None:
         backup_id = self.refuse_native_preflight(attempt=2)
@@ -536,11 +596,35 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
             request_fingerprint=saved.request_fingerprint,
             reconciliation_key=saved.reconciliation_key,
         )
+        operation = next(
+            row
+            for row in store.list_verireel_prod_backup_gate_operation_records()
+            if row.backup_record_id == backup_id
+        )
+        for suffix in (":old_pause_fenced", ":rollback_completed_at"):
+            with self.subTest(marker=suffix):
+                witnessed = current.model_copy(
+                    update={
+                        "execution": {
+                            **current.execution,
+                            canonical_sha256(key) + suffix: saved.created_at,
+                        }
+                    }
+                )
+                with patch.object(
+                    store,
+                    "read_production_recipient",
+                    return_value=witnessed.model_dump(mode="json"),
+                ):
+                    with self.assertRaises(BackupContinuationRefused):
+                        require_continuable_backup(
+                            store, operation, store.read_backup_gate_record(backup_id)
+                        )
         replacement = current.model_copy(
             update={
                 "execution": {
                     **current.execution,
-                    canonical_sha256(key) + ":old_pause_dispatched_at": saved.recorded_at,
+                    canonical_sha256(key) + ":old_pause_dispatched_at": saved.created_at,
                 }
             }
         )

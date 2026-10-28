@@ -1281,8 +1281,9 @@ rollback baseline or a later started step refuse. Native rollback-drill history
 may precede backup two, but current-attempt effects or reservations refuse.
 An exact native attempt that refused before dispatch may retain preparation
 metadata and a pending promotion. It qualifies only with the original key's
-reservation absent, matching no-effect attempt metadata and no scoped writer,
-fence or rollback witness. Only that attempt's bound pending promotion is
+reservation absent, unchanged no-dispatch custody and no scoped writer, fence
+or rollback witness. Any saved attempt metadata must match that original key;
+a refusal before its snapshot needs no invented metadata. Only that attempt's bound pending promotion is
 excluded from consumption; another consumer still refuses. This applies to
 both the first promotion and the final promotion after the drill inverse.
 Apply compares the exact reviewed operation, backup, recipient custody and
