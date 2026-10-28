@@ -1,11 +1,16 @@
 import unittest
 from collections.abc import Callable
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 from control_plane import client_release as releases
+from control_plane.client_release_backup_continuation import (
+    BackupContinuationReview,
+    continue_release_backup,
+)
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import ArtifactIdentityReference
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -23,6 +28,7 @@ from control_plane.release_review import (
 from tests import test_production_recipient_cutover as cutover_tests
 from tests import test_production_recipient_release_recovery as recovery_tests
 from tests import test_production_recipient_runtime as runtime_tests
+from tests.test_generic_web_client_release import expired_backup_clock
 
 
 class RecipientReleaseSettingsTests(unittest.TestCase):
@@ -260,6 +266,69 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
         self.assertTrue(fixture.new_running)
         self.assertFalse(fixture.old_running)
         self.assert_ordinary_settings_handoff(final_backup)
+
+    def test_native_second_backup_can_continue_after_completed_inverse(self) -> None:
+        fixture = self.case.fixture
+        self.capture_next_backup()
+        self.advance()
+        self.advance()
+        backup_id = self.capture_next_backup()
+        operation = next(
+            row
+            for row in fixture.store.list_verireel_prod_backup_gate_operation_records()
+            if row.backup_record_id == backup_id
+        )
+        before = custody(fixture.store, fixture.record.product, fixture.record.context)
+        with (
+            expired_backup_clock(fixture.store, operation.operation_id),
+            patch(
+                "control_plane.client_release_backup_continuation.guest_capture_metadata",
+                return_value=(),
+            ),
+        ):
+            self.assertEqual(
+                releases.advance_client_releases(
+                    store=fixture.store, control_plane_root=fixture.fixture.root
+                ),
+                (),
+            )
+            continue_backup = partial(
+                continue_release_backup,
+                store=fixture.store,
+                root=fixture.fixture.root,
+                product=fixture.record.product,
+                decision_record_id=self.case.decision.record_id,
+                actor="local:fixture",
+                trace_id="fixture-backup-continuation",
+            )
+            plan = continue_backup(review=BackupContinuationReview(reason="Expired unused capture"))
+            self.assertEqual(plan.operation_id, operation.operation_id)
+            continue_backup(
+                review=BackupContinuationReview(
+                    reason="Expired unused capture", expected_digest=plan.review_digest, apply=True
+                ),
+            )
+        resumed = fixture.store.read_verireel_prod_backup_gate_operation_record(
+            operation.operation_id
+        )
+        self.assertEqual(resumed.previous_attempt, operation)
+        self.assertEqual(
+            custody(fixture.store, fixture.record.product, fixture.record.context), before
+        )
+        assert operation.binding is not None
+        with patch(
+            "tests.test_production_recipient_cutover.enqueue_production_backup_gate",
+            return_value=resumed,
+        ):
+            fixture.capture(operation.binding.policy, backup_id)
+        self.advance()
+        run = releases.read_client_release_run(
+            store=fixture.store, profile=self.profile, decision=self.case.decision
+        )
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+        self.assertTrue(fixture.new_running)
+        self.assertFalse(fixture.old_running)
 
     def assert_ordinary_settings_handoff(self, original_backup: str) -> None:
         fixture = self.case.fixture

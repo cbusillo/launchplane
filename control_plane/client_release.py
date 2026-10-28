@@ -134,7 +134,12 @@ from control_plane.contracts.idempotency_record import parse_launchplane_mutatio
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionRequest
 from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
-from control_plane.workflows.production_promotion_backup import GENERIC_WEB_PROMOTION_BACKUP_ACTION
+from control_plane.workflows.production_promotion_backup import (
+    GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+    ODOO_PROMOTION_BACKUP_ACTION,
+    ProductionBackupNotAdmissible,
+    require_production_promotion_backup,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_prod_promotion_run import (
     OdooProdPromotionRunStore,
@@ -145,7 +150,6 @@ from control_plane.workflows.production_backup_gate import (
     enqueue_production_backup_gate,
     production_backup_gate_operation_id,
 )
-from control_plane.workflows.production_promotion_backup import ODOO_PROMOTION_BACKUP_ACTION
 from control_plane.workflows.ship import utc_now_timestamp
 
 _LOGGER = logging.getLogger(__name__)
@@ -958,6 +962,25 @@ def _recipient_release_refusal(
     return ""
 
 
+def _release_backup_refusal(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    backup_record_id: str,
+) -> str:
+    try:
+        require_production_promotion_backup(
+            record_store=store,
+            product=profile.product,
+            context=_prod_context(profile),
+            instance="prod",
+            promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+            backup_record_id=backup_record_id,
+        )
+    except ProductionBackupNotAdmissible:
+        return "The release needs a fresh verified backup. An agent can continue its existing backup before deployment."
+    return ""
+
+
 def _release_run_blocked_reason(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
@@ -1015,7 +1038,8 @@ def _release_run_blocked_reason(
         return _testing_release_evidence_blocked_reason(error)
     if candidate is not None and candidate != decision.checklist.candidate:
         return _TESTING_RELEASE_CHANGED_MESSAGE
-    next_step = next(view for view in views if view.status != "pass")
+    next_index = next(index for index, view in enumerate(views) if view.status != "pass")
+    next_step = views[next_index]
     if (
         profile.driver_id == "generic-web"
         and next_step.kind == "promote"
@@ -1024,6 +1048,19 @@ def _release_run_blocked_reason(
         and (refusal := _recipient_release_refusal(recipient, decision))
     ):
         return refusal
+    if (
+        profile.driver_id == "generic-web"
+        and next_step.kind == "promote"
+        and next_step.status == "not_started"
+    ):
+        try:
+            backup = store.read_verireel_prod_backup_gate_operation_record(
+                views[next_index - 1].operation_id
+            )
+            if refusal := _release_backup_refusal(store, profile, backup.backup_record_id):
+                return refusal
+        except (FileNotFoundError, ValueError, click.ClickException):
+            return "The release's backup authority or evidence is unavailable. An agent must reconcile it before deployment."
     expected_production = (
         decision.checklist.candidate
         if next_step.kind == "rollback"
@@ -1654,6 +1691,10 @@ def _advance(
                 _generic_web_drill_target(store, profile, decision)
             return _queue_backup(store, profile, decision, step, context, authorized_at)
         backup_record_id = str(getattr(previous, "backup_record_id", ""))
+        if profile.driver_id == "generic-web" and (
+            refusal := _release_backup_refusal(store, profile, backup_record_id)
+        ):
+            raise ClientReleaseNotReady(refusal)
         return _queue_promotion(
             store,
             control_plane_root,

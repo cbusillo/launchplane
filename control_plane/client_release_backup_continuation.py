@@ -6,15 +6,22 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.client_release import (
+    CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+    ClientReleaseStep,
     ClientReleaseNotReady,
     _covering_decision,
     _generic_web_drill_target,
     _require_current_release,
+    _step_key,
+    client_release_promotion_request,
     client_release_step_operation_id,
     client_release_steps,
     client_release_grant_allows,
     read_client_release_step_views,
 )
+from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
+from control_plane.provider_operations import build_provider_operation_key
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
@@ -22,6 +29,11 @@ from control_plane.guest_capture_credentials import guest_capture_metadata
 from control_plane.odoo_business_hours import BusinessHoursHeld, require_release_window
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import resolve_production_backup_binding
+from control_plane.workflows.production_promotion_backup import (
+    ProductionBackupNotAdmissible,
+    promotion_is_temporary_admission_refusal,
+    require_production_promotion_backup,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 BACKUP_CONTINUATION_ROUTE = (
@@ -61,13 +73,126 @@ def require_precapture_failure(operation: VeriReelProdBackupGateOperationRecord)
         or operation.binding is None
         or operation.status != "fail"
         or operation.phase != "failed"
-        or operation.error_code != "backup_preflight_unavailable"
-        or operation.progress_evidence != {"provider_stage": "backup_preflight"}
+        or (operation.error_code, operation.progress_evidence)
+        not in (
+            ("backup_preflight_unavailable", {"provider_stage": "backup_preflight"}),
+            ("backup_source_busy", {}),
+        )
         or operation.result is not None
         or operation.cancellation is not None
         or not operation.finished_at
     ):
         raise BackupContinuationRefused("backup_capture_outcome_not_proven_absent")
+
+
+def require_continuable_backup(
+    store: PostgresRecordStore,
+    operation: VeriReelProdBackupGateOperationRecord,
+    backup: BackupGateRecord,
+) -> None:
+    if operation.status == "pass" and (
+        operation.schema_version != 3
+        or operation.binding is None
+        or operation.result is None
+        or operation.phase != "completed"
+        or operation.cancellation is not None
+        or not operation.finished_at
+    ):
+        raise BackupContinuationRefused("backup_capture_outcome_not_proven_absent")
+    authorization = operation.authorization
+    if authorization is None or not authorization.release_decision_record_id:
+        raise BackupContinuationRefused("backup_acceptance_provenance_invalid")
+    decision = store.read_release_review_decision_record(
+        product=operation.product, record_id=authorization.release_decision_record_id
+    )
+    profile = store.read_product_profile_record(operation.product)
+    if (
+        profile.driver_id != "generic-web"
+        or _covering_decision(store, operation.product, decision_record_id=decision.record_id)
+        is None
+        or not client_release_grant_allows(store, authorization)
+    ):
+        raise BackupContinuationRefused("backup_acceptance_provenance_invalid")
+    if (
+        operation.binding is None
+        or resolve_production_backup_binding(store, operation.binding.request) != operation.binding
+    ):
+        raise BackupContinuationRefused("backup_authority_changed")
+    steps = client_release_steps(decision.release_start)
+    index = next(
+        (
+            index
+            for index, step in enumerate(steps)
+            if step.kind == "backup"
+            and client_release_step_operation_id(profile=profile, decision=decision, step=step)
+            == operation.operation_id
+        ),
+        None,
+    )
+    if index is None:
+        raise BackupContinuationRefused("backup_continuation_scope_invalid")
+    views = read_client_release_step_views(store=store, profile=profile, decision=decision)
+    if any(view.status != "not_started" for view in views[index + 1 :]):
+        raise BackupContinuationRefused("later_release_step_already_started")
+    for promotion in store.list_promotion_records(
+        context_name=operation.context, to_instance_name=operation.instance
+    ):
+        if not promotion_is_temporary_admission_refusal(
+            promotion
+        ) and operation.backup_record_id in (
+            promotion.backup_gate.evidence.get("backup_record_id"),
+            promotion.backup_gate.evidence.get("infrastructure_backup_record_id"),
+        ):
+            raise BackupContinuationRefused("backup_capture_already_consumed")
+    from control_plane.production_recipient import custody
+    from control_plane.production_recipient_cutover import (
+        _attempt_execution_started,
+        cutover_reconciliation_key,
+    )
+
+    recipient = custody(store, operation.product, operation.context)
+    if recipient is not None and recipient.phase != "retired" and recipient.execution:
+        step = ClientReleaseStep("promote", steps[index].attempt)
+        request = client_release_promotion_request(profile, decision, operation.backup_record_id)
+        key = build_provider_operation_key(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=_step_key(decision, step),
+            request_fingerprint=hashlib.sha256(request.model_dump_json().encode()).hexdigest(),
+            reconciliation_key=cutover_reconciliation_key(recipient.plan_sha256),
+        )
+        if (
+            step.attempt == 1
+            or recipient.phase != "rolled_back"
+            or recipient.execution.get("release_trace") != f"client-release-{decision.record_id}"
+            or "reservation:"
+            + client_release_step_operation_id(profile=profile, decision=decision, step=step)
+            in recipient.execution
+            or _attempt_execution_started(recipient, key, repromote=True)
+        ):
+            raise BackupContinuationRefused("recipient_release_execution_already_started")
+    if operation.status != "pass":
+        require_precapture_failure(operation)
+        if backup.status != "fail" or backup.evidence != {
+            **operation.progress_evidence,
+            "error_message": operation.error_message,
+        }:
+            raise BackupContinuationRefused("backup_evidence_changed")
+        return
+    try:
+        require_production_promotion_backup(
+            record_store=store,
+            product=operation.product,
+            context=operation.context,
+            instance=operation.instance,
+            promotion_action=operation.binding.request.promotion_action,
+            backup_record_id=operation.backup_record_id,
+        )
+    except ProductionBackupNotAdmissible as error:
+        if error.reason in {"expired", "superseded"}:
+            return
+        raise BackupContinuationRefused("backup_capture_not_renewable") from error
+    raise BackupContinuationRefused("backup_capture_still_admissible")
 
 
 def _has_continuation_receipt(
@@ -109,27 +234,44 @@ def continue_release_backup(
     steps = client_release_steps(decision.release_start)
     if not steps or steps[0].kind != "backup":
         raise BackupContinuationRefused("backup_continuation_scope_invalid")
+    operations: dict[str, VeriReelProdBackupGateOperationRecord] = {}
+    for step in steps:
+        if step.kind != "backup":
+            continue
+        operation_id = client_release_step_operation_id(
+            profile=profile, decision=decision, step=step
+        )
+        try:
+            prior = store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        except FileNotFoundError:
+            continue
+        operations[operation_id] = prior
+        if _has_continuation_receipt(prior, review, actor):
+            return BackupContinuationResult(
+                trace_id=trace_id,
+                decision_record_id=decision_record_id,
+                operation_id=operation_id,
+                review_digest=review.expected_digest,
+                status="replayed",
+            )
+    views = read_client_release_step_views(store=store, profile=profile, decision=decision)
+    index = next((index for index, view in enumerate(views) if view.status != "pass"), len(views))
+    if index == len(views) or steps[index].kind == "rollback":
+        raise BackupContinuationRefused("later_release_step_already_started")
+    if steps[index].kind == "promote":
+        index -= 1
     operation_id = client_release_step_operation_id(
-        profile=profile, decision=decision, step=steps[0]
+        profile=profile, decision=decision, step=steps[index]
     )
     try:
-        operation = store.read_verireel_prod_backup_gate_operation_record(operation_id)
-    except FileNotFoundError as error:
+        operation = operations[operation_id]
+    except KeyError as error:
         raise BackupContinuationRefused("backup_operation_unavailable") from error
-    if _has_continuation_receipt(operation, review, actor):
-        return BackupContinuationResult(
-            trace_id=trace_id,
-            decision_record_id=decision_record_id,
-            operation_id=operation_id,
-            review_digest=review.expected_digest,
-            status="replayed",
-        )
-    require_precapture_failure(operation)
-    assert operation.binding is not None
+    if operation.binding is None:
+        raise BackupContinuationRefused("backup_capture_outcome_not_proven_absent")
     if _covering_decision(store, product, decision_record_id=decision_record_id) is None:
         raise BackupContinuationRefused("release_acceptance_no_longer_current")
-    views = read_client_release_step_views(store=store, profile=profile, decision=decision)
-    if any(view.status != "not_started" for view in views[1:]):
+    if any(view.status != "not_started" for view in views[index + 1 :]):
         raise BackupContinuationRefused("later_release_step_already_started")
     try:
         _require_current_release(store, root, profile, decision)
@@ -163,11 +305,7 @@ def continue_release_backup(
         backup = store.read_backup_gate_record(operation.backup_record_id)
     except FileNotFoundError as error:
         raise BackupContinuationRefused("backup_evidence_unavailable") from error
-    if backup.status != "fail" or backup.evidence != {
-        **operation.progress_evidence,
-        "error_message": operation.error_message,
-    }:
-        raise BackupContinuationRefused("backup_evidence_changed")
+    require_continuable_backup(store, operation, backup)
     digest = hashlib.sha256(
         json.dumps(
             {
@@ -204,6 +342,8 @@ def continue_release_backup(
                 "error_code": "",
                 "error_message": "",
                 "progress_evidence": {},
+                "result": None,
+                "attempt": 0,
                 "runner_trace_id": trace_id,
             }
         )
