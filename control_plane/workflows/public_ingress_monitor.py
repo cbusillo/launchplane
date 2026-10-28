@@ -42,6 +42,7 @@ from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
 )
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
@@ -180,6 +181,7 @@ PUBLIC_INGRESS_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"
 MISSING_AUTHORITY_SHA256 = "missing"
 DEPLOY_FENCE_PROVIDER = "launchplane"
 DEPLOY_FENCE_CHECK_NAME = "launchplane-deploy-fence"
+DEPLOY_INCIDENT_DEFERRAL = timedelta(minutes=5)
 # A deploy records its new runtime identity when its own rollout check passes,
 # and the public route can still answer from the previous container for a few
 # seconds. A mismatch is probed once more after this delay before it counts.
@@ -978,7 +980,7 @@ def run_public_ingress_monitor_once(
             target_http_get = scoped_private_get
         return check_public_ingress_target(
             target=target,
-            checked_at=observed_at,
+            checked_at=checked_at.strip() or utc_now_timestamp(),
             timeout_seconds=timeout_seconds,
             http_get=target_http_get,
             tls_get=tls_probe,
@@ -1663,6 +1665,20 @@ def _plan_public_ingress_incident_transition(
     expected_incident_sha256 = (
         public_ingress_incident_record_sha256(existing) if existing is not None else ""
     )
+    if existing is None and incident_eligible:
+        deploying = _deployment_deferring_failure(record_store, record)
+        if deploying is not None:
+            return _PlannedIncidentTransition(
+                observation=record.model_copy(
+                    update={
+                        "summary": f"{record.summary} Incident deferred during recorded deploy "
+                        f"{deploying.record_id}, bounded from {deploying.deploy.started_at}."
+                    }
+                ),
+                incidents=(),
+                incident_events=(),
+                reminder_states=(),
+            )
     incident_events: list[PublicIngressIncidentEventRecord] = []
     reconciled_duplicates: list[PublicIngressIncidentRecord] = []
     reconciled_reminder_states: list[PublicIngressIncidentReminderStateRecord] = []
@@ -3228,6 +3244,85 @@ def _profile_uses_generic_web(profile: LaunchplaneProductProfileRecord) -> bool:
         return read_driver_descriptor(profile.driver_id).base_driver_id == "generic-web"
     except FileNotFoundError:
         return False
+
+
+def _deployment_deferring_failure(
+    record_store: PublicIngressMonitorStore, record: PublicIngressObservationRecord
+) -> DeploymentRecord | None:
+    transient_codes = {
+        "http_error",
+        "health_status_error",
+        "connection_timeout",
+        "wrong_runtime_identity",
+        "unknown_error",
+    }
+    if (
+        record.purpose != "probe"
+        or record.status != "fail"
+        or record.check_kind not in {"public_http", "private_http"}
+        or any(
+            target.failure_code not in transient_codes
+            for target in record.targets
+            if target.status == "fail"
+        )
+    ):
+        return None
+    read_latest = getattr(record_store, "read_latest_lane_deployment_record", None)
+    if not callable(read_latest):
+        return None
+    deployment = cast(Callable[..., object], read_latest)(
+        context_name=record.context, instance_name=record.instance
+    )
+    if not isinstance(deployment, DeploymentRecord):
+        return None
+    identity = deployment.runtime_identity
+    owners = [
+        profile.product
+        for profile in record_store.list_product_profile_records()
+        if profile.is_active
+        and any(
+            (lane.context, lane.instance) == (record.context, record.instance)
+            for lane in profile.lanes
+        )
+    ]
+    if (
+        deployment.deploy.status != "pending"
+        or deployment.deploy.finished_at
+        or deployment.failure is not None
+        or owners != [record.product]
+        or identity is not None
+        and (identity.product, identity.context, identity.instance, identity.deployment_record_id)
+        != (record.product, record.context, record.instance, deployment.record_id)
+        or (deployment.context, deployment.instance) != (record.context, record.instance)
+    ):
+        return None
+    try:
+        started = _parse_utc_timestamp(deployment.deploy.started_at)
+        observed = _parse_utc_timestamp(record.observed_at)
+    except ValueError:
+        return None
+    if not started <= observed < started + DEPLOY_INCIDENT_DEFERRAL:
+        return None
+    previous = record_store.list_public_ingress_observation_records(
+        product=record.product,
+        context_name=record.context,
+        instance_name=record.instance,
+        check_name=record.check_name,
+        check_kind=record.check_kind,
+        limit=50,
+    )
+    preceding_probe = next(
+        (item for item in previous if item.purpose == "probe" and item.status != "skipped"), None
+    )
+    if (
+        previous
+        and preceding_probe is None
+        or preceding_probe is not None
+        and preceding_probe.status == "fail"
+        and _parse_utc_timestamp(preceding_probe.observed_at) < started
+    ):
+        return None
+    return deployment
 
 
 def _expected_runtime_identity(
