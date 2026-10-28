@@ -131,7 +131,7 @@ INTEGRATION_FAMILIES: tuple[IntegrationFamily, ...] = (
             # only providers with no remote service are exempt.
             IntegrationTableSetting(
                 table="payment_provider",
-                configured_when="state <> 'disabled' AND code NOT IN ('none', 'custom', 'demo')",
+                configured_when="coalesce(code, '') NOT IN ('none', 'custom', 'demo')",
             ),
         ),
     ),
@@ -335,13 +335,35 @@ def present_config_parameters(cursor, keys):
     return sorted(row[0] for row in cursor.fetchall())
 
 
+def payment_provider_activation(cursor: object) -> str:
+    cursor.execute(
+        "SELECT attribute.attname, format_type(attribute.atttypid, NULL)"
+        " FROM pg_attribute attribute JOIN ir_model_fields field"
+        " ON field.name = attribute.attname AND field.model = 'payment.provider'"
+        " WHERE attribute.attrelid = to_regclass('payment_provider')"
+        " AND attribute.attnum > 0 AND NOT attribute.attisdropped"
+    )
+    columns = dict(cursor.fetchall())
+    text_types = {"character varying", "text"}
+    legacy = columns.get("state") in text_types
+    current = columns.get("active") == "boolean" and columns.get("is_live") == "boolean"
+    if columns.get("code") not in text_types or legacy == current:
+        raise SystemExit("Unsupported payment_provider schema")
+    if legacy:
+        return "state IS DISTINCT FROM 'disabled'"
+    if "state" in columns:
+        raise SystemExit("Unsupported payment_provider schema")
+    return "active IS DISTINCT FROM FALSE"
+
+
 def table_is_configured(cursor, table):
     cursor.execute("SELECT to_regclass(%s) IS NOT NULL", (table["table"],))
     if not cursor.fetchone()[0]:
         return False
-    cursor.execute(
-        "SELECT EXISTS (SELECT 1 FROM " + table["table"] + " WHERE " + table["configured_when"] + ")"
-    )
+    predicate = table["configured_when"]
+    if table["table"] == "payment_provider":
+        predicate = "(" + payment_provider_activation(cursor) + ") AND " + predicate
+    cursor.execute("SELECT EXISTS (SELECT 1 FROM " + table["table"] + " WHERE " + predicate + ")")
     return bool(cursor.fetchone()[0])
 
 
