@@ -1,0 +1,105 @@
+import unittest
+
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.secret_record import SecretBinding
+from control_plane.runtime_setting_inventory import (
+    SettingAuthorityConsumer,
+    SettingConsumer,
+    setting_consumer_inventory,
+)
+from tests.support.profiles import _odoo_profile_payload_with_prod_lane
+from tests.test_reviewed_runtime_setting_removal import runtime
+
+
+class SettingConsumerInventoryTests(unittest.TestCase):
+    def test_orphan_records_retired_profiles_and_global_secret_metadata_are_included(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _odoo_profile_payload_with_prod_lane("retired-site")
+        )
+        profile = profile.model_copy(
+            update={
+                "lifecycle_state": "retired",
+                "preview": profile.preview.model_copy(
+                    update={"context": "old-site", "override_env": {"REMOVE": "private-preview"}}
+                ),
+            }
+        )
+        result = setting_consumer_inventory(
+            keys=("REMOVE",),
+            records=(
+                runtime(),
+                runtime(scope="instance", context="orphan", instance="historical"),
+                runtime(scope="context", context="empty-match", env={"OTHER": "private-other"}),
+            ),
+            profiles=(profile,),
+            targets=(
+                DokployTargetRecord(
+                    context="orphan",
+                    instance="historical",
+                    env={"REMOVE": "private-target"},
+                    updated_at="fixture-time",
+                ),
+            ),
+            bindings=(
+                SecretBinding(
+                    binding_id="private-binding",
+                    secret_id="private-secret",
+                    integration="runtime_environment",
+                    binding_key="REMOVE",
+                    created_at="fixture-time",
+                    updated_at="fixture-time",
+                ),
+            ),
+            authority_records=(
+                SettingAuthorityConsumer(
+                    kind="production_recipient",
+                    product="retained-site",
+                    context="old-site",
+                    instance="prod",
+                    state="prepared",
+                ),
+            ),
+        )
+        by_kind: dict[str, list[SettingConsumer]] = {}
+        for consumer in result.consumers:
+            by_kind.setdefault(consumer.kind, []).append(consumer)
+        self.assertTrue(any(c.context == "orphan" for c in result.consumers))
+        self.assertTrue(any(c.product == profile.product for c in result.consumers))
+        self.assertEqual(by_kind["secret_binding"][0].selected_keys, ("REMOVE",))
+        self.assertEqual(result.runtime_record_count, 3)
+        self.assertFalse(result.truncated)
+        wire = result.model_dump_json()
+        for private in (
+            "private-value",
+            "private-preview",
+            "private-target",
+            "private-secret",
+            "private-binding",
+            "private-other",
+        ):
+            self.assertNotIn(private, wire)
+
+    def test_truncation_preserves_full_population_counts_and_authority_limits(self) -> None:
+        authorities = tuple(
+            SettingAuthorityConsumer(
+                kind="reconcile_request", product=f"site-{n}", instance="testing", state="failed"
+            )
+            for n in range(3)
+        )
+        records = (runtime(), runtime(scope="context", context="undeclared"))
+        result = setting_consumer_inventory(
+            keys=("REMOVE",),
+            records=iter(records),
+            profiles=(),
+            targets=(),
+            bindings=(),
+            authority_records=iter(authorities),
+            limit=1,
+        )
+        self.assertTrue(result.truncated)
+        self.assertTrue(result.authority_records_truncated)
+        self.assertEqual(result.total_consumers, len(records))
+        self.assertEqual(result.authority_record_count, len(authorities))
+        self.assertEqual(len(result.consumers), 1)
+        self.assertEqual(len(result.authority_records), 1)

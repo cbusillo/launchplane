@@ -522,6 +522,7 @@ from control_plane.runtime_setting_removal import (
     RuntimeSettingRemovalRequest,
     RuntimeSettingRemovalPlan,
 )
+from control_plane.runtime_setting_inventory import SettingConsumerInventory
 from control_plane.service_auth import LaunchplaneIdentity
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
@@ -32297,6 +32298,55 @@ class PostgresRecordStore(HumanSessionStore):
             session.delete(row)
             session.commit()
             return "deleted"
+
+    def global_setting_consumer_inventory(
+        self, *, keys: tuple[str, ...]
+    ) -> SettingConsumerInventory:
+        from control_plane.runtime_setting_inventory import (
+            SettingAuthorityConsumer,
+            setting_consumer_inventory,
+        )
+
+        with self._session_factory() as session:
+            authorities = [
+                SettingAuthorityConsumer(
+                    kind="reconcile_request",
+                    product=row.product,
+                    instance=row.target_kind,
+                    state=row.state,
+                )
+                for row in session.scalars(select(LaunchplaneProductReconcileRequestRow)).all()
+            ]
+            authorities.extend(
+                SettingAuthorityConsumer(
+                    kind="production_recipient",
+                    product=row.product,
+                    context=row.context,
+                    instance="prod",
+                    state=str(row.payload.get("phase", "")),
+                )
+                for row in session.scalars(select(LaunchplaneProductionRecipientRow)).all()
+            )
+            return setting_consumer_inventory(
+                keys=keys,
+                records=(
+                    RuntimeEnvironmentRecord.model_validate(row.payload)
+                    for row in session.scalars(select(LaunchplaneRuntimeEnvironmentRow)).all()
+                ),
+                profiles=(
+                    self._read_product_profile_payload(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                ),
+                targets=(
+                    DokployTargetRecord.model_validate(row.payload)
+                    for row in session.scalars(select(LaunchplaneDokployTargetRow)).all()
+                ),
+                bindings=(
+                    SecretBinding.model_validate(row.payload)
+                    for row in session.scalars(select(LaunchplaneSecretBindingRow)).all()
+                ),
+                authority_records=authorities,
+            )
 
     def runtime_setting_removal(
         self,
