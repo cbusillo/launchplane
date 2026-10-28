@@ -46,7 +46,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import create_engine, delete, event, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from psycopg.errors import LockNotAvailable
 
@@ -16632,8 +16632,105 @@ class RealPostgresCalendarProfileFenceTests(unittest.TestCase):
 
 
 class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
+    def test_snapshot_settings_restore_on_sql_failure_without_rolling_back_outer_work(self) -> None:
+        from control_plane.database_maintenance import _schema_deparse_settings
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text("CREATE TABLE setting_scope_sample(id integer PRIMARY KEY)")
+                )
+                connection.execute(text("INSERT INTO setting_scope_sample VALUES(1)"))
+                connection.execute(text("SET LOCAL standard_conforming_strings=off"))
+                original = connection.execute(
+                    text(
+                        "SELECT current_setting('search_path'),current_setting('standard_conforming_strings')"
+                    )
+                ).one()
+                with self.assertRaises(DBAPIError):
+                    with _schema_deparse_settings(connection):
+                        connection.execute(text("SELECT 1/0"))
+                self.assertEqual(
+                    connection.execute(
+                        text(
+                            "SELECT current_setting('search_path'),current_setting('standard_conforming_strings')"
+                        )
+                    ).one(),
+                    original,
+                )
+                self.assertEqual(
+                    connection.scalar(text("SELECT count(*) FROM setting_scope_sample")), 1
+                )
+
+    def test_reparsed_constraint_and_partial_index_keep_schema_but_changes_do_not(self) -> None:
+        from control_plane.database_maintenance import database_snapshot
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE scalar_array_sample(id integer PRIMARY KEY, state varchar, value text, CONSTRAINT scalar_array_state_ck CHECK(state IN ('queued','done')))"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "CREATE UNIQUE INDEX scalar_array_value_idx ON scalar_array_sample(value) WHERE state IN ('queued','done')"
+                    )
+                )
+                connection.execute(
+                    text("INSERT INTO scalar_array_sample VALUES(1,'queued','original')")
+                )
+                before = database_snapshot(connection)
+                constraint = connection.scalar(
+                    text(
+                        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='scalar_array_sample'::regclass AND conname='scalar_array_state_ck'"
+                    )
+                )
+                index = connection.scalar(
+                    text("SELECT pg_get_indexdef('scalar_array_value_idx'::regclass)")
+                )
+                assert isinstance(constraint, str) and isinstance(index, str)
+                connection.execute(
+                    text("ALTER TABLE scalar_array_sample DROP CONSTRAINT scalar_array_state_ck")
+                )
+                connection.exec_driver_sql(
+                    "ALTER TABLE scalar_array_sample ADD CONSTRAINT scalar_array_state_ck "
+                    + constraint
+                )
+                connection.execute(text("DROP INDEX scalar_array_value_idx"))
+                connection.exec_driver_sql(index)
+                self.assertEqual(database_snapshot(connection), before)
+                connection.execute(
+                    text("ALTER TABLE scalar_array_sample DROP CONSTRAINT scalar_array_state_ck")
+                )
+                connection.execute(
+                    text(
+                        "ALTER TABLE scalar_array_sample ADD CONSTRAINT scalar_array_state_ck CHECK(state IN ('queued'))"
+                    )
+                )
+                self.assertNotEqual(database_snapshot(connection), before)
+                connection.execute(
+                    text("ALTER TABLE scalar_array_sample DROP CONSTRAINT scalar_array_state_ck")
+                )
+                connection.exec_driver_sql(
+                    "ALTER TABLE scalar_array_sample ADD CONSTRAINT scalar_array_state_ck "
+                    + constraint
+                )
+                self.assertEqual(database_snapshot(connection), before)
+                connection.execute(text("DROP INDEX scalar_array_value_idx"))
+                connection.execute(
+                    text(
+                        "CREATE UNIQUE INDEX scalar_array_value_idx ON scalar_array_sample(value) WHERE state='queued'"
+                    )
+                )
+                self.assertNotEqual(database_snapshot(connection), before)
+
     def test_hold_blocks_writes_but_allows_its_exported_backup_snapshot(self) -> None:
-        from control_plane.database_maintenance import locked_database
+        from control_plane.database_maintenance import locked_database, database_snapshot
         from sqlalchemy.pool import NullPool
 
         with _isolated_postgres_database() as url:
@@ -16646,6 +16743,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 with locked_database(
                     keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=20)
                 ):
+                    database_snapshot(keeper)
                     snapshot = keeper.scalar(text("SELECT pg_export_snapshot()"))
                     with engine.connect() as reader:
                         reader.execute(text("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"))

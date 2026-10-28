@@ -30,6 +30,116 @@ from tempfile import TemporaryDirectory
 import io
 
 
+class DatabaseMaintenanceSchemaSnapshotTests(unittest.TestCase):
+    @staticmethod
+    def metadata(category: str, definition: str) -> dict[str, object]:
+        return {
+            "constraints": [],
+            "indexes": [],
+            "triggers": [],
+            "columns": [["state", "character varying"]],
+            **{category: [definition]},
+        }
+
+    def test_logical_literal_array_cast_rewrites_keep_the_schema_fingerprint(self) -> None:
+        pairs = (
+            (
+                "CHECK (state::text = ANY (ARRAY['queued'::character varying, 'done'::character varying]::text[]))",
+                "CHECK (state::text = ANY (ARRAY['queued'::character varying::text, 'done'::character varying::text]))",
+            ),
+            (
+                "CREATE UNIQUE INDEX state_idx ON public.example USING btree (id) WHERE ((state)::text = ANY ((ARRAY['queued'::character varying, 'done'::character varying])::text[]))",
+                "CREATE UNIQUE INDEX state_idx ON public.example USING btree (id) WHERE ((state)::text = ANY (ARRAY[('queued'::character varying)::text, ('done'::character varying)::text]))",
+            ),
+        )
+        for category, pair in zip(("constraints", "indexes"), pairs, strict=True):
+            before, restored = pair
+            self.assertEqual(
+                database_maintenance._schema_sha256(self.metadata(category, before)),
+                database_maintenance._schema_sha256(self.metadata(category, restored)),
+            )
+
+    def test_function_overloads_and_other_semantic_changes_remain_distinct(self) -> None:
+        pairs = (
+            (
+                "CHECK (f(ARRAY['a'::character varying])::text[] IS NOT NULL)",
+                "CHECK (f(ARRAY['a'::text])::text[] IS NOT NULL)",
+            ),
+            (
+                "CHECK (state = ANY (ARRAY['a'::character varying]::text[]))",
+                "CHECK (state = ANY (ARRAY['b'::character varying]::text[]))",
+            ),
+            (
+                "CHECK (state = ANY (ARRAY['a'::character varying]::text[]))",
+                "CHECK (state <> ANY (ARRAY['a'::text]))",
+            ),
+            (
+                "CHECK (state = ANY (ARRAY['a,b'::character varying]::text[]))",
+                "CHECK (state = ANY (ARRAY['a'::text, 'b'::text]))",
+            ),
+            (
+                "CHECK (state = ANY (ARRAY['ab'::character varying(1)]::text[]))",
+                "CHECK (state = ANY (ARRAY['ab'::text]))",
+            ),
+        )
+        for before, changed in pairs:
+            with self.subTest(before=before):
+                self.assertNotEqual(
+                    database_maintenance._schema_sha256(self.metadata("constraints", before)),
+                    database_maintenance._schema_sha256(self.metadata("constraints", changed)),
+                )
+
+    def test_unknown_casts_expressions_and_quoted_content_remain_byte_exact(self) -> None:
+        expressions = (
+            "ARRAY['a'::character varying(1)]::text[]",
+            "ARRAY['a'::text]::character varying(1)[]",
+            "ARRAY['ab'::character varying::text]::character varying(1)[]",
+            "ARRAY['a'::character varying]::text[] COLLATE \"C\"",
+            "ARRAY[NULL::character varying]::text[]",
+            "ARRAY[f()::character varying]::text[]",
+            "ARRAY['a'::public.text]::text[]",
+            "ARRAY['a'::\"text\"]::text[]",
+            "ARRAY['a'::character(1)]::text[]",
+            "ARRAY['a'::bpchar]::text[]",
+            "ARRAY['a'::text COLLATE \"C\"]",
+            "ARRAY[E'a\\nb'::character varying]::text[]",
+            "ARRAY[ARRAY['a'::character varying]]::text[]",
+        )
+        definitions = ["CHECK (state = ANY (" + expression + "))" for expression in expressions]
+        definitions.extend(
+            (
+                "CHECK (note <> 'ARRAY[''a''::character varying]::text[]')",
+                "CREATE INDEX \"ARRAY['a'::character varying]::text[]\" ON public.example (id)",
+                "CHECK (f(ARRAY['a'::character varying])::text[] IS NOT NULL)",
+            )
+        )
+        for definition in definitions:
+            with self.subTest(definition=definition):
+                self.assertEqual(
+                    database_maintenance._normalize_scalar_array_literals(definition), definition
+                )
+
+    def test_scalar_array_literal_quotes_spaces_and_repeat_normalization_are_preserved(
+        self,
+    ) -> None:
+        before = "CHECK (state = ALL (ARRAY['a''b'::character varying, 'a,b'::character varying, 'a '::character varying]::text[]))"
+        restored = "CHECK (state = ALL (ARRAY['a''b'::text, 'a,b'::text, 'a '::text]))"
+        normalized = database_maintenance._normalize_scalar_array_literals(before)
+        self.assertEqual(normalized, restored)
+        self.assertEqual(
+            database_maintenance._normalize_scalar_array_literals(normalized), normalized
+        )
+
+    def test_trigger_code_and_column_metadata_are_not_normalized(self) -> None:
+        before = "state = ANY (ARRAY['a'::character varying]::text[])"
+        after = "state = ANY (ARRAY['a'::text])"
+        for category in ("triggers", "columns"):
+            self.assertNotEqual(
+                database_maintenance._schema_sha256(self.metadata(category, before)),
+                database_maintenance._schema_sha256(self.metadata(category, after)),
+            )
+
+
 class DatabaseMaintenanceIsolationTests(unittest.TestCase):
     def test_cli_emits_terminal_database_and_deployment_results_for_the_host(self) -> None:
         with TemporaryDirectory() as temporary:

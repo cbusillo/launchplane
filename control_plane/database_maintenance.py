@@ -134,6 +134,116 @@ def locked_database(
             connection.commit()
 
 
+_SCHEMA_SQL_TOKENS = re.compile(
+    r"[eE]'(?:''|\\.|[^'\\])*'|(?:[uU]&|[bBxX])?'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|::|[A-Za-z_][A-Za-z_0-9$]*|\S"
+)
+
+
+def _parse_literal_text_casts(tokens: list[str]) -> tuple[str, str] | None:
+    offset = 0
+    while offset < len(tokens) and tokens[offset] == "(":
+        offset += 1
+    depth = offset
+    if offset == len(tokens) or not tokens[offset].startswith("'"):
+        return None
+    literal, kind = tokens[offset], "unknown"
+    offset += 1
+    while offset < len(tokens):
+        if tokens[offset] == ")" and depth:
+            depth -= 1
+            offset += 1
+        elif tokens[offset : offset + 3] == ["::", "character", "varying"]:
+            kind, offset = "varchar", offset + 3
+        elif tokens[offset : offset + 2] == ["::", "text"]:
+            kind, offset = "text", offset + 2
+        else:
+            return None
+    return None if depth else (literal, kind)
+
+
+def _normalize_scalar_array_literals(definition: str) -> str:
+    matches = list(_SCHEMA_SQL_TOKENS.finditer(definition))
+    tokens = [match.group() for match in matches]
+    replacements: list[tuple[int, int, str]] = []
+    for index, token in enumerate(tokens):
+        if token != "ARRAY" or tokens[index + 1 : index + 2] != ["["]:
+            continue
+        direct = index >= 2 and tokens[index - 1] == "(" and tokens[index - 2] in {"ANY", "ALL"}
+        grouped = (
+            index >= 3
+            and tokens[index - 2 : index] == ["(", "("]
+            and tokens[index - 3] in {"ANY", "ALL"}
+        )
+        if not direct and not grouped:
+            continue
+        closing = index + 2
+        items: list[list[str]] = [[]]
+        while closing < len(tokens) and tokens[closing] != "]":
+            if tokens[closing] == ",":
+                items.append([])
+            else:
+                items[-1].append(tokens[closing])
+            closing += 1
+        if closing == len(tokens):
+            continue
+        parsed = [_parse_literal_text_casts(item) for item in items]
+        if any(item is None for item in parsed):
+            continue
+        values = [item for item in parsed if item is not None]
+        start, end = index, closing + 1
+        outer = ["::", "text", "[", "]"]
+        if direct and tokens[end : end + 4] == outer:
+            end += 4
+        elif grouped and tokens[end : end + 5] == [")", *outer]:
+            start, end = index - 1, end + 5
+        elif not direct or not all(kind == "text" for _, kind in values):
+            continue
+        if tokens[end : end + 1] != [")"]:
+            continue
+        canonical = "ARRAY[" + ", ".join(literal + "::text" for literal, _ in values) + "]"
+        replacements.append((matches[start].start(), matches[end - 1].end(), canonical))
+    result = definition
+    for start, end, canonical in reversed(replacements):
+        result = result[:start] + canonical + result[end:]
+    return result
+
+
+def _schema_sha256(metadata: dict[str, Any]) -> str:
+    normalized = {
+        **metadata,
+        **{
+            category: [_normalize_scalar_array_literals(value) for value in metadata[category]]
+            for category in ("constraints", "indexes")
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+@contextmanager
+def _schema_deparse_settings(connection: Connection) -> Iterator[None]:
+    with connection.begin_nested():
+        previous: dict[str, str] = {}
+        for setting, value in (
+            ("standard_conforming_strings", "on"),
+            ("search_path", "pg_catalog, public"),
+        ):
+            previous[setting] = connection.scalar(
+                text("SELECT current_setting(:setting)"), {"setting": setting}
+            )
+            connection.execute(
+                text("SELECT set_config(:setting, :value, true)"),
+                {"setting": setting, "value": value},
+            )
+        yield
+        for setting, value in previous.items():
+            connection.execute(
+                text("SELECT set_config(:setting, :value, true)"),
+                {"setting": setting, "value": value},
+            )
+
+
 def database_snapshot(connection: Connection) -> dict[str, Any]:
     for setting, value in (
         ("TimeZone", "UTC"),
@@ -145,6 +255,11 @@ def database_snapshot(connection: Connection) -> dict[str, Any]:
         connection.execute(
             text("SELECT set_config(:setting, :value, true)"), {"setting": setting, "value": value}
         )
+    with _schema_deparse_settings(connection):
+        return _collect_database_snapshot(connection)
+
+
+def _collect_database_snapshot(connection: Connection) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for name in sorted(inspect(connection).get_table_names(schema="public")):
         quoted = connection.dialect.identifier_preparer.quote(name)
@@ -205,9 +320,7 @@ def database_snapshot(connection: Connection) -> dict[str, Any]:
             )
         metadata["columns"] = [list(row) for row in columns]
         result[name] = {
-            "schema_sha256": hashlib.sha256(
-                json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest(),
+            "schema_sha256": _schema_sha256(metadata),
             "rows": count,
             "sha256": digest.hexdigest(),
         }
