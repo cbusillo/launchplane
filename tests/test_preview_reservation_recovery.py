@@ -217,13 +217,29 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         from tests.support.auth import scoped_agent_transport, local_operator_policy
         from tests.support.http import request as http_request
         from httpx2 import Response
+        from control_plane.contracts.authz_policy_record import (
+            LaunchplaneAuthzPolicyRecord,
+            authz_policy_sha256,
+            build_authz_policy_record_id,
+        )
 
+        policy = local_operator_policy(
+            actions=("odoo_website_bootstrap_override.write",),
+            token_label="local-owner-read",
+        )
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                source="test:preview-bootstrap",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+        )
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
-            authz_policy=local_operator_policy(
-                actions=("odoo_website_bootstrap_override.write",),
-                token_label="local-owner-read",
-            ),
+            authz_policy=policy,
             bearer_identity_config=_local_operator_bearer_config(),
             record_store_factory=lambda: self.store,
             control_plane_root_path=self.root,
@@ -253,7 +269,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             )
 
         plan = post(payload)
-        self.assertEqual(plan.status_code, 202)
+        self.assertEqual(plan.status_code, 202, plan.text)
         with scoped_agent_transport():
             self.assertEqual(post(payload).status_code, 403)
             unknown_original: dict[str, object] = {
