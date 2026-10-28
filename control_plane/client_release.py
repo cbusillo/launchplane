@@ -98,6 +98,7 @@ from control_plane.contracts.release_review import (
     AcceptanceReleaseStart,
     ReleaseReviewDecisionRecord,
     ReleaseStart,
+    ReleaseVersion,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -896,17 +897,64 @@ def _release_recipient(
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
 ) -> ProductionRecipientRecord | None:
+    return native_release_recipient(
+        store,
+        profile,
+        candidate=decision.checklist.candidate,
+        decision_record_id=decision.record_id,
+    )
+
+
+def native_release_recipient(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    *,
+    candidate: ReleaseVersion | None = None,
+    decision_record_id: str = "",
+) -> ProductionRecipientRecord | None:
     from control_plane.production_recipient import custody
 
     recipient = custody(store, profile.product, _prod_context(profile))
     if recipient is None or recipient.phase == "retired":
         return None
-    if (
-        recipient.phase == "published"
-        and decision.checklist.candidate.source_commit != recipient.request.source_commit
-    ):
+    if recipient.phase != "published":
+        return recipient
+    if candidate is None:
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        source_commit = store.read_environment_inventory(
+            context_name=lane.context, instance_name=lane.instance
+        ).source_git_ref
+    else:
+        source_commit = candidate.source_commit
+    if source_commit != recipient.request.source_commit:
         return None
-    return recipient
+    trace = recipient.execution.get("release_trace", "")
+    if not isinstance(trace, str) or not trace.startswith("client-release-"):
+        return recipient
+    owner_id = trace.removeprefix("client-release-")
+    if not owner_id or owner_id == decision_record_id:
+        return recipient
+    try:
+        owner = store.read_release_review_decision_record(
+            product=profile.product, record_id=owner_id
+        )
+    except FileNotFoundError:
+        return recipient
+    if (
+        owner.product != recipient.product
+        or owner.checklist.candidate.artifact_id != recipient.image_reference
+        or owner.checklist.candidate.source_commit != recipient.request.source_commit
+        or owner.checklist.candidate.runtime_settings is not None
+    ):
+        return recipient
+    steps = client_release_steps(owner.release_start)
+    if (
+        not steps
+        or steps[0].kind != "backup"
+        or any(_step_status(store, profile, owner, step)[0] != "pass" for step in steps)
+    ):
+        return recipient
+    return None
 
 
 def _recipient_release_refusal(
