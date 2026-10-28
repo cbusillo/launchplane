@@ -22535,7 +22535,11 @@ def create_launchplane_fastapi_app(
                 ) from error
 
         def binding_refresh_action(binding_record: EnvironmentRouteBindingRecord | None) -> str:
-            if binding_record is not None and binding_record.ingress.provider == "external":
+            if (
+                remaining
+                and binding_record is not None
+                and binding_record.ingress.provider == "external"
+            ):
                 return (
                     "route_binding.external.apply"
                     if refresh_request.mode == "apply"

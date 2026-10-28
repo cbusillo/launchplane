@@ -385,6 +385,12 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
         excluded = _service_binding().model_copy(
             update={"product": "excluded-product", "context": "excluded-testing"}
         )
+        excluded = EnvironmentRouteBindingRecord.model_validate(
+            {
+                **excluded.model_dump(mode="json"),
+                "ingress": {**excluded.ingress.model_dump(mode="json"), "provider": "external"},
+            }
+        )
         store.write_product_profile_record(
             _profile(
                 product=excluded.product,
@@ -394,9 +400,27 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
         store.write_route_binding_record(excluded)
         for mode in ("dry-run", "apply"):
             with self.subTest(mode=mode):
+                policy = _controller_policy(mode="plan" if mode == "dry-run" else mode)
+                policy = LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        **policy.model_dump(mode="json"),
+                        "github_actions": [
+                            *policy.model_dump(mode="json")["github_actions"],
+                            {
+                                **policy.github_actions[-1].model_dump(mode="json"),
+                                "products": [excluded.product],
+                                "contexts": [excluded.context],
+                                "actions": [
+                                    "route_binding.external.plan",
+                                    "route_binding.external.apply",
+                                ],
+                            },
+                        ],
+                    }
+                )
                 app = create_launchplane_fastapi_app(
                     verifier=_StubVerifier(_identity()),
-                    authz_policy=_controller_policy(mode="plan" if mode == "dry-run" else mode),
+                    authz_policy=policy,
                     record_store_factory=lambda: store,
                 )
                 with (
@@ -617,7 +641,7 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied_replay.json()["error"]["code"], "authorization_denied")
         self.assertIsNotNone(parent_idempotency)
 
-    async def test_apply_requires_every_discovered_binding_authority(self) -> None:
+    async def test_apply_denies_when_no_discovered_binding_is_authorized(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(
