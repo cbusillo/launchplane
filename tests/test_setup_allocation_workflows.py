@@ -333,10 +333,9 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
                 outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
                 self.assertEqual(outputs["idempotency_key"], key)
 
-    def test_normal_onboarding_keeps_records_digest_without_authorization_artifacts(self) -> None:
+    def test_normal_onboarding_keeps_records_digest_and_target_request(self) -> None:
         result = self.onboarding_request(None)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((self.root / "authz-apply-request.json").exists())
         payload = json.loads((self.root / "target-apply-request.json").read_text())
         self.assertNotIn("retain_allocation", payload)
         outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())

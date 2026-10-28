@@ -17805,8 +17805,11 @@ def create_launchplane_fastapi_app(
                         context_name=onboarding_request.generic_web.testing_context,
                         instance_name="testing",
                     )
-                except FileNotFoundError:
-                    pass
+                except FileNotFoundError as error:
+                    if isinstance(identity, GitHubHumanIdentity):
+                        raise ValueError(
+                            "Browser onboarding requires the recorded testing application from target setup."
+                        ) from error
                 else:
                     adopted_onboarding_target_id = database_store.read_dokploy_target_id_record(
                         context_name=adopted_onboarding_target.context,

@@ -1208,7 +1208,9 @@ The set deliberately leaves out:
 
 - `product_onboarding.apply`. It is checked on product `launchplane` with no
   product or lane scope, so it would reach every product. Adding the lane record
-  stays with Launchplane's own onboarding workflow.
+  uses Launchplane's onboarding record route, through the compatibility workflow
+  or a signed-in admin session. Browser generic-web apply requires the recorded
+  testing application from target setup.
 - `dokploy_target.setup`. It is checked on product and context `launchplane`,
   so it reaches every product's Dokploy targets. `dokploy_target.lane_setup` is
   the lane-scoped alternative (see the Dokploy target setup section in

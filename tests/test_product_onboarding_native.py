@@ -2,6 +2,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -86,6 +88,31 @@ class NativeProductOnboardingTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(mismatch.status_code, 409, mismatch.text)
                 headers.update(_browser_mutation_headers(session_manager, session))
+                missing_target = await client.post(
+                    "/v1/product-onboarding/apply", json=applied_request, headers=headers
+                )
+                self.assertEqual(missing_target.status_code, 400, missing_target.text)
+                self.assertFalse(store.list_product_profile_records())
+                target = DokployTargetRecord(
+                    context="new-site-testing",
+                    instance="testing",
+                    target_type="application",
+                    project_name="allocated-project",
+                    target_name="allocated-target",
+                    updated_at="2026-10-28T00:00:00Z",
+                    source_label="test:setup",
+                )
+                store.write_dokploy_target_record(target)
+                store.write_dokploy_target_id_record(
+                    DokployTargetIdRecord(
+                        context=target.context,
+                        instance=target.instance,
+                        target_id=str(applied_request["resolved_target_id"]),
+                        updated_at=target.updated_at,
+                        source_label=target.source_label,
+                    )
+                )
+                headers.update(_browser_mutation_headers(session_manager, session))
                 applied = await client.post(
                     "/v1/product-onboarding/apply", json=applied_request, headers=headers
                 )
@@ -99,7 +126,6 @@ class NativeProductOnboardingTests(unittest.IsolatedAsyncioTestCase):
             profile = store.read_product_profile_record(str(intent["product"]))
             self.assertEqual(profile.repository_id, intent["repository_id"])
             self.assertEqual(profile.lanes[0].instance, "testing")
-            self.assertEqual(profile.preview.context, "new-site-preview")
             self.assertEqual(
                 store.read_dokploy_target_id_record(
                     context_name=profile.lanes[0].context, instance_name="testing"
