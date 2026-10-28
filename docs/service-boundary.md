@@ -1949,7 +1949,19 @@ without an additional grant. This exception cannot remove requirements or
 publish Client credential requests through `owner_input`, and does not extend
 to other agent identities. Other callers and removals require
 `product_profile.expected_config.apply` for the target product in the
-Launchplane service context. The route loads the existing DB-backed product profile,
+Launchplane service context.
+On a Live product, `local_operator` apply outside the Director add-only exception
+returns `live_product_requires_operator` even with that grant; inert dry runs
+require existing plan or apply authority unless the Director declaration exception
+applies. Browser CSRF and read-only identity
+restrictions remain in force. The Director may add a positive external-provider
+purpose to an existing nonlocal requirement while preserving its other metadata.
+Clearing purpose, enabling or retiring existing generation intent, or declaring
+a provider that shadows a local key requires `product_profile.expected_config.apply` and retains
+the Live-product admin boundary. Odoo's driver-owned local passwords cannot be
+declared external through any profile input path. Completed exact-key receipts
+replay before current-state retirement checks; new writes compare the same
+captured profile that passed those checks. The route loads the existing DB-backed product profile and
 appends supplied runtime keys or managed secret binding requirements only when
 absent, and removes requirements named in `remove_runtime_environment_keys` or
 `remove_managed_secret_bindings`. Adding and removing the same identity in one
@@ -2266,8 +2278,9 @@ site's own setting. Because no declaration vouches for it, Launchplane refuses
 it with `runtime_setting_refused` when it is not an env key name, names a
 declared managed-secret binding, or looks like a credential by name or value.
 On a `live` product, the `local_operator` credential cannot apply an
-undeclared setting (`live_product_requires_operator`), the same guard as
-declaring a key. The authenticated Director agent may dry-run those settings
+undeclared setting (`live_product_requires_operator`). Expected-config
+declarations follow the [product profile contract](#product-profile-endpoints).
+The authenticated Director agent may dry-run those settings
 on testing, production or context scope; planning persists only its own review
 evidence and grants no apply authority. Other scoped callers retain their
 existing authorization and live-product guard. `retired_provider_keys` adds keys
