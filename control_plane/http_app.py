@@ -5429,9 +5429,6 @@ def create_launchplane_fastapi_app(
         policy_record_reader=lambda: read_active_authz_policy_record(get_record_store()),
         github_login_reader=github_account_login,
         github_account_reader=github_account_for_login,
-        read_configured_terminal_identity=lambda: configured_terminal_agent_identity(
-            bearer_identity_config or BearerIdentityConfig()
-        ),
         read_configured_local_operator_identity=lambda: configured_local_operator_identity(
             bearer_identity_config or BearerIdentityConfig()
         ),

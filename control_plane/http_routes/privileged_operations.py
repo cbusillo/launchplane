@@ -120,7 +120,6 @@ class PrivilegedOperationRouteDependencies:
     policy_record_reader: Callable[[], object] | None = None
     github_login_reader: Callable[[int], str] = lambda _: ""
     github_account_reader: AccountReader = lambda _: None
-    read_configured_terminal_identity: Callable[[], TerminalAgentIdentity | None] = lambda: None
     read_configured_local_operator_identity: Callable[[], LocalOperatorIdentity | None] = lambda: (
         None
     )
@@ -1515,7 +1514,6 @@ def register_privileged_operation_routes(
                 github_id=identity.github_id,
                 intent=envelope.intent,
                 record_store=record_store,
-                configured_terminal_identity=dependencies.read_configured_terminal_identity(),
                 configured_local_operator_identity=(
                     dependencies.read_configured_local_operator_identity()
                 ),

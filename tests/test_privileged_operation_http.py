@@ -411,7 +411,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         | LocalOperatorIdentity
         | LocalAdminIdentity
         | None = None,
-        configured_terminal_identity: TerminalAgentIdentity | None = None,
         configured_local_operator_identity: LocalOperatorIdentity | None = None,
         policy_record_reader: Callable[[], object] | None = None,
         github_login_reader: Callable[[int], str] = lambda _: "",
@@ -459,7 +458,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 policy_reader=lambda: policy,
                 policy_record_reader=policy_record_reader or (lambda: _policy_record(policy)),
                 github_login_reader=github_login_reader,
-                read_configured_terminal_identity=lambda: configured_terminal_identity,
                 read_configured_local_operator_identity=(
                     lambda: configured_local_operator_identity
                 ),
@@ -730,74 +728,41 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(review.json()["review"]["operation_id"], operation_records[0].operation_id)
         self.assertEqual(policy_record, active_policy_record)
 
-    async def test_terminal_enrollment_candidate_plans_without_active_policy_or_principal_write(
-        self,
-    ) -> None:
+    async def test_retired_terminal_enrollment_candidate_cannot_create_a_plan(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
             )
+            self.addCleanup(store.close)
             store.ensure_schema()
             policy = _policy()
             policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
-            terminal = TerminalAgentIdentity(
-                subject="trusted-terminal", token_label="owner-terminal"
-            )
             app = self._app(
                 store=store,
                 policy=policy,
                 policy_record_reader=lambda: policy_record,
-                configured_terminal_identity=terminal,
             )
-            payload = {
-                "candidate_id": "ordinary-agent-enrollment-requester",
-                "intent": "add",
-                "source_event_id": "ui:terminal-enrollment:stable-retry",
-            }
             async with lifespan_client(app) as client:
-                first = await client.post(
-                    "/v1/privileged-operations/authorization-candidates/prepare", json=payload
-                )
-                replay = await client.post(
-                    "/v1/privileged-operations/authorization-candidates/prepare", json=payload
-                )
-                conflict = await client.post(
-                    "/v1/privileged-operations/authorization-candidates/prepare",
-                    json={**payload, "intent": "remove"},
-                )
-                review = await client.get(
-                    f"/v1/privileged-operations/plans/{first.json()['operation_id']}/review"
-                )
-            records = store.list_privileged_operation_records(limit=None)
-            active_policy_record = store.list_authz_policy_records(status="active", limit=2)[0]
-            store.close()
+                for intent in ("add", "remove"):
+                    with self.subTest(intent=intent):
+                        response = await client.post(
+                            "/v1/privileged-operations/authorization-candidates/prepare",
+                            json={
+                                "candidate_id": "ordinary-agent-enrollment-requester",
+                                "intent": intent,
+                                "source_event_id": f"retired-terminal-enrollment:{intent}",
+                            },
+                        )
+                        self.assertEqual(response.status_code, 422, response.text)
+            self.assertEqual(store.list_privileged_operation_records(), ())
+            self.assertEqual(
+                store.list_authz_policy_records(status="active", limit=2), (policy_record,)
+            )
 
-        self.assertEqual(first.status_code, 200, first.text)
-        self.assertEqual(replay.json()["operation_id"], first.json()["operation_id"])
-        self.assertEqual(conflict.status_code, 409, conflict.text)
-        self.assertEqual(len(records), 1)
-        self.assertEqual(policy_record, active_policy_record)
-        self.assertEqual(
-            review.json()["review"]["title"], "Review terminal client connection requests"
-        )
-        self.assertIn(
-            "separate administrator approval", review.json()["review"]["change"]["summary"]
-        )
-        semantic = review.json()["review"]
-        principal_display = semantic.pop("access_policy")
-        self.assertIn(terminal.token_label, json.dumps(principal_display))
-        self.assertNotIn(terminal.token_label, json.dumps(semantic))
+    async def test_retained_terminal_enrollment_removal_is_reviewable(self) -> None:
+        from tests.test_authz_candidate_preparation import _terminal_enrollment_request
 
-    async def test_terminal_enrollment_removal_review_keeps_existing_client_state(self) -> None:
-        terminal = TerminalAgentIdentity(subject="trusted-terminal", token_label="owner-terminal")
-        from control_plane.authz_candidate_preparation import (
-            compile_terminal_enrollment_policy_candidate,
-        )
-
-        _, addition = compile_terminal_enrollment_policy_candidate(
-            current_policy=_policy(), identity=terminal
-        )
-        assert addition is not None
+        addition = _terminal_enrollment_request(intent="add")
         policy_payload = _policy().model_dump(mode="json")
         policy_payload["terminal_agents"] = [
             rule.model_dump(mode="json") for rule in addition.desired_policy.terminal_agents
@@ -813,31 +778,26 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 store=store,
                 policy=policy,
                 policy_record_reader=lambda: policy_record,
-                configured_terminal_identity=None,
             )
             async with lifespan_client(app) as client:
                 prepared = await client.post(
-                    "/v1/privileged-operations/authorization-candidates/prepare",
+                    "/v1/privileged-operations/plans",
                     json={
-                        "candidate_id": "ordinary-agent-enrollment-requester",
-                        "intent": "remove",
-                        "source_event_id": "ui:terminal-enrollment:remove",
+                        "descriptor_id": "managed-authz-policy-set",
+                        "source_event_id": "historical-terminal-enrollment:remove",
+                        "request": _terminal_enrollment_request(intent="remove").model_dump(
+                            mode="json"
+                        ),
                     },
                 )
+                self.assertEqual(prepared.status_code, 200, prepared.text)
                 review = await client.get(
-                    f"/v1/privileged-operations/plans/{prepared.json()['operation_id']}/review"
+                    f"/v1/privileged-operations/plans/{prepared.json()['record']['operation_id']}/review"
                 )
             store.close()
 
         self.assertEqual(prepared.status_code, 200, prepared.text)
-        self.assertEqual(
-            review.json()["review"]["title"],
-            "Review removing terminal client connection requests",
-        )
-        self.assertIn(
-            "Existing ordinary credentials, sessions, ordinary rules, and delivery activation are not revoked.",
-            review.json()["review"]["change"]["summary"],
-        )
+        self.assertEqual(review.status_code, 200, review.text)
 
     async def test_closed_authorization_candidate_active_is_noop(self) -> None:
         policy_payload = _policy().model_dump(mode="json")
@@ -2187,7 +2147,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                         json=_managed_authz_plan_payload("refused-local-proposal"),
                     )
                 self.assertEqual(response.status_code, 403, response.text)
-                self.assertEqual(store.list_privileged_operation_records(limit=None), ())
+                self.assertEqual(store.list_privileged_operation_records(), ())
 
     async def test_agent_proposer_candidate_is_server_derived_pending_and_replay_bound(
         self,
