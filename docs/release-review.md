@@ -1124,6 +1124,13 @@ refusals. Repeated refusals do not turn an unstarted step into an interrupted
 deployment. An existing or dispatched attempt keeps its original recovery fence;
 a qualified retest cannot stand in for proof that its uncertain effects ended.
 
+Odoo stable replacement admits both the recorded lane build and the provider's
+runtime identity before writing a pending deployment. A temporary source-history
+outage before replacement writes keeps the accepted operation pending without a
+failed production deployment record or a delivery-failure incident from that
+attempt. Testing refusals still record failures; dispatched or uncertain attempts
+keep their failure evidence and recovery fences. Backup gates are unchanged.
+
 Before the first backup, a generic-web drill requires a deployable passing
 production record for the checklist's exact artifact and source commit. A
 missing target is shown as a release blocker without changing production.

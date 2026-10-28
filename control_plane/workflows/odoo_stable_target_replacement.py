@@ -2127,23 +2127,6 @@ def execute_odoo_stable_target_replacement_apply(
         )
     if generation is not None and generation.drill_database:
         runtime_source[TESTING_DRILL_DATABASE_KEY] = generation.drill_database
-    record_store.write_deployment_record(
-        build_deployment_record(
-            request=ship_request,
-            record_id=deployment_record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pending",
-            started_at=started_at,
-            finished_at="",
-            resolved_target=resolved_target,
-            runtime_source=runtime_source,
-            runtime_identity=runtime_identity,
-            destination_health=HealthcheckEvidence(status="pending")
-            if request.verify_health
-            else HealthcheckEvidence(status="skipped"),
-        )
-    )
-
     base_result = _ApplyResultBase(
         product=plan.product,
         context=plan.context,
@@ -2654,6 +2637,22 @@ def execute_odoo_stable_target_replacement_apply(
                     ),
                     desired=desired_build,
                 )
+        record_store.write_deployment_record(
+            build_deployment_record(
+                request=ship_request,
+                record_id=deployment_record_id,
+                deployment_id="control-plane-dokploy",
+                deployment_status="pending",
+                started_at=started_at,
+                finished_at="",
+                resolved_target=resolved_target,
+                runtime_source=runtime_source,
+                runtime_identity=runtime_identity,
+                destination_health=HealthcheckEvidence(status="pending")
+                if request.verify_health
+                else HealthcheckEvidence(status="skipped"),
+            )
+        )
         if plan.destructive_backup_required:
             with _failure_stage(deploy_blocked_code("backup_restore_proof_required")):
                 backup_record_id = "replacement-" + uuid4().hex
@@ -2967,6 +2966,13 @@ def execute_odoo_stable_target_replacement_apply(
             }
         )
     except (click.ClickException, OSError) as error:
+        if (
+            plan.instance == "prod"
+            and not production_write_started
+            and isinstance(error, LaneMovementRefused)
+            and error.code == "source_order_unavailable"
+        ):
+            raise
         uncertain = (
             hold_uncertain_effects
             and production_write_started
