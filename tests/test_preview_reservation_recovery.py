@@ -160,12 +160,24 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             _untracked_preview_warnings,
         )
 
+        def read_warnings(profile: LaunchplaneProductProfileRecord) -> tuple[str, ...]:
+            return _untracked_preview_warnings(
+                record_store=self.store,
+                profile=profile,
+                slugs=(self.issued.preview_slug,),
+                action_allowed=lambda *_: True,
+            )
+
         for scenario in ("unmatched", "unavailable", "truncated"):
             with self.subTest(scenario=scenario):
                 held = Mock(return_value=(self.reservation,))
                 if scenario == "unmatched":
                     profile = self.profile.model_copy(deep=True)
                     profile.preview.app_name_prefix = "changed-preview-prefix"
+                    held.return_value = (
+                        self.reservation,
+                        self.reservation.model_copy(update={"record_id": "other-held-operation"}),
+                    )
                 else:
                     profile = self.profile
                 if scenario == "unavailable":
@@ -174,14 +186,17 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                     )
                 if scenario == "truncated":
                     held.return_value = (self.reservation,) * (PRODUCT_PREVIEW_RECOVERY_LIMIT + 1)
+                baseline_held = (self.reservation,) if scenario == "truncated" else ()
+                with patch.object(
+                    recovery, "held_preview_reservations", return_value=baseline_held
+                ):
+                    baseline = read_warnings(profile)
                 with patch.object(recovery, "held_preview_reservations", held):
-                    warnings = _untracked_preview_warnings(
-                        record_store=self.store,
-                        profile=profile,
-                        slugs=(self.issued.preview_slug, "pr-999"),
-                        action_allowed=lambda *_: True,
-                    )
-                self.assertTrue(warnings)
+                    warnings = read_warnings(profile)
+                self.assertGreater(set(warnings), set(baseline))
+                self.assertEqual(len(warnings), len(set(warnings)))
+                if scenario == "unmatched":
+                    self.assertFalse(any(warning.startswith("PR #") for warning in warnings))
                 unclassified = tuple(
                     warning for warning in warnings if not warning.startswith("PR #")
                 )

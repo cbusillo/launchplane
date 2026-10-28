@@ -798,25 +798,22 @@ def _untracked_preview_warnings(
         held_preview_reservations,
     )
 
-    warnings: list[str] = []
+    warnings: set[str] = set()
     unresolved = set(slugs)
-    recovery_warnings: set[str] = set()
     if action_allowed("preview.read", profile.product, profile.preview.context, ()):
         try:
             held = held_preview_reservations(
                 record_store, product=profile.product, limit=PRODUCT_PREVIEW_RECOVERY_LIMIT + 1
             )
             if len(held) > PRODUCT_PREVIEW_RECOVERY_LIMIT:
-                warnings.append(
-                    "Preview recovery status is incomplete; retain untracked resources."
-                )
+                warnings.add("Preview recovery status is incomplete; retain untracked resources.")
             for reservation in held[:PRODUCT_PREVIEW_RECOVERY_LIMIT]:
                 status = classify_preview_reservation(
                     reservation, profile=profile, store=record_store
                 )
                 number = cast(int, status["target_pull_request_number"])
                 if not number:
-                    warnings.append(
+                    warnings.add(
                         "A retained preview operation cannot be matched to a change; retain untracked resources."
                     )
                     continue
@@ -828,7 +825,7 @@ def _untracked_preview_warnings(
                     if status["original_binding_available"]
                     else "Original operation evidence is missing; retain resources and recover that evidence."
                 )
-                recovery_warnings.add(
+                warnings.add(
                     f"PR #{number}: Preview operation is recorded as {reservation.state}. {guidance}"
                 )
                 unresolved.discard(slug)
@@ -836,14 +833,13 @@ def _untracked_preview_warnings(
             logging.getLogger(__name__).warning(
                 "Untracked preview recovery status could not be read.", exc_info=True
             )
-            warnings.append("Preview recovery status is unavailable; retain untracked resources.")
-    warnings.extend(sorted(recovery_warnings))
+            warnings.add("Preview recovery status is unavailable; retain untracked resources.")
     if unresolved:
-        warnings.append(
+        warnings.add(
             f"{len(unresolved)} previews are present without a current status. "
             "Retain resources until original operations and data custody are verified."
         )
-    return tuple(warnings)
+    return tuple(sorted(warnings))
 
 
 def _preview_refresh_warnings(
