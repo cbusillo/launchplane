@@ -4865,6 +4865,7 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
             )
 
             response = await _get_protected_artifacts(app, product="verireel")
+            manifest = record_store.read_artifact_manifest("artifact-verireel-prod")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -4874,6 +4875,15 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("artifact-verireel-prod", protected_artifacts["artifact_ids"])
         self.assertIn("artifact-preview-verireel-pr-196", protected_artifacts["artifact_ids"])
         self.assertNotIn("artifact-preview-verireel-pr-195", protected_artifacts["artifact_ids"])
+        retained = next(
+            entry
+            for entry in protected_artifacts["entries"]
+            if entry["artifact_id"] == manifest.artifact_id
+        )
+        self.assertEqual(retained["manifest_provenance"]["source_commit"], manifest.source_commit)
+        self.assertEqual(
+            retained["manifest_provenance"]["image"], manifest.image.model_dump(mode="json")
+        )
 
     @scoped_agent_test
     async def test_protected_artifacts_requires_wildcard_context_for_whole_product(
