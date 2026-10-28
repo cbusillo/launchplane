@@ -5601,8 +5601,10 @@ the hold requires the shared-data/release approval below.
 
 The release default never traverses the held branch. If a database has already
 applied the held drop or one of its joins, startup joins the missing approved
-branches at `f87c72d690ab`. After explicit approval, requesting the held revision
-from an activated hostname-only schema reaches that same join. Earlier schemas
+branches through `schema_migration_target`. After explicit approval, requesting
+the held revision from an activated hostname-only schema reaches its compatibility
+join; an integration-attestations schema reaches the later attestations join.
+Use the planner's target for the observed current revision. Earlier schemas
 keep their explicit historical application routes, followed by normal startup.
 These routes leave
 one recorded Alembic revision; startup never mistakes incomparable branches for
@@ -5638,13 +5640,14 @@ window. The source rehearsal seeds every retiring table and checks restored
 rows/columns plus every surviving table's contents. A dump file without a proven
 restore is insufficient.
 
-Only after that proof and the recorded approval, the approved host/image runs:
+After Q777/Q966's approval and the actual restored-backup proof, use the
+[bounded maintenance keeper](#bounded-launchplane-database-maintenance) below.
+It runs the prepared migration on the same connection and transaction as the
+backup locks. Do not run the separate-process migration command against that
+keeper: it would wait for the keeper's own schema and table locks.
 
-```bash
-uv run python -m control_plane.storage.schema_migration --target-revision e7c1d5e9a3b6
-```
-
-The existing serialized migration helper holds the deployment advisory lock.
+The existing serialized migration helper holds the schema-migration advisory lock;
+that lock alone does not stop database writers or deployments.
 The revision takes non-waiting exclusive locks on all existing retiring tables
 before dropping any, uses restrictive drops, and never cascades into an unexpected
 dependent object. A busy table or retained database dependency aborts the
@@ -5661,6 +5664,320 @@ rows. Recovery requires a separately approved restore of the verified full
 pre-migration backup with its matching image and writer quiescence. Images
 before this preparation accept only the old revision and cannot simply restart
 against the contracted database. Keep the Protection App/access decision separate.
+
+### Bounded Launchplane database maintenance
+
+This path holds Launchplane's own writers and deployments through a full private
+backup, actual isolated restore, exact retirement rehearsal and verification.
+It adds no normal request or transaction barrier. Source must be reviewed,
+landed through the train and present in the exact running image before use.
+Q777 and Q966 on #2437 retain full hold/full-backup recovery; online backup or
+selective table recovery does not meet that decision. Client databases,
+credentials, grants and product resources are excluded.
+
+On the documented Launchplane host, copy only the reviewed image's
+`control_plane/database_maintenance_host.py` into a private directory. The
+standalone driver needs Python 3.11+, root's existing Docker/systemd access and
+a dedicated cgroup-v2 freezer for every original writer container. The same
+host must already support `nsenter`, `nft` and `ss` for the API's dedicated
+network namespace; qualification adds no packages or capability grants:
+
+```bash
+python3 database_maintenance_host.py plan --api-container API_CONTAINER \
+  --postgres-container POSTGRES_CONTAINER --duration-seconds 1800
+python3 database_maintenance_host.py hold --api-container API_CONTAINER \
+  --postgres-container POSTGRES_CONTAINER --duration-seconds 1800
+```
+
+`plan` reads exact project/container/image/database identities, current DB-backed
+own target, provider queue/history and self-deploy workflows. It creates only
+private evidence and a temporary non-serving helper. The helper uses the
+existing `.env` in place and the actual API image ID, with no ports, logs,
+restart policy, runtime volumes, Odoo copy or prepared-public mounts. Its root
+is read-only, temporary storage is RAM-backed, and its only host mount is private
+maintenance state. The credential-free browser may remain running. Every own
+writer must match the image. The complete Docker inventory, including dormant
+and foreign-source containers, must have exclusive credential custody: a raw or
+percent-decoded copy of the API database password in any other environment or
+configured command refuses qualification. A same-image container without explicit
+independent database credentials also refuses qualification.
+The exact PostgreSQL server is trusted bootstrap custody, bound separately to
+the API's database system identifier; it stays running for the backup. It is
+never treated as an application writer to freeze or an arbitrary extra client.
+The API needs explicit PostgreSQL username/password wiring; credential indirection
+is unqualified. Values stay in process memory and are never emitted. Unknown
+identities refuse.
+The plan also reads the API's network namespace, connection transport, mounts,
+capability bounds and namespace peers. Host/shared namespaces, local database
+transport overrides, local proxies, Unix listeners, bind/socket mounts and an
+API able to change network policy refuse the controlled-health qualification.
+Other containers supply only PID metadata for this namespace census.
+
+Before any freeze, `hold` installs and reads back a persistent systemd calendar
+timer/service, records every original restart policy, and suppresses automatic
+restart on those exact IDs. Private fsync'd state and watchdog files survive
+reboot. The watchdog runs release at the recorded deadline, including after a
+missed deadline during reboot. That oneshot service is the single recovery process:
+EOF cleanup, the deadline and explicit release requests join the same systemd job.
+The keeper ends at COMMIT; only that process verifies committed state.
+Each automatic recovery entry consumes a fsync'd budget in the existing private
+state before external commands, including an unavailable ownership read. The
+health refreeze phase has its own phase-bound budget. Reloading systemd or
+restarting the interpreter cannot reset either count. Unit rate limits are
+secondary protection, and each service attempt has a timeout. Genuine unsafe or
+blocked results and exhausted automatic budgets have distinct non-restarting
+statuses. Explicit manual release replenishes only the main automatic budget
+through the supported driver, waits for state custody, then starts or joins the
+same service and its applicable verification gates. It never restores data or
+replays an uncertain provider request. The main service is enabled for the next
+boot without starting at installation; the existing calendar timer still starts
+it at the deadline. Boot, EOF and deadline requests share the same executor and
+persisted budget. Observe actual release;
+installation alone is not a release receipt.
+
+The keeper takes the existing own-deploy dispatch lock and installs an expiring
+provider marker before freeze. Own DB/image/repository binding, auto-deploy off,
+complete queue/history and absence of self-deploy workflows are required.
+Normal and emergency self-deploy guards enforce that marker. The host credential
+file must remain unchanged. No workflow, credential or access grant is changed.
+
+The host binds each original PID/start time to its dedicated Docker cgroup's
+path/device/inode. It writes `cgroup.freeze=1` and requires effective frozen
+readback in `cgroup.events`. Each transition has a deadline; cancellation writes
+0 directly, so no late Docker pause/stop request can refreeze a released service.
+All original writer CPUs must freeze before database admission. The driver
+checks physical state and unexpected containers throughout the window.
+
+After freeze and **before disconnecting any backend**, the keeper uses existing
+exact executor-exit receipts and execution-lock observations. These preserve
+historical running/UNKNOWN provider fences unchanged; an expired lease alone
+never proves an executor absent. Every additional running idempotency reservation
+also refuses unless that exact record has an existing executor-exclusion proof;
+expiry alone is insufficient. Historical reconcile-required fences are preserved.
+Additional active own-worker catalogs refuse admission, and the train must be idle or in its qualified pre-effect selection
+phase. Qualify every permitted worker's lost-pool/lease-expiry resume before use.
+Remote work is not declared settled because its CPU froze.
+
+The keeper takes the schema, dispatch and release advisory session locks and
+all-public-table EXCLUSIVE NOWAIT locks before its first repeatable-read snapshot.
+It then disconnects only exact PID/start/address/role-matched frozen idle clients
+without XIDs, allowing benign read transactions. Prepared, active, unmapped,
+XID-owning, advisory-lock-owning or incompatible relation-lock-owning clients
+refuse. A late queued row write is blocked and refused rather than killed;
+commits or sequence activity completed before the final census are included in
+the source snapshot. Zero other clients plus physical freeze and locks prove
+that no further Launchplane DB commit can occur. Zero selected drains do not.
+Foreign/materialized relations, other application schemas, large objects and
+table-set changes require separate qualification and currently refuse.
+
+The private `held` receipt binds hold ID, keeper identity, exported snapshot,
+transaction, cluster and aggregate schema/full-row/sequence checksums. Trigger
+metadata includes enabled state and function bodies. No SQL definition, payload,
+column default, ciphertext or individual credential-column hash is emitted.
+Stream the complete custom dump through the existing private transport:
+
+```bash
+python3 database_maintenance_host.py dump --state STATE_JSON
+```
+
+Stdout is binary; create its approved mode-0600 encrypted private artifact
+exclusively, never overwriting a verified file. The dump carries a private
+hold-scoped application name; the keeper admits only its Unix-socket/current-role/no-XID
+backend and binds its first PID/start identity. Generic pg_dump names refuse.
+Only one dump attempt is supported per hold; after a failed read, release with
+readback and create a new hold rather than blindly retrying or replacing evidence. Stderr and host state record the stream SHA-256; independently hash the
+private file and require agreement. Prove actual artifact custody with one
+read-only private file descriptor feeding both stream hashing and pg_restore;
+check file identity/size/mtime and the full checksum before and after, require
+agreement with the native dump stream, and retain that same artifact. The
+rehearsal checksum argument is accepted only with this independently recorded
+operational proof; it is not proof by itself. Qualify capacity, encryption, custodian,
+minimum retention and Director-reviewed disposal before capture. Leave the
+existing bootstrap/keyring in place; copy or export no credential/key file.
+
+Restore with PostgreSQL `pg_restore --no-owner --exit-on-error` into an empty
+qualified isolated cluster. It has no outbound network, published ports, logs,
+persistent mounts, application processes or production keys. Data and temporary
+storage are RAM-backed without VM swap, or independently qualified encrypted
+storage. Both PostgreSQL and migrator containers require `--ulimit core=0:0`
+with process-limit readback, so a crash cannot write a core onto an unencrypted
+VM disk. Capture restore/migrator stderr privately or in RAM and emit only fixed
+status summaries on failure. Use only the exact reviewed migrator image and private held receipt,
+never production configuration. The rehearsal requires a different system
+identifier, loopback DSN and no platform credentials. Run the migrator with
+`--cap-drop ALL --security-opt no-new-privileges:true`; it requires every
+capability set empty and NoNewPrivs enabled. Namespace-local socket flags,
+IPv4 addresses, IPv4/IPv6 routes and IPv6 addresses must prove that only
+loopback is active/configured/routed. Kernel-created DOWN unconfigured tunnel
+templates are permitted without a name allowlist; missing or unknown views
+refuse. The database container remains network-none, without NET_ADMIN or
+SYS_ADMIN, and its PostgreSQL OS user must have no effective capabilities. Join
+only that exact namespace with `--network container:<isolated-postgres-container>`.
+Read back matching namespace identities and both processes' zero core limits as
+helper evidence; the network guard does not inspect its PostgreSQL peer or
+replace those process-limit observations:
+
+```bash
+python -m control_plane.database_maintenance_cli rehearse \
+  --before-file HELD_RECEIPT --backup-sha256 VERIFIED_DUMP_SHA256 \
+  --hold-id HOLD_ID --expires-at DEADLINE
+python3 database_maintenance_host.py submit --state STATE_JSON --receipt-file REHEARSAL_RECEIPT
+```
+
+Rehearsal compares the actual restore with every source aggregate, applies only
+the prepared revision, and proves the exact retired table/function set,
+retained data, compatibility and full schema invariants. Non-serving readonly
+startup, retained-history, train and expiry callbacks must also pass on the
+restored clone without changing credentials; no application service runs there.
+The receipt binds the same hold/snapshot/transaction and actual dump hash. The private FIFO submits it;
+terminal input is monitored only for EOF. The live transaction repeats the
+checks, including full invariants on its held Connection before COMMIT.
+
+Before committing DDL, the keeper readbacks a non-expiring, exact own recovery
+marker and fsyncs `commit-pending.json` while serialized against host release.
+EOF, deadline or mismatch before commit rolls back. A pending/uncertain committed
+outcome cannot reopen writers merely because the original deadline elapsed.
+Normal, explicit, deadline and post-boot release all use the same read-only
+before/after verifier: first terminate and confirm the exact keeper backend
+is gone, then independently compare committed state with either verified full
+state, check revision/cluster and full invariants. Any unsafe or UNKNOWN result
+keeps originals frozen or stopped with restart disabled and the recovery marker
+held. The failure event states which evidence failed:
+
+- `database_unsafe`: the committed data or schema disagrees with the verified
+  states. Preserve the backup and bring the Director an exact full-restore
+  question; later writes could otherwise be lost.
+- `deployment_recovery_required`: an original marker effect remains unknown.
+  Re-observe that same operation through manual release. This is no evidence of
+  database damage and never calls for restoring a healthy database.
+- `verification_blocked`: identity or runtime/health verification cannot pass.
+  Bring the Director the concrete missing action if it exceeds Q777.
+- `release_incomplete`: a transient read or transport failed; retry is supported.
+- `automatic_recovery_exhausted`: automatic attempts stopped. Supported manual
+  release replenishes their allowance without changing any safety proof.
+
+None authorizes an automatic restore or drop retry. Events report whether resume
+started and whether all original writers were resumed; a failed read does not
+claim physical quiescence.
+
+Before reopening writers, the matching image runs its actual non-serving
+privileged-worker startup/schema probe, retained-history and train readers,
+and existing expiry callback against the committed live database. A generated
+in-memory URL adds enforced transaction read-only options to both actual store
+engines; no credential is printed or copied. Expiry must return success and
+zero changes. If a credential would expire, readonly enforcement refuses its
+write and verification fails. An earlier empty count is not expiry proof.
+
+The original API then gets a bounded health-only thaw with all other writer
+CPUs still frozen and deployments held. Before thaw, the driver proves zero
+other DB clients and atomically installs its own UUID-named nftables table in
+that exact API namespace. `inet` INPUT, OUTPUT and POSTROUTING hooks drop
+non-loopback IPv4/IPv6 traffic; the inbound hook prevents new SYN arrivals racing
+socket destruction. Exact hook/rule readback and continuous checks
+hold through the phase. A second persistent, phase-bound timer performs cleanup
+independently at the short health deadline. It consumes the existing root
+capabilities; the API itself cannot alter the fence.
+
+Before thaw, connected TCP sockets and the kernel's queued inbound connections
+are destroyed under the network fence, preserving listeners. Only the API CPU
+thaws. A fresh actual loopback HTTP GET to
+`/v1/health?maintenance_liveness=true` must return HTTP 200 and the service's
+success payload. This explicit loopback-only probe reads successful-startup
+metadata asynchronously; it proves same-process HTTP liveness, not database
+access or ordinary request-worker readiness. Default `/v1/health` retains its
+original request-worker/store path, including waiting when those workers are
+saturated. The separate matching-image read-only database and runtime probes
+remain mandatory. The route documents its maintenance 403/503 responses.
+An unauthenticated TCP probe
+to its in-place database endpoint must fail, with a kernel packet drop observed.
+No database credential is transmitted by that probe. Before removing its own
+network table, the driver physically refreezes the API, destroys connected TCP
+sockets while preserving listeners, requires only inert TIME-WAIT sockets and
+zero DB clients, then verifies fence removal while the API remains frozen.
+No buffered TCP packet escapes before final CPU resume. Requests already parsed
+into userspace can continue after release. Health completion is saved
+only after these readbacks. Both the normal release and deadline watchdog do
+this refreeze/socket-settlement/owned-unfence cleanup before terminating a keeper.
+
+Cleanup holds the same private state lock through native transitions. Phase ID
+and active intent bind timer actions; deactivation and loaded-unit cleanup
+precede final CPU resume, so a late timer cannot freeze a released API. No SQL
+session's death can remove the API's network fence. Unqualified namespace loss
+or native effects remain UNKNOWN; there is no broad firewall flush or blind
+replacement of another phase's rules.
+
+An after-state requires the completed runtime and health receipt before release
+fsyncs its resume proof bound to hold, cluster, revision and image. A proved
+before-state abort can reopen unchanged. A running frozen original automatically
+completes missing verification through the same
+`database_maintenance_host.py release --state STATE_JSON` path used by EOF cleanup
+and the persistent deadline watchdog. The `verify` alias uses that same path.
+Automatic starts consume the durable budget even when a recovery process crashes
+or its ownership read fails. Transient database reads, census collisions and
+health transport failures remain retryable after exact phase cleanup. Exhaustion
+preserves the holds and permits explicit manual `release` or `verify`; these
+replenish the main allowance and join the same recovery service, without a
+private-state edit. A request that joins an already-exhausted exit can start one
+fresh job after that exit. An active verification may already be in progress.
+The health phase's independent deadline remains protected by its own budget.
+A transport failure or exhausted budget does not classify the database as unsafe
+or authorize a restore. Terminal identity/schema or unknown provider-effect
+results still stop automatic retries and require the applicable recovery action.
+If the API is stopped after reboot and the after-state lacks health proof, the
+driver cannot start it with full network before a namespace fence exists. It
+keeps writers stopped and reports recovery required; bring the Director the
+concrete missing recovery action. No new container, credential or database
+configuration is substituted to bypass that boundary.
+
+Release resumes exact original IDs, checks running/health and restores their
+original policies. A partial resume records progress; subsequent cleanup retries
+reuse the safe proof because legitimate resumed writes may have changed rows.
+They never refreeze healthy services or demand the old full hashes again. A crash after
+starting a stopped original, before progress is recorded, may leave its same
+container ID/image/project running with a newer PID. Only the already bound safe
+proof and persisted resume-start intent allow fresh thawed-cgroup qualification
+and policy readback in that case. On a no-commit release, durable resume intent
+and absence of `commit-pending.json` allow the same exact-original retry; the
+host's releasing flag and state lock prevent a later commit. Unverified changed
+identities still refuse.
+
+Only the host removes the deployment marker, after all original recovery
+readbacks pass and the keeper can no longer act. Install, recovery fencing and
+removal share one private fsync'd transition journal bound to hold, target and
+expected/desired marker. The existing provider mutation observer records dispatch
+immediately before the POST, response confirmation after return and exact result
+observation after readback. It records no env body, token or credential. A failed
+GET or validation before dispatch may retry; a dispatched request is never sent
+again. One-off intent and container identity are persisted; a timed-out one-off
+is removed and its DB session must be gone before another observation.
+
+An uncertain original request permits a bounded read-only observation of its
+exact desired effect. Only that value, including absence for an original removal,
+settles it. An old marker, an expired old deadline or absence before an uncertain
+install does not prove the request cannot execute late. Unavailable or mismatched
+effect observation emits a distinct terminal recovery requirement, so the watchdog
+does not restart forever. The same manual release can re-read that original
+operation later. A newly needed repair action requires an exact Director question;
+there is no blind whole-env rewrite or cleanup override. Provider failure can
+prevent release beyond the planned bound, so successful actual marker absence
+and service release readback, rather than timer installation, qualify the window.
+
+```bash
+python3 database_maintenance_host.py release --state STATE_JSON
+```
+
+The final receipt includes actual verified revision and original service
+readback. Successful cleanup disables/removes the watchdog and verifies its
+inactive state. A crash after marking release complete still uses the same
+supported command to settle only the exact owned units and fsync cleanup progress;
+it repeats no database, provider, freezer or resume operation. It stops those
+units outside state custody before final metadata cleanup. Success requires the
+cleanup readback as well as the sticky release proof.
+Private state defaults to `/var/lib/launchplane-maintenance`;
+a reboot or failed attempt continues through that same supported release,
+never a different target or recovery restore. Monitoring is paused during the
+window, which counts against verification cadence and is not healthy evidence.
+
 
 ### Hostname schema compatibility prelude
 

@@ -10,7 +10,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from control_plane.storage.postgres import _build_engine, PostgresRecordStore
 from control_plane.storage.migrations.versions import (
@@ -213,6 +213,31 @@ def _alembic_predecessor_revisions(target_revision: str) -> frozenset[str]:
         revision.revision
         for revision in script_directory.iterate_revisions(target_revision, "base")
     )
+
+
+def migrate_schema_on_connection(connection: Connection, *, target_revision: str) -> str:
+    _require_supported_target(target_revision)
+    if connection.dialect.name != "postgresql" or not connection.in_transaction():
+        raise RuntimeError("A held PostgreSQL transaction is required.")
+    revisions = connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all()
+    if len(revisions) != 1:
+        raise RuntimeError("The held database must have exactly one migration revision.")
+    current = str(revisions[0])
+    action = schema_migration_action(current_revision=current, target_revision=target_revision)
+    if action == "upgrade":
+        config = alembic_config("postgresql://")
+        config.attributes["connection"] = connection
+        command.upgrade(
+            config,
+            schema_migration_target(current_revision=current, target_revision=target_revision),
+        )
+    final = str(connection.scalar(text("SELECT version_num FROM alembic_version")))
+    if schema_migration_action(current_revision=final, target_revision=target_revision) not in {
+        "current",
+        "compatible_ahead",
+    }:
+        raise RuntimeError("The held migration did not reach a compatible revision.")
+    return final
 
 
 def migrate_schema(
