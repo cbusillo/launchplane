@@ -1056,18 +1056,6 @@ provider payload data.
 > described in this doc remain only until their deletion (#2606, #2740); do not
 > extend them or onboard a product onto them.
 
-The original communication model was:
-
-- Launchplane runs as a long-running service behind an admin-owned stable
-  host.
-- Product workflows communicate with Launchplane over authenticated HTTP.
-- GitHub Actions OIDC is the default machine-to-machine trust boundary.
-- Launchplane authorizes requests from GitHub-issued identity claims such as repo,
-  workflow, ref, environment, and event context.
-- Typed evidence payloads are the stable contract; CLI commands are service
-  clients, DB-backed admin tools, or explicit local-only rehearsal and
-  inspection helpers.
-
 Launchplane should eventually expose API ingress for at least:
 
 - deployment evidence
@@ -1092,8 +1080,7 @@ uv run launchplane service serve \
 ```
 
 The service needs an explicit minimal bootstrap policy input, but the repo no
-longer tracks the live policy. Product and workflow grants should be represented
-as DB-backed authz policy records. Omitting `LAUNCHPLANE_DATABASE_URL` always fails closed,
+longer tracks the live policy. Omitting `LAUNCHPLANE_DATABASE_URL` always fails closed,
 including loopback local development, rather than using file-backed JSON state
 as authority. The GitHub OIDC audience is explicit admin/process wiring;
 production code must not default it to a live domain.
