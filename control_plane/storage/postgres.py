@@ -32346,7 +32346,7 @@ class PostgresRecordStore(HumanSessionStore):
             return profile
 
         def context_for_request(session: Any) -> RuntimeEnvironmentRecord | None:
-            if request.scope != "instance":
+            if request.scope != "instance" or request.instance == "preview":
                 return None
             row = session.scalar(
                 self._runtime_environment_statement(

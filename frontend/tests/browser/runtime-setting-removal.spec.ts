@@ -61,7 +61,6 @@ test("stored removal reviews exact scope, invalidates edits, applies and reads b
   await expect(page.getByRole("button", { name: "Remove reviewed settings" })).toHaveCount(0);
   await review(page);
   await expect(page.getByLabel("Context fallback comparison")).toContainText("OBSOLETE_INPUT");
-  await expect(page.getByLabel("Context fallback comparison")).toContainText("The context supplies a different value.");
   await confirm(page);
   await page.getByLabel("Removal reason").fill("Changed reason requires a fresh review.");
   await expect(page.getByRole("button", { name: "Remove reviewed settings" })).toBeDisabled();

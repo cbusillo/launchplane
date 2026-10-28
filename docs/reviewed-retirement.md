@@ -65,20 +65,20 @@ Managed-secret records and bindings are untouched. An inherited value can
 become visible after a stored override is removed; the preview is not a claim
 that a key is absent across all layers or from the provider.
 
-Exact instance reviews also return `instance_plain_setting_effects`: for each
+Exact non-preview instance reviews also return `instance_plain_setting_effects`: for each
 selected key, whether the context supplies the same string value, a different
 value, or no value after the lane override is removed. This comparison follows
 the current site plain-setting layers, which exclude global settings. It does
 not evaluate preview templates, target overrides, managed secrets, provider
 leftovers, actual runtime consumers or legacy global-inclusive resolvers.
-Context and global reviews omit this comparison and still require their own
+Preview, context and global reviews omit this comparison and still require their own
 consumer and inheritance qualification.
 
 The service compares selected context values privately and binds them to the
 review with a nonce-protected `context_values_sha256`. Apply rechecks this
 binding under the existing authority locks, including when an absent context
 value has since appeared. A changed fallback requires a fresh review; unrelated
-context keys do not invalidate it. Older instance reviews also require a fresh
+context keys do not invalidate it. Older non-preview instance reviews also require a fresh
 review before applying. The comparison stays with the original review in
 historical receipts and readback; it is not a fresh runtime observation.
 
@@ -187,7 +187,7 @@ context/lane when applicable, selected names and reason. **Review removal** save
 a fresh service review and shows the exact selected names, survivors, retirement
 intent and reader/rollback requirement. Changing any field invalidates that review.
 No stored values, secret bindings or rollback preimages are displayed.
-Instance reviews display the stored context fallback comparison alongside the
+Non-preview instance reviews display the stored context fallback comparison alongside the
 selected keys. This evidence narrows the stored-value question without
 attesting runtime use or qualifying a removal by itself.
 

@@ -82,6 +82,8 @@ def instance_plain_setting_effects(
         request.instance,
     ):
         raise ValueError("Instance comparison requires the selected lane record.")
+    if request.instance == "preview":
+        raise ValueError("Preview template inheritance requires separate qualification.")
     if context_record is not None and (
         context_record.scope,
         context_record.context,
@@ -171,7 +173,7 @@ def removal_plan(
         "authority_sha256": authority_sha256,
         "applied": False,
     }
-    if request.scope == "instance":
+    if request.scope == "instance" and request.instance != "preview":
         effects = instance_plain_setting_effects(record, request, context_record)
         context_values = context_record.env if context_record else {}
         plan.update(
