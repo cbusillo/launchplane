@@ -1949,7 +1949,18 @@ without an additional grant. This exception cannot remove requirements or
 publish Client credential requests through `owner_input`, and does not extend
 to other agent identities. Other callers and removals require
 `product_profile.expected_config.apply` for the target product in the
-Launchplane service context. The route loads the existing DB-backed product profile,
+Launchplane service context.
+On a Live product, `local_operator` apply outside the Director add-only exception
+returns `live_product_requires_operator` even with that grant; inert dry runs
+retain existing read/plan authority. Browser CSRF and read-only identity
+restrictions remain in force. The Director may add a positive external-provider
+purpose to an existing nonlocal requirement while preserving its other metadata.
+Clearing purpose, enabling or retiring existing generation intent, or declaring
+a provider that shadows a local key requires the explicit action and retains
+the Live-product admin boundary. Odoo's driver-owned local passwords cannot be
+declared external through any profile input path. Completed exact-key receipts
+replay before current-state retirement checks; new writes compare the same
+captured profile that passed those checks. The route loads the existing DB-backed product profile and
 appends supplied runtime keys or managed secret binding requirements only when
 absent, and removes requirements named in `remove_runtime_environment_keys` or
 `remove_managed_secret_bindings`. Adding and removing the same identity in one
