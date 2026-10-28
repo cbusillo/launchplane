@@ -16,10 +16,13 @@ from control_plane.client_release_backup_continuation import (
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import ArtifactIdentityReference
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.production_recipient import custody
 from control_plane.production_recipient_cutover import RecipientCutoverAdapter
+from control_plane.production_recipient_publication import republication_snapshot
 from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
+from control_plane.dokploy import api
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
 from control_plane.release_request import record_release_request
 from control_plane.workflows.production_promotion_backup import GENERIC_WEB_PROMOTION_BACKUP_ACTION
@@ -232,6 +235,57 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
 
     def test_native_drill_keeps_authority_through_publication_and_inverse(self) -> None:
         self.complete_native_drill()
+
+    def test_repromotion_rejects_changed_stamps_unmanaged_keys_and_managed_values(self) -> None:
+        fixture = self.case.fixture
+        self.capture_next_backup()
+        self.advance()
+        self.advance()
+        self.capture_next_backup()
+        record = custody(fixture.store, fixture.record.product, fixture.record.context)
+        assert record is not None
+        provider = fixture.fixture.provider[record.target_id]
+        original = str(provider["env"])
+        expected = api.parse_dokploy_env_text(original)
+        changes: list[dict[str, str | None]] = [
+            {key: "example/wrong@sha256:" + "f" * 64} for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS
+        ]
+        changes.extend({key: None} for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS)
+        changes.extend(
+            [{"UNREVIEWED_RUNTIME_INPUT": "unexpected"}, {"DB_PASSWORD": "different-managed-value"}]
+        )
+        before = (fixture.deploys, list(fixture.actions))
+        for change in changes:
+            with self.subTest(keys=tuple(change)):
+                provider["env"] = api.serialize_dokploy_env_text(
+                    {
+                        key: value
+                        for key, value in {**expected, **change}.items()
+                        if value is not None
+                    }
+                )
+                with self.assertRaises(ValueError):
+                    fixture.fixture.adapter.verify_configuration(
+                        record.model_copy(
+                            update={
+                                "authority_snapshot": republication_snapshot(fixture.store, record)
+                            }
+                        )
+                    )
+                self.assertFalse(
+                    releases.advance_client_releases(
+                        store=fixture.store, control_plane_root=fixture.fixture.root
+                    )
+                )
+                self.assertEqual((fixture.deploys, fixture.actions), before)
+        provider["env"] = original
+        self.advance()
+        run = releases.read_client_release_run(
+            store=fixture.store, profile=self.profile, decision=self.case.decision
+        )
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+        self.assertEqual(fixture.deploys, before[0])
 
     def complete_native_drill(self) -> None:
         fixture = self.case.fixture

@@ -21,8 +21,8 @@ from control_plane.contracts.production_backup_authority import ProductionBackup
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
-from control_plane.contracts.runtime_identity import runtime_identity_env
-from control_plane.production_recipient import custody, runtime_values
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
+from control_plane.production_recipient import custody
 from control_plane.production_recipient_cutover import (
     RecipientCutoverAdapter,
     RecipientCutoverRequest,
@@ -34,6 +34,7 @@ from control_plane.runtime_environments import SiteRuntimeEnvironment
 from control_plane.dokploy import api
 from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 from control_plane.workflows.production_backup_gate import enqueue_production_backup_gate
+from control_plane.workflows.dokploy_deploy import update_dokploy_target_artifact
 from control_plane.workflows.production_backup_gate_operation_worker import (
     run_production_backup_gate_operation_worker_once,
 )
@@ -335,14 +336,16 @@ class RecipientCutoverTests(unittest.TestCase):
             )
 
     def deploy(self, **kwargs: Any) -> None:
-        kwargs["before_provider_mutation"]("target_update")
         current = custody(self.store, self.fixture.product, self.fixture.context)
         assert current is not None
-        self.fixture.provider[current.target_id]["env"] = api.serialize_dokploy_env_text(
-            {
-                **runtime_values(self.store, self.fixture.root, current),
-                **runtime_identity_env(kwargs["runtime_identity"]),
-            },
+        update_dokploy_target_artifact(
+            host="https://provider.invalid",
+            token="fixture-token",
+            target_type="compose",
+            target_id=current.target_id,
+            artifact_id=current.image_reference,
+            runtime_identity=kwargs["runtime_identity"],
+            before_provider_mutation=kwargs["before_provider_mutation"],
         )
         kwargs["before_provider_mutation"]("deploy_trigger")
         self.assertFalse(self.old_running)
@@ -958,6 +961,18 @@ class RecipientCutoverTests(unittest.TestCase):
         assert current is not None
         self.assertEqual(current.phase, "preflight_refused")
         self.assertTrue(self.old_running)
+        self.assertTrue(current.execution.get("runtime_identity"))
+        self.assertNotIn("trigger_requested_at", current.execution)
+        provider = self.fixture.provider[current.target_id]
+        original_environment = str(provider["env"])
+        expected = api.parse_dokploy_env_text(original_environment)
+        for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS:
+            with self.subTest(missing_before_dispatch=key):
+                provider["env"] = api.serialize_dokploy_env_text(
+                    {name: value for name, value in expected.items() if name != key}
+                )
+                self.fixture.adapter.verify_configuration(current)
+        provider["env"] = original_environment
         self.assertEqual(self.run_release().response_status_code, 202)
 
     def test_missing_peer_target_does_not_block_an_unrelated_products_effect(self) -> None:
