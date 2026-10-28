@@ -63,6 +63,50 @@ class RuntimeSettingRemovalRequest(BaseModel):
         }
 
 
+class InstancePlainSettingEffect(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    key: str
+    source_after: Literal["context"] | None = None
+    effect: Literal["absent", "unchanged", "changed"]
+
+
+def instance_plain_setting_effects(
+    record: RuntimeEnvironmentRecord,
+    request: RuntimeSettingRemovalRequest,
+    context_record: RuntimeEnvironmentRecord | None,
+) -> list[InstancePlainSettingEffect]:
+    if request.scope != "instance" or (record.scope, record.context, record.instance) != (
+        request.scope,
+        request.context,
+        request.instance,
+    ):
+        raise ValueError("Instance comparison requires the selected lane record.")
+    if context_record is not None and (
+        context_record.scope,
+        context_record.context,
+        context_record.instance,
+    ) != ("context", request.context, ""):
+        raise ValueError("Instance comparison requires its own context record.")
+    if not set(request.keys).issubset(record.env):
+        raise ValueError("The selected keys are unavailable; refresh the inventory.")
+    context_values = context_record.env if context_record else {}
+    return [
+        InstancePlainSettingEffect(
+            key=key,
+            source_after="context" if key in context_values else None,
+            effect=(
+                "absent"
+                if key not in context_values
+                else "unchanged"
+                if str(record.env[key]) == str(context_values[key])
+                else "changed"
+            ),
+        )
+        for key in sorted(request.keys)
+    ]
+
+
 class RuntimeSettingRemovalPlan(BaseModel):
     model_config = ConfigDict(frozen=True)
     product: str
@@ -87,6 +131,8 @@ class RuntimeSettingRemovalPlan(BaseModel):
     readback_matches: bool | None = None
     current_record_present: bool | None = None
     replayed: bool | None = None
+    instance_plain_setting_effects: list[InstancePlainSettingEffect] | None = None
+    context_values_sha256: str | None = None
 
 
 def removal_plan(
@@ -95,6 +141,7 @@ def removal_plan(
     *,
     authority_sha256: str,
     private_nonce: str,
+    context_record: RuntimeEnvironmentRecord | None = None,
 ) -> RuntimeSettingRemovalPlan:
     if (record.scope, record.context, record.instance) != (
         request.scope,
@@ -124,6 +171,20 @@ def removal_plan(
         "authority_sha256": authority_sha256,
         "applied": False,
     }
+    if request.scope == "instance":
+        effects = instance_plain_setting_effects(record, request, context_record)
+        context_values = context_record.env if context_record else {}
+        plan.update(
+            instance_plain_setting_effects=[effect.model_dump(mode="json") for effect in effects],
+            context_values_sha256=request_fingerprint(
+                {
+                    "nonce": private_nonce,
+                    "context_values": {
+                        key: context_values[key] for key in request.keys if key in context_values
+                    },
+                }
+            ),
+        )
     digest = request_fingerprint({"intent": request.intent(), "plan": plan})
     return RuntimeSettingRemovalPlan.model_validate(
         {**plan, "plan_sha256": digest, "review_id": "runtime-removal-" + digest}

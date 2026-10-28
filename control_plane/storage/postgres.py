@@ -32345,6 +32345,16 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             return profile
 
+        def context_for_request(session: Any) -> RuntimeEnvironmentRecord | None:
+            if request.scope != "instance":
+                return None
+            row = session.scalar(
+                self._runtime_environment_statement(
+                    scope="context", context=request.context, instance="", for_update=True
+                )
+            )
+            return RuntimeEnvironmentRecord.model_validate(row.payload) if row else None
+
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             # Match the policy writer's lock order before touching product authority.
@@ -32432,7 +32442,11 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ValueError("The selected runtime record is absent.")
                 private_nonce = secrets.token_hex(32)
                 plan = removal_plan(
-                    current, request, authority_sha256=authority_sha256, private_nonce=private_nonce
+                    current,
+                    request,
+                    authority_sha256=authority_sha256,
+                    private_nonce=private_nonce,
+                    context_record=context_for_request(session),
                 )
                 review_id = plan.review_id
                 existing = session.scalar(
@@ -32562,6 +32576,7 @@ class PostgresRecordStore(HumanSessionStore):
                     request,
                     authority_sha256=authority_sha256,
                     private_nonce=str(review.response_payload["private_nonce"]),
+                    context_record=context_for_request(session),
                 )
             except ValueError as error:
                 raise RuntimeSettingRemovalStale(str(error)) from None

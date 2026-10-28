@@ -154,6 +154,15 @@ function RemovalForm({ actorId, target, onBusy }: { actorId: number; target: Rem
       <p>{plan.surviving_value_count} stored values and {plan.retirement_intent_count} provider retirement intents remain.
         {plan.record_deleted ? " The empty record will be deleted." : " The record will remain."}</p>
       {plan.unprintable_survivor_count ? <p role="alert">{plan.unprintable_survivor_count} surviving names cannot be displayed. Name coverage is partial.</p> : null}
+      {plan.instance_plain_setting_effects ? <section aria-label="Context fallback comparison">
+        <h4>Stored settings after removing the lane override</h4>
+        <ul>{plan.instance_plain_setting_effects.map(effect => <li key={effect.key}>
+          <code>{effect.key}</code>: {effect.source_after === "context"
+            ? effect.effect === "unchanged" ? "The context supplies the same value." : "The context supplies a different value."
+            : "No context value remains."}
+        </li>)}</ul>
+        <p>This compares stored plain settings only. Runtime use, preview templates, target overrides and secrets need separate qualification.</p>
+      </section> : null}
       {plan.requires_compatible_readers_and_rollback ? <p role="alert">Before applying, deploy compatible readers to every consumer and replica and retain a compatible rollback build. This review does not prove that qualification.</p> : null}
       <p>Review <code>{plan.review_id}</code></p>
       <label className="service-delivery-check"><input type="checkbox" checked={confirmed} disabled={locked} onChange={event => setConfirmed(event.target.checked)} />
