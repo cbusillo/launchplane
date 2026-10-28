@@ -277,13 +277,8 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
         (self.root / "onboarding-plan.json").write_text(
             json.dumps({"result": {"plan_sha256": "records-plan"}})
         )
-        (self.root / "authz-plan.json").write_text(
-            json.dumps({"result": {"plan_sha256": "authz-plan", "configuration": {}}})
-        )
-        (self.root / "authz-reconcile-request.json").write_text("{}")
         if isinstance(control, dict) and "mode" in control:
-            for name in ("onboarding-plan.json", "authz-plan.json", "authz-reconcile-request.json"):
-                (self.root / name).unlink()
+            (self.root / "onboarding-plan.json").unlink()
         return self.run_step(
             "reusable-generic-web-onboarding-apply.yml",
             "apply",
@@ -293,7 +288,6 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
                 "TESTING_CONTEXT": context,
                 "REASON": "fixture recovery",
                 "ONBOARDING_PLAN_SHA256": "records-plan",
-                "AUTHZ_PLAN_SHA256": "authz-plan",
                 "TARGET_PLAN_SHA256": hashlib.sha256(target.read_bytes()).hexdigest(),
                 "ALLOCATION_CONTROL": "" if control is None else json.dumps(control),
             },
@@ -304,7 +298,6 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
         self.assertEqual(normal.returncode, 0, normal.stderr)
         original_outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
         original_request = json.loads((self.root / "target-apply-request.json").read_text())
-        (self.root / "authz-apply-request.json").unlink()
         for mode in ("readback", "apply"):
             with self.subTest(mode=mode):
                 result = self.onboarding_request({"mode": mode})
@@ -330,7 +323,6 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
                 self.assertEqual(normal.returncode, 0, normal.stderr)
                 outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
                 key = outputs["idempotency_key"]
-                (self.root / "authz-apply-request.json").unlink()
                 recovered = self.onboarding_request({"mode": "readback"}, context=context)
                 self.assertEqual(recovered.returncode, 0, recovered.stderr)
                 outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
@@ -341,10 +333,10 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
                 outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
                 self.assertEqual(outputs["idempotency_key"], key)
 
-    def test_normal_onboarding_keeps_records_and_authz_apply_requests(self) -> None:
+    def test_normal_onboarding_keeps_records_digest_without_authorization_artifacts(self) -> None:
         result = self.onboarding_request(None)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((self.root / "authz-apply-request.json").exists())
+        self.assertFalse((self.root / "authz-apply-request.json").exists())
         payload = json.loads((self.root / "target-apply-request.json").read_text())
         self.assertNotIn("retain_allocation", payload)
         outputs = dict(line.split("=", 1) for line in self.output.read_text().splitlines())
