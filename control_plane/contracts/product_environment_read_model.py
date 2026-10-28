@@ -515,6 +515,7 @@ class ProductEnvironmentSummary(BaseModel):
 
 
 PRODUCT_PREVIEW_REFERENCE_LIMIT = 50
+PRODUCT_PREVIEW_RECOVERY_LIMIT = 100
 
 
 class ProductPreviewReference(BaseModel):
@@ -802,11 +803,23 @@ def _untracked_preview_warnings(
     recovery_warnings: set[str] = set()
     if action_allowed("preview.read", profile.product, profile.preview.context, ()):
         try:
-            for reservation in held_preview_reservations(record_store, product=profile.product):
+            held = held_preview_reservations(
+                record_store, product=profile.product, limit=PRODUCT_PREVIEW_RECOVERY_LIMIT + 1
+            )
+            if len(held) > PRODUCT_PREVIEW_RECOVERY_LIMIT:
+                warnings.append(
+                    "Preview recovery status is incomplete; retain untracked resources."
+                )
+            for reservation in held[:PRODUCT_PREVIEW_RECOVERY_LIMIT]:
                 status = classify_preview_reservation(
                     reservation, profile=profile, store=record_store
                 )
-                number = status["target_pull_request_number"]
+                number = cast(int, status["target_pull_request_number"])
+                if not number:
+                    warnings.append(
+                        "A retained preview operation cannot be matched to a change; retain untracked resources."
+                    )
+                    continue
                 slug = profile.preview.slug_template.format(number=number)
                 if slug not in slugs:
                     continue
@@ -827,7 +840,8 @@ def _untracked_preview_warnings(
     warnings.extend(sorted(recovery_warnings))
     if unresolved:
         warnings.append(
-            f"{len(unresolved)} previews are present without a current status. Check preview cleanup."
+            f"{len(unresolved)} previews are present without a current status. "
+            "Retain resources until original operations and data custody are verified."
         )
     return tuple(warnings)
 
