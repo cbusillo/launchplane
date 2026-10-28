@@ -35,8 +35,13 @@ Legacy production inventories can still identify their artifact without a linked
 deployment record. Their settings remain unrecorded; a settings-bearing forward
 deployment still requires its exact predecessor and rollback evidence before effects.
 Rejected snapshot values are omitted from validation and deployment error messages.
-Two-slot lanes keep their separate qualified slot-settings contract and do not
-enter this conventional-target settings path.
+Two-slot lanes and incomplete native production-recipient releases keep their
+separate qualified settings authority. A native recipient's render, publication
+and inverse bind its configuration through the entire accepted rollback drill;
+the old published target's settings do not enter that candidate. Once every
+required step of its exact native release passes, future ordinary settings work
+can use the existing request and acceptance path, including the same artifact.
+The original native decision's receipts and recovery keep their native adapter.
 
 Automatically starting the first settings release on a legacy
 Director-standing product needs an
