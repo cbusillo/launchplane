@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ast
+import sqlite3
 import unittest
 from types import SimpleNamespace
+from typing import Any
 
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
@@ -22,9 +25,162 @@ from control_plane.dokploy.post_deploy import (
     require_integration_readback_evidence,
 )
 from control_plane.integration_readback import (
+    INTEGRATION_FAMILIES,
+    INTEGRATION_READBACK_PROGRAM,
     integration_readback_policy,
     integration_credential_warnings,
 )
+
+
+class PaymentProviderCursor:
+    def __init__(self, database: sqlite3.Connection) -> None:
+        self.database = database
+        self.rows: list[tuple[Any, ...]] = []
+
+    def execute(self, query: str, parameters: tuple[str, ...] = ()) -> None:
+        self.rows = self.database.execute(query.replace("%s", "?"), parameters).fetchall()
+
+    def fetchone(self) -> tuple[Any, ...]:
+        return self.rows[0]
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self.rows
+
+
+class PaymentProviderReadbackTests(unittest.TestCase):
+    def setUp(self) -> None:
+        functions = ast.Module(
+            body=[
+                node
+                for node in ast.parse(INTEGRATION_READBACK_PROGRAM).body
+                if isinstance(node, ast.FunctionDef)
+            ],
+            type_ignores=[],
+        )
+        self.program: dict[str, Any] = {}
+        exec(compile(functions, "<integration-readback>", "exec"), self.program)
+        self.setting = next(
+            family.tables[0] for family in INTEGRATION_FAMILIES if family.integration == "payment"
+        )
+
+    def configured(
+        self,
+        schema: str,
+        values: tuple[object, ...] | None = None,
+        registered: tuple[str, ...] | None = None,
+    ) -> bool:
+        database = sqlite3.connect(":memory:")
+        self.addCleanup(database.close)
+        database.execute("CREATE TABLE payment_provider (" + schema + ")")
+        database.create_function("to_regclass", 1, lambda name: name)
+        database.create_function("format_type", 2, lambda name, modifier: name)
+        database.execute("CREATE TABLE ir_model_fields (name VARCHAR, model VARCHAR)")
+        database.execute(
+            "CREATE TABLE pg_attribute (attname VARCHAR, atttypid VARCHAR, attrelid VARCHAR, attnum INTEGER, attisdropped BOOLEAN)"
+        )
+        types = {"VARCHAR": "character varying", "BOOLEAN": "boolean", "INTEGER": "integer"}
+        columns = database.execute("PRAGMA table_info(payment_provider)").fetchall()
+        database.executemany(
+            "INSERT INTO pg_attribute VALUES (?, ?, ?, ?, ?)",
+            [(row[1], types[row[2]], "payment_provider", row[0] + 1, False) for row in columns],
+        )
+        names = registered if registered is not None else tuple(row[1] for row in columns)
+        database.executemany(
+            "INSERT INTO ir_model_fields VALUES (?, ?)",
+            [(name, "payment.provider") for name in names],
+        )
+        if values is not None:
+            database.execute(
+                "INSERT INTO payment_provider VALUES (" + ",".join("?" for _ in values) + ")",
+                values,
+            )
+        database.execute("PRAGMA query_only = ON")
+        return bool(
+            self.program["table_is_configured"](
+                PaymentProviderCursor(database),
+                {
+                    "table": self.setting.table,
+                    "configured_when": self.setting.configured_when,
+                },
+            )
+        )
+
+    def test_native20_remote_provider_is_detected_in_live_and_test_modes(self) -> None:
+        for live in (True, False):
+            with self.subTest(live=live):
+                self.assertTrue(
+                    self.configured(
+                        "code VARCHAR, active BOOLEAN, is_live BOOLEAN", ("stripe", True, live)
+                    )
+                )
+
+    def test_native19_enabled_and_sandbox_providers_are_detected(self) -> None:
+        for state in ("enabled", "test"):
+            with self.subTest(state=state):
+                self.assertTrue(self.configured("code VARCHAR, state VARCHAR", ("stripe", state)))
+
+    def test_native20_ignores_a_retired_sql_state_column(self) -> None:
+        for active, legacy_state in ((True, "disabled"), (False, "enabled")):
+            with self.subTest(active=active, legacy_state=legacy_state):
+                self.assertEqual(
+                    self.configured(
+                        "code VARCHAR, active BOOLEAN, is_live BOOLEAN, state VARCHAR",
+                        ("stripe", active, False, legacy_state),
+                        registered=("code", "active", "is_live"),
+                    ),
+                    active,
+                )
+
+    def test_native_disabled_archived_and_no_remote_providers_are_exempt(self) -> None:
+        self.assertFalse(self.configured("code VARCHAR, state VARCHAR", ("stripe", "disabled")))
+        self.assertFalse(
+            self.configured(
+                "code VARCHAR, active BOOLEAN, is_live BOOLEAN", ("stripe", False, True)
+            )
+        )
+        for code in ("none", "custom", "demo"):
+            with self.subTest(code=code):
+                self.assertFalse(self.configured("code VARCHAR, state VARCHAR", (code, "enabled")))
+                self.assertFalse(
+                    self.configured(
+                        "code VARCHAR, active BOOLEAN, is_live BOOLEAN", (code, True, True)
+                    )
+                )
+
+    def test_supported_empty_schemas_pass(self) -> None:
+        for schema in (
+            "code VARCHAR, state VARCHAR",
+            "code VARCHAR, active BOOLEAN, is_live BOOLEAN",
+        ):
+            with self.subTest(schema=schema):
+                self.assertFalse(self.configured(schema))
+
+    def test_unknown_empty_schema_refuses_instead_of_passing_no_rows(self) -> None:
+        for schema in (
+            "code VARCHAR",
+            "state VARCHAR",
+            "code INTEGER, state VARCHAR",
+            "code VARCHAR, active BOOLEAN",
+            "code VARCHAR, active VARCHAR, is_live BOOLEAN",
+            "code VARCHAR, state VARCHAR, active BOOLEAN, is_live BOOLEAN",
+        ):
+            with (
+                self.subTest(schema=schema),
+                self.assertRaisesRegex(SystemExit, "payment_provider.*schema"),
+            ):
+                self.configured(schema)
+
+    def test_null_remote_provider_status_or_code_cannot_hide_configuration(self) -> None:
+        self.assertTrue(self.configured("code VARCHAR, state VARCHAR", ("stripe", None)))
+        self.assertTrue(self.configured("code VARCHAR, state VARCHAR", (None, "enabled")))
+        self.assertTrue(
+            self.configured(
+                "code VARCHAR, active BOOLEAN, is_live BOOLEAN", ("stripe", None, False)
+            )
+        )
+        self.assertTrue(
+            self.configured("code VARCHAR, active BOOLEAN, is_live BOOLEAN", (None, True, True))
+        )
 
 
 def _policies(*allowed: str, protected: tuple[str, ...] = ()) -> DokployTargetPolicies:
