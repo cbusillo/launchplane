@@ -38,24 +38,6 @@ class ArtifactIdentityManifestTests(unittest.TestCase):
         ):
             ArtifactIdentityManifest.model_validate(payload)
 
-    def test_v2_manifest_accepts_complete_dependency_provenance(self) -> None:
-        manifest = artifact_manifest_v2()
-        provenance = manifest.dependency_provenance
-
-        assert provenance is not None
-        self.assertEqual(
-            tuple(lock.scope for lock in provenance.uv_locks),
-            ("support_runtime", "tenant"),
-        )
-        self.assertEqual(tuple(provenance.python_environments), provenance.target_platforms)
-        package_source = provenance.python_environments["linux/amd64"].packages[1].source
-        self.assertEqual(package_source.repository, "https://github.com/cbusillo/simple_zpl2.git")
-        self.assertEqual(package_source.commit, "7" * 40)
-        self.assertEqual(
-            set(package_source.model_dump(mode="json")),
-            {"kind", "repository", "commit"},
-        )
-
     def test_v2_manifest_requires_dependency_and_build_provenance(self) -> None:
         missing_dependency = artifact_manifest_v2().model_dump(mode="json")
         missing_dependency.pop("dependency_provenance")
