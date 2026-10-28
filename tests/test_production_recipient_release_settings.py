@@ -432,10 +432,13 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
                 }
             }
         )
-        with patch.object(
-            fixture.store,
-            "read_production_recipient",
-            return_value=triggered.model_dump(mode="json"),
+        with (
+            patch.object(
+                fixture.store,
+                "read_production_recipient",
+                return_value=triggered.model_dump(mode="json"),
+            ),
+            expired_backup_clock(fixture.store, operation.operation_id),
         ):
             with self.assertRaises(BackupContinuationRefused):
                 require_continuable_backup(
@@ -612,10 +615,13 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
                         }
                     }
                 )
-                with patch.object(
-                    store,
-                    "read_production_recipient",
-                    return_value=witnessed.model_dump(mode="json"),
+                with (
+                    patch.object(
+                        store,
+                        "read_production_recipient",
+                        return_value=witnessed.model_dump(mode="json"),
+                    ),
+                    expired_backup_clock(store, operation.operation_id),
                 ):
                     with self.assertRaises(BackupContinuationRefused):
                         require_continuable_backup(
