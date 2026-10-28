@@ -4221,7 +4221,6 @@ def create_launchplane_fastapi_app(
         if record_store_factory is not None
         else build_shared_record_store(database_url=database_url)
     )
-    health_storage_backend: str | None = None
     if authz_policy_runtime is not None:
         resolved_authz_policy_runtime = authz_policy_runtime
     elif shared_record_store is not None:
@@ -4253,7 +4252,6 @@ def create_launchplane_fastapi_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        nonlocal health_storage_backend
         try:
             if release_digest_scheduler is not None:
                 await run_in_threadpool(release_digest_scheduler.start)
@@ -4272,10 +4270,8 @@ def create_launchplane_fastapi_app(
                 from control_plane.service_deploy_drain import confirm_startup
 
                 await run_in_threadpool(confirm_startup, startup_record_store)
-            health_storage_backend = storage_backend_name(startup_record_store)
             yield
         finally:
-            health_storage_backend = None
             if release_digest_scheduler is not None:
                 await run_in_threadpool(release_digest_scheduler.stop)
             if discussion_reminder_scheduler is not None:
@@ -26708,23 +26704,10 @@ def create_launchplane_fastapi_app(
             )
         return response
 
-    async def read_health(
-        request: Request, maintenance_liveness: Annotated[bool, Query()] = False
-    ) -> HealthResponse:
-        if not maintenance_liveness:
-            return await run_in_threadpool(
-                lambda: HealthResponse(
-                    trace_id=next_trace_id(),
-                    storage_backend=storage_backend_name(get_record_store()),
-                )
-            )
-        if request.client is None or request.client.host not in {"127.0.0.1", "::1"}:
-            raise HTTPException(status_code=403, detail="Maintenance liveness requires loopback.")
-        if health_storage_backend is None:
-            raise HTTPException(status_code=503, detail="Launchplane startup is incomplete.")
+    def read_health() -> HealthResponse:
         return HealthResponse(
             trace_id=next_trace_id(),
-            storage_backend=health_storage_backend,
+            storage_backend=storage_backend_name(get_record_store()),
         )
 
     def preserve_renewed_session_cookie(request: Request, response: JSONResponse) -> None:
@@ -26743,10 +26726,6 @@ def create_launchplane_fastapi_app(
         response_model=HealthResponse,
         operation_id="read_launchplane_health",
         summary="Read Launchplane service health",
-        responses={
-            403: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
     )
 
     async def configure_github_delivery(
