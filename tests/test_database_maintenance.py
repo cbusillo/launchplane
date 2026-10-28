@@ -125,7 +125,10 @@ class DatabaseMaintenanceSchemaSnapshotTests(unittest.TestCase):
         before = "CHECK (state = ALL (ARRAY['a''b'::character varying, 'a,b'::character varying, 'a '::character varying]::text[]))"
         restored = "CHECK (state = ALL (ARRAY['a''b'::text, 'a,b'::text, 'a '::text]))"
         normalized = database_maintenance._normalize_scalar_array_literals(before)
-        self.assertEqual(normalized, restored)
+        self.assertEqual(
+            database_maintenance._schema_sha256(self.metadata("constraints", before)),
+            database_maintenance._schema_sha256(self.metadata("constraints", restored)),
+        )
         self.assertEqual(
             database_maintenance._normalize_scalar_array_literals(normalized), normalized
         )
