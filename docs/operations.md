@@ -5704,7 +5704,7 @@ configured command refuses qualification. A same-image container without explici
 independent database credentials also refuses qualification.
 The exact PostgreSQL server is trusted bootstrap custody, bound separately to
 the API's database system identifier; it stays running for the backup. It is
-never treated as an application writer to freeze or an arbitrary extra client.
+never treated as an application writer to stop or an arbitrary extra client.
 The API needs explicit PostgreSQL username/password wiring; credential indirection
 is unqualified. Values stay in process memory and are never emitted. Unknown
 identities refuse.
@@ -5863,7 +5863,7 @@ Normal, explicit, deadline and post-boot release all use the same read-only
 before/after verifier: first terminate and confirm the exact keeper backend
 is gone, then independently compare committed state with either verified full
 state, check revision/cluster and full invariants. Any unsafe or UNKNOWN result
-keeps originals frozen or stopped with restart disabled and the recovery marker
+keeps originals stopped with restart disabled and the recovery marker
 held. The failure event states which evidence failed:
 
 - `database_unsafe`: the committed data or schema disagrees with the verified
@@ -5921,7 +5921,7 @@ before explicitly starting other workers in parallel. The original policies
 have already been restored after the bound database/health proof. Healthy readback
 is still required for every original, including an automatically restarted one. A partial resume records progress; subsequent cleanup retries
 reuse the safe proof because legitimate resumed writes may have changed rows.
-They never refreeze healthy services or demand the old full hashes again. A crash after
+They never stop healthy services again or demand the old full hashes again. A crash after
 starting a stopped original, before progress is recorded, may leave its same
 container ID/image/project running with a newer PID. Only the already bound safe
 proof and persisted resume-start intent allow that exact-original retry and
@@ -5965,7 +5965,7 @@ The final receipt includes actual verified revision and original service
 readback. Successful cleanup disables/removes the watchdog and verifies its
 inactive state. A crash after marking release complete still uses the same
 supported command to settle only the exact owned units and fsync cleanup progress;
-it repeats no database, provider, freezer or resume operation. It stops those
+it repeats no database, provider or resume operation. It stops those
 units outside state custody before final metadata cleanup. Success requires the
 cleanup readback as well as the sticky release proof.
 Private state defaults to `/var/lib/launchplane-maintenance`;

@@ -482,14 +482,6 @@ def start_process(command: list[str]) -> subprocess.Popen[bytes]:
     )
 
 
-def restart_policy(policy: dict[str, Any]) -> str:
-    name = str(policy["Name"])
-    if name not in {"no", "always", "unless-stopped", "on-failure"}:
-        raise RuntimeError("An original restart policy is unsupported.")
-    attempts = int(policy.get("MaximumRetryCount", 0))
-    return f"{name}:{attempts}" if name == "on-failure" and attempts else name
-
-
 def clean_original_exit(observed: dict[str, Any], state: dict[str, Any]) -> bool:
     permitted = {0, 128 + signal.SIGTERM} if observed["Id"] == state["api"] else {0}
     return not observed["State"].get("OOMKilled") and observed["State"].get("ExitCode") in permitted
@@ -597,7 +589,7 @@ def rearm_original_policies(state_path: Path, state: dict[str, Any]) -> None:
         ):
             raise RecoveryRequired("An original changed identity before recovery rearming.")
         policy = state["originals"][identifier]["restart_policy"]
-        run("docker", "update", "--restart=" + restart_policy(policy), identifier, timeout=10)
+        run("docker", "update", "--restart=" + str(policy["Name"]), identifier, timeout=10)
         if inspect_container(identifier)["HostConfig"]["RestartPolicy"] != policy:
             raise RuntimeError("The original recovery restart policy was not read back.")
         state.setdefault("rearmed_containers", [])
@@ -631,7 +623,11 @@ def resume_original(identifier: str, state: dict[str, Any]) -> str:
     if identifier in state.get("stop_requested", []) and (
         observed["State"]["StartedAt"] == state["originals"][identifier]["started_at"]
     ):
-        if observed["State"]["Running"]:
+        if (
+            observed["State"]["Running"]
+            and not observed["State"].get("Restarting")
+            and observed["State"]["Pid"] == state["originals"][identifier]["pid"]
+        ):
             signal_original(identifier, state)
         observed = wait_for_exit(identifier, state)
     if not observed["State"]["Running"]:
@@ -646,7 +642,7 @@ def resume_original(identifier: str, state: dict[str, Any]) -> str:
                 run(
                     "docker",
                     "update",
-                    "--restart=" + restart_policy(policy),
+                    "--restart=" + str(policy["Name"]),
                     identifier,
                     timeout=10,
                 )
@@ -824,7 +820,7 @@ def require_no_api_database_clients(state: dict[str, Any]) -> None:
         )
         != "0"
     ):
-        raise RuntimeError("Another database client exists during the physical API fence.")
+        raise RuntimeError("Another database client exists during the stopped-writer verification.")
 
 
 def require_database_cluster(state: dict[str, Any]) -> None:

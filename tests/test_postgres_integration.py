@@ -16669,25 +16669,23 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 store.close()
             engine = create_engine(url)
             self.addCleanup(engine.dispose)
-            schedulers = (
-                "ReleaseDigestScheduler",
-                "DiscussionReminderScheduler",
-                "HealthMonitorScheduler",
-                "OdooTestingDrillScheduler",
-                "PreviewLifecycleScheduler",
-            )
-            from contextlib import ExitStack
+            from control_plane.http_app import create_launchplane_fastapi_app as factory
 
-            with engine.connect() as connection, ExitStack() as stack:
-                constructors = [
-                    stack.enter_context(patch.object(service_bootstrap, name))
-                    for name in schedulers
-                ]
-                stack.enter_context(
-                    patch.dict(
-                        os.environ, {"LAUNCHPLANE_POLICY_TOML": "schema_version = 1"}, clear=True
-                    )
-                )
+            def create_app(**arguments: Any) -> Any:
+                for name, value in arguments.items():
+                    if name.endswith("_scheduler"):
+                        self.assertIsNone(value)
+                return factory(**arguments)
+
+            with (
+                engine.connect() as connection,
+                patch.object(
+                    service_bootstrap, "create_launchplane_fastapi_app", side_effect=create_app
+                ),
+                patch.dict(
+                    os.environ, {"LAUNCHPLANE_POLICY_TOML": "schema_version = 1"}, clear=True
+                ),
+            ):
                 before = database_snapshot(connection)
                 connection.commit()
                 verify_application_reads(connection, service_health=True)
@@ -16704,8 +16702,6 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 connection.commit()
                 verify_application_reads(connection, service_health=True)
                 self.assertEqual(database_snapshot(connection), retired)
-                for constructor in constructors:
-                    constructor.assert_not_called()
 
     def test_readonly_service_startup_refuses_a_policy_seed(self) -> None:
         from control_plane.database_maintenance_cli import verify_application_reads

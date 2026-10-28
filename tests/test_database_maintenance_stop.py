@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 import signal
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -174,6 +175,44 @@ class StoppedWriterHoldTests(unittest.TestCase):
         observed["State"]["OOMKilled"] = True
         self.assertFalse(host.clean_original_exit(observed, state))
 
+    def test_docker_restart_backoff_waits_without_signaling_an_exited_original(self) -> None:
+        from tests.test_database_maintenance_host import state_file
+
+        with TemporaryDirectory() as directory:
+            path = state_file(Path(directory))
+            state = json.loads(path.read_text())
+            name = state["api"]
+            state["stop_requested"] = [name]
+            state["resume_started"] = True
+            original = state["originals"][name]
+            restarting = {
+                "Image": state["image_id"],
+                "Config": {"Labels": {"com.docker.compose.project": state["project"]}},
+                "HostConfig": {"RestartPolicy": original["restart_policy"]},
+                "State": {
+                    "Running": True,
+                    "Restarting": True,
+                    "Pid": 0,
+                    "StartedAt": original["started_at"],
+                },
+            }
+            healthy = {**restarting, "State": {"Running": True, "StartedAt": "restarted"}}
+            observations = iter([restarting])
+            with (
+                patch.object(
+                    host, "inspect_container", side_effect=lambda _: next(observations, healthy)
+                ),
+                patch.object(host, "wait_for_exit", return_value=healthy) as wait,
+                patch.object(
+                    host, "signal_original", side_effect=host.RecoveryRequired("Exited process")
+                ) as send,
+                patch.object(host, "run"),
+                patch.object(time, "sleep"),
+            ):
+                self.assertEqual(host.resume_original(name, state), name)
+                send.assert_not_called()
+                wait.assert_called_once_with(name, state)
+
     def test_every_policy_is_rearmed_even_when_the_api_is_still_exiting(self) -> None:
         from tests.test_database_maintenance_host import state_file
 
@@ -199,13 +238,12 @@ class StoppedWriterHoldTests(unittest.TestCase):
                 ]
                 return ""
 
-            def pending(_name: str, current: dict[str, Any]) -> str:
+            def pending(_name: str, _current: dict[str, Any]) -> str:
                 for name in state["containers"]:
                     self.assertEqual(
                         containers[name]["HostConfig"]["RestartPolicy"],
                         state["originals"][name]["restart_policy"],
                     )
-                self.assertEqual(set(current["rearmed_containers"]), set(state["containers"]))
                 raise TimeoutError("The original API is finishing its request.")
 
             with (

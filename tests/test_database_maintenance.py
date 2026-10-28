@@ -5,6 +5,10 @@ import struct
 import socket
 import sys
 import json
+import threading
+import time
+
+import uvicorn
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -141,6 +145,49 @@ class DatabaseMaintenanceSchemaSnapshotTests(unittest.TestCase):
                 database_maintenance._schema_sha256(self.metadata(category, before)),
                 database_maintenance._schema_sha256(self.metadata(category, after)),
             )
+
+
+class DatabaseMaintenanceHealthTests(unittest.TestCase):
+    def test_slow_startup_and_shutdown_remain_transient(self) -> None:
+        from control_plane import database_maintenance_health as health
+        from control_plane.drivers import native_routes
+
+        for started in (False, True):
+            with self.subTest(started=started):
+                store = MagicMock()
+                server = Mock(started=started, should_exit=False)
+                worker = Mock()
+                worker.is_alive.side_effect = lambda: started or not server.should_exit
+                elapsed = [0.0]
+                response = MagicMock(status=200)
+                response.read.return_value = b'{"status":"ok"}'
+                response.__enter__.return_value = response
+                opener = Mock()
+                opener.open.return_value = response
+                with (
+                    patch.dict(
+                        os.environ, {"LAUNCHPLANE_POLICY_TOML": "schema_version = 1"}, clear=True
+                    ),
+                    patch.object(health, "schema_migration_action", return_value="current"),
+                    patch.object(native_routes, "_validate_native_descriptor_driver_routes"),
+                    patch.object(native_routes, "_validate_native_fastapi_driver_routes"),
+                    patch.object(health, "create_launchplane_service_application"),
+                    patch.object(uvicorn, "Server", return_value=server),
+                    patch.object(threading, "Thread", return_value=worker),
+                    patch.object(health, "build_opener", return_value=opener),
+                    patch.object(time, "monotonic", side_effect=lambda: elapsed[0]),
+                    patch.object(
+                        time,
+                        "sleep",
+                        side_effect=lambda _: elapsed.__setitem__(
+                            0, elapsed[0] + health.HEALTH_WAIT_SECONDS
+                        ),
+                    ),
+                ):
+                    with self.assertRaises(TimeoutError):
+                        health.verify_service_health(store)
+                self.assertTrue(server.should_exit)
+                worker.join.assert_called_once()
 
 
 class DatabaseMaintenanceIsolationTests(unittest.TestCase):

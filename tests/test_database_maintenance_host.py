@@ -20,15 +20,7 @@ from control_plane import database_maintenance_host as host
 def state_file(root: Path, **changes: Any) -> Path:
     originals = {}
     for index, identifier in enumerate(("own-api", "own-train"), start=10):
-        group = root / identifier
-        group.mkdir()
-        (group / "cgroup.freeze").write_text("0")
-        (group / "cgroup.events").write_text("populated 1\nfrozen 0\n")
-        metadata = group.stat()
         originals[identifier] = {
-            "cgroup": str(group),
-            "device": metadata.st_dev,
-            "inode": metadata.st_ino,
             "pid": index,
             "started_at": "original-start",
             "restart_policy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
@@ -778,7 +770,7 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                     host.check_originals(json.loads(path.read_text()))
             run.assert_not_called()
 
-    def test_dormant_writer_outside_the_project_refuses_before_freeze(self) -> None:
+    def test_dormant_writer_outside_the_project_refuses_before_stop(self) -> None:
         database = "postgresql://synthetic:credential@own/database"
         api = {
             "Image": "own-image",

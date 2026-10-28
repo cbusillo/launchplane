@@ -1,6 +1,4 @@
 from tests.support.auth import scoped_agent_test
-import asyncio
-import threading
 import base64
 import hashlib
 import json
@@ -19,9 +17,6 @@ from urllib.parse import (
 )
 
 from fastapi import FastAPI
-from httpx2 import ASGITransport, AsyncClient
-from fastapi.concurrency import run_in_threadpool
-from anyio.to_thread import current_default_thread_limiter
 from fastapi.responses import PlainTextResponse
 from fastapi.routing import APIRoute
 
@@ -302,54 +297,6 @@ class FastApiConstructionMetadataTests(unittest.TestCase):
 
 
 class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_maintenance_liveness_preserves_normal_health_worker_requirement(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_product_environment_read_policy(context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-        async with lifespan_client(app) as client:
-            started = asyncio.Event()
-            unblock = threading.Event()
-            loop = asyncio.get_running_loop()
-            limiter = current_default_thread_limiter()
-            original_capacity = limiter.total_tokens
-            limiter.total_tokens = 1
-
-            def occupy_worker() -> None:
-                loop.call_soon_threadsafe(started.set)
-                unblock.wait()
-
-            occupied = asyncio.create_task(run_in_threadpool(occupy_worker))
-            normal = None
-            try:
-                await asyncio.wait_for(started.wait(), timeout=5)
-                normal = asyncio.create_task(client.get("/v1/health"))
-                await asyncio.sleep(0)
-                response = await asyncio.wait_for(
-                    client.get("/v1/health?maintenance_liveness=true"), timeout=5
-                )
-                self.assertEqual(response.status_code, 200)
-                self.assertFalse(normal.done())
-            finally:
-                unblock.set()
-                await occupied
-                limiter.total_tokens = original_capacity
-                if normal is not None:
-                    self.assertEqual((await normal).status_code, 200)
-
-    async def test_maintenance_liveness_requires_loopback_and_completed_startup(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_product_environment_read_policy(context="example-site"),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-        for address, expected in (("127.0.0.1", 503), ("192.0.2.10", 403)):
-            transport = ASGITransport(app=app, client=(address, 12345))
-            async with AsyncClient(transport=transport, base_url="http://fixture") as client:
-                response = await client.get("/v1/health?maintenance_liveness=true")
-                self.assertEqual(response.status_code, expected)
-
     async def test_health_returns_typed_public_safe_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

@@ -64,8 +64,10 @@ def verify_service_health(store: PostgresRecordStore) -> None:
         try:
             deadline = time.monotonic() + HEALTH_WAIT_SECONDS
             while not server.started:
-                if not thread.is_alive() or time.monotonic() >= deadline:
-                    raise RecoveryRequired("The actual API lifespan did not complete.")
+                if not thread.is_alive():
+                    raise RecoveryRequired("The actual API lifespan failed startup.")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("The actual API lifespan did not finish in time.")
                 time.sleep(0.05)
             opener = build_opener(ProxyHandler({}))
             with opener.open(f"http://127.0.0.1:{port}/v1/health", timeout=5) as response:
@@ -76,4 +78,4 @@ def verify_service_health(store: PostgresRecordStore) -> None:
             server.should_exit = True
             thread.join(HEALTH_WAIT_SECONDS)
             if thread.is_alive():
-                raise RecoveryRequired("The verification API did not finish shutdown.")
+                raise TimeoutError("The verification API did not finish shutdown.")
