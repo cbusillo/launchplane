@@ -7670,8 +7670,16 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
+        preview_bootstrap = bool(override_request.override.preview_original_reservation_id)
+        if preview_bootstrap and not director_agent_identity(identity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Only the Director agent can prepare exact preview bootstrap intent.",
+            )
         try:
-            if override_request.override.preview_original_reservation_id:
+            if preview_bootstrap:
                 from control_plane.preview_website_bootstrap_override import (
                     preview_bootstrap_profile,
                 )
@@ -7707,18 +7715,13 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        preview_bootstrap = bool(override_request.override.preview_original_reservation_id)
-        director_preview_bootstrap = preview_bootstrap and director_agent_identity(identity)
-        if not director_preview_bootstrap and (
-            preview_bootstrap
-            or not native_routes.native_driver_route_authorization_allows(
-                endpoint=write_odoo_website_bootstrap_override,
-                authorization_allows=resolved_authz_policy_runtime.allows,
-                identity=identity,
-                product=authorization_product,
-                context=override_request.override.context,
-                instances=(override_request.override.instance,),
-            )
+        if not preview_bootstrap and not native_routes.native_driver_route_authorization_allows(
+            endpoint=write_odoo_website_bootstrap_override,
+            authorization_allows=resolved_authz_policy_runtime.allows,
+            identity=identity,
+            product=authorization_product,
+            context=override_request.override.context,
+            instances=(override_request.override.instance,),
         ):
             raise _launchplane_http_error(
                 status_code=403,

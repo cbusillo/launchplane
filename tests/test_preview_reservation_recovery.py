@@ -256,6 +256,11 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         self.assertEqual(plan.status_code, 202)
         with scoped_agent_transport():
             self.assertEqual(post(payload).status_code, 403)
+            unknown_original: dict[str, object] = {
+                **payload,
+                "override": {**override, "preview_original_reservation_id": "unavailable"},
+            }
+            self.assertEqual(post(unknown_original).status_code, 403)
         override["instance"] = self.profile.preview.template_instance
         self.assertEqual(post(payload).status_code, 400)
         override["instance"] = self.issued.preview_slug
