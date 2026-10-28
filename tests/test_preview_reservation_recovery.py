@@ -282,6 +282,15 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             },
         }
         self.assertEqual(post(stable_null).status_code, 400)
+        stable_intent: dict[str, object] = {
+            **stable_null,
+            "override": {
+                **cast(dict[str, object], stable_null["override"]),
+                "website_bootstrap": {"name": "Stable native-grant control"},
+            },
+        }
+        with scoped_agent_transport():
+            self.assertEqual(post(stable_intent).status_code, 202)
         from control_plane.contracts.odoo_instance_override_record import (
             OdooAddonSettingOverride,
             OdooOverrideValue,
@@ -476,6 +485,36 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                     database_url=self.database_url(),
                 )
             self.assertEqual(refusal.exception.code, "odoo_preview_plan_stale")
+
+    def test_recorded_preview_preparation_requires_the_current_executor_target(self) -> None:
+        from control_plane.odoo_post_deploy_http import OdooWebsiteBootstrapOverrideRequest
+        from control_plane.preview_website_bootstrap_override import prepare_preview_bootstrap
+
+        self.prepare_cleanup()
+        changed = self.profile.model_copy(deep=True)
+        changed.preview.app_name_prefix = "replacement-preview"
+        self.store.write_product_profile_record(changed)
+        self.assertEqual(
+            original_preview_intent(
+                self.reservation, profile=changed, store=self.store
+            ).issued_plan,
+            self.issued,
+        )
+        self.assertTrue(
+            classify_preview_reservation(self.reservation, profile=changed, store=self.store)[
+                "original_binding_available"
+            ]
+        )
+        request = OdooWebsiteBootstrapOverrideRequest(
+            product=changed.product,
+            context=changed.preview.context,
+            instance=self.issued.preview_slug,
+            website_bootstrap=None,
+            mode="dry-run",
+            preview_original_reservation_id=self.reservation.record_id,
+        )
+        with self.assertRaises(ValueError):
+            prepare_preview_bootstrap(self.store, request)
 
     def replace_record(self, **changes: object) -> LaunchplaneIdempotencyRecord:
         with self.store._session_factory() as session:

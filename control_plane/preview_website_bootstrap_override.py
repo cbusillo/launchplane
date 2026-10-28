@@ -17,6 +17,7 @@ from control_plane.preview_reservation_recovery import (
     original_preview_intent,
     preview_reservation_reference,
     require_unrecorded_preview_original,
+    require_current_preview_original_target,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
@@ -37,6 +38,9 @@ def preview_bootstrap_profile(
         original.issued_plan.preview_slug,
     ):
         raise ValueError("Preview bootstrap target differs from the retained original.")
+    require_current_preview_original_target(
+        profile=profile, reservation=reservation, original=original, instance=request.instance
+    )
     if any(
         (lane.context, lane.instance) == (request.context, request.instance)
         for product in store.list_product_profile_records()
