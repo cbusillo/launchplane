@@ -82,6 +82,14 @@ from control_plane.production_recipient_evidence import (
 CUTOVER_ROUTE = "/v1/products/{product}/production-recipient/cutover"
 
 
+def recipient_promotion_record_id(provider_operation_key: str) -> str:
+    return "promotion-recipient-" + canonical_sha256(provider_operation_key)[:24]
+
+
+def recipient_deployment_record_id(provider_operation_key: str) -> str:
+    return "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
+
+
 def cutover_reconciliation_key(preparation: str) -> str:
     return "production-recipient-cutover:" + preparation
 
@@ -746,7 +754,7 @@ def _attempt_execution_started(
         and record.execution.get("trigger_requested_at")
         and isinstance(attempt_identity, dict)
         and attempt_identity.get("deployment_record_id")
-        == "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
+        == recipient_deployment_record_id(provider_operation_key)
     )
 
 
@@ -965,8 +973,9 @@ class RecipientCutoverAdapter:
                     instance="prod",
                     promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
                     backup_record_id=self.backup_record_id,
-                    active_promotion_record_id="promotion-recipient-"
-                    + canonical_sha256(provider_operation_key)[:24],
+                    active_promotion_record_id=recipient_promotion_record_id(
+                        provider_operation_key
+                    ),
                 )
 
             automatic_recovery = False
@@ -1116,8 +1125,8 @@ class RecipientCutoverAdapter:
                 != record.activation
             ):
                 raise ValueError("Reviewed cutover authority changed.")
-            deployment_id = "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
-            promotion_id = "promotion-recipient-" + canonical_sha256(provider_operation_key)[:24]
+            deployment_id = recipient_deployment_record_id(provider_operation_key)
+            promotion_id = recipient_promotion_record_id(provider_operation_key)
             if record.execution:
                 identity = RuntimeIdentity.model_validate(record.execution["runtime_identity"])
                 if (
@@ -1597,9 +1606,7 @@ class RecipientCutoverAdapter:
         if not isinstance(lease, ProviderEvidenceLease):
             raise ValueError("Promotion failure evidence requires a live lease.")
         try:
-            pending = self.store.read_promotion_record(
-                "promotion-recipient-" + canonical_sha256(key)[:24]
-            )
+            pending = self.store.read_promotion_record(recipient_promotion_record_id(key))
         except FileNotFoundError:
             return
         with self.store.provider_evidence_guard(lease.evidence_reservation):
@@ -1619,7 +1626,7 @@ class RecipientCutoverAdapter:
         return self.result(
             "fail",
             provider_effect_performed=provider_effect_performed,
-            promotion_record_id="promotion-recipient-" + canonical_sha256(key)[:24],
+            promotion_record_id=recipient_promotion_record_id(key),
             **extra,
         )
 

@@ -34,6 +34,7 @@ from tests import test_testing_retry as testing_retry_tests
 from tests import test_browser_route_repair as browser_repair_tests
 from tests import test_release_review_http as release_review_http_tests
 from tests import test_production_recipient_release_settings as recipient_settings_tests
+from tests import test_accepted_recipient_delivery_recovery as recipient_delivery_tests
 from tests import test_generic_web_compose_refusal as compose_refusal_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
@@ -13523,6 +13524,16 @@ class RealPostgresRecipientReleaseSettingsTests(unittest.TestCase):
 
     def test_native_backup_continuation_rechecks_current_and_dispatched_attempt(self) -> None:
         self.fixture.test_native_preflight_continuation_refuses_current_or_dispatched_attempt()
+
+
+class RealPostgresRecipientDeliveryRecoveryTests(unittest.TestCase):
+    def test_released_final_preflight_recovers_through_native_publication(self) -> None:
+        fixture = recipient_delivery_tests.ReleasedFinalPreflightDeliveryRecoveryTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.old_database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_abandoned_preflight_recovers_without_recreating_its_reservation()
 
 
 class RealPostgresRecipientWriterTests(unittest.TestCase):
