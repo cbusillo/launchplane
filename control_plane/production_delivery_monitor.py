@@ -974,7 +974,7 @@ def _recover_delivery_failures(
                 recovery = _later_completed_recipient_release(
                     store, profile, lane, key, failures, failed_at, now
                 )
-            except (ValueError, KeyError, TypeError, FileNotFoundError):
+            except (ValueError, KeyError, TypeError, AttributeError, FileNotFoundError):
                 recipient_evidence_failed = True
                 _LOGGER.exception("Could not verify recipient delivery for %s", profile.product)
             else:
@@ -1118,7 +1118,7 @@ def _later_completed_recipient_release(
                     store, profile, previous, previous_decision, final.updated_at
                 )
             )
-        except (ValueError, KeyError, TypeError, FileNotFoundError):
+        except (ValueError, KeyError, TypeError, AttributeError, FileNotFoundError):
             continue
     if any(
         _delivery_failure_reference(failure).trace_id not in settled_traces for failure in failures

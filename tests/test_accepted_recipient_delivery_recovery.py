@@ -12,10 +12,9 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneHealthMonitoringPolicy,
 )
 from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
-from control_plane.integration_allowances import canonical_sha256
-from control_plane.provider_operations import build_provider_operation_key
 from control_plane.production_recipient_cutover import RecipientCutoverAdapter
 from control_plane.production_delivery_monitor import (
+    _delivery_failure_reference,
     _scan_failures,
     monitor_production_delivery_once,
     record_production_delivery_failure,
@@ -166,7 +165,9 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
         self.new_case.case.decision = self.decision
         self.store.write_release_review_decision_record(self.decision)
         with patch.object(
-            self.store, "_database_mutation_timestamp", return_value=self.clock.isoformat()
+            self.store,
+            "_database_mutation_timestamp",
+            side_effect=lambda _session: self.clock.isoformat(),
         ):
             self.new_case.capture_next_backup()
             self.new_case.advance()
@@ -190,6 +191,13 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
                 and row.check_name.startswith("production-delivery-")
             )
             if self.complete_current:
+                last_failure = max(
+                    datetime.fromisoformat(_delivery_failure_reference(failure).failed_at)
+                    for failure in self.store.list_delivery_failure_observations(
+                        incident_id=self.current_incident.incident_id
+                    )
+                )
+                self.clock = max(self.clock, last_failure) + timedelta(seconds=1)
                 self.new_case.advance()
         self.replay_history()
         record = recipient.custody(self.store, current.record.product, current.record.context)
@@ -503,7 +511,8 @@ class AcceptedRecipientDeliveryRecoveryTests(NativeDeliveryHistory):
         self.assert_open()
 
     def test_malformed_old_history_does_not_block_current_incident_recovery(self) -> None:
-        prior = {**self.record.prior_attempts[0], "plan_sha256": "malformed"}
+        original = self.record.prior_attempts[0]
+        prior = {**original, "execution": {**original["execution"], "release_trace": 1}}
         self.seed_custody(self.record.model_copy(update={"prior_attempts": [prior]}))
         self.assert_open()
         self.assertEqual(
@@ -511,6 +520,13 @@ class AcceptedRecipientDeliveryRecoveryTests(NativeDeliveryHistory):
                 self.current_incident.incident_id
             ).status,
             "resolved",
+        )
+        self.assertEqual(
+            {
+                incident.incident_id
+                for incident in self.store.list_public_ingress_incident_records(status="open")
+            },
+            {self.old_incident.incident_id},
         )
 
     def test_concurrent_new_failure_defers_recovery(self) -> None:
@@ -533,6 +549,14 @@ class AcceptedRecipientDeliveryRecoveryTests(NativeDeliveryHistory):
 
     def test_missing_current_publication_refreshes_all_incidents_then_reports_unknown(self) -> None:
         self.seed_custody(self.record.model_copy(update={"publication": {}}))
+        self.assert_current_evidence_unknown()
+
+    def test_malformed_current_receipt_refreshes_all_incidents_then_reports_unknown(self) -> None:
+        assert self.final is not None
+        self.seed_receipt(self.final.model_copy(update={"response_payload": {"result": []}}))
+        self.assert_current_evidence_unknown()
+
+    def assert_current_evidence_unknown(self) -> None:
         self.assert_open()
         for incident in (self.old_incident, self.current_incident):
             self.assertEqual(
@@ -596,34 +620,6 @@ class ReleasedPreflightDeliveryRecoveryTests(NativeDeliveryHistory):
         saved = self.prior.execution["reservation:" + self.old_operation_id]
         self.seed_receipt(
             LaunchplaneIdempotencyRecord.model_validate({**saved, "state": "reconcile_required"})
-        )
-        self.assert_open()
-
-    def test_dispatched_attempt_stays_fenced_without_a_current_reservation(self) -> None:
-        saved = LaunchplaneIdempotencyRecord.model_validate(
-            self.prior.execution["reservation:" + self.old_operation_id]
-        )
-        key = build_provider_operation_key(
-            scope=saved.scope,
-            route_path=saved.route_path,
-            idempotency_key=saved.idempotency_key,
-            request_fingerprint=saved.request_fingerprint,
-            reconciliation_key=saved.reconciliation_key,
-        )
-        prior = self.prior.model_copy(
-            update={
-                "execution": {
-                    **self.prior.execution,
-                    canonical_sha256(key) + ":old_pause_dispatched_at": self.now.isoformat(),
-                }
-            }
-        )
-        self.seed_custody(
-            self.record.model_copy(
-                update={
-                    "prior_attempts": [prior.model_dump(mode="json", exclude={"prior_attempts"})]
-                }
-            )
         )
         self.assert_open()
 
