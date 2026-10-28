@@ -19,14 +19,10 @@ Status: a product repository never calls Launchplane
 `.github/workflows/build.yml` that publishes an immutable image and a build
 manifest ([artifact-provenance.md](artifact-provenance.md)); Launchplane hears
 the events and deploys previews and `testing` itself
-([event-driven-deploys.md](event-driven-deploys.md)). The trigger inputs,
-OIDC request action, setup clients, and pinned reusable workflows described
-below (from [Minimal Trigger Inputs](#minimal-trigger-inputs) through
-[Reusable Launchplane Request Action](#reusable-launchplane-request-action),
-and the config-authority reusable gate) are the old call-in path. Products
-still on it keep it until #2606 deletes it; a new product repository does not
-add them. Production promotion and rollback that run from Launchplane itself,
-with no product workflow, are #2682 (CM website) and #2792 (generic-web).
+([event-driven-deploys.md](event-driven-deploys.md)). The old trigger-input, OIDC request-action, reusable-workflow, and caller-grant
+recipes are intentionally not repeated here. Existing compatibility remains
+bounded by [the transitional preview contract](preview-workflow-contract.md);
+new products follow the canonical event-driven and provenance contracts above.
 
 ## Target Shape
 
@@ -122,35 +118,8 @@ target ids, runtime environments, managed secret bindings, authz grants,
 admin identities, promotion policy, rollback policy, cleanup protection, or
 production readiness authority in `.github/github.json`.
 
-Thin connector metadata is allowed only when it identifies a generic connection
-surface rather than product topology. Examples include the name of the variable
-that supplies the Launchplane service URL, a reusable workflow entrypoint, a
-shared action path, a GitHub label that triggers a workflow, or a generic
-Launchplane route path used by the shared request action. The product-specific
-facts sent to that route should come from Launchplane records, GitHub OIDC
-claims, workflow dispatch input, or immutable build outputs, not from a
-checked-in catalog.
-
-Existing product repo metadata that lists product identity, public domains,
-health URLs, preview/deploy route configuration, or lane topology is an audit and
-remediation target unless it is explicitly reclassified as a Launchplane-stamped
-read model. A stamped read model must carry provenance that identifies
-Launchplane as the writer, the source record or response it mirrors, the stamp
-time or source hash, and a contract that admin edits are non-authoritative.
-Launchplane must still read authoritative lifecycle state from DB-backed records
-or driver responses, not from the stamped repo copy.
-
-Do not replace hard-coded lifecycle authority in code with the same authority in
-JSON, TOML, YAML, workflow defaults, or repo metadata. Moving the value changes
-the hiding place, not the ownership boundary.
-
-Allowed metadata examples:
-
-- quality gate commands such as `npm test` or `uv run python -m unittest`
-- important workflow display names used for admin navigation
-- the GitHub variable name that supplies the Launchplane service URL
-- a reusable Launchplane workflow reference or shared request action reference
-- public-safe related repository links used for docs or admin orientation
+Product-repository metadata is not a place for Launchplane caller workflow,
+route, OIDC, grant, or build-setting configuration.
 
 Disallowed metadata examples:
 
@@ -160,8 +129,11 @@ Disallowed metadata examples:
 - authz grants, admin subjects, token labels, or workflow policy catalogs
 - Launchplane route batches, idempotency catalogs, or copied provider payloads
 
-Product repositories should run Launchplane's changed-file authority gate before
-merge once the local baseline is clean:
+Launchplane's changed-file authority scanner audits an explicit product checkout:
+existing repositories retain their [dedicated reusable config-authority gate](../.github/workflows/reusable-product-repo-config-authority.yml)
+as compatibility, with `launchplane-revision` matching the called workflow SHA.
+This scanner invocation describes the Launchplane-side audit, not a product-owned
+Launchplane tool checkout or a new-product gate requirement:
 
 ```bash
 uv run launchplane service audit-config-authority \
@@ -203,37 +175,6 @@ Launchplane lifecycle authority such as authz policy, provider target,
 runtime-environment, managed secret, route batch, topology, or target-id
 material.
 
-Conventional generic-web repositories use the exact caller paths
-`.github/workflows/launchplane-preview.yml` and
-`.github/workflows/launchplane-preview-notice.yml`. The generated product-repo
-integration and onboarding authz planner share this path contract.
-
-When a product repository runs the gate from GitHub Actions, use a dedicated
-`.github/workflows/launchplane-config-authority.yml` workflow that calls the
-Launchplane-owned reusable gate:
-
-```yaml
-on: [pull_request, merge_group]
-jobs:
-  launchplane-config-authority:
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-repo-config-authority.yml@<launchplane-sha>
-    with:
-      launchplane-revision: <launchplane-sha>
-```
-
-The reusable workflow validates `launchplane-revision` as a 40-character SHA,
-requires it to match GitHub's called-workflow commit SHA, checks out the product
-repository and that exact Launchplane audit-tool commit, then runs the product-repo
-changed-file gate. The input must match the SHA in the reusable-workflow `uses`
-reference, and the dedicated workflow must contain
-exactly one such call. Product repositories should not carry a
-pinned Launchplane tool checkout or run `uv run launchplane ...` themselves.
-The dedicated workflow fails closed when the reusable call is absent, duplicated,
-mutable, mismatched, or mixed with another reusable workflow call. The optional
-`runs_on` input takes a JSON-encoded runner selector (default
-`"ubuntu-latest"`) for product repositories that run the gate on their own
-runner.
-
 ## What Product Repos Own
 
 - Application source code and product-owned business behavior.
@@ -262,9 +203,6 @@ runner.
   bot/dependency-type guard or a step output. Mutable action/image references,
   unrelated action inputs, and runtime identities disguised as scanner
   configuration remain rejected.
-- The reusable config-authority workflow validates and checks out the explicit
-  `launchplane-revision` SHA. Callers repeat the immutable `uses` SHA as that
-  input so the selected workflow and executed audit implementation stay bound.
 - A publish guard derived from `github.event.repository.default_branch` is a
   workflow mechanic; a checked-in literal branch remains runtime authority.
 - Direct `${{ inputs.* }}` forwarding inside action metadata is connector
@@ -277,10 +215,10 @@ runner.
 
 Product-specific checks may stay in the repo when they exercise product behavior
 Launchplane cannot know generically, such as a checkout flow, Client route, QR
-scan flow, or domain-specific API behavior. They should send facts to
-Launchplane rather than defining product topology, target inventory, domains, or
-runtime authority. Generic runtime health and revision checks should move to
-Launchplane drivers once the driver has the necessary profile data.
+scan flow, or domain-specific API behavior. Their results stay product-owned build or CI evidence rather than defining
+product topology, target inventory, domains, or runtime authority. Generic
+runtime health and revision checks should move to Launchplane drivers once the
+driver has the necessary profile data.
 
 Product smoke checks own their fixture setup and cleanup. They do not call a
 Launchplane maintenance endpoint. The old generated smoke-maintenance client is
@@ -311,43 +249,6 @@ and never runs the product check inside its credentialed service.
 - Protected artifact inventory used by registry cleanup to identify live
   testing, production, release-tuple, and active-preview image references, and
   each stable lane's default rollback target.
-
-## Minimal Trigger Inputs
-
-A product workflow should submit only the facts Launchplane cannot derive from
-DB-backed profiles or GitHub OIDC claims:
-
-- product key
-- source ref or commit SHA
-- immutable artifact or image reference
-- PR number for preview actions
-- explicit production confirmation for destructive or high-risk actions
-- optional run URL for audit display
-
-Launchplane should derive context, lane, preview slug, preview URL, target,
-health path, feedback marker, provider credentials, managed secrets, and record
-ids unless a driver-specific route documents an explicit exception.
-
-## Approval Gate
-
-A product repo is approved when all of these are true:
-
-- Workflows build, test, and publish product artifacts and the build manifest.
-  They do not call Launchplane or directly mutate runtime providers.
-- Scripts do not own Launchplane record or evidence shaping that Launchplane can
-  derive from profiles, driver requests, provider results, or GitHub OIDC
-  claims.
-- Driver-trigger workflows rely on Launchplane routes to write the records for
-  provider actions they execute. If product-specific smoke checks still run in
-  the repo, the repo sends only primitive result facts back to Launchplane.
-- Preview, deploy, promotion, rollback, and cleanup triggers pass minimal inputs
-  only.
-- Product-specific checks remain in the repo only when they validate product
-  behavior rather than generic deploy plumbing.
-- Removed scripts are unused or replaced by equivalent Launchplane routes with
-  tests.
-- CI and security gates pass after cleanup.
-- At least one non-prod Launchplane path is exercised after the cleanup.
 
 ## Odoo Ownership Regression Check
 
@@ -428,11 +329,6 @@ by whitespace or end-of-line, including descriptions of non-production
 restores. Commands with trailing comments or quoted `#` characters, shebangs,
 and JavaScript private members remain subject to the rule.
 
-When a product repo genuinely needs new source-adjacent facts, add a typed
-Launchplane driver input or shared connector path before expanding the allowlist.
-Do not copy a request client, provider planner, or durable-record builder into a
-tenant, image, shared-addon, or local-DX repo.
-
 Retired `odoo-ai` archival authority is intentionally handled by the separate
 quarantine plan rather than this active-repo regression gate.
 Known `odoo-devkit` Dokploy-managed local/remote runtime helpers are still
@@ -440,39 +336,7 @@ tracked by the local-DX separation plan; this check guards against new drift in
 tenant, image, shared-addon, and workflow/script surfaces while that cleanup
 continues.
 
-## Cleanup Workflow
-
-For an existing repo, classify each workflow and script before deleting code:
-
-- `keep`: product build, test, lint, local dev, local DB, or real product smoke
-  behavior.
-- `move`: Launchplane lifecycle behavior that should become or already is a
-  driver route.
-- `delete`: stale compatibility code with no active caller or with a proven
-  Launchplane replacement.
-- `adapter`: temporary OIDC trigger glue. Prefer the reusable
-  `cbusillo/launchplane/.github/actions/launchplane-request` GitHub Action for
-  raw Launchplane HTTP calls, then keep only the product-specific payload
-  assembly that cannot yet move into a driver route. When Launchplane owns the
-  full handoff, product repos should call a Launchplane reusable workflow and
-  keep only dispatch inputs, confirmation text, and product-owned build or test
-  facts locally.
-
-`launchplane-request` also supports `payload-list-file` with
-`idempotency-key-prefix` for bounded fan-out where Launchplane has already
-generated a JSON array of public-safe request payloads, such as merge-train PR
-feedback delivery. The action appends a stable digest for each payload, requests
-GitHub OIDC per POST, and writes a JSON response array. Do not use shell loops
-or repo-local OIDC clients for those remaining connector calls.
-
-Odoo tenants build from their own `workspace.toml` and source files. The `[build]`
-table declares the Odoo version and base images, `[workspace].python` declares
-Python, and the manifest names the devkit/shared-addon repositories. The build
-records resolved image digests and source commits in its artifact manifest.
-Launchplane verifies the build's provenance and deploys previews and testing
-from source-control events. It supplies no build inputs and has no Odoo publish
-or artifact-record call-in route. Runtime `ODOO_VERSION` comes from the artifact
-when that manifest records it.
+## Existing Cleanup Safety
 
 Start with low-risk deletions and documentation, then replace active workflow
 behavior in small slices. Do not remove active backup, promotion, rollback,
@@ -499,464 +363,26 @@ the inventory keeps the previous-good image without a product repo change.
 Cleanup consumers must check both `artifact_ids` and `image_references` from the
 protected inventory. Some active-preview protections come from ready PR feedback
 records that carry immutable and refresh image references but no artifact id, so
-an artifact-id-only cleanup filter can still delete a live preview tag. Whole-
-product cleanup callers should use
-`cbusillo/launchplane/.github/actions/setup-protected-artifacts-request-client@<launchplane-sha>`
-with `render-request: true` to render the
-`GET /v1/artifacts/protected?product=...` route, `GET` method, and
-`protected_artifacts` response extraction for `launchplane-request`. Product
-repos should forward the workflow's existing product value into that action
-instead of introducing a second product literal. The caller must use an
-`artifact_protection.read` grant that allows wildcard context for that product.
-Context-specific cleanup may pass `context=` and use a matching scoped grant.
-Product repos may still own provider-specific deletion and package tokens, but
-not the protected-inventory route shape or response extraction contract.
-The Odoo ownership check treats this shared-action composition as compliant;
-it rejects executable repo-local HTTP clients, not descriptive workflow step
-names such as `Fetch Launchplane protected artifact inventory`.
+an artifact-id-only cleanup filter can still delete a live preview tag. Existing cleanup uses [`setup-protected-artifacts-request-client`](../.github/actions/setup-protected-artifacts-request-client/action.yml)'s
+`render-request` interface and `protected_artifacts` extraction. Whole-product
+reads require `artifact_protection.read` with wildcard context for that product;
+context-specific reads use the matching scoped grant. Product-owned registry
+deletion keeps its package token and honors both deny sets. This retained
+compatibility does not authorize adding a caller or changing access.
 
-## Canonical Image Deploy Connector
+## Approval Gate
 
-Image-backed generic-web deploy is the canonical stable product-repo connector
-for simple service and website repos. The product repo builds and publishes an
-immutable image, then calls deployed Launchplane over the shared request action.
-Launchplane resolves product profile, lane, provider target, runtime
-environment, managed secrets, authz, idempotency, and deployment evidence from
-service-owned records.
+A product repo is approved when all of these are true:
 
-The first real-world proof for this shape is RepairShopr Sync: after PR #1503
-deployed Launchplane commit `9dbdf15904a86eea2b742f1e42e341db138e4860`,
-`cbusillo/repairshopr_api` Launchplane Deploy run `28415366430` attempt 4
-passed through `/v1/drivers/generic-web/deploy`. The product workflow supplied
-`ghcr.io/cbusillo/repairshopr_api@sha256:7efdbf139f7f5263c02d38509841253e719a41c44c55aa79aa4a223379808eea`
-as `artifact_id`; Launchplane returned deployment record
-`deployment-20260630T034901Z-repairshopr-sync-prod`, `deploy_status: pass`,
-target `cm-repairshopr-sync`, target category `compose`, provider `dokploy`,
-and `post_deploy_status: skipped`. That run is the recovery evidence for this
-contract and the baseline for retiring older source-ref or checkout-and-invoke
-patterns.
-
-For new or repaired product repos, prefer this connector over product-repo
-checkout of Launchplane source or direct invocation of Launchplane internals.
-If a repo still needs a compatibility bridge, the bridge must have an issue
-reference, a dated assignee, and a delete condition.
-
-## Reusable Generic-Web Lifecycle Workflows
-
-Generic-web product repos should prefer Launchplane-owned reusable workflows
-before calling raw driver routes. The reusable workflow owns the Launchplane
-route path, request JSON shape, response-output mapping, and run-scoped
-idempotency key. The product repo supplies only primitive facts. Product repos
-may calculate product-specific semantic release tags, but Launchplane owns
-source-inventory lookup and validation, promotion request shaping, provider
-mutation, health verification, and release creation or verification. The
-stable deploy workflow derives
-the product key from the caller repository name by default and uses the
-`testing` stable lane unless the caller supplies a narrower admin override.
-
-For ordinary same-repository pull requests, prefer the preview facade instead
-of composing image publication, preview lifecycle, product verification, and
-feedback jobs in the product repo:
-
-```yaml
-name: Launchplane Preview
-
-"on":
-  pull_request:
-    types: [opened, reopened, synchronize]
-
-permissions:
-  contents: read
-
-jobs:
-  preview:
-    if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login != 'dependabot[bot]'
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview.yml@<launchplane-sha>
-    with:
-      verification_command: >-
-        curl --fail --silent --show-error
-        "${LAUNCHPLANE_PREVIEW_URL}/healthz"
-```
-
-The facade derives the product key and default GHCR image repository from the
-caller repository. It publishes an exact digest, invokes the typed generic-web
-preview lifecycle, runs the product-owned verification command in a job without
-OIDC, records verification evidence, and delegates feedback status to the
-existing Launchplane workflow. The caller may override code-adjacent build facts
-supported by the facade, but the conventional product-repository connector is
-currently classified to pass only `verification_command` and the optional
-`image_repository`. Dockerfile path, build target, build arguments, and other
-facade inputs require their own reviewed config-authority classification before
-product repositories may set them. The caller must not pass provider targets,
-domains, lane topology, secret values, or Launchplane record IDs.
-
-The config-authority gate classifies `verification_command` and optional
-`image_repository` as thin connector inputs only when they are in the `with:`
-block directly attached to a full-SHA
-`reusable-generic-web-preview.yml` call in the conventional
-`.github/workflows/launchplane-preview.yml` workflow. Lookalike paths, mutable
-facade refs, unrelated reusable workflows, and other input names remain
-rejected.
-
-Same-repository cleanup, fork notices, and Dependabot notices stay in a
-separate trusted workflow so `pull_request_target` never reaches an untrusted
-checkout or preview refresh. Cleanup runs there because destructive authz
-requires an exact base-branch caller workflow ref:
-
-```yaml
-name: Launchplane Preview Notice
-
-"on":
-  pull_request_target:
-    types: [opened, reopened, synchronize, closed]
-
-permissions:
-  contents: read
-
-jobs:
-  notice:
-    permissions:
-      contents: read
-      id-token: write
-    uses: cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@<launchplane-sha>
-```
-
-Both callers must pin the full reviewed Launchplane commit SHA. The notice
-workflow accepts an optional `runs_on` input, a JSON-encoded GitHub Actions
-runner selector that defaults to `"ubuntu-latest"`. It applies to the notice's
-own job and to the cleanup and feedback reusable workflows it calls, so a
-product repository can run the notice on its own repository runners with
-`runs_on: '["self-hosted"]'`. The product-repo config authority gate accepts a
-selector built only from `self-hosted`, `ubuntu-latest`, or
-`${{ vars.LAUNCHPLANE_RUNNER_LABEL }}`; a literal runner label is still a
-finding. Production
-promotion, rollback, and other high-risk operations remain separate explicit
-workflows and are not part of the preview facade.
-
-Stable deploy uses:
-
-```yaml
-jobs:
-  launchplane-deploy:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-deploy.yml@<launchplane-sha>
-    with:
-      artifact_id: ${{ needs.build.outputs.image_digest }}
-      source_git_ref: ${{ github.sha }}
-```
-
-Production promotion uses:
-
-```yaml
-jobs:
-  launchplane-prod-promotion:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-prod-promotion.yml@<launchplane-sha>
-    with:
-      product: ${{ vars.LAUNCHPLANE_PRODUCT }}
-      dry_run: ${{ inputs.dry_run }}
-      release_tag: ${{ needs.release.outputs.release_tag }}
-```
-
-The promotion workflow defaults artifact identity and source revision from the
-Launchplane-owned source-lane inventory. Optional explicit artifact and source
-revision inputs are validation overrides: they must match that stored inventory.
-Dry run is the fail-closed default and returns pending evidence without mutating
-prod or creating a release. When a release tag is supplied, dry run also
-validates managed GitHub credentials, tag target, and release availability.
-Live callers must explicitly set `dry_run: false`.
-
-Production rollback uses stored Launchplane deployment evidence rather than
-product-provided provider targets:
-
-```yaml
-jobs:
-  launchplane-prod-rollback:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-prod-rollback.yml@<launchplane-sha>
-    with:
-      rollback_deployment_record_id: ${{ inputs.rollback_deployment_record_id }}
-      backup_record_id: ${{ inputs.backup_record_id }}
-```
-
-The rollback workflow calls `/v1/drivers/generic-web/prod-rollback`, derives the
-product key from the caller repository name by default, and owns the backup gate,
-health-verification, deploy-timeout, no-cache, idempotency, result-status, and
-output mapping mechanics. Product repos pass only the rollback deployment record
-ID, optional backup record ID, and primitive policy toggles.
-
-Stable verification uses product-owned smoke evidence to update Launchplane
-health records without mutating provider state:
-
-```yaml
-jobs:
-  launchplane-stable-verification:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-stable-verification.yml@<launchplane-sha>
-    with:
-      context: ${{ vars.LAUNCHPLANE_CONTEXT }}
-      deployment_record_id: ${{ needs.deploy.outputs.deployment_record_id }}
-      verification_status: ${{ needs.smoke.result }}
-      verified_at: ${{ steps.clock.outputs.verified_at }}
-```
-
-The stable verification workflow calls
-`/v1/drivers/generic-web/stable-verification`, normalizes common success/failure
-status words, accepts optional checked URL and health payload JSON, and exposes
-deployment, inventory, promotion, and health-status record outputs. Product repos
-do not submit provider targets, health URLs, deployment health record IDs,
-promotion health record IDs, or idempotency keys.
-
-Preview refresh, destroy, and unsupported-notice handoff use:
-
-```yaml
-jobs:
-  launchplane-preview:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@<launchplane-sha>
-    with:
-      operation: refresh
-      anchor_pr_number: ${{ github.event.pull_request.number }}
-      anchor_pr_url: ${{ github.event.pull_request.html_url }}
-      anchor_head_sha: ${{ github.event.pull_request.head.sha }}
-      image_reference: ${{ needs.build.outputs.image_digest }}
-```
-
-Destroy calls set `operation: destroy` and pass `destroy_reason`. The ordinary
-two-file preview contract delegates same-repository cleanup to the trusted
-notice workflow. Fork and Dependabot `unsupported_notice` handoffs also call
-`cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@<launchplane-sha>`
-from a trusted `pull_request_target` workflow. Product repos do not choose a
-trusted checkout ref, pass preview slugs, preview URLs, provider application
-names, feedback context, feedback markdown, route payloads, or idempotency keys;
-Launchplane derives those from product profiles, runtime records, GitHub OIDC
-claims, the PR event, and the run-scoped workflow context.
-
-Product workflows that still compose local publish, provision, verification, or
-cleanup job results into preview PR feedback status should call
-`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@<launchplane-sha>`.
-That wrapper accepts primitive GitHub Actions job results and optional failure
-summaries, derives the canonical `ready`, `failed`, `destroyed`,
-`cleanup_failed`, or `cleared` status, and delegates delivery to the reusable
-Launchplane PR feedback workflow. Generic-web cleanup callers pass the lifecycle
-workflow's `destroy_outcome` output as the feedback wrapper's `cleanup_outcome`
-input so a successful no-preview no-op clears stale managed feedback. Product
-repos should not copy status selection, feedback route payloads, feedback
-markers, or idempotency-key logic.
-
-Product workflows that smoke a generic-web preview after refresh should call
-`cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@<launchplane-sha>`.
-That wrapper submits product-owned smoke evidence to
-`/v1/drivers/generic-web/preview-verification`, defaults the anchor repository
-to the full caller `owner/repo` slug, normalizes skipped or neutral smoke jobs to
-failure evidence, and maps service errors through the shared request-action
-`error_message` output.
-
-Odoo previews use the event reconciler and the tenant's verified Build. The
-reconciler owns preview plans, runtime bindings and lifecycle evidence; no
-Odoo workflow request client is installed in a tenant repository.
-
-These reusable workflows intentionally do not accept provider targets, target
-ids, health URLs, preview URLs, feedback markdown, record ids, managed secrets,
-runtime environment values, or idempotency keys. Launchplane derives or records
-those values from product profiles, lane profiles, provider-target records,
-runtime-environment records, managed secret bindings, GitHub OIDC claims, driver
-results, and durable evidence. The reusable deploy workflow is the first
-non-prod proof path for #1528; product-repo cleanup should wait for a live
-non-prod deploy proof before deleting older local request-shaping scripts.
-
-## Reusable Product-Driver Workflows
-
-Odoo retains the product-driver connectors below. VeriReel uses the
-[shared generic-web workflows](#reusable-generic-web-lifecycle-workflows) and declared
-[application extensions](driver-development.md). Its old stable/environment,
-verification, reset/readiness, promotion and rollback connectors are retired.
-Testing migration, explicit reset and billing use profile-declared generic-web
-maintenance and schedules. The remaining app-maintenance workflow requires
-`driver: odoo` and serves `/v1/drivers/odoo/app-maintenance` only.
-Callers whose maintenance must run once for each new deployment may pass the
-Launchplane-issued deployment or operation record id as `idempotency_scope`.
-Launchplane appends that bounded primitive only to the request idempotency key;
-it does not enter the maintenance payload. Omitting the scope preserves the
-existing action/intent/user/application key for callers that require replay
-across workflow runs.
-Driver-owned maintenance commands must use executables shipped in the product
-runtime image and must not assume package-manager CLIs remain installed. Profile commands name executables in the artifact rather than relying on a
-package-manager CLI in the hardened runtime stage.
-Product repos should pass an explicit `instance` only for a workflow whose
-admin input or job purpose genuinely selects a different lane.
-Production readiness wrappers may also accept expected runtime build identity
-from admin input or upstream workflow evidence and forward it to
-Launchplane-owned runtime verification.
-
-The product-driver reusable surface is:
-
-- `reusable-product-driver-app-maintenance.yml@<launchplane-sha>`
-- `reusable-product-driver-post-deploy.yml@<launchplane-sha>`
-- `reusable-product-driver-prod-promotion.yml@<launchplane-sha>`
-- `reusable-product-driver-prod-rollback.yml@<launchplane-sha>`
-
-These workflows are transitional connectors, not permission to move product
-lifecycle authority back into product repos. A product repo may still own image
-build/publish, release tagging, and product-specific browser checks, but it
-should not own Launchplane route construction, request envelopes, idempotency
-recipes, polling behavior, or record-output extraction once a reusable workflow
-exists.
-
-`reusable-product-driver-post-deploy.yml@<launchplane-sha>` preserves explicit driver
-post-deploy phases for Odoo refresh, manual, promotion, and deploy callers
-while moving request shaping into Launchplane. Odoo callers must pass
-`driver: odoo` plus the same explicit `product`, `context`, `instance`, and
-`phase` inputs. App
-maintenance remains the deploy-phase maintenance wrapper for stable lane
-operations; product repos should not use it as a generic phase-aware post-deploy
-substitute. The old Odoo-specific post-deploy reusable has been retired after
-tenant callers moved to the product-driver wrapper.
-
-`reusable-product-driver-prod-rollback.yml@<launchplane-sha>` supports explicit
-`driver: odoo` callers. Odoo rollback callers pass the same primitive rollback
-facts as the older Odoo-specific reusable: explicit `product`, explicit
-`context`, `artifact_id`, optional `promotion_record_id`, and `reason`. The
-wrapper keeps Odoo's source channel fixed to `testing`; callers should omit
-`source_channel` unless they are intentionally relying on that compatibility
-default. The product-driver wrapper owns the `/v1/drivers/odoo/prod-rollback`
-route, payload envelope, output mapping, fail-result paths, and legacy
-`opr:<context>:<run>` idempotency key shape so tenant repos do not keep Odoo
-rollback request construction locally.
-
-`reusable-product-driver-prod-promotion.yml@<launchplane-sha>` supports explicit
-`driver: odoo` callers. Odoo promotion callers pass the same primitive facts as
-the older Odoo-specific reusable: explicit `product` and explicit `context`.
-The wrapper owns the `/v1/drivers/odoo/prod-promotion-run` route, request ID,
-payload envelope, output mapping, fail-result paths, and legacy
-`opp:<context>:<run>` idempotency key shape so tenant repos do not keep Odoo
-promotion request construction locally.
-
-Same-repository preview jobs that need label normalization and preview image tag
-derivation should use `setup-preview-prepare-client@<launchplane-sha>` instead of carrying a
-product-local helper. The generated Node ESM client returns refresh/noop or
-unsupported mode, same-repo support flags, `pr-<number>` image tags, and full
-caller-supplied image references from primitive GitHub event facts. It is a
-read-only adapter for product-owned artifact publication; Launchplane records
-still own preview URL policy, provider targets, lifecycle records, comments, and
-cleanup truth.
-
-## Reusable Launchplane Request Action
-
-Product workflows that only need to send JSON to an existing Launchplane route
-should not carry their own GitHub OIDC transport client. Use the Launchplane
-repo action instead. Raw action calls are a lower-level compatibility surface
-when a Launchplane-owned reusable workflow does not exist yet.
-
-Generic web/service repos that deploy as Dokploy applications should build and
-push their own immutable image digest plus an immutable SHA tag. Submit the
-digest-pinned image reference as `artifact_id` and the SHA tag as
-`deploy_reference` to Launchplane's `generic-web` deploy route. Launchplane keeps
-`artifact_id` as the evidence and runtime artifact identity, while using
-`deploy_reference` only for the provider-facing Dokploy Docker image. This avoids
-Dokploy application saved-registry failures for `repository@sha256:digest` while
-preserving digest equality evidence. The workflow may derive the GHCR repository
-from the current GitHub repository, publish with `docker/login-action` and
-`docker/build-push-action`, then pass the product key, stable-lane intent, tested
-source SHA, immutable image digest, and provider SHA tag. While the current
-`generic-web/deploy` route still requires context or instance compatibility
-fields, product workflows may supply those values from admin-seeded GitHub variables
-as scoped adapter inputs. They are not checked-in product topology or
-durable lifecycle authority, and #1528 owns reducing that bridge behind
-Launchplane-owned reusable lifecycle contracts. The checked-in workflow must not
-hard-code provider targets, Dokploy operations, runtime domains, managed secrets,
-or fixed product topology; Launchplane resolves those from DB-backed product and
-target records.
-
-This route can redeploy a production lane but not change its artifact unless the
-product is recorded as `prelaunch`; a production release goes through promotion
-(see [release review](release-review.md)).
-
-For this compatibility shape, `.github/workflows/launchplane-deploy.yml` is the
-supported thin connector workflow name. It should call:
-
-```yaml
-- name: Request Launchplane deploy
-  uses: cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-sha>
-  with:
-    launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-    route-path: /v1/drivers/generic-web/deploy
-    payload-file: ${{ steps.launchplane_payload.outputs.payload_path }}
-    idempotency-key: >-
-      generic-web-deploy:${{ vars.LAUNCHPLANE_PRODUCT }}:${{ vars.LAUNCHPLANE_CONTEXT }}:${{ vars.LAUNCHPLANE_INSTANCE }}:${{ github.event.workflow_run.head_sha }}:${{ steps.launchplane_payload.outputs.artifact_id }}
-```
-
-The payload should include the product key, stable-lane intent required by the
-current route, immutable image digest as `artifact_id`, provider SHA tag as
-`deploy_reference`, and tested source SHA. Mutable image tags such as `latest`,
-branch names, and environment tags remain invalid deploy references.
-
-```yaml
-- name: Request Launchplane preview refresh
-  uses: cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-sha>
-  with:
-    launchplane-url: ${{ vars.LAUNCHPLANE_URL }}
-    audience: ${{ vars.LAUNCHPLANE_AUDIENCE }}
-    route-path: /v1/drivers/generic-web/preview-refresh
-    payload-file: ${{ runner.temp }}/launchplane-preview-refresh.json
-    idempotency-key: >-
-      generic-web-preview-refresh:${{ github.event.number }}:${{ github.sha }}
-    timeout-ms: "900000"
-    output-paths: >-
-      refresh_status=result.refresh_status,
-      application_id=result.application_id,
-      preview_url=result.preview_url,
-      error_message=result.error_message
-```
-
-The preview refresh payload should identify the product, PR number, immutable
-image reference, source SHA, and optional PR URL. New product workflows should
-omit `preview_slug` and `preview_url`; Launchplane derives the preview slug from
-the product profile slug policy and derives the live URL from the product
-preview context and `LAUNCHPLANE_PREVIEW_BASE_URL`. `preview_slug` and
-`preview_url` are compatibility overrides for older callers, and a supplied slug
-must match the Launchplane-derived slug when PR identity is also present.
-
-The action requests a GitHub OIDC token, sends the JSON request with a stable
-`Idempotency-Key`, exposes the raw response body, and can map response JSON paths
-to GitHub outputs. When a later product step needs a JSON file instead of a
-scalar output, set `response-output-file` and, optionally,
-`response-output-path` to write the full response or a nested response value.
-Use `payload-fields` for small workflow-input overlays instead of a repo-local
-JSON builder when the base request is already static:
-
-```yaml
-payload: >-
-  {"schema_version":1,"product":"odoo","rollback":{"schema_version":1}}
-payload-fields: |-
-  rollback.context=cm
-  rollback.instance=prod
-  rollback.reason=${{ github.event.inputs.reason }}
-```
-
-Each `payload-fields` line is `json.path=value`. Values are strings unless they
-parse as JSON literals or objects, so `false`, `300`, and `{}` keep their JSON
-types. Use `payload-json-files` when a workflow already has a JSON artifact file
-and only needs to splice it into a static Launchplane request:
-
-```yaml
-payload: >-
-  {"schema_version":2,"product":"odoo","publish":{"schema_version":2}}
-payload-fields: |-
-  publish.context=cm
-  publish.instance=${{ github.event.inputs.instance }}
-payload-json-files: |-
-  publish.manifest=${{ steps.publish.outputs.manifest_file }}
-```
-
-Each `payload-json-files` line is `json.path=file-path`; the action parses the
-file as JSON and writes that value into the request before sending it.
-
-The transitional request action still supports polling asynchronous results.
-Use its [declared polling inputs](../.github/actions/launchplane-request/action.yml)
-for the input descriptions and defaults; select the supported operation from
-[the service boundary](service-boundary.md).
+- Workflows build, test, and publish product artifacts and the build manifest.
+  They do not call Launchplane or directly mutate runtime providers.
+- Product-specific checks remain in the repo only when they validate product
+  behavior rather than generic deploy plumbing.
+- Launchplane lifecycle, provider, authorization, and evidence shaping stay out
+  of product scripts and repository metadata.
+- CI and security gates pass after cleanup.
+- Launchplane can verify the artifact provenance and reconcile a non-production
+  event using its own records and credentials.
 
 ## New Repo Checklist
 
@@ -971,10 +397,10 @@ When creating a new website repo for Launchplane:
 - Publish immutable container images or artifacts from
   `.github/workflows/build.yml`, with the build manifest described in
   [artifact-provenance.md](artifact-provenance.md).
-- Apply an admin-owned Launchplane product onboarding manifest to seed the
-  product profile, lane profiles, target records, runtime environment, disabled
-  managed secret binding placeholders, and then update DB-backed authz policy in
-  Launchplane.
+- Use the [existing admin onboarding operation](operations.md#conventional-generic-web-onboarding) to create the required product
+  profile and target records. This remains compatibility work until a deployed
+  service operation replaces every required mode; do not put its inputs or
+  authorization policy in the product repository.
 - Use `generic-web` directly when the product is a stateless or mostly
   stateless web app with standard preview/deploy behavior.
 - Use the Dokploy service deployment contract when the product is a simple bot

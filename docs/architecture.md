@@ -176,8 +176,6 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   App's webhooks at `POST /v1/github/app-webhook` and verifies build provenance
   itself; it needs no caller grant for the preview and testing deploys it
   starts from those events.
-- Human/admin access in Launchplane may still use a separate auth layer, but
-  machine evidence ingress should trust workflow identity first.
 - The stable cross-product contract is the typed Launchplane API payload, not the
   particular client used to submit it.
 

@@ -1056,27 +1056,6 @@ provider payload data.
 > described in this doc remain only until their deletion (#2606, #2740); do not
 > extend them or onboard a product onto them.
 
-The original communication model was:
-
-- Launchplane runs as a long-running service behind an admin-owned stable
-  host.
-- Product workflows communicate with Launchplane over authenticated HTTP.
-- GitHub Actions OIDC is the default machine-to-machine trust boundary.
-- Launchplane authorizes requests from GitHub-issued identity claims such as repo,
-  workflow, ref, environment, and event context.
-- Typed evidence payloads are the stable contract; CLI commands are service
-  clients, DB-backed admin tools, or explicit local-only rehearsal and
-  inspection helpers.
-
-Launchplane should eventually expose API ingress for at least:
-
-- deployment evidence
-- promotion evidence
-- inventory refresh triggers or derived writes
-- preview generation evidence
-- preview destroyed evidence
-- driver-triggered runtime actions where Launchplane owns execution
-
 The first explicit version of that boundary, including the OIDC claim mapping
 and endpoint list, lives in [`service-boundary.md`](service-boundary.md).
 Agent-facing read context and scoped write-intent consumption rules live in
@@ -1092,8 +1071,7 @@ uv run launchplane service serve \
 ```
 
 The service needs an explicit minimal bootstrap policy input, but the repo no
-longer tracks the live policy. Product and workflow grants should be represented
-as DB-backed authz policy records. Omitting `LAUNCHPLANE_DATABASE_URL` always fails closed,
+longer tracks the live policy. Omitting `LAUNCHPLANE_DATABASE_URL` always fails closed,
 including loopback local development, rather than using file-backed JSON state
 as authority. The GitHub OIDC audience is explicit admin/process wiring;
 production code must not default it to a live domain.
@@ -1144,9 +1122,6 @@ runtime memos belong in product repos; this repo keeps only the shared driver
 and record contracts.
 
 The service uses GitHub OIDC bearer tokens and DB-backed authz policy records.
-Additional evidence routes should land against the same authn/authz boundary
-rather than creating separate ad hoc ingress patterns.
-
 Managed authz policy reconciliation is a native FastAPI service route. It
 requires DB-backed policy storage, enforces `authz_policy_grant.write`,
 preserves signed-in GitHub human-session callers, and keeps dry-runs stateless.
