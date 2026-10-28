@@ -144,6 +144,12 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
         pattern=r"^(?:mutation-reservation-[a-f0-9]{64})?$",
         exclude_if=lambda value: not value,
     )
+    unrecorded_original_reservation_id: str = Field(
+        default="",
+        max_length=128,
+        pattern=r"^(?:mutation-reservation-[a-f0-9]{64})?$",
+        exclude_if=lambda value: not value,
+    )
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooPreviewApplyEnvelope":
@@ -152,6 +158,11 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
             raise ValueError("Odoo preview apply requires matching product values.")
         if self.preserve_original_reservation_id and self.apply.dry_run_plan.operation != "destroy":
             raise ValueError("Original preview preservation requires a destroy operation.")
+        if (
+            self.unrecorded_original_reservation_id
+            and self.apply.dry_run_plan.operation != "refresh"
+        ):
+            raise ValueError("Unrecorded preview recovery requires a refresh operation.")
         return self
 
 

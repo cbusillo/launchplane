@@ -857,6 +857,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
     require_disposable_lane,
+    require_lane_target_ownership,
     resolve_disposable_preview,
     resolve_disposable_observation_binding,
     disposable_lane_observation_sha256,
@@ -6809,6 +6810,13 @@ def create_launchplane_fastapi_app(
             ) from error
 
         director_preview_apply = director_agent_identity(identity)
+        if apply_request.unrecorded_original_reservation_id and not director_preview_apply:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Unrecorded preview recovery requires the authenticated Director agent.",
+            )
         if (
             not director_preview_apply
             and not native_routes.native_driver_route_authorization_allows(
@@ -6901,6 +6909,11 @@ def create_launchplane_fastapi_app(
                 current_profile = lane_store.read_product_profile_record(product_profile.product)
                 if current_profile != product_profile:
                     raise DisposableLaneSafetyUnknown("The preview profile changed; plan again.")
+                operation_record_id = build_launchplane_mutation_reservation_id(
+                    scope=preview_apply_operation.reservation_scope,
+                    route_path=preview_apply_operation.route_path,
+                    idempotency_key=preview_apply_operation.idempotency_key,
+                )
                 if service_apply_request.preserve_original_reservation_id:
                     from control_plane.preview_preservation import (
                         require_preview_preservation_admission,
@@ -6911,7 +6924,7 @@ def create_launchplane_fastapi_app(
                         profile=current_profile,
                         issued_plan=issued_plan,
                         original_reservation_id=service_apply_request.preserve_original_reservation_id,
-                        operation_record_id=preview_apply_operation.adapter._deployment_record_id,
+                        operation_record_id=operation_record_id,
                         captured_schedule_binding=preview_apply_operation.adapter.schedule_binding,
                     )
                     if preview_binding and authority.preservation_id != preview_binding:
@@ -6919,6 +6932,22 @@ def create_launchplane_fastapi_app(
                             "Original preservation authority changed."
                         )
                     preview_binding = authority.preservation_id
+                    return
+                if service_apply_request.unrecorded_original_reservation_id:
+                    from control_plane.preview_reservation_recovery import (
+                        require_unrecorded_preview_refresh,
+                    )
+
+                    binding = require_unrecorded_preview_refresh(
+                        cast(PostgresRecordStore, record_store),
+                        profile=current_profile,
+                        issued_plan=issued_plan,
+                        original_reservation_id=service_apply_request.unrecorded_original_reservation_id,
+                        operation_record_id=operation_record_id,
+                    )
+                    if preview_binding and binding != preview_binding:
+                        raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
+                    preview_binding = binding
                     return
                 preview = resolve_disposable_preview(
                     lane_store,
@@ -6945,19 +6974,23 @@ def create_launchplane_fastapi_app(
                     )
                 except FileNotFoundError:
                     target_id = None
-                if (
-                    (creating_recipient and target_id is not None)
-                    or (target_id is not None and compose_id != target_id.target_id)
-                    or any(
-                        item.target_id == compose_id
-                        and (item.context, item.instance)
-                        != (issued_plan.context, issued_plan.preview_slug)
-                        for item in lane_store.list_dokploy_target_id_records()
-                    )
+                if (creating_recipient and target_id is not None) or (
+                    target_id is not None and compose_id != target_id.target_id
                 ):
                     raise DisposableLaneSafetyUnknown(
                         "The discovered preview target changed or aliases another lane."
                     )
+                require_lane_target_ownership(
+                    (
+                        *lane_store.list_dokploy_target_id_records(),
+                        *cast(
+                            PostgresRecordStore, record_store
+                        ).list_physical_provider_target_records(),
+                    ),
+                    context=issued_plan.context,
+                    instance=issued_plan.preview_slug,
+                    target_id="" if creating_recipient else compose_id,
+                )
                 binding = require_disposable_lane(
                     lane_store,
                     product=product_profile.product,

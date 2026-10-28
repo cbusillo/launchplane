@@ -733,6 +733,50 @@ cancelling the old job or modifying an application. Original-key retry remains
 available after an inspection-only refusal. See the full
 [authorization and recovery contract](authorization-authority.md#reviewed-never-live-classification-and-preview-execution).
 
+### Failed first preview without lifecycle
+
+When a source-free Odoo preview fails before its first lifecycle publication,
+the Director agent can qualify the same retained target through the normal
+`POST /v1/drivers/odoo/preview-apply` path. No lifecycle or positive safety
+observation is backfilled. Qualification is read-only; the subsequent refresh
+uses the existing resource inspector and normal provider executor.
+
+The agent first reads the retained original reservation and its saved intent
+and failure receipt, verifies it is completed and failed, and verifies current
+provider quiescence and exact product/profile/target ownership. An unresolved
+original uses its existing observation/settlement path first. Obtain a fresh
+service-issued refresh plan for the retained concrete Compose target. Its name,
+environment, context and preview instance must match the original. If the
+original allocated the target, its saved failure receipt must identify the same
+concrete Compose ID. Missing or contradictory target proof refuses recovery.
+
+Submit the reviewed fresh plan with its own issued key, the original caller,
+and the envelope field `unrecorded_original_reservation_id` naming the retained
+failed original. This field is valid only for a Director-agent refresh with
+`data_transport_mode: none` and no clean snapshot. It is part of the request
+fingerprint and retained intent. It never selects destroy, upstream restore,
+snapshot replacement or a replay of the completed original. Scoped callers
+keep their existing route authority and cannot select this qualification.
+
+Every existing checkpoint rechecks original ownership and terminal failure,
+current profile/configuration, exact target and environment, all recorded and
+physical target aliases, other held operations, and protected use/data/resource
+reports, including expired reports. A lifecycle appearing in the meantime also
+refuses this path. Executor exclusion, leases, issued-plan expiry and native
+physical resource inspection stay in force. Unknown usage, custody and isolation
+are never relabeled as positive facts. The normal source-free refresh preserves
+the target's volumes and existing database; its established database-existence
+probe refuses an unknown result before bootstrap or maintenance.
+
+Only a real successful refresh publishes its verified serving generation.
+Failure publishes no active/serving/healthy success and leaves the completed
+original's request, intent, phase and receipt unchanged. Keep the exact new
+request and issued key after an uncertain reply; use the same operation's
+supported observation/replay. A completed reply reuses its receipt without a
+second provider effect. Drift after an effect retains the original operation's
+reconciliation fence. This procedure does not qualify staff use, imported data,
+only-copy custody or a production release.
+
 ## Staging generic-web testing separation
 
 `POST /v1/live-target-runtime/apply` supports `separation_only=true` for an
