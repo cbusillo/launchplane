@@ -14,11 +14,12 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml /app/frontend/
-RUN corepack enable \
-    && corepack prepare "$(node -p "require('./frontend/package.json').packageManager")" --activate
-
+COPY frontend/package.json /app/frontend/
 WORKDIR /app/frontend
+RUN corepack enable \
+    && corepack install
+
+COPY frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml /app/frontend/
 RUN pnpm install --frozen-lockfile
 
 COPY pyproject.toml uv.lock README.md /app/

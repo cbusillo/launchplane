@@ -163,11 +163,6 @@ request. Renovate tracks third-party GitHub Actions weekly through
 no release tag. Launchplane maintains those pins through the required content check and
 `action-pins update` command instead.
 
-This is also the maintained agreement mechanism for the repeated
-`astral-sh/setup-uv` pin. GitHub requires every workflow `uses` value to remain a
-literal reference, so the full SHA cannot be read from a shared file or expression;
-Renovate updates those necessary copies together.
-
 Renovate does not update container references embedded in workflow scripts.
 For those images, resolve the reviewed release manifest with
 `docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'`,

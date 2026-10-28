@@ -251,7 +251,7 @@ jobs:
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       - name: Install Python
-        run: uv python install 3.13
+        run: uv python install
 
       - name: Validate supplied candidate image
         if: steps.prep.outputs.should_build == 'false'
@@ -1631,7 +1631,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Install qualification Python
-        run: uv python install 3.13
+        run: uv python install
       - name: Validate qualification candidate image
         env:
           CANDIDATE_IMAGE: ${{ inputs.image_reference }}
