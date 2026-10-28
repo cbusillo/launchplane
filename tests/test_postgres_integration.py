@@ -16764,6 +16764,46 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 self.assertFalse(thread.is_alive())
                 self.assertEqual(results, ["57014"])
 
+    def test_keeper_release_closes_only_after_its_admission_scope_finishes(self) -> None:
+        import argparse
+        from contextlib import nullcontext, redirect_stdout
+        from io import StringIO
+        from control_plane import database_maintenance_cli
+        from control_plane.storage.schema_migration import migrate_schema
+        from sqlalchemy.pool import NullPool
+        from tempfile import TemporaryDirectory
+
+        with _isolated_postgres_database() as url, TemporaryDirectory() as directory:
+            migrate_schema(database_url=url)
+            root = Path(directory)
+            root.joinpath("state.json").write_text(
+                json.dumps({"hold_id": "own", "original_addresses": ["192.0.2.1"]})
+            )
+            expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+            arguments = argparse.Namespace(
+                hold_id="own", job_directory=root, expires_at=expires.isoformat()
+            )
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            output = StringIO()
+            deployment = Mock(target_id="synthetic", fence=Mock(return_value=nullcontext()))
+            with (
+                engine.connect() as connection,
+                patch.object(
+                    database_maintenance_cli,
+                    "await_command",
+                    side_effect=({"action": "stopped"}, {"action": "release"}),
+                ),
+                redirect_stdout(output),
+            ):
+                database_maintenance_cli.keep_database(
+                    connection, deployment=deployment, arguments=arguments, expires=expires
+                )
+                self.assertTrue(connection.closed)
+            self.assertEqual(
+                json.loads(output.getvalue().splitlines()[-1])["event"], "database_released"
+            )
+
     def test_snapshot_settings_restore_on_sql_failure_without_rolling_back_outer_work(self) -> None:
         from control_plane.database_maintenance import _schema_deparse_settings
 

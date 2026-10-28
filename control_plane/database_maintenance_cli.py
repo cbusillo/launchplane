@@ -420,8 +420,8 @@ def keep_database(
                 emit("verified_before_commit", revision=revision)
             elif receipt.get("action") != "release":
                 raise ValueError("Only an exact rehearsal or release command is accepted.")
-        connection.close()
-        emit("database_released", revision=revision)
+    connection.close()
+    emit("database_released", revision=revision)
 
 
 def release_deployment(arguments: argparse.Namespace, url: str) -> None:
