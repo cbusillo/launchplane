@@ -164,6 +164,7 @@ class OdooWebsiteBootstrapOverrideRequest(BaseModel):
     instance: str
     website_bootstrap: OdooWebsiteBootstrapPayload | None
     preview_original_reservation_id: str = ""
+    inherit_template: bool = False
     mode: Literal["dry-run", "apply"] = "apply"
     reviewed_plan_sha256: str = ""
     source_label: str = "launchplane-service"
@@ -181,7 +182,12 @@ class OdooWebsiteBootstrapOverrideRequest(BaseModel):
         if not self.instance:
             raise ValueError("Odoo website-bootstrap override requires instance.")
         if not self.preview_original_reservation_id:
-            if self.website_bootstrap is None or self.mode != "apply" or self.reviewed_plan_sha256:
+            if (
+                self.website_bootstrap is None
+                or self.mode != "apply"
+                or self.reviewed_plan_sha256
+                or self.inherit_template
+            ):
                 raise ValueError("Stable website-bootstrap writes require bootstrap intent.")
         elif self.mode == "apply" and (
             len(self.reviewed_plan_sha256) != 64
@@ -190,6 +196,8 @@ class OdooWebsiteBootstrapOverrideRequest(BaseModel):
             raise ValueError("Preview website-bootstrap writes require a reviewed plan digest.")
         elif self.mode == "dry-run" and self.reviewed_plan_sha256:
             raise ValueError("Preview dry-run cannot supply a reviewed plan digest.")
+        if self.inherit_template and self.website_bootstrap is not None:
+            raise ValueError("Template inheritance cannot supply exact bootstrap intent.")
         if self.website_bootstrap is not None:
             self.website_bootstrap = validate_odoo_website_bootstrap_contract(
                 self.website_bootstrap

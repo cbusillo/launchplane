@@ -7707,12 +7707,11 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        director_preview_bootstrap = bool(
-            override_request.override.preview_original_reservation_id
-        ) and director_agent_identity(identity)
-        if (
-            not director_preview_bootstrap
-            and not native_routes.native_driver_route_authorization_allows(
+        preview_bootstrap = bool(override_request.override.preview_original_reservation_id)
+        director_preview_bootstrap = preview_bootstrap and director_agent_identity(identity)
+        if not director_preview_bootstrap and (
+            preview_bootstrap
+            or not native_routes.native_driver_route_authorization_allows(
                 endpoint=write_odoo_website_bootstrap_override,
                 authorization_allows=resolved_authz_policy_runtime.allows,
                 identity=identity,
@@ -7731,16 +7730,8 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
-        if override_request.override.preview_original_reservation_id:
-            if override_request.override.mode == "dry-run":
-                return accepted_evidence_response(
-                    trace_id=trace_id,
-                    records={},
-                    result=write_odoo_website_bootstrap_override_result(
-                        record_store=cast(OdooInstanceOverrideStore, record_store),
-                        request=override_request,
-                    ),
-                )
+        preview_dry_run = preview_bootstrap and override_request.override.mode == "dry-run"
+        if preview_bootstrap and not preview_dry_run:
             if not idempotency_key.strip():
                 raise _launchplane_http_error(
                     status_code=400,
@@ -7749,21 +7740,23 @@ def create_launchplane_fastapi_app(
                     message="Preview bootstrap preparation requires an idempotency key.",
                 )
 
-        (
-            normalized_idempotency_key,
-            payload_fingerprint,
-            replay_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path=_ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replay_response is not None:
-            return replay_response
+        normalized_idempotency_key = payload_fingerprint = ""
+        if not preview_dry_run:
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path=_ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
+                idempotency_key=idempotency_key,
+                trace_id=trace_id,
+                check_replay=bool(idempotency_key.strip()),
+            )
+            if replay_response is not None:
+                return replay_response
 
         try:
             driver_result = write_odoo_website_bootstrap_override_result(
@@ -7797,6 +7790,8 @@ def create_launchplane_fastapi_app(
             records={},
             result=driver_result,
         )
+        if preview_dry_run:
+            return response
         store_apply_idempotency(
             record_store=record_store,
             identity=identity,

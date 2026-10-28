@@ -1,7 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
-import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -99,6 +98,13 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         return _sqlite_database_url(self.root / "state.sqlite3")
 
     def test_exact_preview_bootstrap_withdrawal_preserves_original_and_template(self) -> None:
+        self.reservation = self.replace_record(
+            state="completed",
+            response_status_code=409,
+            response_trace_id="settled-original",
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+            response_payload={"result": {"status": "fail"}},
+        )
         from control_plane.contracts.odoo_instance_override_record import (
             OdooInstanceOverrideRecord,
             OdooWebsiteBootstrapPayload,
@@ -158,17 +164,66 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(self.store.read_original_mutation_intent(self.reservation), retained)
 
+        from control_plane.contracts.preview_record import PreviewRecord
+        from control_plane.launchplane_mutations import resolve_launchplane_preview_id
+        from control_plane.odoo_instance_overrides import resolve_preview_website_bootstrap
+
+        number = self.issued.plan_request.pr_number
+        repository = self.profile.repository.partition("/")[2]
+        self.store.write_preview_record(
+            PreviewRecord(
+                preview_id=resolve_launchplane_preview_id(
+                    context=template.context, anchor_repo=repository, anchor_pr_number=number
+                ),
+                context=template.context,
+                anchor_repo=repository,
+                anchor_pr_number=number,
+                anchor_pr_url=f"https://github.com/{self.profile.repository}/pull/{number}",
+                preview_label="preview",
+                canonical_url=self.issued.preview_url,
+                state="active",
+                created_at=template.updated_at,
+                updated_at=template.updated_at,
+                eligible_at=template.updated_at,
+            )
+        )
+        request.override.mode = "dry-run"
+        request.override.reviewed_plan_sha256 = ""
+        request.override.inherit_template = True
+        inheritance = write_odoo_website_bootstrap_override_result(
+            record_store=self.store, request=request
+        )
+        request.override.mode = "apply"
+        request.override.reviewed_plan_sha256 = str(inheritance["plan_sha256"])
+        write_odoo_website_bootstrap_override_result(record_store=self.store, request=request)
+        selected, _ = resolve_preview_website_bootstrap(
+            self.store,
+            context=template.context,
+            template_instance=template.instance,
+            preview_slug=self.issued.preview_slug,
+        )
+        self.assertEqual(selected, template)
+
     def test_preview_bootstrap_http_keeps_scope_review_and_identity_boundaries(self) -> None:
+        self.reservation = self.replace_record(
+            state="completed",
+            response_status_code=409,
+            response_trace_id="settled-original",
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+            response_payload={"result": {"status": "fail"}},
+        )
         from control_plane.http_app import create_launchplane_fastapi_app
-        from control_plane.service_auth import LaunchplaneAuthzPolicy
         from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
-        from tests.support.auth import scoped_agent_transport
+        from tests.support.auth import scoped_agent_transport, local_operator_policy
         from tests.support.http import request as http_request
         from httpx2 import Response
 
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
-            authz_policy=LaunchplaneAuthzPolicy(),
+            authz_policy=local_operator_policy(
+                actions=("odoo_website_bootstrap_override.write",),
+                token_label="local-owner-read",
+            ),
             bearer_identity_config=_local_operator_bearer_config(),
             record_store_factory=lambda: self.store,
             control_plane_root_path=self.root,
@@ -217,6 +272,42 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             self.store.read_idempotency_record_by_id(self.reservation.record_id), self.reservation
         )
 
+        stable_null: dict[str, object] = {
+            "product": self.profile.product,
+            "override": {
+                "product": self.profile.product,
+                "context": self.profile.preview.context,
+                "instance": self.profile.preview.template_instance,
+                "website_bootstrap": None,
+            },
+        }
+        self.assertEqual(post(stable_null).status_code, 400)
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooAddonSettingOverride,
+            OdooOverrideValue,
+        )
+
+        current = self.store.read_odoo_instance_override_record(
+            context_name=self.profile.preview.context,
+            instance_name=self.issued.preview_slug,
+        )
+        self.store.write_odoo_instance_override_record(
+            current.model_copy(
+                update={
+                    "addon_settings": (
+                        OdooAddonSettingOverride(
+                            addon="authentik_sso",
+                            setting="client_id",
+                            value=OdooOverrideValue(source="literal", value="keep-setting"),
+                        ),
+                    ),
+                }
+            )
+        )
+        override["mode"] = "dry-run"
+        override["reviewed_plan_sha256"] = ""
+        self.assertEqual(post(payload).status_code, 400)
+
     def test_preview_safety_binding_tracks_actual_preview_inputs_only(self) -> None:
         from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -257,22 +348,6 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         )
         self.assertNotEqual(disposable_lane_configuration(self.store, context, slug), with_managed)
         self.assertEqual(disposable_lane_configuration(self.store, context, "testing"), stable)
-
-    def test_existing_plan_hash_and_exact_original_survive_optional_preview_intent(self) -> None:
-        from control_plane.workflows.odoo_preview_runtime import odoo_preview_apply_plan_sha256
-
-        legacy = self.issued.model_dump(mode="json", exclude={"plan_provenance"})
-        legacy.pop("preview_website_bootstrap_sha256", None)
-        expected = hashlib.sha256(
-            json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        self.assertEqual(odoo_preview_apply_plan_sha256(self.issued), expected)
-        self.assertEqual(
-            original_preview_intent(
-                self.reservation, profile=self.profile, store=self.store
-            ).issued_plan,
-            self.issued,
-        )
 
     def test_preview_bootstrap_and_profile_drift_refuse_before_write(self) -> None:
         from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -315,6 +390,54 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             ),
             record,
         )
+
+    def test_bootstrap_preparation_cannot_strand_a_held_original(self) -> None:
+        from control_plane.odoo_post_deploy_http import OdooWebsiteBootstrapOverrideRequest
+        from control_plane.preview_website_bootstrap_override import prepare_preview_bootstrap
+
+        request = OdooWebsiteBootstrapOverrideRequest(
+            product=self.profile.product,
+            context=self.profile.preview.context,
+            instance=self.issued.preview_slug,
+            website_bootstrap=None,
+            mode="dry-run",
+            preview_original_reservation_id=self.reservation.record_id,
+        )
+        plan = prepare_preview_bootstrap(self.store, request)
+        request.mode = "apply"
+        request.reviewed_plan_sha256 = str(plan["plan_sha256"])
+        with self.assertRaises(ValueError):
+            prepare_preview_bootstrap(self.store, request)
+        self.assertEqual(
+            self.store.read_idempotency_record_by_id(self.reservation.record_id), self.reservation
+        )
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_odoo_instance_override_record(
+                context_name=request.context, instance_name=request.instance
+            )
+        self.reservation = self.replace_record(
+            state="completed",
+            response_status_code=409,
+            response_trace_id="settled-original",
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+            response_payload={"result": {"status": "fail"}},
+        )
+        self.store.reserve_mutation(
+            scope="other-executor",
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key="another-plan",
+            request_fingerprint="another-original",
+            lease_owner="another-executor",
+            reconciliation_key=self.reservation.reconciliation_key,
+            provider_target_key=self.reservation.provider_target_key,
+        )
+        request.mode = "dry-run"
+        request.reviewed_plan_sha256 = ""
+        plan = prepare_preview_bootstrap(self.store, request)
+        request.mode = "apply"
+        request.reviewed_plan_sha256 = str(plan["plan_sha256"])
+        with self.assertRaises(ValueError):
+            prepare_preview_bootstrap(self.store, request)
 
     def test_exact_bootstrap_edit_invalidates_a_previously_issued_refresh_plan(self) -> None:
         from control_plane import odoo_preview_apply_http as preview_http

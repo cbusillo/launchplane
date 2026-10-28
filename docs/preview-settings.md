@@ -67,23 +67,29 @@ require managed bindings. Integration credentials still need a matching existing
 runtime key-safety rule that permits preview use. A rule cannot override a
 binding declared production-only or testing-only.
 
-An unrecorded Odoo preview can need different Website bootstrap intent from its
+An Odoo preview can need different Website bootstrap intent from its
 stable template. Use the existing native
 `POST /v1/drivers/odoo/website-bootstrap-override` with an `override` containing
 the product, exact context/instance, `preview_original_reservation_id`, an
 explicit `website_bootstrap` value (including `null`), and `mode: dry-run`.
-The original's retained issued plan must prove that exact unrecorded preview and
-unique product ownership. Review the returned `plan_sha256`, then submit the
+The original's retained issued plan must prove that exact preview and
+unique product ownership. Recorded previews must still belong to that product.
+Review the returned `plan_sha256`, then submit the
 same intent with `mode: apply`, `reviewed_plan_sha256`, and an idempotency key.
 The service writes only that preview's existing per-instance override family
 with the `preview` phase, checks concurrent profile/record changes and reads it
 back. Its null bootstrap explicitly withdraws template inheritance for this
 preview. Without such an exact record, template inheritance is unchanged.
-Mixed phases/settings and conflicting carried Website intent refuse.
+Mixed phases/settings and conflicting carried Website intent refuse. The same
+reviewed operation with `inherit_template: true` and null bootstrap restores
+template inheritance, including after the preview is recorded. Its inert record
+retains the audit history. Other exact settings are never silently removed.
 
-This preparation uses the Director agent's existing preview authority or the
-route's existing instance permission; stable-lane writes retain their original
-authorization and non-null contract. It changes no original operation,
+This preparation uses only the Director agent's existing preview authority;
+stable-lane writes retain their original authorization and non-null contract.
+Apply holds the preview's executor lock, requires a completed original and
+refuses any held operation on that provider target. Inspection remains available
+before settlement. It changes no original operation,
 provider, database, template or other preview. It supplies no custody,
 disposability or settlement proof. A subsequent refresh still requires its
 normal gates and a fresh issued plan. Preview safety bindings include managed
