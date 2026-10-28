@@ -212,9 +212,17 @@ class NativeDeliveryHistory(WriterFenceHarness, unittest.TestCase):
         else:
             self.assertNotEqual(run.state, "passed")
         self.final = self.store.read_idempotency_record_by_id(run.steps[-1].operation_id)
-        self.now = self.clock + timedelta(seconds=1)
+        self.now = max(
+            self.clock,
+            datetime.fromisoformat(
+                self.store.read_environment_inventory(
+                    context_name=self.lane.context, instance_name="prod"
+                ).updated_at
+            ),
+        )
         if self.final is not None:
-            self.now = datetime.fromisoformat(self.final.updated_at) + timedelta(seconds=1)
+            self.now = max(self.now, datetime.fromisoformat(self.final.updated_at))
+        self.now += timedelta(seconds=1)
         self.health()
         transport = Mock()
         transport.get_json.return_value = {"sha": self.record.request.source_commit}
