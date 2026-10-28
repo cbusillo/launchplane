@@ -19,6 +19,7 @@ class RuntimeSourceTests(PrerequisiteFixture):
         super().setUp()
         self.probes: list[dict[str, str]] = []
         self.probe_failure = ""
+        self.probe_unknown = False
         for name, prefix in SOURCE_PREFIXES.items():
             self.values[prefix + ".host"] = name + ".invalid"
         self.set_overrides({"fishbowl.db": "inventory"})
@@ -29,6 +30,10 @@ class RuntimeSourceTests(PrerequisiteFixture):
             settings = json.loads(kwargs["input"])
             self.probes.append(settings)
             if self.probe_failure == settings["host"]:
+                if self.probe_unknown:
+                    return subprocess.CompletedProcess(
+                        command, 0, stdout=json.dumps({"grants": "unknown"})
+                    )
                 raise subprocess.TimeoutExpired(command, 10)
             return subprocess.CompletedProcess(
                 command, 0, stdout=json.dumps({"grants": "read_only"})
@@ -220,15 +225,23 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 )
                 self.assertTrue(all(not item.parameters for item in result.sources))
 
-    def test_unreachable_source_does_not_hide_other_sources(self) -> None:
+    def test_probe_timeout_stage_and_unexplained_unknown_preserve_other_sources(self) -> None:
         self.probe_failure = self.values["cm_data.db.host"]
-        result = self.consume()
-        failed = next(item for item in result.sources if item.source == "cm_data")
-        self.assertEqual(failed.grants, "unknown")
-        self.assertEqual(failed.failure_stage, "source_resolution")
-        self.assertTrue(
-            all(item.grants == "read_only" for item in result.sources if item.source != "cm_data")
-        )
+        for self.probe_unknown in (False, True):
+            with self.subTest(unknown=self.probe_unknown):
+                result = self.consume()
+                failed = next(item for item in result.sources if item.source == "cm_data")
+                self.assertEqual(failed.grants, "unknown")
+                self.assertEqual(
+                    failed.failure_stage, None if self.probe_unknown else "source_resolution"
+                )
+                self.assertTrue(
+                    all(
+                        item.grants == "read_only"
+                        for item in result.sources
+                        if item.source != failed.source
+                    )
+                )
 
     def test_typed_only_authority_reaches_grant_route_and_preview_consumer(self) -> None:
         from control_plane import odoo_import_diagnostics as diagnostic, odoo_runtime_reads as reads

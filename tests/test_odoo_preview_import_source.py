@@ -425,7 +425,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_unqualified_source_reports_only_proven_failure_stage(self) -> None:
         original = self.qualification
-        for stage in ("capacity", "addon_state", "source_resolution", None):
+        for stage in ("capacity", "producer_inventory", "addon_state", "source_resolution", None):
             with self.subTest(stage=stage):
                 self.qualification = original.model_copy(
                     update={
@@ -447,7 +447,8 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(caught.exception.failure_stage, stage)
                 if stage:
                     self.assertIn(stage, str(caught.exception))
-                self.assertNotIn("inventory", str(caught.exception))
+                self.assertNotIn("source.example.test", str(caught.exception))
+                self.assertNotIn("private-fixture-source-password", str(caught.exception))
 
     @scoped_agent_test
     async def test_preview_read_and_standing_metadata_read_cannot_move_source_value(self) -> None:
