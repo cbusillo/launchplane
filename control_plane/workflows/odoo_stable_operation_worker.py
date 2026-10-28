@@ -15,6 +15,7 @@ from threading import Event, Thread
 import time
 from typing import Any, Callable, Protocol, cast
 
+from control_plane.timestamps import utc_now_timestamp as _utc_now_timestamp
 from pydantic import BaseModel
 from control_plane.lane_movement import LaneMovementRefused
 from control_plane.http_error_evidence import log_handled_error_cause
@@ -3147,10 +3148,6 @@ def _target_replacement_result_passed(result: OdooStableTargetReplacementApplyRe
         and result.canonical_status != "fail"
         and result.logo_status != "fail"
     )
-
-
-def _utc_now_timestamp() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _parse_timestamp(value: str) -> datetime:
