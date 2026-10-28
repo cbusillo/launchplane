@@ -5678,9 +5678,9 @@ credentials, grants and product resources are excluded.
 On the documented Launchplane host, copy only the reviewed image's
 `control_plane/database_maintenance_host.py` into a private directory. The
 standalone driver needs Python 3.11+, root's existing Docker/systemd access and
-a dedicated cgroup-v2 freezer for every original writer container. The same
-host must already support `nsenter`, `nft` and `ss` for the API's dedicated
-network namespace; qualification adds no packages or capability grants:
+Linux pidfd signal support. Qualification adds no packages or capability grants.
+The existing PostgreSQL container must expose its Unix socket directory; the
+verification helper consumes that socket in place through a read-only mount:
 
 ```bash
 python3 database_maintenance_host.py plan --api-container API_CONTAINER \
@@ -5691,8 +5691,8 @@ python3 database_maintenance_host.py hold --api-container API_CONTAINER \
 
 `plan` reads exact project/container/image/database identities, current DB-backed
 own target, provider queue/history and self-deploy workflows. It creates only
-private evidence and a temporary non-serving helper. The helper uses the
-existing `.env` in place and the actual API image ID, with no ports, logs,
+private evidence, a temporary keeper helper and an isolated loopback health
+probe. The planning/keeper helper uses the existing `.env` in place and the actual API image ID, with no ports, logs,
 restart policy, runtime volumes, Odoo copy or prepared-public mounts. Its root
 is read-only, temporary storage is RAM-backed, and its only host mount is private
 maintenance state. The credential-free browser may remain running. Every own
@@ -5707,13 +5707,14 @@ never treated as an application writer to freeze or an arbitrary extra client.
 The API needs explicit PostgreSQL username/password wiring; credential indirection
 is unqualified. Values stay in process memory and are never emitted. Unknown
 identities refuse.
-The plan also reads the API's network namespace, connection transport, mounts,
-capability bounds and namespace peers. Host/shared namespaces, local database
-transport overrides, local proxies, Unix listeners, bind/socket mounts and an
-API able to change network policy refuse the controlled-health qualification.
-Other containers supply only PID metadata for this namespace census.
+The plan binds the PostgreSQL container, process start, socket path/device/inode
+and database system identifier. A changed process or socket refuses verification.
+No database directory or credential file is mounted into the verification helper.
+`plan` qualifies its actual read-only startup and HTTP health before any pause.
+That qualification authorizes no backup or retirement; committed-state verification
+repeats under the complete writer hold.
 
-Before any freeze, `hold` installs and reads back a persistent systemd calendar
+Before stopping services, `hold` installs and reads back a persistent systemd calendar
 timer/service, records every original restart policy, and suppresses automatic
 restart on those exact IDs. Private fsync'd state and watchdog files survive
 reboot. The watchdog runs release at the recorded deadline, including after a
@@ -5721,9 +5722,7 @@ missed deadline during reboot. That oneshot service is the single recovery proce
 EOF cleanup, the deadline and explicit release requests join the same systemd job.
 The keeper ends at COMMIT; only that process verifies committed state.
 Each automatic recovery entry consumes a fsync'd budget in the existing private
-state before external commands, including an unavailable ownership read. The
-health refreeze phase has its own phase-bound budget. Reloading systemd or
-restarting the interpreter cannot reset either count. Unit rate limits are
+state before external commands, including an unavailable ownership read. Reloading systemd or restarting the interpreter cannot reset that count. Unit rate limits are
 secondary protection, and each service attempt has a timeout. Genuine unsafe or
 blocked results and exhausted automatic budgets have distinct non-restarting
 statuses. Explicit manual release replenishes only the main automatic budget
@@ -5736,39 +5735,43 @@ persisted budget. Observe actual release;
 installation alone is not a release receipt.
 
 The keeper takes the existing own-deploy dispatch lock and installs an expiring
-provider marker before freeze. Own DB/image/repository binding, auto-deploy off,
+provider marker before shutdown. Own DB/image/repository binding, auto-deploy off,
 complete queue/history and absence of self-deploy workflows are required.
 Normal and emergency self-deploy guards enforce that marker. The host credential
 file must remain unchanged. No workflow, credential or access grant is changed.
 
-The host binds each original PID/start time to its dedicated Docker cgroup's
-path/device/inode. It writes `cgroup.freeze=1` and requires effective frozen
-readback in `cgroup.events`. Each transition has a deadline; cancellation writes
-0 directly, so no late Docker pause/stop request can refreeze a released service.
-All original writer CPUs must freeze before database admission. The driver
-checks physical state and unexpected containers throughout the window.
+The keeper takes the existing schema, own-deploy dispatch and release-admission
+locks before checking executor observations. Existing exact executor-exit receipts
+and execution-lock observations preserve historical running/UNKNOWN fences;
+lease expiry is never absence proof. Additional running reservations and admitted
+worker work refuse shutdown. The train must be idle or in its qualified
+pre-effect selection phase. This observation is repeated after shutdown.
 
-After freeze and **before disconnecting any backend**, the keeper uses existing
-exact executor-exit receipts and execution-lock observations. These preserve
-historical running/UNKNOWN provider fences unchanged; an expired lease alone
-never proves an executor absent. Every additional running idempotency reservation
-also refuses unless that exact record has an existing executor-exclusion proof;
-expiry alone is insufficient. Historical reconcile-required fences are preserved.
-Additional active own-worker catalogs refuse admission, and the train must be idle or in its qualified pre-effect selection
-phase. Qualify every permitted worker's lost-pool/lease-expiry resume before use.
-Remote work is not declared settled because its CPU froze.
+The host persists each exact original's termination intent before sending SIGTERM
+through a kernel pidfd bound to that process and its container membership. There
+is no queued Docker stop and no SIGKILL escalation. All originals receive TERM
+before the shared shutdown deadline. Read-only own-role clients waiting directly
+on the keeper's advisory locks are canceled so their shutdown can finish; this
+never cancels a transaction with an XID or an unrelated address/blocker.
+Every original must exit cleanly, with no OOM and automatic restart suppressed.
+All six own writers stop, including the API and workers. No cgroup freezer,
+namespace firewall, API thaw, or second health timer is required.
 
-The keeper takes the schema, dispatch and release advisory session locks and
-all-public-table EXCLUSIVE NOWAIT locks before its first repeatable-read snapshot.
-It then disconnects only exact PID/start/address/role-matched frozen idle clients
-without XIDs, allowing benign read transactions. Prepared, active, unmapped,
-XID-owning, advisory-lock-owning or incompatible relation-lock-owning clients
-refuse. A late queued row write is blocked and refused rather than killed;
-commits or sequence activity completed before the final census are included in
-the source snapshot. Zero other clients plus physical freeze and locks prove
-that no further Launchplane DB commit can occur. Zero selected drains do not.
-Foreign/materialized relations, other application schemas, large objects and
-table-set changes require separate qualification and currently refuse.
+Shutdown timeout, changed identity or an unclean exit refuses backup admission.
+Recovery settles a signaled original before restarting it; a still-running process
+with TERM pending is never reported as recovered. A native signal can be repeated
+only against that original process. A newly needed forced termination or Client
+recovery action requires its exact Director question, never an automatic kill.
+The actual released readback qualifies the bounded window; a deadline alone does
+not prove release.
+
+The keeper then takes all-public-table EXCLUSIVE NOWAIT locks before its first
+repeatable-read snapshot. No application backend is disconnected to manufacture
+admission: zero other client backends and zero prepared transactions are required.
+Stopped originals, suppressed restart, credential custody, table locks and the
+repeated client census prove exclusion of further Launchplane commits. Zero
+selected drains do not. Foreign/materialized relations, other application
+schemas, large objects and table-set changes still refuse qualification.
 
 The private `held` receipt binds hold ID, keeper identity, exported snapshot,
 transaction, cluster and aggregate schema/full-row/sequence checksums. Trigger
@@ -5877,75 +5880,39 @@ engines; no credential is printed or copied. Expiry must return success and
 zero changes. If a credential would expire, readonly enforcement refuses its
 write and verification fails. An earlier empty count is not expiry proof.
 
-The original API then gets a bounded health-only thaw with all other writer
-CPUs still frozen and deployments held. Before thaw, the driver proves zero
-other DB clients and atomically installs its own UUID-named nftables table in
-that exact API namespace. `inet` INPUT, OUTPUT and POSTROUTING hooks drop
-non-loopback IPv4/IPv6 traffic; the inbound hook prevents new SYN arrivals racing
-socket destruction. Exact hook/rule readback and continuous checks
-hold through the phase. A second persistent, phase-bound timer performs cleanup
-independently at the short health deadline. It consumes the existing root
-capabilities; the API itself cannot alter the fence.
+The exact image then runs the normal service application factory and real
+lifespan, including DB-backed authorization/OAuth construction, native route
+validation and the unchanged startup confirmation callback. Only its five
+background schedulers are omitted. Both store pools remain enforced read-only;
+a would-write startup, expiry or policy seed is fatal. The default startup schema
+action must already be compatible. A fresh loopback HTTP GET of `/v1/health` must
+return the service's success payload. Server shutdown and pool disposal finish
+before verification succeeds.
 
-Before thaw, connected TCP sockets and the kernel's queued inbound connections
-are destroyed under the network fence, preserving listeners. Only the API CPU
-thaws. A fresh actual loopback HTTP GET to
-`/v1/health?maintenance_liveness=true` must return HTTP 200 and the service's
-success payload. This explicit loopback-only probe reads successful-startup
-metadata asynchronously; it proves same-process HTTP liveness, not database
-access or ordinary request-worker readiness. Default `/v1/health` retains its
-original request-worker/store path, including waiting when those workers are
-saturated. The separate matching-image read-only database and runtime probes
-remain mandatory. The route documents its maintenance 403/503 responses.
-An unauthenticated TCP probe
-to its in-place database endpoint must fail, with a kernel packet drop observed.
-No database credential is transmitted by that probe. Before removing its own
-network table, the driver physically refreezes the API, destroys connected TCP
-sockets while preserving listeners, requires only inert TIME-WAIT sockets and
-zero DB clients, then verifies fence removal while the API remains frozen.
-No buffered TCP packet escapes before final CPU resume. Requests already parsed
-into userspace can continue after release. Health completion is saved
-only after these readbacks. Both the normal release and deadline watchdog do
-this refreeze/socket-settlement/owned-unfence cleanup before terminating a keeper.
+This temporary API runs against the actual own database, never against the
+restored copy. Its root is read-only, scratch is RAM-backed, capabilities are
+dropped, and its network namespace has only loopback. It reaches PostgreSQL via
+the qualified read-only Unix-socket mount. Existing bootstrap and keyring inputs
+are consumed in place, with no credential export, new grant, published port or
+provider connection. Runtime/schema/history/expiry/train probes remain mandatory.
+After the helper exits, zero remaining DB clients are required before a durable
+health receipt binds hold, cluster, revision and image.
 
-Cleanup holds the same private state lock through native transitions. Phase ID
-and active intent bind timer actions; deactivation and loaded-unit cleanup
-precede final CPU resume, so a late timer cannot freeze a released API. No SQL
-session's death can remove the API's network fence. Unqualified namespace loss
-or native effects remain UNKNOWN; there is no broad firewall flush or blind
-replacement of another phase's rules.
+Automatic recovery consumes the existing durable budget. Transient reads and
+health failures can be retried through the same explicit `release` or `verify`
+path; unsafe or UNKNOWN state keeps writers stopped and deployments held. Budget
+exhaustion never authorizes a restore or resets a safety proof. No probe failure
+is called database damage merely because health is unavailable.
 
-An after-state requires the completed runtime and health receipt before release
-fsyncs its resume proof bound to hold, cluster, revision and image. A proved
-before-state abort can reopen unchanged. A running frozen original automatically
-completes missing verification through the same
-`database_maintenance_host.py release --state STATE_JSON` path used by EOF cleanup
-and the persistent deadline watchdog. The `verify` alias uses that same path.
-Automatic starts consume the durable budget even when a recovery process crashes
-or its ownership read fails. Transient database reads, census collisions and
-health transport failures remain retryable after exact phase cleanup. Exhaustion
-preserves the holds and permits explicit manual `release` or `verify`; these
-replenish the main allowance and join the same recovery service, without a
-private-state edit. A request that joins an already-exhausted exit can start one
-fresh job after that exit. An active verification may already be in progress.
-The health phase's independent deadline remains protected by its own budget.
-A transport failure or exhausted budget does not classify the database as unsafe
-or authorize a restore. Terminal identity/schema or unknown provider-effect
-results still stop automatic retries and require the applicable recovery action.
-If the API is stopped after reboot and the after-state lacks health proof, the
-driver cannot start it with full network before a namespace fence exists. It
-keeps writers stopped and reports recovery required; bring the Director the
-concrete missing recovery action. No new container, credential or database
-configuration is substituted to bypass that boundary.
-
-Release resumes exact original IDs, checks running/health and restores their
-original policies. A partial resume records progress; subsequent cleanup retries
+Release starts the exact original API first and requires its container health
+before starting other workers in parallel. It checks running/health and restores
+the exact original restart policies. A partial resume records progress; subsequent cleanup retries
 reuse the safe proof because legitimate resumed writes may have changed rows.
 They never refreeze healthy services or demand the old full hashes again. A crash after
 starting a stopped original, before progress is recorded, may leave its same
 container ID/image/project running with a newer PID. Only the already bound safe
-proof and persisted resume-start intent allow fresh thawed-cgroup qualification
-and policy readback in that case. On a no-commit release, durable resume intent
+proof and persisted resume-start intent allow that exact-original retry and
+policy readback. On a no-commit release, durable resume intent
 and absence of `commit-pending.json` allow the same exact-original retry; the
 host's releasing flag and state lock prevent a later commit. Unverified changed
 identities still refuse.

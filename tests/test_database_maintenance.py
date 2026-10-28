@@ -173,6 +173,7 @@ class DatabaseMaintenanceIsolationTests(unittest.TestCase):
                         clear=True,
                     ),
                     patch.object(sys, "argv", arguments),
+                    patch.object(database_maintenance_cli, "require_isolated_network"),
                     patch.object(
                         database_maintenance_cli, "_build_engine", return_value=MagicMock()
                     ),
