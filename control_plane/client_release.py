@@ -896,17 +896,53 @@ def _release_recipient(
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
 ) -> ProductionRecipientRecord | None:
+    return native_release_recipient(
+        store,
+        profile,
+        decision_record_id=decision.record_id,
+    )
+
+
+def native_release_recipient(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    *,
+    decision_record_id: str = "",
+) -> ProductionRecipientRecord | None:
     from control_plane.production_recipient import custody
 
     recipient = custody(store, profile.product, _prod_context(profile))
     if recipient is None or recipient.phase == "retired":
         return None
+    if recipient.phase != "published":
+        return recipient
+    trace = recipient.execution.get("release_trace", "")
+    if not isinstance(trace, str) or not trace.startswith("client-release-"):
+        return recipient
+    owner_id = trace.removeprefix("client-release-")
+    if not owner_id or owner_id == decision_record_id:
+        return recipient
+    try:
+        owner = store.read_release_review_decision_record(
+            product=profile.product, record_id=owner_id
+        )
+    except FileNotFoundError:
+        return recipient
     if (
-        recipient.phase == "published"
-        and decision.checklist.candidate.source_commit != recipient.request.source_commit
+        owner.product != recipient.product
+        or owner.checklist.candidate.artifact_id != recipient.image_reference
+        or owner.checklist.candidate.source_commit != recipient.request.source_commit
+        or owner.checklist.candidate.runtime_settings is not None
     ):
-        return None
-    return recipient
+        return recipient
+    steps = client_release_steps(owner.release_start)
+    if (
+        not steps
+        or steps[0].kind != "backup"
+        or any(_step_status(store, profile, owner, step)[0] != "pass" for step in steps)
+    ):
+        return recipient
+    return None
 
 
 def _recipient_release_refusal(

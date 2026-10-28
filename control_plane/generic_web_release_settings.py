@@ -69,6 +69,14 @@ def desired_release_settings(
     lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
     if lane is None or profile.driver_id == "odoo" or lane.generic_web_cutover is not None:
         return None
+    from control_plane.client_release import native_release_recipient
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if (
+        isinstance(store, PostgresRecordStore)
+        and native_release_recipient(store, profile) is not None
+    ):
+        return None
     records = tuple(
         record for record in store.list_runtime_environment_records() if record.scope != "global"
     )

@@ -33,6 +33,7 @@ from tests import test_testing_rebuild as testing_rebuild_tests
 from tests import test_testing_retry as testing_retry_tests
 from tests import test_browser_route_repair as browser_repair_tests
 from tests import test_release_review_http as release_review_http_tests
+from tests import test_production_recipient_release_settings as recipient_settings_tests
 from tests import test_generic_web_compose_refusal as compose_refusal_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
@@ -13425,6 +13426,17 @@ class RealPostgresRecipientReleaseAdmissionTests(unittest.TestCase):
 
     def test_missing_custody_is_unknown(self) -> None:
         self.fixture.test_missing_custody_remains_unknown_without_provider_effects()
+
+
+class RealPostgresRecipientReleaseSettingsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = recipient_settings_tests.RecipientReleaseSettingsTests()
+        self.fixture.database_url = self.enterContext(_head_postgres_database())
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_native_drill_and_ordinary_settings_handoff(self) -> None:
+        self.fixture.test_native_drill_keeps_authority_through_publication_and_inverse()
 
 
 class RealPostgresRecipientWriterTests(unittest.TestCase):

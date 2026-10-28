@@ -43,14 +43,18 @@ class RecipientRuntimeProgramTests(unittest.TestCase):
                 },
             },
         }
+        self.prepare_runtime(self.spec)
+
+    def prepare_runtime(self, spec: dict[str, Any]) -> None:
+        self.spec = spec
         self.rows: dict[str, Any] = {
             name: {
                 "Image": name,
                 "State": {"Running": True},
                 "Config": {"Image": row["image"], "Cmd": row["command"]},
                 "HostConfig": {
-                    "NanoCpus": 1000000000,
-                    "Memory": 2048,
+                    "NanoCpus": int(row["cpus"] * 1000000000),
+                    "Memory": row["memory"],
                     "PortBindings": {
                         key: [{"HostPort": value}] for key, value in row["ports"].items()
                     },
@@ -74,7 +78,7 @@ class RecipientRuntimeProgramTests(unittest.TestCase):
             self.fail("Only read-only Docker metadata is expected")
         return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
 
-    def run_program(self) -> None:
+    def run_program(self) -> dict[str, str]:
         output = io.StringIO()
         with (
             patch.object(
@@ -86,6 +90,7 @@ class RecipientRuntimeProgramTests(unittest.TestCase):
             exec(compile(RUNTIME_PROGRAM, "<runtime>", "exec"), {})
         evidence = extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
         self.assertEqual(evidence[RUNTIME_OK_MARKER], "true")
+        return evidence
 
     def test_actual_runtime_accepts_only_reviewed_images_limits_storage_and_ports(self) -> None:
         self.run_program()
