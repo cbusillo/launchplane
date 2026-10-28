@@ -5,6 +5,10 @@ import struct
 import socket
 import sys
 import json
+import threading
+import time
+
+import uvicorn
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -143,7 +147,79 @@ class DatabaseMaintenanceSchemaSnapshotTests(unittest.TestCase):
             )
 
 
+class DatabaseMaintenanceHealthTests(unittest.TestCase):
+    def test_failed_startup_is_blocked_but_startup_and_shutdown_timeouts_are_transient(
+        self,
+    ) -> None:
+        from control_plane import database_maintenance_health as health
+        from control_plane.drivers import native_routes
+
+        for started, alive, expected in (
+            (False, False, RecoveryRequired),
+            (False, True, TimeoutError),
+            (True, True, TimeoutError),
+        ):
+            with self.subTest(started=started, alive=alive):
+                store = MagicMock()
+                server = Mock(started=started, should_exit=False)
+                worker = Mock()
+                worker.is_alive.side_effect = lambda: alive and (started or not server.should_exit)
+                elapsed = [0.0]
+                response = MagicMock(status=200)
+                response.read.return_value = b'{"status":"ok"}'
+                response.__enter__.return_value = response
+                opener = Mock()
+                opener.open.return_value = response
+                with (
+                    patch.dict(
+                        os.environ, {"LAUNCHPLANE_POLICY_TOML": "synthetic-policy"}, clear=True
+                    ),
+                    patch.object(health, "schema_migration_action", return_value="current"),
+                    patch.object(health, "parse_authz_policy_toml"),
+                    patch.object(native_routes, "_validate_native_descriptor_driver_routes"),
+                    patch.object(native_routes, "_validate_native_fastapi_driver_routes"),
+                    patch.object(health, "create_launchplane_service_application"),
+                    patch.object(uvicorn, "Server", return_value=server),
+                    patch.object(threading, "Thread", return_value=worker),
+                    patch.object(health, "build_opener", return_value=opener),
+                    patch.object(time, "monotonic", side_effect=lambda: elapsed[0]),
+                    patch.object(
+                        time,
+                        "sleep",
+                        side_effect=lambda _: elapsed.__setitem__(
+                            0, elapsed[0] + health.HEALTH_WAIT_SECONDS
+                        ),
+                    ),
+                ):
+                    with self.assertRaises(expected) as result:
+                        health.verify_service_health(store)
+                    if isinstance(result.exception, RecoveryRequired):
+                        self.assertEqual(result.exception.event, VERIFICATION_BLOCKED_EVENT)
+                self.assertTrue(server.should_exit)
+                worker.join.assert_called_once()
+
+
 class DatabaseMaintenanceIsolationTests(unittest.TestCase):
+    def test_admission_cancellation_follows_each_fresh_stop_intent(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = {
+                "originals": {
+                    "api": {"addresses": ["192.0.2.1"]},
+                    "worker": {"addresses": ["192.0.2.2"]},
+                },
+                "stop_requested": [],
+            }
+            connection = Mock()
+            with patch.object(database_maintenance_cli, "cancel_waiting_admissions") as cancel:
+                (root / "state.json").write_text(json.dumps(state))
+                database_maintenance_cli.cancel_stopping_admissions(connection, root)
+                cancel.assert_not_called()
+                state["stop_requested"] = ["worker"]
+                (root / "state.json").write_text(json.dumps(state))
+                database_maintenance_cli.cancel_stopping_admissions(connection, root)
+                cancel.assert_called_once_with(connection, ["192.0.2.2"])
+
     def test_cli_emits_terminal_database_and_deployment_results_for_the_host(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -173,6 +249,7 @@ class DatabaseMaintenanceIsolationTests(unittest.TestCase):
                         clear=True,
                     ),
                     patch.object(sys, "argv", arguments),
+                    patch.object(database_maintenance_cli, "require_isolated_network"),
                     patch.object(
                         database_maintenance_cli, "_build_engine", return_value=MagicMock()
                     ),

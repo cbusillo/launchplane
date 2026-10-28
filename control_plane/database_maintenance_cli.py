@@ -21,7 +21,6 @@ from sqlalchemy.exc import DBAPIError
 
 from control_plane.database_maintenance import (
     apply_retirement,
-    disconnect_frozen_clients,
     verify_committed_database,
     database_snapshot,
     database_system_identifier,
@@ -29,6 +28,7 @@ from control_plane.database_maintenance import (
     require_no_other_clients,
     require_retired_functions_absent,
     locked_database,
+    maintenance_admission,
     retained_snapshot,
 )
 from control_plane.deployment_maintenance import DeploymentMaintenance, recovery_marker
@@ -49,9 +49,6 @@ def require_no_active_executors(connection: Connection) -> None:
     from control_plane.service_deploy_drain import _operation_observations
     from control_plane.storage.postgres import (
         PostgresRecordStore,
-        LaunchplaneOdooStableBootstrapOperationRow,
-        LaunchplaneOdooProdBackupRestoreOperationRow,
-        LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
         LaunchplanePrivilegedOperationRow,
         LaunchplaneOutboxDeliveryRow,
         LaunchplaneMergeTrainControllerStateRow,
@@ -84,9 +81,6 @@ def require_no_active_executors(connection: Connection) -> None:
             ):
                 raise RuntimeError("An unqualified API or scheduler reservation is still running.")
             for row_type, column, active in (
-                (LaunchplaneOdooStableBootstrapOperationRow, "status", ("running",)),
-                (LaunchplaneOdooProdBackupRestoreOperationRow, "status", ("running",)),
-                (LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow, "status", ("running",)),
                 (LaunchplanePrivilegedOperationRow, "status", ("executing",)),
                 (LaunchplaneOutboxDeliveryRow, "state", ("running",)),
             ):
@@ -269,7 +263,7 @@ def rehearsal_receipt(
     }
 
 
-def verify_application_reads(connection: Connection) -> None:
+def verify_application_reads(connection: Connection, *, service_health: bool = False) -> None:
     from control_plane.storage.factory import build_privileged_operation_worker_store
 
     options = " ".join(connection.engine.url.normalized_query.get("options", ()))
@@ -300,8 +294,45 @@ def verify_application_reads(connection: Connection) -> None:
         store.list_ordinary_agent_delivery_activation_records()
         store.list_ordinary_agent_delivery_activation_event_records()
         store.list_merge_train_controller_state_records()
+        if service_health:
+            from control_plane.database_maintenance_health import verify_service_health
+
+            try:
+                verify_service_health(store)
+            except DBAPIError as error:
+                if getattr(error.orig, "sqlstate", None) == "25006":
+                    raise RecoveryRequired(
+                        "The actual service startup would change stored records."
+                    ) from error
+                raise
     finally:
         store.close()
+
+
+def cancel_waiting_admissions(connection: Connection, addresses: list[str]) -> None:
+    connection.execute(text("SELECT pg_stat_clear_snapshot()"))
+    connection.execute(
+        text(
+            "SELECT pg_cancel_backend(a.pid) FROM pg_stat_activity a "
+            "WHERE a.datname=current_database() AND a.usename=current_user "
+            "AND a.backend_type='client backend' AND a.backend_xid IS NULL "
+            "AND host(a.client_addr)=ANY(:addresses) "
+            "AND a.wait_event_type='Lock' AND a.wait_event='advisory' "
+            "AND pg_backend_pid()=ANY(pg_blocking_pids(a.pid))"
+        ),
+        {"addresses": addresses},
+    )
+    connection.commit()
+
+
+def cancel_stopping_admissions(connection: Connection, directory: Path) -> None:
+    state = json.loads((directory / "state.json").read_text())
+    stopping = set(state.get("stop_requested", []))
+    addresses = []
+    for identifier in stopping:
+        addresses.extend(state["originals"][identifier].get("addresses", []))
+    if addresses:
+        cancel_waiting_admissions(connection, addresses)
 
 
 def keep_database(
@@ -320,9 +351,18 @@ def keep_database(
     connection.commit()
     if (arguments.job_directory / "releasing").exists():
         raise RuntimeError("The host already released this maintenance attempt.")
-    with deployment.fence(arguments.expires_at):
+    with deployment.fence(arguments.expires_at), maintenance_admission(connection):
         if (arguments.job_directory / "releasing").exists():
             raise RuntimeError("The host already released this maintenance attempt.")
+        require_no_active_executors(connection)
+        connection.commit()
+        state = json.loads((arguments.job_directory / "state.json").read_text())
+        if (
+            state["hold_id"] != arguments.hold_id
+            or not state.get("originals")
+            or any(not original.get("addresses") for original in state["originals"].values())
+        ):
+            raise RuntimeError("The original writer address custody is missing.")
         emit(
             "deployment_held",
             target_id=deployment.target_id,
@@ -331,25 +371,17 @@ def keep_database(
         )
         command = await_command(
             expires,
-            lambda: None,
+            lambda: cancel_stopping_admissions(connection, arguments.job_directory),
             arguments.job_directory,
         )
-        if command.get("action") != "frozen" or (arguments.job_directory / "releasing").exists():
+        if command.get("action") != "stopped" or (arguments.job_directory / "releasing").exists():
             raise RuntimeError("The host did not confirm its complete physical writer hold.")
-        addresses = command.get("addresses")
-        if (
-            not isinstance(addresses, list)
-            or not addresses
-            or any(not isinstance(value, str) for value in addresses)
-        ):
-            raise RuntimeError("Frozen container network identities are missing.")
         deployment.observe(deadline=arguments.expires_at)
         require_no_active_executors(connection)
         connection.commit()
         with locked_database(
             connection,
             expires_at=expires,
-            disconnect_clients=lambda: disconnect_frozen_clients(connection, set(addresses)),
         ):
             before = database_snapshot(connection)
             revision = str(connection.scalar(text("SELECT version_num FROM alembic_version")))
@@ -396,8 +428,8 @@ def keep_database(
                 emit("verified_before_commit", revision=revision)
             elif receipt.get("action") != "release":
                 raise ValueError("Only an exact rehearsal or release command is accepted.")
-        connection.close()
-        emit("database_released", revision=revision)
+    connection.close()
+    emit("database_released", revision=revision)
 
 
 def release_deployment(arguments: argparse.Namespace, url: str) -> None:
@@ -440,7 +472,7 @@ def main() -> int:
         description="Launchplane's bounded full writer-hold database keeper."
     )
     parser.add_argument(
-        "mode", choices=("plan", "unfence", "hold", "rehearse", "verify", "revision")
+        "mode", choices=("plan", "unfence", "hold", "rehearse", "verify", "revision", "health")
     )
     parser.add_argument("--before-file", type=Path)
     parser.add_argument("--backup-sha256", default="")
@@ -456,6 +488,20 @@ def main() -> int:
     ):
         parser.error("The deadline must be within one hour and include a timezone.")
     url = os.environ["LAUNCHPLANE_DATABASE_URL"]
+    if arguments.mode in {"verify", "health"}:
+        from sqlalchemy.engine import make_url
+
+        require_isolated_network()
+        original_url = make_url(url)
+        options = " ".join(original_url.normalized_query.get("options", ()))
+        url = (
+            original_url.difference_update_query(["host", "hostaddr", "service"])
+            .set(host=None, port=None)
+            .update_query_dict(
+                {"host": "/pgsocket", "options": options + " -c default_transaction_read_only=on"}
+            )
+            .render_as_string(hide_password=False)
+        )
     if arguments.mode == "unfence":
         try:
             release_deployment(arguments, url)
@@ -473,6 +519,15 @@ def main() -> int:
     }
     try:
         with engine.connect() as connection:
+            if arguments.mode == "health":
+                verify_application_reads(connection, service_health=True)
+                emit(
+                    "health_qualified",
+                    hold_id=arguments.hold_id,
+                    system_identifier=database_system_identifier(connection),
+                    health_passed=True,
+                )
+                return 0
             if arguments.mode == "rehearse":
                 if arguments.before_file is None:
                     parser.error("rehearse requires the held-snapshot receipt.")
@@ -492,7 +547,7 @@ def main() -> int:
                     raise RuntimeError("The recovery proof belongs to another maintenance attempt.")
                 try:
                     revision = verify_committed_database(connection, proof)
-                    verify_application_reads(connection)
+                    verify_application_reads(connection, service_health=True)
                 except RecoveryRequired as error:
                     emit(error.event, hold_id=arguments.hold_id)
                     return 0
@@ -511,6 +566,7 @@ def main() -> int:
                     revision=revision,
                     hold_id=arguments.hold_id,
                     outcome=outcome,
+                    health_passed=True,
                 )
                 return 0
             if arguments.mode == "revision":
