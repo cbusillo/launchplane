@@ -11,7 +11,10 @@ from threading import Event
 from typing import Protocol, cast
 from urllib.parse import quote
 
-from control_plane.contracts.merge_train_controller_state import MergeTrainControllerStateRecord
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerStateRecord,
+    merge_train_controller_alias_reconciliation_detail,
+)
 from control_plane import runtime_environments
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
@@ -36,6 +39,10 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class StallStore(Protocol):
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]: ...
+
     def merge_train_stall_lock(self, *, repository: str) -> AbstractContextManager[None]: ...
     def read_merge_train_stall_record(self, repository: str) -> MergeTrainStallRecord: ...
     def write_merge_train_stall_record(self, record: MergeTrainStallRecord) -> object: ...
@@ -289,6 +296,11 @@ def run_stall_monitor_pass(
                         repository=repository, base_branch=target.base_branch, limit=1
                     )
                     state = states[0] if states else None
+                    alias_detail = merge_train_controller_alias_reconciliation_detail(
+                        stall_store.list_merge_train_controller_state_alias_records(
+                            repository=repository, base_branch=target.base_branch
+                        )
+                    )
                     candidate_records = getattr(store, "list_merge_train_batch_candidate_records")(
                         repository=repository,
                         base_branch=target.base_branch,
@@ -315,7 +327,8 @@ def run_stall_monitor_pass(
                         else ()
                     )
                     progress_key = json.dumps(
-                        [snapshot.base_sha, state_signature, signatures], sort_keys=True
+                        [snapshot.base_sha, state_signature, signatures, alias_detail],
+                        sort_keys=True,
                     )
                     previous = record.observations.get(
                         target.base_branch, MergeTrainStallObservation()
@@ -384,6 +397,18 @@ def run_stall_monitor_pass(
                         ),
                         setting_gaps=setting_gaps,
                     ).model_copy(update={"queue_suspended": release_held})
+                    if alias_detail:
+                        observation = observations[target.base_branch]
+                        observations[target.base_branch] = observation.model_copy(
+                            update={
+                                "reasons": tuple(
+                                    sorted(
+                                        set(observation.reasons)
+                                        | {"controller_alias_requires_reconciliation"}
+                                    )
+                                )
+                            }
+                        )
                 current_reasons = {
                     base: item.reasons for base, item in observations.items() if item.reasons
                 }

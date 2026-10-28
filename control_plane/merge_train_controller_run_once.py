@@ -33,6 +33,7 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerReconciliationRequiredError,
     MergeTrainControllerStateRecord,
     build_merge_train_controller_state_record,
+    merge_train_controller_alias_reconciliation_detail,
 )
 from control_plane.contracts.merge_train_effect import (
     MergeTrainEffectLineage,
@@ -200,6 +201,10 @@ class MergeTrainControllerRequestError(ValueError):
 
 
 class MergeTrainControllerStateRecordStore(Protocol):
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]: ...
+
     def list_merge_train_controller_state_records(
         self,
         *,
@@ -568,6 +573,7 @@ def _execute_merge_train_controller_with_client(
         )
     transport = github_client.transport
     lease_owner = merge_train_controller_lease_owner(trace_id=trace_id)
+    alias_detail = ""
     if request.mutate:
         controller_state = controller_state_store.acquire_merge_train_controller_state_record(
             repository=request.repository,
@@ -586,6 +592,11 @@ def _execute_merge_train_controller_with_client(
         )
         recorded_at = lease.record.updated_at
     else:
+        alias_detail = merge_train_controller_alias_reconciliation_detail(
+            controller_state_store.list_merge_train_controller_state_alias_records(
+                repository=request.repository, base_branch=request.base_branch
+            )
+        )
         controller_state = latest_merge_train_controller_state_record(
             record_store=controller_state_store,
             repository=request.repository,
@@ -598,22 +609,35 @@ def _execute_merge_train_controller_with_client(
             updated_at=recorded_at,
         )
         lease = MergeTrainControllerLeaseContext(record=controller_state)
+    result: dict[str, object] | None
     try:
         try:
-            result = _resume_merge_train_controller_state(
-                request=request,
-                policy_sha256=policy_sha256,
-                repository_policy=repository_policy,
-                trace_id=trace_id,
-                recorded_at=recorded_at,
-                github_client=github_client,
-                candidate_store=candidate_store,
-                landing_store=landing_store,
-                stack_collapse_store=stack_collapse_store,
-                admission_store=admission_store,
-                lease=lease,
+            result = (
+                {
+                    "repository": request.repository,
+                    "base_branch": request.base_branch,
+                    "mode": "dry-run",
+                    "controller_action": "resume_reconciliation",
+                    "controller_reconciliation_status": "required",
+                    "reason_code": "controller_alias_requires_reconciliation",
+                    "reconciliation_detail": alias_detail,
+                }
+                if alias_detail
+                else _resume_merge_train_controller_state(
+                    request=request,
+                    policy_sha256=policy_sha256,
+                    repository_policy=repository_policy,
+                    trace_id=trace_id,
+                    recorded_at=recorded_at,
+                    github_client=github_client,
+                    candidate_store=candidate_store,
+                    landing_store=landing_store,
+                    stack_collapse_store=stack_collapse_store,
+                    admission_store=admission_store,
+                    lease=lease,
+                )
             )
-            if result is not None and not request.mutate:
+            if result is not None and not request.mutate and not alias_detail:
                 history = stack_collapse_store.list_merge_train_stack_collapse_plan_records(
                     repository=request.repository, base_branch=request.base_branch
                 )
@@ -7655,6 +7679,7 @@ def require_merge_train_controller_state_record_store(
     record_store: object,
 ) -> MergeTrainControllerStateRecordStore:
     required_methods = (
+        "list_merge_train_controller_state_alias_records",
         "list_merge_train_controller_state_records",
         "acquire_merge_train_controller_state_record",
         "compare_and_set_merge_train_controller_state_record",
