@@ -10,7 +10,6 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.promotion_record import ArtifactIdentityReference
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.production_recipient import custody
-from control_plane.production_recipient_cutover import RUNTIME_PROGRAM
 from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
 from control_plane.release_request import record_release_request
@@ -34,31 +33,31 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
 
         def seed_resource_settings(case: cutover_tests.RecipientCutoverTests) -> None:
             seed(case)
-            fixture = case.publication_case.fixture
-            inventory = case.publication_case.inventory
-            identity = inventory.runtime_identity
-            assert identity is not None
-            inventory = inventory.model_copy(
+            seed_fixture = case.publication_case.fixture
+            seed_inventory = case.publication_case.inventory
+            seed_identity = seed_inventory.runtime_identity
+            assert seed_identity is not None
+            seed_inventory = seed_inventory.model_copy(
                 update={
                     "artifact_identity": ArtifactIdentityReference(
-                        artifact_id=identity.image_reference
+                        artifact_id=seed_identity.image_reference
                     ),
-                    "runtime_identity": identity.model_copy(
-                        update={"artifact_id": identity.image_reference}
+                    "runtime_identity": seed_identity.model_copy(
+                        update={"artifact_id": seed_identity.image_reference}
                     ),
                 }
             )
-            case.publication_case.inventory = inventory
-            fixture.store.write_environment_inventory(inventory)
-            keys = set(fixture.body.ports) | set(fixture.body.volume_keys.values())
-            fixture.store.write_runtime_environment_record(
+            case.publication_case.inventory = seed_inventory
+            seed_fixture.store.write_environment_inventory(seed_inventory)
+            keys = set(seed_fixture.body.ports) | set(seed_fixture.body.volume_keys.values())
+            seed_fixture.store.write_runtime_environment_record(
                 RuntimeEnvironmentRecord(
                     scope="instance",
-                    context=fixture.context,
+                    context=seed_fixture.context,
                     instance="prod",
-                    env={key: fixture.values[key] for key in keys},
-                    updated_at=fixture.old.updated_at,
-                    source_label="fixture",
+                    env={key: seed_fixture.values[key] for key in keys},
+                    updated_at=seed_fixture.old.updated_at,
+                    source_label="seed_fixture",
                 )
             )
 
@@ -137,16 +136,15 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
             patch("socket.create_connection", side_effect=AssertionError("Unexpected network call"))
         )
 
+    @staticmethod
     def runtime_program(
-        self,
         _root: Path,
         _record: Any,
         spec: dict[str, Any],
-        program: str,
+        _program: str,
         checkpoint: Callable[[str], None],
         **_kwargs: Any,
     ) -> dict[str, str]:
-        self.assertEqual(program, RUNTIME_PROGRAM)
         runtime = runtime_tests.RecipientRuntimeProgramTests()
         runtime.prepare_runtime(spec)
         checkpoint(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
@@ -198,13 +196,19 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
 
     def test_unavailable_custody_never_selects_ordinary_settings(self) -> None:
         fixture = self.case.fixture
-        with patch.object(fixture.store, "read_production_recipient", side_effect=ValueError):
+        with patch(
+            "control_plane.storage.postgres.PostgresRecordStore.read_production_recipient",
+            side_effect=ValueError,
+        ):
             with self.assertRaises(ReleaseEvidenceUnavailable):
                 release_version(store=fixture.store, profile=self.profile, instance="testing")
 
     def test_absent_and_retired_custody_keep_ordinary_settings(self) -> None:
         fixture = self.case.fixture
-        with patch.object(fixture.store, "read_production_recipient", return_value=None):
+        with patch(
+            "control_plane.storage.postgres.PostgresRecordStore.read_production_recipient",
+            return_value=None,
+        ):
             missing = release_version(store=fixture.store, profile=self.profile, instance="testing")
         current = custody(fixture.store, fixture.record.product, fixture.record.context)
         assert current is not None

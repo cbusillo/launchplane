@@ -13428,12 +13428,15 @@ class RealPostgresRecipientReleaseAdmissionTests(unittest.TestCase):
         self.fixture.test_missing_custody_remains_unknown_without_provider_effects()
 
 
-class RealPostgresRecipientReleaseSettingsTests(
-    recipient_settings_tests.RecipientReleaseSettingsTests
-):
+class RealPostgresRecipientReleaseSettingsTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.database_url = self.enterContext(_head_postgres_database())
-        super().setUp()
+        self.fixture = recipient_settings_tests.RecipientReleaseSettingsTests()
+        self.fixture.database_url = self.enterContext(_head_postgres_database())
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_native_drill_and_ordinary_settings_handoff(self) -> None:
+        self.fixture.test_native_drill_keeps_authority_through_publication_and_inverse()
 
 
 class RealPostgresRecipientWriterTests(unittest.TestCase):

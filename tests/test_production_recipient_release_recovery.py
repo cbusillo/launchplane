@@ -255,38 +255,45 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         self.continue_recipient(source_commit="c" * 40)
         self.assert_release_waits_for_recipient(profile)
 
-    def test_published_other_version_and_retired_custody_allow_ordinary_selection(self) -> None:
+    def test_incomplete_published_other_version_retains_native_selection(self) -> None:
         f = self.fixture
         profile, _testing = self.qualified_testing_source()
-        for phase in ("published", "retired"):
-            with (
-                self.subTest(phase=phase),
-                patch(
-                    "control_plane.production_recipient.custody",
-                    return_value=f.record.model_copy(
-                        update={
-                            "phase": phase,
-                            "request": f.record.request.model_copy(
-                                update={"source_commit": "c" * 40}
-                            ),
-                        }
-                    ),
-                ),
-                patch(
-                    "control_plane.client_release.GenericWebProdPromotionProviderMutationAdapter",
-                    side_effect=AssertionError("Ordinary update selected."),
-                ) as ordinary,
-            ):
-                with self.assertRaises(AssertionError):
-                    releases._run_generic_web_promotion(
-                        f.store,
-                        f.fixture.root,
-                        profile,
-                        self.decision,
-                        releases.ClientReleaseStep("promote", 1),
-                        f.old_backup,
-                    )
-                ordinary.assert_called_once()
+        self.seed_retained_deployment()
+        self.capture_accepted_backup(profile)
+        with patch(
+            "control_plane.production_recipient.custody",
+            return_value=f.record.model_copy(
+                update={
+                    "phase": "published",
+                    "request": f.record.request.model_copy(update={"source_commit": "c" * 40}),
+                }
+            ),
+        ):
+            self.assert_release_waits_for_recipient(profile)
+
+    def test_retired_custody_allows_ordinary_selection(self) -> None:
+        f = self.fixture
+        profile, _testing = self.qualified_testing_source()
+        with (
+            patch(
+                "control_plane.production_recipient.custody",
+                return_value=f.record.model_copy(update={"phase": "retired"}),
+            ),
+            patch(
+                "control_plane.client_release.GenericWebProdPromotionProviderMutationAdapter",
+                side_effect=AssertionError("Ordinary update selected."),
+            ) as ordinary,
+        ):
+            with self.assertRaises(AssertionError):
+                releases._run_generic_web_promotion(
+                    f.store,
+                    f.fixture.root,
+                    profile,
+                    self.decision,
+                    releases.ClientReleaseStep("promote", 1),
+                    f.old_backup,
+                )
+            ordinary.assert_called_once()
         self.assertEqual(f.actions, [])
 
     def test_superseded_preflight_retry_releases_without_touching_replacement(self) -> None:

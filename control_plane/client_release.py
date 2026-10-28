@@ -98,7 +98,6 @@ from control_plane.contracts.release_review import (
     AcceptanceReleaseStart,
     ReleaseReviewDecisionRecord,
     ReleaseStart,
-    ReleaseVersion,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -900,7 +899,6 @@ def _release_recipient(
     return native_release_recipient(
         store,
         profile,
-        candidate=decision.checklist.candidate,
         decision_record_id=decision.record_id,
     )
 
@@ -909,7 +907,6 @@ def native_release_recipient(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
     *,
-    candidate: ReleaseVersion | None = None,
     decision_record_id: str = "",
 ) -> ProductionRecipientRecord | None:
     from control_plane.production_recipient import custody
@@ -919,15 +916,6 @@ def native_release_recipient(
         return None
     if recipient.phase != "published":
         return recipient
-    if candidate is None:
-        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
-        source_commit = store.read_environment_inventory(
-            context_name=lane.context, instance_name=lane.instance
-        ).source_git_ref
-    else:
-        source_commit = candidate.source_commit
-    if source_commit != recipient.request.source_commit:
-        return None
     trace = recipient.execution.get("release_trace", "")
     if not isinstance(trace, str) or not trace.startswith("client-release-"):
         return recipient
