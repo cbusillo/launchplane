@@ -1,7 +1,5 @@
 """Classify the full verified artifact-input diff; never infer safe overlap."""
 
-import hashlib
-import json
 from pathlib import PurePosixPath
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -10,14 +8,13 @@ from control_plane.contracts.artifact_release_compatibility import (
     ReleaseInputChange,
     ReleaseInputFile,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 def _digest(manifest: ArtifactIdentityManifest | None) -> str:
     if manifest is None:
         return ""
-    return hashlib.sha256(
-        json.dumps(manifest.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(manifest.model_dump(mode="json"))
 
 
 def _image(manifest: ArtifactIdentityManifest | None) -> str:
@@ -137,9 +134,7 @@ def release_examined_inputs_sha256(manifest: ArtifactIdentityManifest) -> str:
         "modules": [module.model_dump(mode="json") for module in declaration.modules],
         "install_modules": list(manifest.odoo_install_modules),
     }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def _dependency_closure(roots: set[str], graph: dict[str, set[str]]) -> set[str]:

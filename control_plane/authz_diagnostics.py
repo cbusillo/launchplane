@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
 import hashlib
 import json
+from fnmatch import fnmatchcase
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -11,13 +11,13 @@ from control_plane.authz_scope import (
     exact_instance_workflow_authz_actions,
     exclusively_instance_scoped_authz_actions,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.service_auth import (
     AuthorizationTarget,
     GitHubActionsIdentity,
     GitHubActionsPolicyRule,
     LaunchplaneAuthzPolicy,
 )
-
 
 AuthzDiagnosticFailureCategory = Literal[
     "repository",
@@ -186,9 +186,7 @@ def _identity_sha256(identity: GitHubActionsIdentity) -> str:
         "repository_owner_id": identity.repository_owner_id,
         "workflow_ref": identity.workflow_ref,
     }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def _matches(value: str, patterns: tuple[str, ...]) -> bool:

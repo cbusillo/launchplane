@@ -9,6 +9,7 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.contracts.product_profile_record import (
@@ -96,9 +97,7 @@ def plan_website_settings(store: Any, request: OdooWebsiteSettingsRequest) -> di
         "product": request.product,
         "context": request.context,
         "instance": request.instance,
-        "record_sha256_before": hashlib.sha256(
-            json.dumps(before, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
+        "record_sha256_before": nonvalidating_compact_sorted_json_sha256(before),
         "mode": request.mode,
         "plan_sha256": digest,
         "before": existing.website_settings.model_dump(mode="json")

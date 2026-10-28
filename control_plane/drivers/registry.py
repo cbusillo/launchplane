@@ -45,6 +45,7 @@ from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
     resolve_production_backup_authority,
 )
+from control_plane.timestamps import utc_now_timestamp
 
 
 PROVIDER_BOUNDARY_NOTE = (
@@ -1372,9 +1373,7 @@ def _production_backup_authorities(
         )
     ):
         return ()
-    generated_at = (
-        datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    )
+    generated_at = utc_now_timestamp()
     try:
         authority_store = require_production_backup_authority_store(record_store)
     except TypeError:
