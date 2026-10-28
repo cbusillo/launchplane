@@ -21,6 +21,7 @@ from control_plane.contracts.production_backup_authority import ProductionBackup
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.production_recipient import custody
 from control_plane.production_recipient_cutover import (
     RecipientCutoverAdapter,
@@ -30,6 +31,7 @@ from control_plane.production_recipient_cutover import (
 )
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.runtime_environments import SiteRuntimeEnvironment
+from control_plane.dokploy import api
 from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 from control_plane.workflows.production_backup_gate import enqueue_production_backup_gate
 from control_plane.workflows.dokploy_deploy import update_dokploy_target_artifact
@@ -959,6 +961,18 @@ class RecipientCutoverTests(unittest.TestCase):
         assert current is not None
         self.assertEqual(current.phase, "preflight_refused")
         self.assertTrue(self.old_running)
+        self.assertTrue(current.execution.get("runtime_identity"))
+        self.assertNotIn("trigger_requested_at", current.execution)
+        provider = self.fixture.provider[current.target_id]
+        original_environment = str(provider["env"])
+        expected = api.parse_dokploy_env_text(original_environment)
+        for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS:
+            with self.subTest(missing_before_dispatch=key):
+                provider["env"] = api.serialize_dokploy_env_text(
+                    {name: value for name, value in expected.items() if name != key}
+                )
+                self.fixture.adapter.verify_configuration(current)
+        provider["env"] = original_environment
         self.assertEqual(self.run_release().response_status_code, 202)
 
     def test_missing_peer_target_does_not_block_an_unrelated_products_effect(self) -> None:

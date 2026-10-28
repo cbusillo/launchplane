@@ -20,6 +20,7 @@ from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.production_recipient import custody
 from control_plane.production_recipient_cutover import RecipientCutoverAdapter
+from control_plane.production_recipient_publication import republication_snapshot
 from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 from control_plane.dokploy import api
 from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
@@ -246,18 +247,31 @@ class RecipientReleaseSettingsTests(unittest.TestCase):
         provider = fixture.fixture.provider[record.target_id]
         original = str(provider["env"])
         expected = api.parse_dokploy_env_text(original)
-        changes = [
-            *(
-                {key: "example/wrong@sha256:" + "f" * 64}
-                for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS
-            ),
-            {"UNREVIEWED_RUNTIME_INPUT": "unexpected"},
-            {"DB_PASSWORD": "different-managed-value"},
+        changes: list[dict[str, str | None]] = [
+            {key: "example/wrong@sha256:" + "f" * 64} for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS
         ]
+        changes.extend({key: None} for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS)
+        changes.extend(
+            [{"UNREVIEWED_RUNTIME_INPUT": "unexpected"}, {"DB_PASSWORD": "different-managed-value"}]
+        )
         before = (fixture.deploys, list(fixture.actions))
         for change in changes:
             with self.subTest(keys=tuple(change)):
-                provider["env"] = api.serialize_dokploy_env_text({**expected, **change})
+                provider["env"] = api.serialize_dokploy_env_text(
+                    {
+                        key: value
+                        for key, value in {**expected, **change}.items()
+                        if value is not None
+                    }
+                )
+                with self.assertRaises(ValueError):
+                    fixture.fixture.adapter.verify_configuration(
+                        record.model_copy(
+                            update={
+                                "authority_snapshot": republication_snapshot(fixture.store, record)
+                            }
+                        )
+                    )
                 self.assertFalse(
                     releases.advance_client_releases(
                         store=fixture.store, control_plane_root=fixture.fixture.root
