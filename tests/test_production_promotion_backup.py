@@ -50,9 +50,36 @@ from tests.support.durable_operations import (
 from tests.test_generic_web_promotion import _profile
 from tests.test_odoo_prod_promotion_run import _inputs_result
 from tests.test_production_backup_provider import BackupHost, _binding, setup_memory_files
+from tests.test_generic_web_client_release import expired_backup_clock
+from control_plane.generic_web_source_qualification import GenericWebPromotionAdmissionRefused
 
 
 class ProductionPromotionBackupTests(unittest.TestCase):
+    def test_only_generic_web_expiry_is_a_temporary_admission_refusal(self) -> None:
+        for action in (ODOO_PROMOTION_BACKUP_ACTION, GENERIC_WEB_PROMOTION_BACKUP_ACTION):
+            with self.subTest(action=action):
+                store = self.capture(action)
+                operation = store.list_verireel_prod_backup_gate_operation_records()[0]
+                pending = self.pending(store, action)
+                with self.assertRaises(click.ClickException):
+                    with production_promotion_backup_guard(
+                        record_store=store,
+                        product=operation.product,
+                        context=operation.context,
+                        instance=operation.instance,
+                        promotion_action=action,
+                        backup_record_id=operation.backup_record_id,
+                        pending_promotion=pending,
+                    ) as checkpoint:
+                        with expired_backup_clock(store, operation.operation_id):
+                            checkpoint("first_effect")
+                refused = store.read_promotion_record(pending.record_id)
+                temporary = (
+                    refused.failure is not None
+                    and refused.failure.code == GenericWebPromotionAdmissionRefused.failure_code
+                )
+                self.assertEqual(temporary, action == GENERIC_WEB_PROMOTION_BACKUP_ACTION)
+
     def test_interrupted_cutover_resumes_through_real_backup_guard_without_new_capture(
         self,
     ) -> None:

@@ -16,9 +16,11 @@ authorization rule with durable provenance, and `Idempotency-Key`. The service
 resolves current typed authority and stores the exact binding in a durable
 operation. The same caller/key and request reuses that operation even after
 authority changes; changed requests conflict. New captures resolve current
-authority. Backup record IDs cannot be reused for another capture. Reviewed
-continuation of a proven pre-capture failure preserves the original operation;
-see [release review](release-review.md).
+authority. An accepted generic-web release can continue its unused, expired or
+superseded capture, or a proved pre-capture failure, through reviewed
+[backup continuation](release-review.md). It retains the operation and gate IDs
+with complete prior evidence; the new snapshot and archive have their own
+identities. Other requests cannot reuse backup record IDs for another capture.
 
 The enqueue and cancel routes accept a bearer or OIDC caller, or a signed-in
 browser session through the CSRF-checked browser-mutation dependency; terminal

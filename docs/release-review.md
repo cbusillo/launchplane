@@ -1257,12 +1257,13 @@ trace after settling.
 The activity read derives stopped-step events from those same operations, with
 the reason in `summary` and record, operation, decision and available trace IDs
 in `records`. Reading this evidence never retries a stopped release.
-An admin can continue the original accepted generic-web release after a backup
-failed while preparing its capture credentials, using
+An admin can continue the original accepted generic-web release after a proved
+pre-capture failure or an unused capture expires or is superseded, using
 `POST /v1/products/{product}/releases/{decision_record_id}/backup-continuation`.
 Send a concrete `reason` first; this review changes no operation or provider.
 Send the same reason with `apply: true` and its `expected_digest` to requeue the
-same first backup operation. The Director's authenticated agent or an existing
+same stopped or preceding backup operation, including the second backup in a
+rollback drill. The Director's authenticated agent or an existing
 admin applies through `client_release_backup.continue`, a write control covered
 by the Director agent's existing standing authority. Review uses
 `product_environment.read` and reports `apply_authorized` for the current caller.
@@ -1270,17 +1271,28 @@ No direct capture or promotion permission is supplied and no acceptance is
 recorded. The normal worker performs fresh capture, verification,
 promotion, checks and the decision's rollback drill.
 
-Only a terminal `backup_preflight_unavailable` failure with the exact retained
-`backup_preflight` stage, no result and no cancellation qualifies. Empty progress
-is unknown. Snapshot or archive evidence, changed backup authority, a newer
-decision, held releases, changed source pair, missing rollback baseline or a
-later started step refuses. Apply compares the exact reviewed operation and
-failed backup evidence transactionally. The operation retains its complete prior
-attempt and failed backup record, review digest, authenticated actor, reason and time. Repeating an applied
-review returns its receipt, even after the worker advances, without requeueing.
-Expired or consumed passing captures and stopped promotions need their own
-supported recovery; this control cannot reset them. Inspecting release progress
-alone never retries anything. Refusals return a bounded cause such as
+Terminal `backup_preflight_unavailable` with the exact retained `backup_preflight`
+stage, or `backup_source_busy` with empty progress, qualifies only with no result
+and no cancellation. Other empty progress and partial captures remain unknown.
+A completed passing capture qualifies only when its exact verified evidence is
+expired or superseded and remains unused. Future or invalid timestamps, changed
+backup authority, a newer decision, held releases, changed source pair, missing
+rollback baseline or a later started step refuse. Native rollback-drill history
+may precede backup two, but current-attempt effects or reservations refuse.
+Apply compares the exact reviewed operation and backup evidence under the same
+source lock used by capture and promotion, then atomically publishes a pending
+operation and pending gate with no passing evidence. The operation retains its
+complete prior attempt and backup record, review digest, authenticated actor,
+reason and time. Repeating an applied review returns its receipt, even after all
+release steps complete, without requeueing. Consumed captures and stopped
+promotions still require their own supported recovery. Odoo continuation is not
+supported by this route. Inspecting release progress alone never retries
+anything. Known expired or superseded evidence leaves an unstarted release
+waiting for this continuation; a source-busy promotion before any effect also
+waits. Progress offers continuation only while the shared capture-eligibility
+checks pass; a fenced capture instead requires reconciliation. The generic-web
+HTTP adapter reports these pre-dispatch refusals as `409 generic_web.admission_refused`
+with its fixed, redacted description. Continuation refusals return a bounded cause such as
 `backup_capture_outcome_not_proven_absent`, `release_acceptance_no_longer_current`
 or `backup_continuation_review_changed`; unexpected evidence errors retain the
 generic `backup_continuation_held` response. Planning inspects credential metadata

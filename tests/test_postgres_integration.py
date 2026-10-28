@@ -9807,6 +9807,68 @@ def _run_integration_provider_operation(
 
 
 class RealPostgresProviderOperationTests(unittest.TestCase):
+    def test_accepted_backup_continuation_preserves_history_and_refuses_late_reservation(
+        self,
+    ) -> None:
+        from tests import test_generic_web_client_release as fixtures
+
+        for scenario in (
+            "test_expired_capture_continuation_preserves_the_complete_drill",
+            "test_continuation_transaction_rechecks_a_new_promotion_reservation",
+        ):
+            with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
+                with patch.object(fixtures, "PostgresRecordStore", return_value=store):
+                    case = fixtures.GenericWebClientReleaseTests(scenario)
+                    try:
+                        case.debug()
+                    finally:
+                        case.doCleanups()
+
+    def test_backup_continuation_serializes_capture_and_promotion_source_until_pending_commit(
+        self,
+    ) -> None:
+        from tests import test_generic_web_client_release as fixtures
+        from control_plane.client_release_backup_continuation import BackupContinuationRefused
+        from control_plane.workflows.production_promotion_backup import _source_key
+
+        with _store_for_fresh_head_database() as store:
+            case = fixtures.GenericWebClientReleaseTests()
+            with patch.object(fixtures, "PostgresRecordStore", return_value=store):
+                case.setUp()
+            try:
+                decision = case.accept()
+                (operation_id,) = case.advance()
+                case.capture()
+                original = store.read_verireel_prod_backup_gate_operation_record(operation_id)
+                backup = store.read_backup_gate_record(original.backup_record_id)
+                with fixtures.expired_backup_clock(store, operation_id):
+                    plan = case.continue_backup(decision)
+                    with store.production_backup_source_lock(_source_key(original)) as held:
+                        self.assertIsNotNone(held)
+                        with self.assertRaises(BackupContinuationRefused):
+                            case.continue_backup(decision, digest=plan.review_digest, apply=True)
+                        self.assertEqual(store.read_backup_gate_record(backup.record_id), backup)
+                        self.assertEqual(
+                            store.read_verireel_prod_backup_gate_operation_record(operation_id),
+                            original,
+                        )
+                    case.continue_backup(decision, digest=plan.review_digest, apply=True)
+                with store.production_backup_source_lock(_source_key(original)) as released:
+                    self.assertIsNotNone(released)
+                    pending = store.read_backup_gate_record(backup.record_id)
+                    self.assertEqual(pending.status, "pending")
+                    self.assertFalse(pending.evidence)
+                case.capture()
+                self.assertTrue(case.advance())
+                self.assertEqual(
+                    store.read_verireel_prod_backup_gate_operation_record(
+                        operation_id
+                    ).previous_attempt,
+                    original,
+                )
+            finally:
+                case.doCleanups()
+
     def test_executor_exit_drain_proof_and_live_reconciliation_on_postgres(self) -> None:
         from tests.test_event_deploy_redeploy import EventDeployRedeployTests
 
@@ -13437,6 +13499,15 @@ class RealPostgresRecipientReleaseSettingsTests(unittest.TestCase):
 
     def test_native_drill_and_ordinary_settings_handoff(self) -> None:
         self.fixture.test_native_drill_keeps_authority_through_publication_and_inverse()
+
+    def test_continuation_after_native_release_hands_off_to_ordinary(self) -> None:
+        self.fixture.test_later_ordinary_release_can_continue_after_completed_native_publication()
+
+    def test_native_second_backup_continuation_preserves_inverse(self) -> None:
+        self.fixture.test_native_second_backup_can_continue_after_completed_inverse()
+
+    def test_native_busy_source_has_no_delivery_failure(self) -> None:
+        self.fixture.test_busy_native_source_leaves_the_release_waiting_without_delivery_failure()
 
 
 class RealPostgresRecipientWriterTests(unittest.TestCase):

@@ -8879,7 +8879,8 @@ class PostgresRecordStore(HumanSessionStore):
             route_path=route_path,
             idempotency_key=idempotency_key,
         )
-        with self._session_factory() as session:
+        held = getattr(self._disposable_authority_context, "observation_read_session", None)
+        with nullcontext(held) if held is not None else self._session_factory() as session:
             row = session.scalar(statement)
             if row is None:
                 return None
@@ -18618,17 +18619,20 @@ class PostgresRecordStore(HumanSessionStore):
     def production_backup_source_lock(self, source_key: str) -> Iterator[Callable[[], None] | None]:
         """Fence shared capture and retention for one configured provider guest."""
         with self._session_factory() as session:
-            acquired = self.database_url.startswith("sqlite") or bool(
-                session.scalar(
-                    text("select pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
-                    {"lock_name": f"launchplane:backup-source:{source_key}"},
-                )
-            )
+            acquired = self._try_production_backup_source_lock(session, source_key)
 
             def check_connection() -> None:
                 session.execute(text("select 1"))
 
             yield check_connection if acquired else None
+
+    def _try_production_backup_source_lock(self, session: Session, source_key: str) -> bool:
+        return self.database_url.startswith("sqlite") or bool(
+            session.scalar(
+                text("select pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                {"lock_name": f"launchplane:backup-source:{source_key}"},
+            )
+        )
 
     def write_verireel_prod_backup_gate_operation_record(
         self, record: VeriReelProdBackupGateOperationRecord
@@ -18659,11 +18663,19 @@ class PostgresRecordStore(HumanSessionStore):
         resumed: VeriReelProdBackupGateOperationRecord,
         expected_backup: BackupGateRecord,
     ) -> bool:
-        from control_plane.client_release_backup_continuation import require_precapture_failure
+        from control_plane.client_release_backup_continuation import (
+            BackupContinuationRefused,
+            require_continuable_backup,
+        )
+        from control_plane.workflows.production_promotion_backup import _source_key
 
-        require_precapture_failure(expected)
+        if expected.binding is None:
+            return False
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            if not self._try_production_backup_source_lock(session, _source_key(expected)):
+                raise BackupContinuationRefused("backup_source_busy")
             row = session.scalar(
                 select(LaunchplaneVeriReelProdBackupGateOperationRow)
                 .where(
@@ -18692,8 +18704,23 @@ class PostgresRecordStore(HumanSessionStore):
                 or resumed.operation_id != expected.operation_id
                 or resumed.binding != expected.binding
                 or resumed.authorization != expected.authorization
+                or resumed.backup_record_id != expected.backup_record_id
+                or resumed.result is not None
+                or resumed.phase != "created"
             ):
                 return False
+            outer = getattr(self._disposable_authority_context, "observation_read_session", None)
+            self._disposable_authority_context.observation_read_session = session
+            try:
+                require_continuable_backup(self, expected, expected_backup)
+            finally:
+                self._disposable_authority_context.observation_read_session = outer
+            pending_backup = expected_backup.model_copy(
+                update={"status": "pending", "evidence": {}, "created_at": resumed.updated_at}
+            )
+            backup_row.status = pending_backup.status
+            backup_row.created_at = pending_backup.created_at
+            backup_row.payload = self._payload_dict(pending_backup)
             self._sync_verireel_prod_backup_gate_operation_row(row, resumed)
             session.commit()
             return True
