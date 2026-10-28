@@ -421,10 +421,82 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             record,
         )
 
-    def test_bootstrap_preparation_cannot_strand_a_held_original(self) -> None:
+    def test_expired_preview_can_prepare_intent_without_losing_original_recovery(self) -> None:
+        self.reservation = self.replace_record(state="reconcile_required")
+        self.assert_expired_preview_preparation_preserves_recovery()
+
+    def test_expired_running_preview_can_prepare_intent_without_losing_recovery(self) -> None:
+        self.assert_expired_preview_preparation_preserves_recovery()
+
+    def assert_expired_preview_preparation_preserves_recovery(self) -> None:
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooInstanceOverrideRecord,
+            OdooWebsiteBootstrapPayload,
+        )
+        from control_plane.odoo_instance_overrides import resolve_preview_website_bootstrap
         from control_plane.odoo_post_deploy_http import OdooWebsiteBootstrapOverrideRequest
         from control_plane.preview_website_bootstrap_override import prepare_preview_bootstrap
 
+        template = OdooInstanceOverrideRecord(
+            context=self.profile.preview.context,
+            instance=self.profile.preview.template_instance,
+            website_bootstrap=OdooWebsiteBootstrapPayload(name="Template website"),
+            updated_at=self.profile.updated_at,
+        )
+        self.store.write_odoo_instance_override_record(template)
+        retained = self.store.read_original_mutation_intent(self.reservation)
+        request = OdooWebsiteBootstrapOverrideRequest(
+            product=self.profile.product,
+            context=template.context,
+            instance=self.issued.preview_slug,
+            website_bootstrap=None,
+            mode="dry-run",
+            preview_original_reservation_id=self.reservation.record_id,
+        )
+        plan = prepare_preview_bootstrap(self.store, request)
+        request.mode = "apply"
+        request.reviewed_plan_sha256 = str(plan["plan_sha256"])
+        result = prepare_preview_bootstrap(self.store, request)
+        self.assertTrue(result["read_back_matches"])
+        selected, _ = resolve_preview_website_bootstrap(
+            self.store,
+            context=template.context,
+            template_instance=template.instance,
+            preview_slug=self.issued.preview_slug,
+        )
+        assert selected is not None
+        self.assertIsNone(selected.website_bootstrap)
+        self.assertEqual(
+            self.store.read_odoo_instance_override_record(
+                context_name=template.context, instance_name=template.instance
+            ),
+            template,
+        )
+        self.assertEqual(
+            self.store.read_idempotency_record_by_id(self.reservation.record_id), self.reservation
+        )
+        self.assertEqual(self.store.read_original_mutation_intent(self.reservation), retained)
+        self.assertTrue(
+            classify_preview_reservation(self.reservation, profile=self.profile, store=self.store)[
+                "original_action_available"
+            ]
+        )
+        quiescence = Mock(return_value=False)
+        observe = Mock()
+        recovery = self.recover(quiescence=quiescence, observe=observe)
+        self.assertEqual(recovery["reason"], "preview_quiescence_unproven")
+        quiescence.assert_called_once()
+        observe.assert_not_called()
+        recovered = self.recover(observe=Mock(return_value=("present", {"status": "fail"}, False)))
+        self.assertEqual(recovered["settlement"], "adopted")
+
+    def test_bootstrap_preparation_refuses_an_unexpired_original_or_other_holder(self) -> None:
+        from control_plane.odoo_post_deploy_http import OdooWebsiteBootstrapOverrideRequest
+        from control_plane.preview_website_bootstrap_override import prepare_preview_bootstrap
+
+        self.reservation = self.replace_record(
+            lease_expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        )
         request = OdooWebsiteBootstrapOverrideRequest(
             product=self.profile.product,
             context=self.profile.preview.context,
@@ -445,6 +517,22 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             self.store.read_odoo_instance_override_record(
                 context_name=request.context, instance_name=request.instance
             )
+        from control_plane.workflows.odoo_preview_runtime import (
+            ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
+        )
+
+        self.reservation = self.replace_record(
+            lease_expires_at=(
+                datetime.now(timezone.utc)
+                - timedelta(seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS / 2)
+            ).isoformat()
+        )
+        request.mode = "dry-run"
+        plan = prepare_preview_bootstrap(self.store, request)
+        request.mode = "apply"
+        request.reviewed_plan_sha256 = str(plan["plan_sha256"])
+        with self.assertRaises(ValueError):
+            prepare_preview_bootstrap(self.store, request)
         self.reservation = self.replace_record(
             state="completed",
             response_status_code=409,
@@ -506,6 +594,16 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                     database_url=self.database_url(),
                 )
             self.assertEqual(refusal.exception.code, "odoo_preview_plan_stale")
+            after = preview_http._build_odoo_preview_apply_inputs(
+                control_plane_root=self.root,
+                record_store=self.store,
+                profile=self.profile,
+                request=self.issued.plan_request,
+                database_url=self.database_url(),
+            )
+            self.assertNotEqual(
+                before.preview_website_bootstrap_sha256, after.preview_website_bootstrap_sha256
+            )
 
     def test_recorded_preview_preparation_requires_the_current_executor_target(self) -> None:
         from control_plane.odoo_post_deploy_http import OdooWebsiteBootstrapOverrideRequest
