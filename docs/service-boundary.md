@@ -2266,8 +2266,9 @@ site's own setting. Because no declaration vouches for it, Launchplane refuses
 it with `runtime_setting_refused` when it is not an env key name, names a
 declared managed-secret binding, or looks like a credential by name or value.
 On a `live` product, the `local_operator` credential cannot apply an
-undeclared setting (`live_product_requires_operator`), the same guard as
-declaring a key. The authenticated Director agent may dry-run those settings
+undeclared setting (`live_product_requires_operator`). Expected-config
+declarations follow the [product profile contract](#product-profile-endpoints).
+The authenticated Director agent may dry-run those settings
 on testing, production or context scope; planning persists only its own review
 evidence and grants no apply authority. Other scoped callers retain their
 existing authorization and live-product guard. `retired_provider_keys` adds keys

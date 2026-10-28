@@ -225,11 +225,9 @@ separate context and instance rules support both scopes. Requests authorize
 the returned product and collections filter each returned record. Revocation
 continues to apply to these scoped rules and to all explicit write permissions.
 
-Expected-configuration dry runs also preserve existing explicit grants: a
-`local_operator` granted `product_profile.expected_config.apply` may inspect the inert
-plan for a live product without changing its profile. The corresponding apply
-still refuses with `live_product_requires_operator`; browser CSRF and read-only
-identity restrictions remain in force.
+Expected-configuration declaration authority, including the authenticated
+Director-agent add-only exception and explicit-grant behavior, is owned by the
+[product profile contract](service-boundary.md#product-profile-endpoints).
 
 Product-config likewise lets the authenticated Director agent plan undeclared
 non-secret settings on a Live product, including testing, production and context
