@@ -1323,8 +1323,14 @@ grant, so it is a Director decision.
 
 The dedicated ordinary-agent preparation routes and browser callers are removed.
 Historical preparation context remains readable; new generic proposals cannot
-supply it. Remaining domain/storage retirement is tracked by
-[launchplane#2437](https://github.com/cbusillo/launchplane/issues/2437).
+supply it. Terminal enrollment candidate production and its candidate ID are
+removed from the generic candidate endpoint as well. Exact historical terminal
+request recognition remains for privileged-operation semantic review. The
+ordinary-agent delivery-policy compiler remains in use by
+`privileged_operation_registry` to validate retained prepared-request shapes;
+its removal needs a replacement for that validation. Remaining source tracing
+is tracked by [launchplane#5245](https://github.com/cbusillo/launchplane/issues/5245).
+The data retirement on #2437 is complete and is not reopened.
 
 
 ### Preparing The First Ordinary Client Policy
