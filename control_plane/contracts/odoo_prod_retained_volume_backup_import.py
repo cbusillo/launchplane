@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from typing import Literal
 
@@ -10,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.text_fields import require_text
 from control_plane.contracts.record_fields import SHA256_PATTERN
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 _DOCKER_VOLUME_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}")
@@ -530,8 +529,7 @@ def build_odoo_prod_retained_volume_backup_import_plan_fingerprint(
             "steps",
         },
     )
-    encoded = json.dumps(authority, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(authority)
 
 
 def _normalize_path_component(value: str, message: str) -> str:

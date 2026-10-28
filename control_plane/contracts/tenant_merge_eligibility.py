@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.record_fields import GIT_SHA_PATTERN, SHA256_PATTERN
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 TenantRepositoryClassificationKind = Literal["engineering", "tenant_ui"]
 TenantRepositoryClassificationLookupStatus = Literal["available", "missing", "ambiguous", "unknown"]
@@ -502,5 +501,4 @@ def _model_sha256(model: BaseModel, *, exclude: set[str]) -> str:
 
 
 def _canonical_sha256(payload: object) -> str:
-    canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)

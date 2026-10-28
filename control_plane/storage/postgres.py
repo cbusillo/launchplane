@@ -665,6 +665,7 @@ from control_plane.storage.schema_invariants import (
     RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS,
     verify_postgres_schema_invariants,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 def _historical_disposition_storage_error(error: Exception) -> HistoricalDispositionError:
@@ -5799,9 +5800,7 @@ class PostgresRecordStore(HumanSessionStore):
                 (fence.record_id, fence.state, fence.lease_expires_at) if fence else None,
             )
             revisions[(preview_target.product, preview_target.context, preview_target.instance)] = (
-                hashlib.sha256(
-                    json.dumps(preview_material, sort_keys=True, separators=(",", ":")).encode()
-                ).hexdigest()
+                nonvalidating_compact_sorted_json_sha256(preview_material)
             )
         active_profiles = {profile.product: profile for profile in profiles}
         for incident in self.list_public_ingress_incident_records(status="open"):

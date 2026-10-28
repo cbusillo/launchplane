@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 AuthzPolicyStatus = Literal["active", "superseded"]
@@ -33,8 +32,7 @@ def authz_policy_sha256(policy: LaunchplaneAuthzPolicy) -> str:
         payload.pop("local_admins", None)
     if not policy.ordinary_agents:
         payload.pop("ordinary_agents", None)
-    canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def build_authz_policy_record_id(*, revision: int, policy_sha256: str) -> str:

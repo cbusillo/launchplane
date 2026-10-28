@@ -5,8 +5,6 @@ Normal previews still receive no source settings or integration allowances.
 """
 
 from dataclasses import dataclass
-import hashlib
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -31,6 +29,7 @@ from control_plane.product_secret_copy import (
 from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 if TYPE_CHECKING:
     from control_plane.odoo_runtime_source_prerequisites import PrerequisiteStore
@@ -221,9 +220,7 @@ def resolve_fishbowl_preview_source(
         "allowance": allowances[0].model_dump(mode="json"),
         "parameters": selected_values,
     }
-    digest = hashlib.sha256(
-        json.dumps(authority, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(authority)
     return FishbowlPreviewSource(
         context=profile.preview.context,
         instance=preview_slug,

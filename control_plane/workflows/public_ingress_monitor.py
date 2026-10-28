@@ -174,6 +174,7 @@ from control_plane.split_ingress import (
 )
 from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 MAX_REDIRECTS = 10
 USER_AGENT = "Launchplane public-ingress-monitor/1.0"
@@ -855,21 +856,17 @@ def _resolved_private_health_url(
 
 
 def _private_health_endpoint_material_sha256(endpoint: PrivateHealthEndpointRecord) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            {
-                "endpoint_key": endpoint.endpoint_key,
-                "product": endpoint.product,
-                "context": endpoint.context,
-                "instance": endpoint.instance,
-                "url": endpoint.url,
-                "status": endpoint.status,
-                **({"tls_ca_pem": endpoint.tls_ca_pem} if endpoint.tls_ca_pem else {}),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(
+        {
+            "endpoint_key": endpoint.endpoint_key,
+            "product": endpoint.product,
+            "context": endpoint.context,
+            "instance": endpoint.instance,
+            "url": endpoint.url,
+            "status": endpoint.status,
+            **({"tls_ca_pem": endpoint.tls_ca_pem} if endpoint.tls_ca_pem else {}),
+        }
+    )
 
 
 class MonitorRunCancelled(RuntimeError):

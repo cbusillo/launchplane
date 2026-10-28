@@ -1,5 +1,4 @@
 import hashlib
-import json
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import Literal
@@ -18,6 +17,7 @@ from control_plane.dokploy.memory_capacity import (
 from control_plane.product_config import plan_product_config_authority_bundle
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 SERVICE_RUNTIME_SETTINGS_ROUTE = "/v1/service/runtime-settings"
 SERVICE_CONTEXT = "launchplane"
@@ -77,19 +77,15 @@ def plan_service_runtime_setting(
         for write in bundle.runtime_environment_writes
     ]
     value_sha256 = hashlib.sha256(request.value.encode()).hexdigest()
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "key": request.key,
-                "value_sha256": value_sha256,
-                "reason": request.reason,
-                "actor": actor,
-                "baseline": baseline,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "key": request.key,
+            "value_sha256": value_sha256,
+            "reason": request.reason,
+            "actor": actor,
+            "baseline": baseline,
+        }
+    )
     summary: dict[str, object] = {
         "status": "ok",
         "actor": actor,

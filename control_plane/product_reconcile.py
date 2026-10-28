@@ -242,6 +242,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsRequest,
     OdooPreviewDokployApplyRequest,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 PRODUCT_RECONCILE_SWEEP_SECONDS = 30 * 60
 # A running reconcile renews its lease every third of it, so a long preview apply
@@ -3959,8 +3960,7 @@ def _labels(pull_request: dict[str, object]) -> set[str]:
 
 
 def _fingerprint(payload: dict[str, object]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def _artifact_digest(record_store: ProductReconcileStore, artifact_id: str) -> str:

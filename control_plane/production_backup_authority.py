@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-import hashlib
-import json
 from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -16,6 +14,7 @@ from control_plane.contracts.production_backup_authority import (
     ProductionBackupTargetSummary,
     production_backup_snapshot_prefix_valid,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 class ProductionBackupAuthorityConflictError(ValueError):
@@ -427,9 +426,7 @@ def production_backup_authority_write_digest(
         ),
         "expected_current_policy_record_id": envelope.expected_current_policy_record_id,
     }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def resolve_production_backup_authority(

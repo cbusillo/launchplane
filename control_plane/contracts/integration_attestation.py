@@ -1,10 +1,9 @@
 from typing import Annotated, Literal
-import hashlib
-import json
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.product_review import ProductReviewIntegratedChange
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 GitSha = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
 EvidenceDigest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -29,9 +28,7 @@ class IntegrationAttestationEvidence(BaseModel):
     batch_record_ids: tuple[str, ...] = ()
 
     def digest(self) -> str:
-        return hashlib.sha256(
-            json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        return nonvalidating_compact_sorted_json_sha256(self.model_dump(mode="json"))
 
 
 class IntegrationModelReview(BaseModel):

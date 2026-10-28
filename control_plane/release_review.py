@@ -56,6 +56,7 @@ from control_plane.workflows.launchplane import (
     resolve_launchplane_github_token,
     launchplane_github_token,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 class ReleaseReviewStore(GenericWebSourceQualificationStore, ReleaseSettingsStore, Protocol):
@@ -258,9 +259,7 @@ def checklist_digest(checklist: ReleaseChecklist) -> str:
         for item in source["items"]:
             item.pop("already_reviewed")
             item.pop("client_test_notes_error", None)
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def release_website_settings(

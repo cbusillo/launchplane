@@ -1,7 +1,5 @@
 """Plan the service's Delivery App selector without copying or minting credentials."""
 
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -18,6 +16,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     SecretCopySourceExpectation,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 GITHUB_DELIVERY_CONFIGURATION_ROUTE = "/v1/service/github-delivery/configuration"
 
@@ -119,21 +118,17 @@ def plan_delivery_github_configuration(
         write.expected_record.model_dump(mode="json") if write.expected_record else None
         for write in bundle.runtime_environment_writes
     ]
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "app_id": request.app_id,
-                "integration": request.integration,
-                "reason": request.reason,
-                "actor": actor,
-                "baseline": baseline,
-                "secret_record": record.model_dump(mode="json"),
-                "binding": binding.model_dump(mode="json"),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "app_id": request.app_id,
+            "integration": request.integration,
+            "reason": request.reason,
+            "actor": actor,
+            "baseline": baseline,
+            "secret_record": record.model_dump(mode="json"),
+            "binding": binding.model_dump(mode="json"),
+        }
+    )
     summary = {
         "status": "ok",
         "actor": actor,

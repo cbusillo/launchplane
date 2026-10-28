@@ -21,6 +21,7 @@ from control_plane.storage.schema_migration import (
 )
 from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
 from control_plane.database_maintenance_host import RecoveryRequired, DATABASE_UNSAFE_EVENT
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 MAINTENANCE_LOCKS = (
@@ -219,9 +220,7 @@ def _schema_sha256(metadata: dict[str, Any]) -> str:
             for category in ("constraints", "indexes")
         },
     }
-    return hashlib.sha256(
-        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(normalized)
 
 
 @contextmanager

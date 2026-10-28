@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.record_fields import SHA256_PATTERN
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 RepositoryInventoryState = Literal["tracked", "retired"]
 
@@ -88,9 +87,7 @@ def repository_inventory_digest(record: RepositoryInventoryRecord) -> str:
         "reason": record.reason,
         "supersedes_record_id": record.supersedes_record_id,
     }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def required_token(value: str, label: str) -> str:

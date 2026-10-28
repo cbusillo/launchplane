@@ -1,5 +1,3 @@
-import hashlib
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +14,7 @@ from control_plane.odoo_business_hours import (
     require_calendar_authority_current,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 def plan_business_hours_config(
@@ -85,21 +84,15 @@ def plan_business_hours_config(
         after = OdooBusinessHoursPolicy(
             company_id=request.company_id, private_endpoint_key=request.private_endpoint_key
         )
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "profile": profile.model_dump(mode="json"),
-                "request": request.model_dump(
-                    mode="json", exclude_none=True, exclude_defaults=True
-                ),
-                "reason": reason,
-                "source_label": source_label,
-                "authority_digest": result.authority_digest,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "profile": profile.model_dump(mode="json"),
+            "request": request.model_dump(mode="json", exclude_none=True, exclude_defaults=True),
+            "reason": reason,
+            "source_label": source_label,
+            "authority_digest": result.authority_digest,
+        }
+    )
     replacement = LaunchplaneProductProfileRecord.model_validate(
         profile.model_copy(update={"odoo_business_hours": after}).model_dump(mode="json")
     )

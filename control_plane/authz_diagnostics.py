@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from fnmatch import fnmatchcase
 from typing import Literal
 
@@ -194,13 +192,7 @@ def _matches(value: str, patterns: tuple[str, ...]) -> bool:
 
 
 def _rule_sha256(rule: GitHubActionsPolicyRule) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            rule.model_dump(mode="json", exclude_none=True),
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(rule.model_dump(mode="json", exclude_none=True))
 
 
 def _target_allowed(
