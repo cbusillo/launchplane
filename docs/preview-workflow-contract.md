@@ -16,12 +16,62 @@ onboarding recipe or permission to add, widen, or refresh a caller grant. Keep
 existing callers unchanged until event-driven reconciliation is activated and
 verified for that product, then retire the caller through the supported cleanup
 and readback path. Do not delete a compatibility workflow merely because this
-document no longer teaches product repositories to call it.
+document no longer teaches product repositories to call it. Active backup,
+promotion, rollback, runtime-health and cleanup gates remain until Launchplane
+owns equivalent behavior and tests. The [onboarding cleanup runbook](operations.md#conventional-generic-web-onboarding)
+owns the retained caller-rule retirement path.
 
 The service remains responsible for preview records, provider mutations, runtime
 settings and secrets, cleanup, feedback, and reconciliation. Product repositories
 build immutable artifacts only. The canonical event and provenance documents own
 the new-product contract rather than duplicating it here.
+
+## Retained Preview Safety
+
+New preview settings accept only `data_transport_mode="none"` (ordinary preview
+provisioning with the declared environment copying) or `"driver"` (executed
+driver-owned preparation). Clone, bootstrap, migration/seed modes and generic
+migration/seed command settings were never executed and are no longer inputs.
+Stored profiles retain that unsupported intent in read-only
+`preview.historical_transport`; readiness reports `unsupported_saved_intent`
+and refresh blocks before provider mutation. To resume, replace the preview
+settings through the product-profile API with supported configuration, omitting
+the historical field. Storage reads preserve the original intent and commands;
+they do not authorize or execute them. Ordinary readiness reports only the
+prerequisites it checks. Driver preparation is proved by successful driver
+execution evidence rather than a passing generic transport-policy check.
+Profile API consumers must use a version compatible with this service contract;
+older clients that forbid unknown fields cannot consume archived unsupported
+intent. Ordinary profiles omit the empty historical field. Update strict profile
+API clients alongside the service when deploying this contract change.
+
+When the stored product profile declares `preview.data_transport_mode="driver"`,
+the generic-web lifecycle route delegates refresh and destroy execution to the
+registered product-driver extension. This keeps product-specific database,
+secret, migration, seed, and cleanup behavior inside Launchplane. Missing driver
+extensions fail closed instead of falling back to generic environment copying.
+Driver-owned application commands must invoke executables already present in the
+immutable image instead of relying on package-runner download or discovery
+behavior. Dokploy schedule failures remain failed refreshes. Launchplane attaches
+bounded redacted deployment output when the provider exposes it, and retries only
+typed transient failures that occur before schedule execution; deterministic
+remote exits and ambiguous post-trigger failures are not executed again.
+After a driver-owned refresh passes its provisioning and health boundary, the
+generic response records successful readiness and smoke evidence and persists the
+same exact runtime identity injected into the serving application. Later product
+verification may advance that generation from verifying to ready, but it must not
+replace or fabricate the serving artifact or source revision.
+Before driver-owned provisioning starts, Launchplane resolves the canonical
+preview record ID and next generation ID from the DB-backed preview history.
+DB-backed execution serializes refreshes by canonical preview ID, then injects
+both values into the expected runtime identity, requires the live health endpoint
+to echo them, and persists that observed identity on the same explicit generation.
+Product-local preview slugs are not substitutes for Launchplane's canonical
+preview and generation identities.
+
+Because product callers pin reusable workflows while the service deploys
+independently, add any future destroy outcome to the reusable workflow allowlist
+and roll caller pins forward before the deployed service starts emitting it.
 
 ## Route Handoff
 

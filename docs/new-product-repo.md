@@ -53,11 +53,29 @@ claimed here. Keep its inputs in admin-owned state, outside the product
 repository and git-tracked history when they contain site-specific runtime
 details.
 
+Reapplying an advanced manifest updates its declared settings while preserving
+existing service-owned state, including the Client, live classification,
+release acceptance and [recorded release request](release-review.md). Image
+scanning policy is retained. Lane and preview state is carried over only for
+the same recorded route; a different lane context does not inherit the old
+lane's cutover or extension authority. Use each bounded service operation to
+change settings the manifest does not own.
+
+If live proof finds that an existing preview wildcard ingress route needs a
+Launchplane-managed repair, `Generic Web Preview Authorization` can temporarily
+include the scoped `Ingress Route Dry Run` and `Ingress Route Apply` workflow
+rules. Expand with `include_ingress_operator=true` and the exact reviewed
+reusable-workflow SHA, perform the route dry-run/apply, then contract with the
+same SHA and `include_ingress_operator=false`. The planner copies the pinned
+ingress workflow identity from the active policy and fails closed when no single
+template exists; admins do not hand-author authz JSON or edit a per-product
+policy secret.
+
 After a product repository is archived or its onboarding GitHub App installation
 is gone, preserve the existing `Generic Web Preview Authorization`
 `operation=retire` cleanup until the grant retirement and readback complete. It
 resolves immutable authority from the active product preview rules and does not
-require a repository lookup. Do not remove that cleanup merely because new
+require a repository lookup. See the [onboarding cleanup runbook](operations.md#conventional-generic-web-onboarding). Do not remove that cleanup merely because new
 products have no caller grant.
 
 New-product build and handoff requirements are canonical in

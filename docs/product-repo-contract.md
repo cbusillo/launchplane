@@ -247,6 +247,126 @@ and never runs the product check inside its credentialed service.
   testing, production, release-tuple, and active-preview image references, and
   each stable lane's default rollback target.
 
+## Odoo Ownership Regression Check
+
+Launchplane owns the Odoo ownership-boundary regression check. Run it from a
+workspace with explicit repository roots and family intent. Repeat `--repository`
+for every root in the caller's complete requested coverage:
+
+```bash
+uv run launchplane odoo-ownership check --workspace-root .. \
+  --repository odoo-tenant-example tenant \
+  --repository /path/to/image-checkout image
+```
+
+There is no default repository catalog or name-based family discovery. Families
+are `tenant`, `image`, `shared_addons`, `devkit`, and `retired`; they select the
+existing generic rules. Relative roots resolve under `--workspace-root`
+(default: Launchplane's parent); absolute roots support independent worktrees.
+An existing checkout uses the same explicit input as a newly added tenant.
+Omitting all roots, repeating a root, or providing an unknown family is an
+input error. A pass applies only to the requested roots, never to all enrolled
+products; the caller supplies that complete list from its authoritative inventory.
+
+Text and JSON output report each requested root and family, whether coverage
+completed, and scanned and omitted file counts. Missing/non-directory roots,
+failed traversal, linked source directories, nonregular source files, and
+unreadable supported source files fail the check rather
+than silently passing. Root-level files use the same rules as nested files.
+Counts exclude unsupported file suffixes, ignored generated directories, and
+known local metadata (`.DS_Store`, `.coverage`, AppleDouble `._*` files), and
+private `.env`/`.env.*` inputs. Generated environments include `.venv`, `venv`,
+and `.tox`. Gitignored source scripts remain checked; a gitignore is not an
+ownership exemption;
+`omitted_file_count` counts supported files exempted by the existing path rules
+(docs, tests, addons, or explicit Python policy exceptions). An empty directory
+reports complete coverage with zero scanned files.
+
+Python callers supply `repo_policies` explicitly to
+`scan_odoo_ownership_boundaries`, using `OdooOwnershipRepoPolicy` for each root
+and family. The existing `allowed_path_globs` field supports scoped exceptions
+for a caller's reviewed transitional cleanup; it is never filled from a
+repository-name catalog. The CLI supplies the same explicit exceptions through
+repeatable `--allow-path ROOT GLOB`; ROOT must exactly match a requested ROOT.
+For example, `--repository odoo-devkit devkit --allow-path odoo-devkit
+odoo_devkit/workspace_surface.py` scopes an exception to that requested checkout.
+An exception is reported as omitted coverage, not checked source.
+
+This is a caller-scoped audit, not a whole-inventory CI lint gate. The caller's
+explicit request owns its coverage; build the complete ROOT/FAMILY inputs from
+the inventory being audited and retain them with the results. Launchplane does
+not infer local checkouts or auxiliary image/addon/devkit families from product
+names. The `.github/github.json` documentation route points here rather than
+publishing a second invocation or repository inventory.
+
+The check is intentionally narrow. It allows product-owned source, tests,
+artifact publishing, GHCR login, devkit local build/runtime behavior, and thin
+Launchplane connectors through reviewed immutable Launchplane revisions. In the
+examples below, `<launchplane-sha>` means one exact 40-character commit SHA:
+
+- `cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-sha>`
+- `cbusillo/launchplane/.github/workflows/reusable-odoo-*.yml@<launchplane-sha>`
+- `cbusillo/launchplane/.github/workflows/reusable-product-driver-*.yml@<launchplane-sha>`
+
+It blocks the patterns that previously caused ownership drift:
+
+- repo-local GitHub OIDC token clients instead of the shared request action or
+  reusable workflow
+- repo-local Launchplane HTTP clients that duplicate the shared connector
+- tenant workflows or scripts mutating Dokploy, SSH, compose, or other runtime
+  providers directly
+- devkit or retired repos exposing shared/prod mutation flows from arbitrary
+  checkouts
+- repo-local derivation of Launchplane-owned preview URLs, target IDs, release
+  tuple IDs, deployment IDs, promotion IDs, or backup-gate IDs outside approved
+  thin workflow response handling
+
+The shared/prod mutation rule ignores full-line comments whose `#` is followed
+by whitespace or end-of-line, including descriptions of non-production
+restores. Commands with trailing comments or quoted `#` characters, shebangs,
+and JavaScript private members remain subject to the rule.
+
+Retired `odoo-ai` archival authority is intentionally handled by the separate
+quarantine plan rather than this active-repo regression gate.
+Known `odoo-devkit` Dokploy-managed local/remote runtime helpers are still
+tracked by the local-DX separation plan; this check guards against new drift in
+tenant, image, shared-addon, and workflow/script surfaces while that cleanup
+continues.
+
+## Existing Cleanup Safety
+
+Start with low-risk deletions and documentation, then replace active workflow
+behavior in small slices. Do not remove active backup, promotion, rollback,
+runtime health, or cleanup safety gates until Launchplane owns the equivalent
+behavior and tests.
+
+Registry artifact cleanup is a Launchplane-owned liveness question. Product
+repos may still perform provider-specific registry deletion, but they must first
+load Launchplane's protected artifact inventory, validate the response, and
+abort without deleting anything when the inventory is unavailable, unauthorized,
+or has unresolved live-artifact warnings for the registry being cleaned. Product
+cleanup jobs should treat Launchplane-protected image references and artifact
+ids as a deny set; they must not infer that testing, production, or active
+preview artifacts are deletable from local tag shape alone.
+
+The retention contract also covers the default rollback target. For every
+stable context and instance, the inventory protects the artifact a rollback
+without an explicit artifact would deploy: the newest passing deployment of an
+artifact other than the lane's latest one. Those entries carry reason
+`previous-good-deployment`, and their artifact ids and image references are in
+the same `artifact_ids` and `image_references` lists, so a cleanup that honors
+the inventory keeps the previous-good image without a product repo change.
+
+Cleanup consumers must check both `artifact_ids` and `image_references` from the
+protected inventory. Some active-preview protections come from ready PR feedback
+records that carry immutable and refresh image references but no artifact id, so
+an artifact-id-only cleanup filter can still delete a live preview tag. Existing cleanup uses the shared protected-artifacts request action's
+`render-request` interface and `protected_artifacts` extraction. Whole-product
+reads require `artifact_protection.read` with wildcard context for that product;
+context-specific reads use the matching scoped grant. Product-owned registry
+deletion keeps its package token and honors both deny sets. This retained
+compatibility does not authorize adding a caller or changing access.
+
 ## Approval Gate
 
 A product repo is approved when all of these are true:
