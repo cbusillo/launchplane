@@ -2905,6 +2905,8 @@ targets and state volumes are refused. Both testing and preview contexts must
 be unowned and free of target/deployment records, including previous product use.
 Those facts are checked before each provider write and under the authority
 guard before adoption.
+Provider names are service allocation markers; product-record apply preserves
+the adopted names.
 
 Start with `mode: dry-run` and a chosen `Idempotency-Key`. Save the exact
 request, key and response privately. The response supplies
@@ -2917,6 +2919,8 @@ back as `reviewed_target_request_sha256` and
 the existing exact confirmation and a reason, and the saved plan under the
 same actor and key. These are native service digests, not the compatibility
 workflow's byte digest of its JSON artifact.
+A changed dry-run requires a fresh key; an existing key preserves its original
+plan even before allocation begins.
 
 On an uncertain outcome, preserve the original request, actor and key. Use
 `mode: readback` to inspect durable progress and `custody_sha256`, then resume

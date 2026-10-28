@@ -26302,7 +26302,7 @@ def create_launchplane_fastapi_app(
         ordinary_allocation = (
             setup_request.operation == "create-application"
             and setup_request.instance == "testing"
-            and setup_request.mode != "dry-run"
+            and (setup_request.mode != "dry-run" or setup_request.onboarding is not None)
             and not setup_request.state_volume_path
         )
         if ordinary_allocation and setup_request.mode == "apply":
@@ -26323,7 +26323,7 @@ def create_launchplane_fastapi_app(
                 )
                 if legacy_replay is not None:
                     return legacy_replay
-        if setup_request.state_volume_path or ordinary_allocation or setup_request.onboarding:
+        if setup_request.state_volume_path or ordinary_allocation:
             from control_plane.application_state_volume import ApplicationStateVolumeAdapter
             from control_plane.application_state_volume_errors import StateVolumeRefusal
 

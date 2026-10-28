@@ -444,7 +444,11 @@ class ApplicationStateVolumeAdapter:
     ) -> "ApplicationStateVolumeAdapter":
         validate_ordinary_allocation_request(request)
         if not operation_key:
-            raise ValueError("Allocation recovery requires the original operation key.")
+            raise ValueError(
+                "New-product allocation planning and recovery require an Idempotency-Key."
+                if request.onboarding is not None
+                else "Allocation recovery requires the original operation key."
+            )
         plan_id = ordinary_allocation_id(scope, operation_key)
         plan = store.read_idempotency_record(
             scope=scope, route_path=PLAN_ROUTE, idempotency_key=plan_id

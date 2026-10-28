@@ -203,6 +203,22 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
                 self.assertEqual(response.status_code, 400, response.text)
                 self.provider.assert_not_called()
 
+    async def test_dry_run_requires_a_key_and_changed_plans_need_a_fresh_key(self) -> None:
+        missing_key = await self.post(idempotency_key="")
+        self.assertEqual(missing_key.status_code, 400, missing_key.text)
+        self.assertEqual(missing_key.json()["error"]["code"], "invalid_dokploy_target_setup")
+        planned = await self.post()
+        self.assertEqual(planned.status_code, 202, planned.text)
+        changed = await self.post(description="revised application")
+        self.assertEqual(changed.status_code, 400, changed.text)
+        fresh = await self.post(idempotency_key="revised-plan", description="revised application")
+        self.assertEqual(fresh.status_code, 202, fresh.text)
+        self.assertNotEqual(
+            fresh.json()["result"]["target_request_sha256"],
+            planned.json()["result"]["target_request_sha256"],
+        )
+        self.provider.assert_not_called()
+
     async def test_matching_digests_require_the_saved_plan_for_the_original_actor_and_key(
         self,
     ) -> None:
@@ -271,13 +287,13 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
                 response = await self.post(
                     onboarding=intent.model_dump(mode="json"), context=intent.testing_context
                 )
-                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.status_code, 400, response.text)
                 self.provider.assert_not_called()
         self.store.write_product_profile_record(
             self.profile.model_copy(update={"historical_contexts": (self.intent.preview_context,)})
         )
         response = await self.post()
-        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.status_code, 400, response.text)
         self.provider.assert_not_called()
 
     async def test_native_request_cannot_select_existing_placement_source_domains_or_production(
