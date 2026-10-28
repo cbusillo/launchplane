@@ -116,27 +116,18 @@ use them.
 ## Retained artifact source attribution
 
 `GET /v1/artifacts/protected` includes optional `manifest_provenance` on entries
-with a stored artifact manifest. It projects the manifest schema version, source
-commit, image, base-image and build-tool provenance, addon sources/selectors and
-verified source-build receipt. It omits arbitrary build-flag values and dependency
-package inventories. Stable, previous-good rollback and release-tuple entries
-use the same projection as any preview entry with a stored manifest.
+with a stored manifest: schema version, source commit, image, base-image/build-tool
+provenance, addon sources/selectors and the source-build receipt when recorded.
+It omits arbitrary build-flag values and package inventories. This is neither an
+installed-module inventory nor proof that a setting is unused. Compare its image
+with the retained record and runtime evidence before attributing consumers;
+floating or incomplete legacy refs remain unqualified.
 
-This is recorded build metadata, not a finding that a runtime setting is unused.
-Compare its image identity with the retained entry and runtime evidence before
-attributing consumers. A legacy manifest can contain floating refs or incomplete
-provenance; neither becomes immutable source proof through this read. An absent
-projection means no stored manifest was found for that entry, including image-only
-entries. Existing missing-manifest warnings and protection remain unchanged.
-Preview manifests are normally not persisted in the release artifact store;
-recover their exact verified build evidence separately. Never infer consumer
-absence from a missing manifest, an image label or a delivery declaration.
-
-The endpoint keeps its existing product/context read authorization and changes
-no records, provider settings, deployment, retention or rollback selection. An
-installed client that projects only older fields must gain a bounded projection
-in its owning repository before it can display this metadata; omitted client
-fields are unavailable evidence.
+An absent projection means no stored manifest was found. Preview manifests are
+normally not persisted in the release store; recover their exact verified build
+evidence separately. Protection, warnings, authorization and rollback selection
+are unchanged. An installed client that omits the additive field needs a bounded
+projection in its owning repository before it can display this evidence.
 
 ## Not covered here
 

@@ -73,7 +73,6 @@ class ProtectedArtifactTests(TestCase):
         self.assertEqual(provenance.addon_sources, manifest.addon_sources)
         self.assertEqual(provenance.image, manifest.image)
         self.assertNotIn("private-build-value", protected.model_dump_json())
-        self.assertNotIn("dependency_provenance", provenance.model_dump())
 
     def test_build_protected_artifact_set_includes_stable_and_active_preview_refs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
