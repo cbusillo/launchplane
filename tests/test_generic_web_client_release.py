@@ -642,6 +642,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                     self.store.continue_precapture_backup_operation(
                         expected=changed,
                         expected_backup=changed_backup,
+                        expected_native_context={},
                         resumed=changed.model_copy(
                             update={
                                 "previous_attempt": changed,
