@@ -1501,7 +1501,6 @@ class ClientReleaseTests(unittest.TestCase):
     ) -> None:
         from control_plane.lane_movement import LaneMovementRefused
         from control_plane.production_delivery_monitor import monitor_production_delivery_once
-        from control_plane.build_provenance import BuildProvenanceTransport
         from control_plane.workflows.odoo_stable_target_replacement import (
             execute_odoo_stable_target_replacement_apply,
         )
@@ -1603,7 +1602,7 @@ class ClientReleaseTests(unittest.TestCase):
         self.assertNotEqual(run.state, "stopped")
         monitor_production_delivery_once(
             self.store,
-            transport_factory=lambda _store, _profile: cast(BuildProvenanceTransport, transport),
+            transport_factory=Mock(return_value=transport),
         )
         self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
 
