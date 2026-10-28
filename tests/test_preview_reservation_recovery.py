@@ -97,6 +97,113 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
     def database_url(self) -> str:
         return _sqlite_database_url(self.root / "state.sqlite3")
 
+    def test_observed_preview_without_lifecycle_keeps_its_original_recovery_status(self) -> None:
+        from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+        from control_plane.contracts.product_environment_read_model import (
+            build_product_site_overview,
+        )
+
+        number = self.issued.plan_request.pr_number
+        self.store.write_preview_inventory_scan_record(
+            PreviewInventoryScanRecord(
+                scan_id="observed-without-lifecycle",
+                context=self.profile.preview.context,
+                product=self.profile.product,
+                repository=self.profile.repository,
+                scanned_at=datetime.now(timezone.utc).isoformat(),
+                source="provider",
+                status="pass",
+                preview_count=1,
+                preview_slugs=(self.issued.preview_slug,),
+            )
+        )
+        available_guidance = ""
+        for missing_original in (False, True):
+            with self.subTest(missing_original=missing_original):
+                if missing_original:
+                    self.reservation = self.replace_record(state="reconcile_required")
+                    self.remove_original_intent()
+                before = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+                overview = build_product_site_overview(
+                    record_store=self.store,
+                    product=self.profile.product,
+                    action_allowed=lambda *_: True,
+                )
+                attention = tuple(w for w in overview.warnings if f"PR #{number}:" in w)
+                self.assertEqual(len(attention), 1)
+                self.assertIn(self.reservation.state, attention[0])
+                guidance = attention[0].partition(". ")[2]
+                if missing_original:
+                    self.assertNotEqual(guidance, available_guidance)
+                    self.assertIn("retain", guidance.lower())
+                else:
+                    available_guidance = guidance
+                self.assertNotIn("without a current status", " ".join(overview.warnings))
+                self.assertEqual(
+                    overview.preview.untracked_observed_slugs, (self.issued.preview_slug,)
+                )
+                self.assertEqual(self.store.list_preview_records(), ())
+                self.assertEqual(
+                    self.store.read_idempotency_record_by_id(self.reservation.record_id), before
+                )
+                denied = build_product_site_overview(
+                    record_store=self.store,
+                    product=self.profile.product,
+                    action_allowed=lambda _action, product, *_: product == "launchplane",
+                )
+                self.assertFalse(any(f"PR #{number}:" in w for w in denied.warnings))
+
+    def test_incomplete_recovery_status_preserves_untracked_resource_retention(self) -> None:
+        from control_plane import preview_reservation_recovery as recovery
+        from control_plane.contracts.product_environment_read_model import (
+            PRODUCT_PREVIEW_RECOVERY_LIMIT,
+            _untracked_preview_warnings,
+        )
+
+        def read_warnings(selected_profile: LaunchplaneProductProfileRecord) -> tuple[str, ...]:
+            return _untracked_preview_warnings(
+                record_store=self.store,
+                profile=selected_profile,
+                slugs=(self.issued.preview_slug,),
+                action_allowed=lambda *_: True,
+            )
+
+        for scenario in ("unmatched", "unavailable", "truncated"):
+            with self.subTest(scenario=scenario):
+                held = Mock(return_value=(self.reservation,))
+                if scenario == "unmatched":
+                    profile = self.profile.model_copy(deep=True)
+                    profile.preview.app_name_prefix = "changed-preview-prefix"
+                    held.return_value = (
+                        self.reservation,
+                        self.reservation.model_copy(update={"record_id": "other-held-operation"}),
+                    )
+                else:
+                    profile = self.profile
+                if scenario == "unavailable":
+                    held.side_effect = ValueError(
+                        "Provider operation source projection is unavailable."
+                    )
+                if scenario == "truncated":
+                    held.return_value = (self.reservation,) * (PRODUCT_PREVIEW_RECOVERY_LIMIT + 1)
+                baseline_held = (self.reservation,) if scenario == "truncated" else ()
+                with patch.object(
+                    recovery, "held_preview_reservations", return_value=baseline_held
+                ):
+                    baseline = read_warnings(profile)
+                with patch.object(recovery, "held_preview_reservations", held):
+                    warnings = read_warnings(profile)
+                self.assertGreater(set(warnings), set(baseline))
+                self.assertEqual(len(warnings), len(set(warnings)))
+                if scenario == "unmatched":
+                    self.assertFalse(any(warning.startswith("PR #") for warning in warnings))
+                unclassified = tuple(
+                    warning for warning in warnings if not warning.startswith("PR #")
+                )
+                self.assertTrue(unclassified)
+                self.assertTrue(all("retain" in warning.lower() for warning in unclassified))
+                self.assertFalse(any("Check preview cleanup" in warning for warning in warnings))
+
     def test_exact_preview_bootstrap_withdrawal_preserves_original_and_template(self) -> None:
         self.reservation = self.replace_record(
             state="completed",

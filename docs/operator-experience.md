@@ -268,6 +268,13 @@ unknown even when a count is recorded; zero recorded is not verified empty.
 Recorded counts remain labelled recorded, stale and unsupported evidence retain
 their uncertainty, and only verified inventory uses active or empty wording.
 
+An observed preview without a successful lifecycle record may still have a
+retained provider operation. The overview reads that operation's recovery status
+under the existing product preview-read permission before suggesting cleanup.
+Missing original proof is shown as a resource-retention hold, not missing status.
+These warnings neither settle the operation nor establish safe disposal, and
+the recorded/observed mismatch remains visible until recovery actually completes.
+
 Product Ops labels combined lane evidence (route records and runtime observations)
 separately from operational health. A product profile's edit date is labelled as
 a profile update, never presented as the age of its lanes' verification.
