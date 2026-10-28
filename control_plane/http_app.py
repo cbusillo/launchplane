@@ -22556,25 +22556,21 @@ def create_launchplane_fastapi_app(
                 "route_binding.apply" if refresh_request.mode == "apply" else "route_binding.read"
             )
 
-        excluded_binding = False
+        excluded_evaluation: AuthzEvaluation | None = None
 
         def include_refresh_binding(binding_record: EnvironmentRouteBindingRecord) -> bool:
-            nonlocal excluded_binding
-            allowed = (
-                resolved_authz_policy_runtime.evaluate(
-                    identity=identity,
-                    action=binding_refresh_action(binding_record),
-                    product=binding_record.product,
-                    context=binding_record.context,
-                    target=AuthorizationTarget(
-                        scope="instance", instances=(binding_record.instance,)
-                    ),
-                    record_context=False,
-                ).decision
-                == "allowed"
+            nonlocal excluded_evaluation
+            evaluation = resolved_authz_policy_runtime.evaluate(
+                identity=identity,
+                action=binding_refresh_action(binding_record),
+                product=binding_record.product,
+                context=binding_record.context,
+                target=AuthorizationTarget(scope="instance", instances=(binding_record.instance,)),
+                record_context=False,
             )
-            excluded_binding |= not allowed
-            return allowed
+            if evaluation.decision != "allowed":
+                excluded_evaluation = evaluation
+            return evaluation.decision == "allowed"
 
         try:
             if remaining:
@@ -22613,12 +22609,13 @@ def create_launchplane_fastapi_app(
                 code="route_binding_refresh_target_invalid",
                 message=str(error),
             ) from error
-        if excluded_binding and not controller_plan.outcomes:
+        if excluded_evaluation is not None and not controller_plan.outcomes:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="Workflow cannot refresh a discovered Odoo route binding.",
+                authz_evaluation=excluded_evaluation,
             )
         for outcome in controller_plan.outcomes:
             current = outcome.reconcile_plan.current_record if outcome.reconcile_plan else None
@@ -22646,10 +22643,10 @@ def create_launchplane_fastapi_app(
                     )
                 except FileNotFoundError:
                     raise _launchplane_http_error(
-                        status_code=403,
+                        status_code=409,
                         trace_id=trace_id,
-                        code="authorization_denied",
-                        message="Workflow cannot read a prior Odoo route binding refresh.",
+                        code="route_binding_changed",
+                        message="A prior refresh binding is unavailable. Read current route authority.",
                     ) from None
                 ensure_route_binding_allowed(
                     identity=identity,

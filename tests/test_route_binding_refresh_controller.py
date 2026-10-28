@@ -1,4 +1,5 @@
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -7,6 +8,11 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
     ProductLaneProfile,
+)
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
 )
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
@@ -27,6 +33,7 @@ from control_plane.route_binding_refresh_controller import (
 from control_plane.http_app import (
     create_launchplane_fastapi_app,
     idempotency_scope,
+    LaunchplaneAuthzPolicyRuntime,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
@@ -655,11 +662,26 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
                 context_name="example-testing",
                 instance_name="testing",
             )
+            policy = _controller_policy(mode="apply", include_binding_authority=False)
+            record = store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id=build_authz_policy_record_id(
+                        revision=1, policy_sha256=authz_policy_sha256(policy)
+                    ),
+                    source="test:route-binding-refresh",
+                    updated_at=datetime.now(UTC).isoformat(),
+                    policy=policy,
+                )
+            )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
-                authz_policy=_controller_policy(
-                    mode="apply",
-                    include_binding_authority=False,
+                authz_policy=policy,
+                authz_policy_runtime=LaunchplaneAuthzPolicyRuntime(
+                    policy,
+                    policy_sha256=record.policy_sha256,
+                    source="db",
+                    record_id=record.record_id,
+                    revision=record.revision,
                 ),
                 record_store_factory=lambda: store,
             )
@@ -688,12 +710,23 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
                 route_path="/v1/route-bindings/odoo-testing/controller/run-once",
                 idempotency_key="odoo-testing-route-binding-refresh-denied",
             )
+            denial = store.read_authz_denial_record(
+                trace_id=response.json()["trace_id"], observed_at=datetime.now(UTC).isoformat()
+            )
             store.close()
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         self.assertEqual(testing_after, testing_before)
         self.assertIsNone(stored_idempotency)
+        self.assertIsNotNone(denial)
+        assert denial is not None
+        self.assertEqual(
+            (denial.product, denial.context), (testing_before.product, testing_before.context)
+        )
+        self.assertEqual(denial.action, "route_binding.apply")
+        self.assertEqual(denial.reason_code, "no_matching_grant")
+        self.assertEqual(denial.policy_sha256, record.policy_sha256)
 
     async def test_apply_records_blocked_outcome_without_binding_write(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

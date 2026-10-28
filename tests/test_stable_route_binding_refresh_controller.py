@@ -255,6 +255,19 @@ class StableRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(revoked.status_code, 403, revoked.text)
         self.assertEqual(_binding(self.store, external=True), after)
+        receipt = self.store.read_idempotency_record(
+            scope=idempotency_scope(_identity()), route_path=ROUTE, idempotency_key="refresh"
+        )
+        with patch.object(self.store, "read_route_binding_record", side_effect=FileNotFoundError):
+            missing = await self._request("apply", now="2026-08-06T01:00:00Z")
+        self.assertEqual(missing.status_code, 409, missing.text)
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=idempotency_scope(_identity()), route_path=ROUTE, idempotency_key="refresh"
+            ),
+            receipt,
+        )
+        self.assertEqual(_binding(self.store, external=True), after)
 
     async def test_controller_denial_prevents_writes_and_ungranted_external_is_excluded(
         self,
