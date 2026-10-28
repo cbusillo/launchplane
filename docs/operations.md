@@ -5682,6 +5682,9 @@ and foreign-source containers, must have exclusive credential custody: a raw or
 percent-decoded copy of the API database password in any other environment or
 configured command refuses qualification. A same-image container without explicit
 independent database credentials also refuses qualification.
+The exact PostgreSQL server is trusted bootstrap custody, bound separately to
+the API's database system identifier; it stays running for the backup. It is
+never treated as an application writer to freeze or an arbitrary extra client.
 The API needs explicit PostgreSQL username/password wiring; credential indirection
 is unqualified. Values stay in process memory and are never emitted. Unknown
 identities refuse.

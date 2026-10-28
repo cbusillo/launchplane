@@ -381,7 +381,7 @@ def check_originals(state: dict[str, Any], *, frozen: bool = False) -> None:
             or observed["HostConfig"]["RestartPolicy"]["Name"] != "no"
         ):
             raise RuntimeError("An original service lost its physical writer hold.")
-    known = set(state["containers"]) | {state["browser"]}
+    known = set(state["containers"]) | {state["browser"], state["postgres"]}
     require_no_outside_writers(
         inspect_container(state["api"]),
         known,
@@ -608,7 +608,7 @@ def install_watchdog(state_path: Path, state: dict[str, Any], *, health: bool = 
     )
     (root / (unit + ".service")).write_text(
         "[Unit]\nDescription=Launchplane maintenance recovery\nAfter=docker.service\n"
-        f"StartLimitIntervalSec=1d\nStartLimitBurst={WATCHDOG_ATTEMPTS}\n"
+        f"StartLimitIntervalSec=1d\nStartLimitBurst={WATCHDOG_ATTEMPTS + 1}\n"
         "[Service]\nType=oneshot\nExecStart="
         + command
         + f"\nRestart=on-failure\nRestartPreventExitStatus={RECOVERY_REQUIRED_EXIT} {AUTOMATIC_RECOVERY_EXHAUSTED_EXIT}\nRestartSec=15s\nTimeoutStartSec=900s\n"
@@ -1274,9 +1274,10 @@ def emit_release(state: dict[str, Any]) -> None:
 
 
 def complete_released_cleanup(state_path: Path) -> None:
-    state = json.loads(state_path.read_text())
-    if not state.get("released"):
-        raise RuntimeError("The original recovery service has no completed release readback.")
+    with locked_state(state_path, wait_seconds=RECOVERY_WAIT_SECONDS) as observed:
+        if not observed.get("released"):
+            raise RuntimeError("The original recovery service has no completed release readback.")
+        state = dict(observed)
     for health in (True, False):
         progress = state.get("verification_phase", {}) if health else state
         if not progress or progress.get("watchdog_removed"):
@@ -1423,7 +1424,7 @@ def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     state["containers"].sort(key=lambda container_id: container_id != state["api"])
     require_no_outside_writers(
         api,
-        set(state["containers"]) | {state["browser"]},
+        set(state["containers"]) | {state["browser"], state["postgres"]},
         project=state["project"],
         operators=set(),
     )

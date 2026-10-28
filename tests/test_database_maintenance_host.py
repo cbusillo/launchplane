@@ -452,6 +452,61 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 host.request_release(path, manual=True)
             self.assertTrue(json.loads(path.read_text())["released"])
 
+    def test_metadata_cleanup_waits_for_the_current_release_owner_before_stopping_units(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            path = state_file(Path(temporary))
+            owner_entered = threading.Event()
+            owner_can_finish = threading.Event()
+            owner_finished = threading.Event()
+            stopped_active_owner = []
+            errors = []
+            original_lock = host.locked_state
+
+            def owner() -> None:
+                with original_lock(path) as state:
+                    state["released"] = True
+                    host.save(path, state)
+                    owner_entered.set()
+                    owner_can_finish.wait(5)
+                    state["watchdog_removed"] = True
+                    host.save(path, state)
+                owner_finished.set()
+
+            @contextmanager
+            def observe_lock(path: Path, **values: Any) -> Iterator[dict[str, Any]]:
+                owner_can_finish.set()
+                with original_lock(path, **values) as state:
+                    yield state
+
+            def run(*arguments: str, **_values: Any) -> str:
+                if arguments[:2] == ("systemctl", "stop"):
+                    stopped_active_owner.append(not owner_finished.is_set())
+                    owner_can_finish.set()
+                return "LoadState=loaded"
+
+            thread = threading.Thread(target=owner)
+            thread.start()
+            try:
+                self.assertTrue(owner_entered.wait(5))
+                with (
+                    patch.object(host, "locked_state", side_effect=observe_lock),
+                    patch.object(host, "run", side_effect=run),
+                    patch.object(host, "remove_watchdog"),
+                    patch.object(host, "emit_release"),
+                ):
+                    try:
+                        host.request_release(path)
+                    except Exception as error:
+                        errors.append(error)
+            finally:
+                owner_can_finish.set()
+                thread.join(5)
+            self.assertFalse(errors)
+            self.assertFalse(any(stopped_active_owner))
+            self.assertTrue(owner_finished.is_set())
+
     def test_completed_release_finishes_missing_unit_metadata_before_success(self) -> None:
         with TemporaryDirectory() as temporary:
             path = state_file(Path(temporary), released=True)
@@ -995,6 +1050,61 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
             reader.join(5)
             self.assertFalse(reader.is_alive())
             self.assertEqual(received, [receipt])
+
+    def test_bound_database_server_is_custody_but_other_password_copies_refuse(self) -> None:
+        with TemporaryDirectory() as temporary:
+            state = json.loads(state_file(Path(temporary)).read_text())
+            items = {}
+            for identifier in (
+                *state["containers"],
+                state["browser"],
+                state["postgres"],
+                "outside",
+            ):
+                items[identifier] = {
+                    "Id": identifier,
+                    "Name": "/" + identifier,
+                    "Image": state["image_id"]
+                    if identifier in state["containers"]
+                    else "other-image",
+                    "Config": {
+                        "Labels": {"com.docker.compose.project": state["project"]},
+                        "Env": [
+                            "LAUNCHPLANE_DATABASE_URL=postgresql://fixture:private-custody@own/db"
+                        ]
+                        if identifier in state["containers"]
+                        else [],
+                    },
+                }
+            items[state["postgres"]]["Config"]["Env"] = ["POSTGRES_PASSWORD=private-custody"]
+            items["outside"]["Config"]["Env"] = [
+                "DATABASE_URL=postgresql://fixture:private-custody@own/db"
+            ]
+            outside_present = False
+
+            def run(*arguments: str, **_values: Any) -> str:
+                if arguments[:2] == ("docker", "inspect"):
+                    return json.dumps([items[identifier] for identifier in arguments[2:]])
+                if arguments[:2] == ("docker", "ps"):
+                    if "--filter" in arguments:
+                        return " ".join([*state["containers"], state["browser"]])
+                    return " ".join(
+                        identifier
+                        for identifier in items
+                        if identifier != "outside" or outside_present
+                    )
+                raise AssertionError("Unexpected fixture operation")
+
+            with (
+                patch.object(
+                    host, "inspect_container", side_effect=lambda identifier: items[identifier]
+                ),
+                patch.object(host, "run", side_effect=run),
+            ):
+                host.check_originals(state)
+                outside_present = True
+                with self.assertRaises(RuntimeError):
+                    host.check_originals(state)
 
     def test_wrong_project_is_refused_before_runtime_changes(self) -> None:
         with TemporaryDirectory() as temporary:
