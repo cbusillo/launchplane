@@ -83,8 +83,8 @@ class _WorkRequestStore:
 
 
 class RepoProductMappingServiceTests(unittest.TestCase):
+    @staticmethod
     def _profile(
-        self,
         *,
         product: str,
         repository: str,
@@ -235,7 +235,7 @@ class RepoProductMappingServiceTests(unittest.TestCase):
             list[dict[str, object]], mapping["ambiguous_repository_product_references"]
         )
         self.assertEqual(
-            {str(reference["repository"]): reference["products"] for reference in references},
+            {cast(str, reference["repository"]): reference["products"] for reference in references},
             {
                 "synthetic/client-one": ["synthetic-client-one", "synthetic-client-two"],
                 "synthetic/client-two-renamed": [
