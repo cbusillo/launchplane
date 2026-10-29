@@ -312,6 +312,7 @@ try:
         expected=spec.get('container_ids')
         if spec.get('allow_unavailable') is not True or not isinstance(expected,list) or not expected or not all(isinstance(value,str) and value for value in expected):
             raise ValueError('Container removal requires admitted unavailable testing custody')
+        project_own=own
         if spec.get('retiring') is True:
             own=own.intersection(set(expected))
         states={item['State']['Status'] for item in containers if item['Id'] in own}
@@ -321,10 +322,10 @@ try:
             raise ValueError('Old testing container state is unverified')
         elif spec['mode']=='remove':
             if spec.get('retiring') is True and own:
-                qualified=qualify_retained_copy(containers,{**spec,'resource_binding':spec.get('resource_binding') if own==set(expected) else None})
-                backings=inspect_volume_backings(qualified['volumes'],containers,own)
+                qualified=qualify_retained_copy(containers,{**spec,'resource_binding':spec.get('resource_binding') if project_own==set(expected) else None})
+                backings=inspect_volume_backings(qualified['volumes'],containers,project_own)
                 physical=hashlib.sha256(json.dumps({'logical':qualified['resource_binding'],'backings':backings},sort_keys=True,separators=(',',':')).encode()).hexdigest()
-                if own==set(expected) and physical!=spec.get('physical_binding'):
+                if project_own==set(expected) and physical!=spec.get('physical_binding'):
                     raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
             for identifier in sorted(own):
                 docker('rm',identifier)

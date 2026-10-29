@@ -1168,7 +1168,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
                     self.store,
                     self.operation,
                     self.intent,
-                    retirement={"stopped": False},
+                    retiring=True,
                 )
         self.assertEqual(self.effects, [])
 
@@ -4962,3 +4962,34 @@ class NativeHistoricalUseTests(unittest.TestCase):
 
     def test_fresh_historical_login_completes_after_its_rebuild_restores_health(self) -> None:
         self.complete_historical_use_rebuild("unused", "in_use")
+
+    def test_repair_admission_cleanup_retry_preserves_qualified_downtime_rule(self) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        fixture = self.fixture
+        fixture.admit_unavailable("stopped")
+        record_safety(
+            fixture.store,
+            fixture.operation.product,
+            fixture.operation.context,
+            "testing",
+            usage="in_use",
+        )
+        physical = fixture.physical
+        removals: list[list[str]] = []
+
+        def lost(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["payload"]["mode"] == "remove":
+                removals.append(kwargs["payload"]["container_ids"])
+                if len(removals) == 1:
+                    raise TimeoutError(
+                        "Fixture lost removal reply before the containers disappeared"
+                    )
+            return physical(**kwargs)
+
+        with patch.object(service, "retained_copy_operation", side_effect=lost):
+            with self.assertRaises(TimeoutError):
+                fixture.execute()
+            self.assertEqual(fixture.execute().deploy_status, "pass")
+        self.assertEqual(removals, [fixture.intent.retained["container_ids"]] * 2)
+        self.assertEqual(fixture.effects, ["switch-new"])

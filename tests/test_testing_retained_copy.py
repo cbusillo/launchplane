@@ -530,3 +530,26 @@ class RetainedTestingCopyTests(unittest.TestCase):
             )
             self.assertEqual(frame["availability"], "absent")
             self.assertFalse(any(command[1] == "rm" for command in commands))
+
+    def test_retired_batch_qualifies_full_project_storage_but_removes_only_saved_ids(self) -> None:
+        for item in self.containers:
+            item["State"]["Status"] = "exited"
+        qualified, _ = self.run_host(extra={"allow_unavailable": True, "retiring": True})
+        expected = [item["Id"] for item in self.containers]
+        extra = deepcopy(self.containers[0])
+        extra["Id"] = "later-script-runner"
+        extra["Config"]["Labels"]["com.docker.compose.service"] = "script-runner"
+        self.containers.append(extra)
+        frame, commands = self.run_host(
+            mode="remove",
+            extra={
+                "allow_unavailable": True,
+                "retiring": True,
+                "container_ids": expected,
+                "resource_binding": qualified["resource_binding"],
+                "physical_binding": qualified["physical_binding"],
+            },
+        )
+        self.assertEqual(frame["availability"], "absent")
+        self.assertEqual([item["Id"] for item in self.containers], [extra["Id"]])
+        self.assertNotIn(["docker", "rm", extra["Id"]], commands)

@@ -600,7 +600,7 @@ def check_testing_rebuild_protection(
     intent: NativeTestingRebuildIntent,
     *,
     actor: str = "",
-    retirement: dict[str, Any] | None = None,
+    retiring: bool = False,
 ) -> None:
     target = store.read_dokploy_target_record(
         context_name=operation.context, instance_name="testing"
@@ -632,11 +632,12 @@ def check_testing_rebuild_protection(
         target_id=intent.before.target_id,
         instance="testing",
         usage=reported_usage,
-        require_unused=retirement is None and reported_usage != "unknown",
-        runtime_stopped=retirement.get("stopped") is True
-        if retirement is not None
-        else usage.reason_code == "serving_container_stopped"
-        or isinstance(intent.old, UnavailableTestingPredecessor),
+        require_unused=not retiring and reported_usage != "unknown",
+        runtime_stopped=not retiring
+        and (
+            usage.reason_code == "serving_container_stopped"
+            or isinstance(intent.old, UnavailableTestingPredecessor)
+        ),
     )
     if decision.protected:
         raise TestingRebuildRefused("testing_in_use", "Someone is using this testing lane.")
@@ -2266,9 +2267,11 @@ class NativeTestingRebuildExecution:
             )
             if phase == "remove-retired-containers" and prior is None:
                 continue
-            if prior is not None and prior.provider_effect_started_at:
-                if phase == "retire-old":
-                    return None
+            if (
+                phase == "disable-old-auto-deploy"
+                and prior is not None
+                and prior.provider_effect_started_at
+            ):
                 self.run_effect(
                     current_phase,
                     lambda: self.old_provider().get("autoDeploy") is False,
@@ -2415,17 +2418,16 @@ class NativeTestingRebuildExecution:
                         or prior is not None
                         and bool(prior.provider_effect_started_at)
                     )
-                    retirement = None
                     if retiring_unavailable or repeated:
                         parent.require_old_quiescent()
-                        retirement = parent.retiring_copy()
+                        parent.retiring_copy()
                     if retiring_unavailable or action == "remove-old-containers" or repeated:
                         check_testing_rebuild_protection(
                             parent.root,
                             parent.store,
                             parent.operation,
                             parent.intent,
-                            retirement=retirement,
+                            retiring=action != "remove-old-containers",
                         )
                     parent.lease.checkpoint_effect(phase)
                     lease.checkpoint_effect(phase)
