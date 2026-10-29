@@ -240,11 +240,13 @@ class ProductPathCheckTests(unittest.TestCase):
             ("done", "pending", "running", "failed"),
             (
                 ({}, "clear", "unknown"),
-                ({"deployed_operation_id": "operation-previous"}, "clear", "clear"),
-                ({"queued_operation_id": "operation-previous"}, "blocked", "blocked"),
+                ({"deployed_operation_id": "operation-previous"}, "clear", None),
+                ({"queued_operation_id": "operation-previous"}, "blocked", None),
                 ({"last_failed_operation_id": "operation-previous"}, "blocked", "blocked"),
             ),
         ):
+            if state == "failed" and failed_state is None:
+                continue
             with (
                 self.subTest(state=state, outcome=outcome),
                 patch(

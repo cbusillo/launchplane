@@ -4408,7 +4408,7 @@ Missing or inconsistent provenance on a completed, unheld no-op stays unknown
 with `testing_provenance_incomplete`. Pending or running requests stay unknown
 with `reconcile_not_done`, even when their saved plans contain a previous successful,
 queued or failed deploy. Historical operation ids are not cited as current evidence.
-A terminal failed request still reports its own recorded deployment failure.
+A terminal failed request still reports its own recorded operation failure.
 This cites saved reconciliation evidence, not a fresh provider observation;
 a later manual deployment requires reconciliation before this evidence is current.
 For Odoo, select `intent=provision|generation|testing-replacement` on the testing
