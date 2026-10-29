@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 import json
 
@@ -6,7 +6,7 @@ import click
 from pathlib import Path
 from typing import Literal, cast
 
-from control_plane._retained_volume_sweep_program import RETAINED_VOLUME_SWEEP_HOST_PROGRAM
+from control_plane.retained_volume_sweep_program import RETAINED_VOLUME_SWEEP_HOST_PROGRAM
 from control_plane.contracts.product_retirement import ProductRetirementRecord
 from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.contracts.retained_volume_sweep import (
@@ -35,8 +35,9 @@ def _strings(value: object) -> set[str]:
         return {value}
     if isinstance(value, Mapping):
         return set().union(*(_strings(item) for item in value.values()))
-    if isinstance(value, list | tuple):
-        return set().union(*(_strings(item) for item in value))
+    if isinstance(value, (list, tuple)):
+        collection: list[object] | tuple[object, ...] = value
+        return set().union(*(_strings(item) for item in collection))
     return set()
 
 
@@ -164,7 +165,7 @@ def _host_result(
     host, token = source.read_dokploy_config(control_plane_root=root)
     frames: list[dict[str, object]] = []
 
-    def dispatch(send: object) -> None:
+    def dispatch(send: Callable[[], None]) -> None:
         if lease is None or not callable(send):
             raise ValueError("A volume removal requires its current operation lease.")
         lease.checkpoint_effect("remove-volume:" + binding.volume_identity_sha256)
@@ -320,6 +321,7 @@ class RetainedVolumeSweepAdapter:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
+        del provider_effect_phase
         if reconciliation_key != self.reconciliation_key():
             return ProviderObservation("unknown")
         items: list[RetainedVolumeSweepItem] = []

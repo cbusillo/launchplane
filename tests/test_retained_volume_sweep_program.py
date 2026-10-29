@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from typing import cast
 
-from control_plane._retained_volume_sweep_program import RETAINED_VOLUME_SWEEP_HOST_PROGRAM
+from control_plane.retained_volume_sweep_program import RETAINED_VOLUME_SWEEP_HOST_PROGRAM
 from control_plane.retained_volume_capture import retained_volume_identity
 
 
@@ -122,9 +122,11 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
 
     def identity(self) -> str:
         metadata = self.data.stat()
+        engine_id = self.state.get("engine", "engine-one")
+        assert isinstance(engine_id, str)
         return retained_volume_identity(
             self.volume(),
-            str(self.state.get("engine", "engine-one")),
+            engine_id,
             metadata.st_dev,
             metadata.st_ino,
         )
@@ -160,7 +162,8 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         self.assertNotIn(str(self.data), result.stdout)
         return cast(dict[str, object], json.loads(result.stdout.removeprefix("FRAME:"))["result"])
 
-    def fixture_program(self, exhaust_budget: bool = False) -> str:
+    @staticmethod
+    def fixture_program(exhaust_budget: bool = False) -> str:
         return (
             "from pathlib import Path\nfrom unittest.mock import patch\nimport json,os\n"
             "read_text=Path.read_text\nmount_reads=[0]\n"

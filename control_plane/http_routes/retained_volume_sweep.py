@@ -77,6 +77,7 @@ def register_retained_volume_sweep_route(
                 "database_required", "Retained volume sweep requires shared database storage.", 503
             )
         assert isinstance(record_store, PostgresRecordStore)
+        store: PostgresRecordStore = record_store
         key = idempotency_key.strip()
         actor = launchplane_identity_actor(identity)
         normalized = payload.model_copy(update={"mode": "apply"})
@@ -99,7 +100,7 @@ def register_retained_volume_sweep_route(
             )
 
         def read_original() -> LaunchplaneIdempotencyRecord | None:
-            return record_store.read_idempotency_record(
+            return store.read_idempotency_record(
                 scope=scope,
                 route_path=RETAINED_VOLUME_SWEEP_ROUTE,
                 idempotency_key=key,
@@ -125,7 +126,7 @@ def register_retained_volume_sweep_route(
                     )
                 else:
                     plan, bindings = build_retained_volume_sweep(
-                        record_store, dependencies.control_plane_root, payload
+                        store, dependencies.control_plane_root, payload
                     )
                 if payload.mode == "dry-run":
                     return RetainedVolumeSweepResponse(
@@ -141,7 +142,7 @@ def register_retained_volume_sweep_route(
                         "The retained volume plan changed. Review it again.",
                     )
                 adapter = RetainedVolumeSweepAdapter(
-                    record_store,
+                    store,
                     dependencies.control_plane_root,
                     payload,
                     plan,
@@ -149,7 +150,7 @@ def register_retained_volume_sweep_route(
                     trace_id,
                 )
                 result = run_durable_provider_operation(
-                    store=record_store,
+                    store=store,
                     scope=scope,
                     route_path=RETAINED_VOLUME_SWEEP_ROUTE,
                     idempotency_key=key,

@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from collections.abc import Callable
 from typing import cast
 import unittest
 from unittest.mock import patch
@@ -22,7 +23,6 @@ from control_plane.http_routes.retained_volume_sweep import (
     register_retained_volume_sweep_route,
 )
 from control_plane.product_retirement import (
-    ProductRetirementStore,
     bind_product_retirement_authority,
     build_product_retirement_plan_record,
 )
@@ -68,7 +68,7 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             row.model_copy(update={"instance": "testing"}) for row in fixture.runtime_records
         )
         bound = bind_product_retirement_authority(
-            record_store=cast(ProductRetirementStore, fixture), request=_request(instance="testing")
+            record_store=fixture, request=_request(instance="testing")
         )
         from control_plane.contracts.product_retirement import ProductRetirementIdentity
 
@@ -136,8 +136,9 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         mode, key = payload["mode"], payload["operation"]
         self.host_keys.append(str(key))
         if mode == "apply":
-            guard = kwargs["dispatch_guard"]
-            assert callable(guard)
+            dispatch_guard = kwargs["dispatch_guard"]
+            assert callable(dispatch_guard)
+            guard = cast(Callable[[Callable[[], None]], None], dispatch_guard)
             guard(lambda: self.apply_calls.append(str(key)))
             if not self.never_started:
                 self.present = False
@@ -146,8 +147,9 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             status = "unknown" if self.fail_readback or self.present else "absent"
         else:
             status = "eligible" if self.present else "held"
-        receive = kwargs["receive"]
-        assert callable(receive)
+        receive_callback = kwargs["receive"]
+        assert callable(receive_callback)
+        receive = cast(Callable[[dict[str, object]], None], receive_callback)
         reason = "test_host_evidence"
         if mode == "readback" and self.never_started:
             status, reason = "held", "never_started"
@@ -160,10 +162,13 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         app = FastAPI()
 
         def error(**kwargs: object) -> HTTPException:
-            return HTTPException(status_code=int(str(kwargs["status_code"])), detail=kwargs)
+            status_code = kwargs["status_code"]
+            if type(status_code) is not int:
+                raise AssertionError("HTTP status must be an integer")
+            return HTTPException(status_code=status_code, detail=kwargs)
 
         register_retained_volume_sweep_route(
-            cast(ApiRouteRegistrar, app),
+            cast(ApiRouteRegistrar, cast(object, app)),
             dependencies=RetainedVolumeSweepDependencies(
                 read_identity=lambda: LocalOperatorIdentity(
                     "test-agent", "test", director_agent=director
@@ -178,7 +183,8 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         )
         return app
 
-    def post(self, app: FastAPI, payload: dict[str, object], key: str = "") -> Response:
+    @staticmethod
+    def post(app: FastAPI, payload: dict[str, object], key: str = "") -> Response:
         return asyncio.run(
             request(
                 app,

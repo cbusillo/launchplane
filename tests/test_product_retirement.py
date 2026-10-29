@@ -34,7 +34,6 @@ from control_plane.product_retirement import (
     BoundProductRetirement,
     DokployProductRetirementAdapter,
     ProductRetirementBlockedError,
-    ProductRetirementStore,
     bind_product_retirement_authority,
     build_product_retirement_plan_record,
     build_provider_observation,
@@ -114,7 +113,7 @@ class _Store:
         self.guest_secret_ids: frozenset[str] = frozenset()
         self.disabled_secret_ids: list[str] = []
         self.secret_events: list[SecretAuditEvent] = []
-        self.records: dict[str, object] = {}
+        self.records: dict[str, ProductRetirementRecord] = {}
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -207,17 +206,18 @@ class _Store:
         self.runtime_records = ()
         return None
 
-    def write_product_retirement_record(self, record: object) -> object:
-        record_id = str(getattr(record, "record_id"))
-        self.records[record_id] = record
+    def write_product_retirement_record(self, record: ProductRetirementRecord) -> object:
+        self.records[record.record_id] = record
         return None
 
+    def read_product_retirement_record(self, record_id: str) -> ProductRetirementRecord:
+        try:
+            return self.records[record_id]
+        except KeyError as error:
+            raise FileNotFoundError(record_id) from error
+
     def list_product_retirement_records(self, **_: object) -> tuple[ProductRetirementRecord, ...]:
-        return tuple(
-            record
-            for record in self.records.values()
-            if isinstance(record, ProductRetirementRecord)
-        )
+        return tuple(self.records.values())
 
 
 def _request(*, mode: str = "plan", **overrides: object) -> ProductRetirementRequest:
@@ -254,7 +254,7 @@ def _plan(
 ) -> ProductRetirementRecord:
     request = _request()
     bound = bind_product_retirement_authority(
-        record_store=cast(ProductRetirementStore, store),
+        record_store=store,
         request=request,
     )
     return build_product_retirement_plan_record(
@@ -279,7 +279,7 @@ class ProductRetirementTests(unittest.TestCase):
                 profile = store.profile
                 with self.assertRaises(ProductRetirementBlockedError):
                     bind_product_retirement_authority(
-                        record_store=cast(ProductRetirementStore, store),
+                        record_store=store,
                         request=_request(instance=instance),
                     )
                 self.assertEqual(store.profile, profile)
@@ -313,7 +313,7 @@ class ProductRetirementTests(unittest.TestCase):
         )
         adapter = DokployProductRetirementAdapter(
             control_plane_root=Path("."),
-            record_store=cast(ProductRetirementStore, store),
+            record_store=store,
             request=_request(
                 mode="apply",
                 reviewed_plan_record_id=plan.record_id,
@@ -431,9 +431,7 @@ class ProductRetirementTests(unittest.TestCase):
         assert store.dokploy_target is not None
         store.dokploy_target = store.dokploy_target.model_copy(update={"target_type": "compose"})
         with self.assertRaisesRegex(ProductRetirementBlockedError, "exact tracked"):
-            bind_product_retirement_authority(
-                record_store=cast(ProductRetirementStore, store), request=_request()
-            )
+            bind_product_retirement_authority(record_store=store, request=_request())
         store = _Store()
         store.previews = (
             PreviewRecord(
@@ -451,9 +449,7 @@ class ProductRetirementTests(unittest.TestCase):
             ),
         )
         with self.assertRaisesRegex(ProductRetirementBlockedError, "active preview"):
-            bind_product_retirement_authority(
-                record_store=cast(ProductRetirementStore, store), request=_request()
-            )
+            bind_product_retirement_authority(record_store=store, request=_request())
 
     def test_provider_observation_rejects_busy_application(self) -> None:
         observation = build_provider_observation(
@@ -668,7 +664,7 @@ class ProductRetirementTests(unittest.TestCase):
         )
         adapter = DokployProductRetirementAdapter(
             control_plane_root=Path("."),
-            record_store=cast(ProductRetirementStore, store),
+            record_store=store,
             request=request,
             plan=plan,
             identity=ProductRetirementIdentity(actor="test", identity_kind="test"),
@@ -740,7 +736,7 @@ class ProductRetirementTests(unittest.TestCase):
         )
         adapter = DokployProductRetirementAdapter(
             control_plane_root=Path("."),
-            record_store=cast(ProductRetirementStore, store),
+            record_store=store,
             request=request,
             plan=plan,
             identity=ProductRetirementIdentity(actor="test", identity_kind="test"),
@@ -772,7 +768,7 @@ class ProductRetirementTests(unittest.TestCase):
         plan = _plan(store, _observation())
         adapter = DokployProductRetirementAdapter(
             control_plane_root=Path("."),
-            record_store=cast(ProductRetirementStore, store),
+            record_store=store,
             request=_request(),
             plan=plan,
             identity=ProductRetirementIdentity(actor="test", identity_kind="test"),
@@ -812,7 +808,7 @@ class ProductRetirementTests(unittest.TestCase):
         plan = _plan(store, _observation())
         adapter = DokployProductRetirementAdapter(
             control_plane_root=Path("."),
-            record_store=cast(ProductRetirementStore, store),
+            record_store=store,
             request=_request(),
             plan=plan,
             identity=ProductRetirementIdentity(actor="test", identity_kind="test"),
@@ -845,7 +841,7 @@ class ProductRetirementTests(unittest.TestCase):
         )
         adapter = DokployProductRetirementAdapter(
             control_plane_root=Path("."),
-            record_store=cast(ProductRetirementStore, store),
+            record_store=store,
             request=request,
             plan=plan,
             identity=ProductRetirementIdentity(actor="test", identity_kind="test"),
@@ -886,7 +882,7 @@ class ProductRetirementTests(unittest.TestCase):
         )
         adapter = DokployProductRetirementAdapter(
             control_plane_root=Path("."),
-            record_store=cast(ProductRetirementStore, store),
+            record_store=store,
             request=request,
             plan=plan,
             identity=ProductRetirementIdentity(actor="test", identity_kind="test"),

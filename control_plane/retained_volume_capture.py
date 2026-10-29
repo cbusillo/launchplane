@@ -40,10 +40,11 @@ def _batched_docker_inspect(
         for row in value:
             if not isinstance(row, dict):
                 raise ValueError("inspect unavailable")
-            identifier = row.get(identity_key)
+            checked_row: dict[str, object] = row
+            identifier = checked_row.get(identity_key)
             if not isinstance(identifier, str) or identifier not in expected or identifier in rows:
                 raise ValueError("inspect identity unavailable")
-            rows[identifier] = row
+            rows[identifier] = checked_row
         offset = end
     if set(rows) != expected:
         raise ValueError("inspect coverage unavailable")
@@ -69,8 +70,12 @@ def capture_retained_volumes(
     token: str,
     payload: Mapping[str, object],
 ) -> tuple[tuple[RetainedVolumeBinding, ...], bool]:
-    application_id = str(payload.get("applicationId") or "").strip()
-    application_name = str(payload.get("appName") or "").strip()
+    raw_application_id = payload.get("applicationId")
+    raw_application_name = payload.get("appName")
+    if not isinstance(raw_application_id, str) or not isinstance(raw_application_name, str):
+        return (), False
+    application_id = raw_application_id.strip()
+    application_name = raw_application_name.strip()
     raw_server = payload.get("serverId")
     server_id = (
         raw_server if isinstance(raw_server, str) and _SAFE_NAME.fullmatch(raw_server) else ""

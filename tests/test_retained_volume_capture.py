@@ -33,6 +33,29 @@ from control_plane.retained_volume_capture import (
 
 
 class RetainedVolumeCaptureTests(unittest.TestCase):
+    def test_non_string_provider_identity_never_dispatches_capture(self) -> None:
+        for field in ("applicationId", "appName"):
+            with (
+                self.subTest(field=field),
+                patch(
+                    "control_plane.retained_volume_capture.native_copy_stream.run_managed_server_program"
+                ) as dispatch,
+            ):
+                payload: dict[str, object] = {
+                    "applicationId": "registered-app",
+                    "appName": "registered-app",
+                    "serverId": "registered-server",
+                    "mounts": [{"type": "volume", "volumeName": "site-data"}],
+                    field: 123,
+                }
+                self.assertEqual(
+                    capture_retained_volumes(
+                        host="https://provider.invalid", token="test-token", payload=payload
+                    ),
+                    ((), False),
+                )
+                dispatch.assert_not_called()
+
     def test_identity_binds_full_metadata_engine_and_backing_inode(self) -> None:
         volume = {
             "Name": "site-data",
@@ -60,7 +83,9 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
         }
 
         def run(**kwargs: object) -> None:
-            receive = cast(Callable[[dict[str, object]], None], kwargs["receive"])
+            receive_callback = kwargs["receive"]
+            assert callable(receive_callback)
+            receive = cast(Callable[[dict[str, object]], None], receive_callback)
             receive(
                 {
                     "type": "complete",
