@@ -295,15 +295,21 @@ captures the freshly qualified stopped IDs and storage in its durable effect;
 replay settles that same custody before qualifying a later batch. A positively
 observed restart or re-enabled automatic deployment after a completed effect
 starts a successor linked to that completed receipt. An unsettled effect always
-retains its original key; rollback reads the latest effect rather than an older
-exclusion. For an unavailable original, health failure may use either an
-undispatched-stop receipt or a distinct completed-retirement receipt, never a
-claim that a dispatched stop was excluded. Existing cleanup first settles on its
-saved IDs and original key: an undispatched cleanup can be excluded. A dispatched cleanup resumes on that
-same key only when complete current readback proves its saved IDs stopped or
-absent; running, changed or unknown custody remains fenced. Inverse preparation starts no new
-cleanup batch. A recorded health-failure exclusion remains binding on replay,
-even if health subsequently recovers. Both removal stages use Docker removal without force or volume
+retains its original key. A stop may repeat on that same key only after complete
+current target and host readback positively proves the qualified old services
+still running; unknown inventory or placement remains fenced.
+Once an old-target stop or post-verification cleanup has dispatched, retirement
+finishes forward. A later candidate health failure never restores the already
+retired copy. The final probe remains required and a failed probe is reported as
+failed health with the new copy still selected, leaving an ordinary fresh rebuild
+available. Pending/skipped health never proves completion. Pre-start removal does
+not cross this boundary; before retirement dispatch, health failure still restores
+the captured original ingress and metadata, including stopped/absent originals.
+Holds, positive use and active old-target work pause the queued operation with
+their exact reason. After those conditions end, the existing queued operation
+continues automatically on its original keys. No provider-console stop or separate
+Resume request is required for an observation-pending operation.
+Both removal stages use Docker removal without force or volume
 deletion. Interrupted removal finishes only its stopped or dead leftovers;
 absent members need no repeated removal. Preparation resumes with the observed absent original,
 while preserving the original ingress preimage and metadata for health rollback.

@@ -169,7 +169,10 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
     web = web_members[0] if web_members else None
     database = database_members[0] if database_members else None
     states = [item.get("State", {}).get("Status") for item in members]
-    stopped = all(value in {"exited", "created"} for value in states)
+    stopped = all(
+        value in {"exited", "created"} or spec.get("retiring") is True and value == "dead"
+        for value in states
+    )
     environment = (
         dict(item.split("=", 1) for item in web["Config"].get("Env", []) if "=" in item)
         if web
