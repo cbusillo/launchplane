@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from contextlib import nullcontext
 from click.testing import CliRunner
 from click import Command
+from http.client import IncompleteRead
 
 from fastapi import FastAPI
 from pydantic import ValidationError
@@ -48,6 +49,13 @@ from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygie
 from control_plane.workflows.runner_host_hygiene_executor import _github_binding_subject_key
 from control_plane.workflows.runner_host_hygiene_executor import _read_github_idle_sample
 from control_plane.workflows.runner_host_hygiene_executor import validate_local_executor_environment
+from control_plane.workflows.runner_host_hygiene_executor import (
+    execute_runner_host_hygiene_executor,
+)
+from control_plane.workflows.runner_host_hygiene_executor import (
+    build_github_idle_evidence_reader,
+    build_github_run_state_reader,
+)
 import click
 from control_plane.contracts.runner_host_hygiene_idle import RunnerHostHygieneIdleObservation
 from tests.support.http import request as http_request
@@ -423,6 +431,60 @@ class HygieneConfigurationTests(HygieneConfigurationFixture):
                 github_idle_evidence_reader=lambda *_args: (),
                 github_idle_sample_reader=idle,
             )
+        runner = Mock()
+        poster = Mock()
+        with self.assertRaises(ValueError):
+            execute_runner_host_hygiene_executor(
+                request=request,
+                remote_runner=runner,
+                audit_poster=poster,
+                github_idle_evidence_reader=lambda *_args: (),
+                github_idle_sample_reader=idle,
+            )
+        runner.assert_not_called()
+        poster.assert_not_called()
+
+    def test_incomplete_http_response_becomes_unavailable_for_service_and_legacy_readers(
+        self,
+    ) -> None:
+        (request,) = self.dispatch()
+        response = Mock(status=200)
+        response.read.side_effect = IncompleteRead(b"synthetic fragment", 1)
+        opener = Mock()
+        opener.open.return_value = nullcontext(response)
+        post = client.build_service_hygiene_post(
+            service_url="https://service.invalid", bearer_token_provider=lambda: "synthetic"
+        )
+        sample, _ = client.build_service_hygiene_readers(
+            request=request, configuration_sha256="a" * 64, post=post
+        )
+        with patch(
+            "control_plane.workflows.runner_host_hygiene_service_executor.build_opener",
+            return_value=opener,
+        ):
+            observations = _read_github_idle_sample(
+                request=request, github_idle_evidence_reader=None, github_idle_sample_reader=sample
+            )
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertTrue(all(item.reason_code == "source_unavailable" for item in observations))
+        with patch(
+            "control_plane.workflows.runner_host_hygiene_executor.urlopen",
+            side_effect=IncompleteRead(b"synthetic", 1),
+        ):
+            legacy = build_github_idle_evidence_reader(
+                bearer_token="synthetic",
+                current_run_id=42,
+                current_runner_name=request.current_runner_name,
+            )
+            binding = request.github_idle_bindings[0]
+            observed = legacy(
+                binding.repository_scope, binding.execution_lane, binding.runner_name, True
+            )
+            self.assertTrue(all(item.reason_code == "source_unavailable" for item in observed))
+            states = build_github_run_state_reader(bearer_token="synthetic")(
+                binding.repository_scope, (21,)
+            )
+            self.assertEqual(states, {21: "unknown"})
 
     def test_failed_whole_sample_is_read_once_and_marks_every_binding_unavailable(self) -> None:
         (request,) = self.dispatch()

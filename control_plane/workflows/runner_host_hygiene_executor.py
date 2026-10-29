@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.client import HTTPException as HTTPTransportError
 from decimal import Decimal
 from decimal import InvalidOperation
 import hashlib
@@ -603,6 +604,7 @@ def execute_runner_host_hygiene_executor(
     github_idle_evidence_reader: GitHubIdleEvidenceReader | None = None,
     github_idle_sample_reader: GitHubIdleSampleReader | None = None,
 ) -> RunnerHostHygieneExecutorResult:
+    _validate_github_idle_reader_selection(github_idle_evidence_reader, github_idle_sample_reader)
     if request.mutate and audit_spool is None:
         raise click.ClickException(
             "runner host hygiene mutation requires durable host-local audit delivery state"
@@ -1197,7 +1199,7 @@ def _post_audit_with_retry(
                 return None, last_error, attempt, False
         except click.ClickException as error:
             return None, _redact_sensitive_text(error.message), attempt, False
-        except OSError as error:
+        except (OSError, HTTPTransportError) as error:
             last_error = _redact_sensitive_text(str(error))
         if attempt < max_attempts:
             sleeper(float(2 ** (attempt - 1)))
@@ -1810,14 +1812,21 @@ def _collect_full_host_idle_convergence(
     )
 
 
+def _validate_github_idle_reader_selection(
+    binding_reader: GitHubIdleEvidenceReader | None,
+    sample_reader: GitHubIdleSampleReader | None,
+) -> None:
+    if binding_reader is not None and sample_reader is not None:
+        raise ValueError("Choose a binding reader or a whole-host sample reader, not both.")
+
+
 def _read_github_idle_sample(
     *,
     request: RunnerHostHygieneExecutorRequest,
     github_idle_evidence_reader: GitHubIdleEvidenceReader | None,
     github_idle_sample_reader: GitHubIdleSampleReader | None = None,
 ) -> tuple[RunnerHostHygieneIdleObservation, ...]:
-    if github_idle_evidence_reader is not None and github_idle_sample_reader is not None:
-        raise ValueError("Choose a binding reader or a whole-host sample reader, not both.")
+    _validate_github_idle_reader_selection(github_idle_evidence_reader, github_idle_sample_reader)
     observed_at = utc_now_timestamp()
     if not request.github_idle_bindings:
         subject_key = _public_identity_key("host-bindings", "missing")
@@ -2338,7 +2347,13 @@ def build_github_run_state_reader(
             except HTTPError as error:
                 states[run_id] = "unauthorized" if error.code in {401, 403} else "unknown"
                 continue
-            except (URLError, TimeoutError, socket.timeout, json.JSONDecodeError):
+            except (
+                URLError,
+                TimeoutError,
+                socket.timeout,
+                json.JSONDecodeError,
+                HTTPTransportError,
+            ):
                 states[run_id] = "unknown"
                 continue
             if not isinstance(payload, dict):
@@ -2759,7 +2774,7 @@ def _github_api_object(
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
         return None, ("source_unauthorized" if error.code in {401, 403} else "source_unavailable")
-    except (URLError, TimeoutError, socket.timeout):
+    except (URLError, TimeoutError, socket.timeout, HTTPTransportError):
         return None, "source_unavailable"
     except json.JSONDecodeError:
         return None, "source_contradictory"
@@ -2803,7 +2818,7 @@ def build_refreshing_service_audit_poster(
                 message,
                 retryable=error.code in {429, 500, 502, 503, 504},
             ) from error
-        except (URLError, TimeoutError, socket.timeout) as error:
+        except (URLError, TimeoutError, socket.timeout, HTTPTransportError) as error:
             raise AuditDeliveryError(
                 _redact_sensitive_text(str(error) or "Launchplane service request failed"),
                 retryable=True,

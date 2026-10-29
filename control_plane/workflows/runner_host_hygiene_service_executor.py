@@ -2,6 +2,7 @@ import json
 import logging
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from http.client import HTTPException as HTTPTransportError
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -67,12 +68,15 @@ def build_service_hygiene_post(
                 "Content-Type": "application/json",
             },
         )
-        with build_opener(_NoRedirect()).open(
-            request, timeout=timeout_seconds if path == "metadata" else 30
-        ) as response:
-            if response.status != 200:
-                raise ValueError("Hygiene service read failed; local action remains blocked.")
-            return json.load(response)
+        try:
+            with build_opener(_NoRedirect()).open(
+                request, timeout=timeout_seconds if path == "metadata" else 30
+            ) as response:
+                if response.status != 200:
+                    raise ValueError("Hygiene service read failed; local action remains blocked.")
+                return json.load(response)
+        except HTTPTransportError as error:
+            raise ValueError("Hygiene service response was incomplete.") from error
 
     return post
 
