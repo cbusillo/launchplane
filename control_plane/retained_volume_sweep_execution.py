@@ -1,4 +1,5 @@
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import closing
 from datetime import datetime, timezone
 import json
 
@@ -66,11 +67,9 @@ def _custody_clear(
     ):
         if _volume_referenced(binding.volume_name, operation.model_dump(mode="json")):
             return False
-    if any(
-        _volume_referenced(binding.volume_name, payload)
-        for payload in store.retained_volume_recovery_payloads()
-    ):
-        return False
+    with closing(store.retained_volume_recovery_payloads()) as recovery_payloads:
+        if any(_volume_referenced(binding.volume_name, payload) for payload in recovery_payloads):
+            return False
     return not any(
         row.provider_target_key != "retained-volume-sweep:" + record.record_id
         for row in store.list_held_provider_target_reservations()

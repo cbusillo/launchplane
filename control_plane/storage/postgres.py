@@ -66,7 +66,7 @@ from control_plane.storage.delivery_evidence import (
 
 from uuid import uuid4
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -29878,10 +29878,9 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.commit()
 
-    def retained_volume_recovery_payloads(self) -> tuple[PayloadDict, ...]:
+    def retained_volume_recovery_payloads(self) -> Generator[PayloadDict, None, None]:
         from control_plane.application_state_volume import state_volume_allocation_names
 
-        payloads: list[PayloadDict] = []
         with self._session_factory() as session:
             for row_type in (
                 LaunchplaneDisposableReplacementPreparationRow,
@@ -29894,21 +29893,14 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneOdooStableTargetReplacementOperationRow,
                 LaunchplaneTestingCandidateRow,
             ):
-                rows = tuple(session.scalars(select(row_type.payload).limit(10001)))
-                if len(rows) > 10000:
-                    raise ValueError("Recovery custody inventory exceeds its complete read bound.")
-                payloads.extend(rows)
-            allocations = tuple(
-                session.scalars(
-                    select(LaunchplaneIdempotencyRow.payload)
-                    .where(
-                        LaunchplaneIdempotencyRow.route_path.startswith("/v1/dokploy-targets/setup")
-                    )
-                    .limit(10001)
+                yield from session.scalars(
+                    select(row_type.payload).execution_options(yield_per=1000)
                 )
+            allocations = session.scalars(
+                select(LaunchplaneIdempotencyRow.payload)
+                .where(LaunchplaneIdempotencyRow.route_path.startswith("/v1/dokploy-targets/setup"))
+                .execution_options(yield_per=1000)
             )
-            if len(allocations) > 10000:
-                raise ValueError("Allocation custody inventory exceeds its complete read bound.")
             for allocation in allocations:
                 response = allocation.get("response_payload", {})
                 if not isinstance(response, dict):
@@ -29920,8 +29912,7 @@ class PostgresRecordStore(HumanSessionStore):
                     plan_id = result.get("plan_id")
                     if not isinstance(plan_id, str):
                         raise ValueError("Retained allocation identity is unavailable.")
-                    payloads.append(state_volume_allocation_names(plan_id))
-        return tuple(payloads)
+                    yield state_volume_allocation_names(plan_id)
 
     def write_product_retirement_record(self, record: ProductRetirementRecord) -> None:
         with self._session_factory() as session:

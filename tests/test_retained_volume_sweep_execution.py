@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -31,7 +32,7 @@ from control_plane.retained_volume_sweep_execution import (
     _inventory_clear,
 )
 from control_plane.dokploy_inventory import TARGET_COLLECTIONS
-from control_plane.service_auth import LocalOperatorIdentity
+from control_plane.service_auth import LocalOperatorIdentity, TerminalAgentIdentity
 from control_plane.storage.postgres import (
     PostgresRecordStore,
     LaunchplaneRetainedTestingGenerationRow,
@@ -158,8 +159,9 @@ class RetainedVolumeSweepTests(unittest.TestCase):
     def payload(self, **updates: object) -> dict[str, object]:
         return {"retirement_record_id": self.record.record_id, "minimum_age_seconds": 1, **updates}
 
-    def app(self, *, director: bool = True) -> FastAPI:
+    def app(self, *, director: bool = True, terminal: bool = False) -> FastAPI:
         app = FastAPI()
+        identity_type = TerminalAgentIdentity if terminal else LocalOperatorIdentity
 
         def error(**kwargs: object) -> HTTPException:
             status_code = kwargs["status_code"]
@@ -170,9 +172,7 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         register_retained_volume_sweep_route(
             cast(ApiRouteRegistrar, cast(object, app)),
             dependencies=RetainedVolumeSweepDependencies(
-                read_identity=lambda: LocalOperatorIdentity(
-                    "test-agent", "test", director_agent=director
-                ),
+                read_identity=lambda: identity_type("test-agent", "test", director_agent=director),
                 get_record_store=lambda: self.store,
                 next_trace_id=lambda: "sweep-test",
                 authorization_allows=lambda **_: False,
@@ -246,6 +246,28 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         self.assertEqual(len(self.apply_calls), 1)
         self.assertEqual(len(set(key for key in self.host_keys if key != "inspection")), 1)
 
+    def test_director_terminal_sweeps_but_ordinary_terminal_is_refused(self) -> None:
+        for mode in ("dry-run", "apply", "readback"):
+            with self.subTest(mode=mode):
+                body = self.payload(mode=mode)
+                if mode != "dry-run":
+                    body["reviewed_plan_sha256"] = "f" * 64
+                denied = self.post(
+                    self.app(director=False, terminal=True), body, "ordinary-terminal"
+                )
+                self.assertEqual(denied.status_code, 403, denied.text)
+        app = self.app(terminal=True)
+        dry = self.post(app, self.payload())
+        self.assertEqual(dry.status_code, 200, dry.text)
+        body = self.payload(mode="apply", reviewed_plan_sha256=dry.json()["plan_sha256"])
+        applied = self.post(app, body, "director-terminal")
+        self.assertEqual(applied.status_code, 200, applied.text)
+        self.assertEqual(applied.json()["items"][0]["status"], "removed")
+        body["mode"] = "readback"
+        observed = self.post(app, body, "director-terminal")
+        self.assertEqual(observed.status_code, 200, observed.text)
+        self.assertEqual(len(self.apply_calls), 1)
+
     def test_non_director_and_missing_readback_receipt_are_refused(self) -> None:
         self.assertEqual(self.post(self.app(director=False), self.payload()).status_code, 403)
         missing = self.post(
@@ -278,7 +300,7 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         with patch.object(
             self.store,
             "retained_volume_recovery_payloads",
-            return_value=({"retained_volume": self.binding.volume_name},),
+            return_value=(payload for payload in ({"retained_volume": self.binding.volume_name},)),
         ):
             plan, _ = build_retained_volume_sweep(self.store, self.root, request_model)
         self.assertEqual(plan.items[0].reason, "recovery_custody_unreleased")
@@ -299,7 +321,11 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         )
         self.assertEqual(plan.items[0].reason, "recovery_custody_unreleased")
         with (
-            patch.object(self.store, "retained_volume_recovery_payloads", return_value=()),
+            patch.object(
+                self.store,
+                "retained_volume_recovery_payloads",
+                return_value=(payload for payload in cast(tuple[dict[str, object], ...], ())),
+            ),
             patch(
                 "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_projects",
                 return_value=(
@@ -323,6 +349,40 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             )
         self.assertEqual(plan.items[0].reason, "provider_reference_unavailable")
         self.assertEqual(self.apply_calls, [])
+
+    def test_unrelated_recovery_history_does_not_prevent_sweep_or_hide_late_custody(self) -> None:
+        unrelated_rows = [
+            LaunchplaneRetainedTestingGenerationRow(
+                operation_id=f"unrelated-operation-{index}",
+                generation_binding_sha256=f"{index:064x}",
+                payload={"generation": {"resource_prefix": f"unrelated-{index}"}},
+            )
+            for index in range(10_001)
+        ]
+        with self.store._session_factory() as session:
+            session.add_all(unrelated_rows)
+            session.commit()
+
+        app = self.app()
+        eligible = self.post(app, self.payload())
+        self.assertEqual(eligible.status_code, 200, eligible.text)
+        self.assertEqual(eligible.json()["items"][0]["status"], "eligible")
+
+        with self.store._session_factory() as session:
+            session.add(
+                LaunchplaneRetainedTestingGenerationRow(
+                    operation_id="late-custody-operation",
+                    generation_binding_sha256="f" * 64,
+                    payload={"generation": {"resource_prefix": self.binding.volume_name}},
+                )
+            )
+            session.commit()
+        held = self.post(app, self.payload())
+        self.assertEqual(held.status_code, 200, held.text)
+        self.assertEqual(held.json()["items"][0]["status"], "held")
+        self.assertEqual(held.json()["items"][0]["reason"], "recovery_custody_unreleased")
+        with closing(self.store.retained_volume_recovery_payloads()) as payloads:
+            self.assertEqual(sum(1 for _ in payloads), len(unrelated_rows) + 1)
 
     def test_never_started_original_settles_then_allows_a_new_reviewed_sweep(self) -> None:
         app = self.app()

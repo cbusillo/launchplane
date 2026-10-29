@@ -31,7 +31,6 @@ from control_plane.retained_volume_sweep_execution import (
 from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneIdentity,
-    LocalOperatorIdentity,
     LocalAdminIdentity,
     director_agent_identity,
     launchplane_identity_actor,
@@ -69,7 +68,7 @@ def register_retained_volume_sweep_route(
         administrator = isinstance(identity, LocalAdminIdentity) or (
             isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         )
-        director = isinstance(identity, LocalOperatorIdentity) and director_agent_identity(identity)
+        director = director_agent_identity(identity)
         if not administrator and not director:
             refuse("authorization_denied", "Identity cannot sweep retained volumes.", 403)
         if not isinstance(record_store, PostgresRecordStore):
