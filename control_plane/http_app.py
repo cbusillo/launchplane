@@ -28602,7 +28602,10 @@ def create_launchplane_fastapi_app(
     register_topology_read_routes(app, dependencies=read_route_dependencies)
     register_ingress_read_routes(app, dependencies=read_route_dependencies)
     register_runner_host_hygiene_read_routes(app, dependencies=read_route_dependencies)
-    register_runner_host_hygiene_configuration_routes(app, dependencies=read_route_dependencies)
+    register_runner_host_hygiene_configuration_routes(
+        app,
+        dependencies=replace(read_route_dependencies, read_identity=read_browser_mutation_identity),
+    )
     register_deployment_promotion_read_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(
