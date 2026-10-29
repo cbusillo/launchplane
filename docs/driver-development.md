@@ -282,6 +282,12 @@ provider adapter constructs its client from environment keys named
 `LAUNCHPLANE_NPMPLUS_BASE_URL`, `LAUNCHPLANE_NPMPLUS_IDENTITY`, and
 `LAUNCHPLANE_NPMPLUS_SECRET`; do not commit real values or local admin
 overrides.
+
+`build_npmplus_ingress_client_from_records(record_store=...)` prepares a
+service-record-backed replacement without changing the default reader. See
+[the NPMplus migration](https://github.com/cbusillo/launchplane/issues/3510)
+for adoption, consumer activation and settings-retirement prerequisites.
+
 Ingress audit records must persist the adapter's provider identity explicitly;
 do not rely on a provider-specific model default for admin evidence.
 
