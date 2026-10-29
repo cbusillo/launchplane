@@ -51,6 +51,5 @@ production disposition or live deletion is performed by this source delivery.
 
 Provider database resources need explicit complete mount details; absent details
 are unknown. Compose declarations are checked through converted provider source.
-Recovery custody reads are bounded to 10,000 rows per existing table; exceeding
-that bound holds eligibility. Namespace references, ancestor bind mounts and
+Namespace references, ancestor bind mounts and
 unrelated held provider reservations also conservatively retain volumes.
