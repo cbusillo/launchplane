@@ -152,32 +152,36 @@ class OdooPreviewProviderMutationAdapter:
 
     def capture_source_decision(self) -> None:
         from control_plane.odoo_preview_apply_http import (
-            _odoo_preview_service_environment,
+            _odoo_preview_base_environment,
             resolve_preview_source_decision,
         )
 
         if self._issued_plan.operation != "refresh":
             return
         environment = (
-            _odoo_preview_service_environment(
+            _odoo_preview_base_environment(
                 control_plane_root_path=self._control_plane_root,
                 record_store=self._record_store,
                 profile=self._profile,
                 plan=self._issued_plan.dry_run_plan,
                 manifest=self._apply_request.apply.manifest,
                 database_url=self._database_url,
-                fishbowl_source=self._issued_plan.plan_request.fishbowl_source,
             ).values
             if self._profile.preview.data_transport_mode == "driver"
             and not self._profile.preview.clean_testing_snapshot
             else {}
         )
-        self.source_decision = resolve_preview_source_decision(
-            record_store=self._record_store,
-            profile=self._profile,
-            issued_plan=self._issued_plan,
-            environment=environment,
-        )
+        try:
+            self.source_decision = resolve_preview_source_decision(
+                record_store=self._record_store,
+                profile=self._profile,
+                issued_plan=self._issued_plan,
+                environment=environment,
+            )
+        except (ValueError, FileNotFoundError, click.ClickException) as error:
+            raise OdooPreviewPlanProvenanceError(
+                code="odoo_preview_source_unavailable", message=str(error)
+            ) from error
 
     def original_intent(self) -> dict[str, object]:
         # The HTTP service resolves environment values from managed records;
@@ -705,12 +709,7 @@ class OdooPreviewApplyOperation:
                 self.require_original_preservation()
                 if self.adapter._pre_mutation_guard is not None:
                     self.adapter._pre_mutation_guard()
-                try:
-                    self.adapter.capture_source_decision()
-                except (ValueError, FileNotFoundError, click.ClickException) as error:
-                    raise OdooPreviewPlanProvenanceError(
-                        code="odoo_preview_source_unavailable", message=str(error)
-                    ) from error
+                self.adapter.capture_source_decision()
             else:
                 existing = postgres.read_idempotency_record(
                     scope=self.reservation_scope,

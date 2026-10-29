@@ -446,7 +446,7 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             )
             cause = click.ClickException("Original source proof is unavailable")
             with (
-                patch.object(operation.adapter, "capture_source_decision", side_effect=cause),
+                patch.object(preview_http, "resolve_preview_source_decision", side_effect=cause),
                 self.assertRaises(OdooPreviewPlanProvenanceError) as refused,
             ):
                 operation.run(store)
@@ -589,6 +589,12 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             self.assertEqual(result["status"], "blocked")
             self.assertEqual(result["error_code"], "lane_movement.ancestor_build")
             self.assertTrue(result["error_message"])
+            assert results[0].record is not None
+            persisted = store.read_idempotency_record_by_id(results[0].record.record_id)
+            assert persisted is not None
+            persisted_result = persisted.response_payload["result"]
+            assert isinstance(persisted_result, dict)
+            self.assertIs(persisted_result["provider_effect_attempted"], False)
             self.assertEqual(store.list_preview_records(), ())
             execute.assert_called_once()
             observe.assert_not_called()

@@ -733,8 +733,10 @@ a completed creation with explicit no-effect evidence and no allocated target or
 effect checkpoint. Disjoint concrete recipients do not lend each other authority.
 
 New operations retain their effective source decision in the immutable reservation
-intent before the first provider effect. Execution resolves it again and refuses
-source drift before dispatch. Observation and replay retain the saved decision;
+intent before the first provider effect. Capture uses the same filtered site values
+as execution, before import-secret delivery and addon payload composition. Runtime
+configuration failures keep their existing structured diagnostics. Execution
+resolves the decision again and refuses source drift before dispatch. Observation and replay retain the saved decision;
 they never infer or backfill it from current settings or a later success. Unknown
 historical origins remain preserved; this guard supplies no new data-use authority.
 To continue preview review without qualifying an old recipient, use the existing

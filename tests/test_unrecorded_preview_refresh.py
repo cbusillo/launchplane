@@ -263,6 +263,14 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         require_history()
         self.assert_original_preserved()
+        assert self.original is not None
+        self.replace_original(
+            provider_effect_started_at=self.original.created_at,
+            provider_effect_phase="compose_create",
+        )
+        with self.assertRaises(ValueError):
+            require_history()
+        self.replace_original(provider_effect_started_at="", provider_effect_phase="")
         self.replace_original(response_payload={"result": {"status": "fail"}})
         with self.assertRaises(ValueError):
             require_history()
