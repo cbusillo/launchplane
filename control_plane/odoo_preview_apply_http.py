@@ -573,8 +573,6 @@ def execute_odoo_preview_apply_result(
         }
     )
     upstream_source = preview_uses_upstream_restore(profile, resolved_environment_values)
-    if current_request.unrecorded_original_reservation_id and upstream_source:
-        raise ValueError("Unrecorded preview recovery cannot restore an upstream source.")
     snapshot_source = (
         profile.preview.clean_testing_snapshot and service_dry_run_plan.operation == "refresh"
     )
