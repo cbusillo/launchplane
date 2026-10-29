@@ -296,9 +296,9 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
           <p>Testing and previews keep production analytics and search indexing disabled.</p>
         </section> : null}
         <h3>What to test</h3>
-        <ReleaseItems items={checklist.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={(checklist.shared_sources ?? []).length ? "No website-repository changes. Review the shared components below." : undefined} />
-        {(checklist.shared_sources ?? []).map(source => <section key={source.repository} aria-label={`Shared website components from ${source.repository}`}>
-          <h4>Shared website components</h4>
+        <ReleaseItems items={checklist.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={(checklist.shared_sources ?? []).length ? "No product-repository changes. Review the shared components below." : undefined} />
+        {(checklist.shared_sources ?? []).map(source => <section key={`${source.repository}/${source.production_commit}/${source.candidate_commit}`} aria-label={`Shared release inputs from ${source.repository}`}>
+          <h4>Shared release inputs</h4>
           <p className="owner-review-state">{source.repository}</p>
           <ReleaseItems items={source.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={source.untracked_commits.length ? "Shared changes have no merged pull request coverage. See the blockers below." : undefined} />
         </section>)}
@@ -369,7 +369,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
         <dl>
           <div><dt>{reviewingHotfix ? "Version the urgent fix replaced:" : "Current production version:"}</dt><dd><code>{checklist.production.source_commit}</code></dd></div>
           <div><dt>{noNewRelease ? "Testing version (already in production):" : reviewingHotfix ? "Live urgent fix:" : "Proposed production version:"}</dt><dd><code>{checklist.candidate.source_commit}</code>{reviewingHotfix ? null : <span>Currently in testing</span>}</dd></div>
-          {(checklist.shared_sources ?? []).map(source => <div key={source.repository}>
+          {(checklist.shared_sources ?? []).map(source => <div key={`${source.repository}/${source.production_commit}/${source.candidate_commit}`}>
             <dt>Shared components from {source.repository}</dt>
             <dd><span>Production</span><code>{source.production_commit}</code><span>Currently in testing</span><code>{source.candidate_commit}</code></dd>
           </div>)}

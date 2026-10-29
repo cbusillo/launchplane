@@ -21,6 +21,8 @@ from control_plane.release_review import (
     checklist_blockers,
     checklist_digest,
     current_release_review,
+    release_version,
+    ReleaseReviewStore,
 )
 from control_plane.release_review_record import release_decision_issue_body
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -110,6 +112,208 @@ class SharedReleaseReviewTests(unittest.TestCase):
         )
         self.store.write_release_review_decision_record(record)
         return record
+
+    def change_build_input(self, kind: str, *, source_ref: str = HEAD) -> str:
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        provenance = artifact.build_provenance
+        inputs = getattr(provenance, kind)
+        repository = str(inputs[0].source_repository)
+        updates = {"source_ref": source_ref}
+        if not source_ref:
+            updates["source_repository"] = ""
+            if kind == "build_tools":
+                updates["version"] = "unverified"
+        changed = inputs[0].model_copy(update=updates)
+        self.store.write_artifact_manifest(
+            artifact.model_copy(
+                update={
+                    "build_provenance": provenance.model_copy(update={kind: (changed, *inputs[1:])})
+                }
+            )
+        )
+        return repository
+
+    def test_build_input_ranges_and_notes_bind_acceptance_without_changing_release_identity(
+        self,
+    ) -> None:
+        from typing import cast
+
+        store = cast(ReleaseReviewStore, self.store)
+        for kind in ("base_images", "build_tools"):
+            with self.subTest(kind=kind):
+                seed(self.store)
+                version = release_version(store=store, profile=profile(), instance="testing")
+                repository = self.change_build_input(kind)
+                self.assertEqual(
+                    release_version(store=store, profile=profile(), instance="testing"),
+                    version,
+                )
+                accepted = self.accept()
+                self.assertTrue(self.review().approved)
+                ranges = accepted.checklist.shared_sources
+                self.assertEqual([source.repository for source in ranges], [repository])
+                self.assertEqual(
+                    (ranges[0].production_commit, ranges[0].candidate_commit), (BASE, HEAD)
+                )
+                self.assertIn(self.github.notes, release_decision_issue_body(accepted))
+                self.github.notes += " Check the second sign-in."
+                self.assertFalse(self.review().approved)
+                self.github.notes = ""
+                self.assertFalse(self.review().checklist_complete)
+                self.github.notes = "Nothing for the Client to test: Build maintenance only."
+                self.accept()
+                self.assertTrue(self.review().approved)
+
+    def test_unknown_build_input_preserves_known_ranges_and_repository_holds(self) -> None:
+        from control_plane.client_release_repositories import client_release_profiles
+        from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
+        from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
+        from typing import Any, cast
+
+        for kind in ("base_images", "build_tools"):
+            for source_ref in ("", "main"):
+                with self.subTest(kind=kind, source_ref=source_ref):
+                    seed(self.store)
+                    self.set_sources("prod", BASE)
+                    self.set_sources("testing", HEAD)
+                    repository = self.change_build_input(kind, source_ref=source_ref)
+                    review = self.review()
+                    assert review.checklist is not None
+                    self.assertFalse(review.checklist_complete)
+                    self.assertTrue(any("UNKNOWN" in value for value in review.blockers))
+                    self.assertIn(
+                        "example/shared-addons",
+                        {source.repository for source in review.checklist.shared_sources},
+                    )
+                    self.assertEqual(
+                        client_release_profiles(
+                            store=self.store, repository="example/shared-addons"
+                        ),
+                        (profile(),),
+                    )
+                    self.assertEqual(
+                        client_release_profiles(store=self.store, repository=repository),
+                        (profile(),),
+                    )
+                    reader = GitHubMergeTrainSnapshotReader(
+                        transport=RecordingMergeTrainGitHubTransport(responses=()),
+                        branch_refresh_store=cast(Any, self.store),
+                    )
+                    self.assertTrue(
+                        reader.client_review_intent(labels=(), repository=repository, body="").error
+                    )
+                    self.accept()
+                    self.assertFalse(self.review().approved)
+
+    def test_build_input_discovery_uses_recorded_repositories_and_normalizes_them(self) -> None:
+        from control_plane.client_release_repositories import client_release_profiles
+
+        for kind in ("base_images", "build_tools"):
+            repository = self.change_build_input(kind)
+            self.assertEqual(
+                client_release_profiles(
+                    store=self.store, repository=f"https://github.com/{repository}.git"
+                ),
+                (profile(),),
+            )
+            self.assertEqual(
+                client_release_profiles(
+                    store=self.store, repository=f"git@github.com:{repository}.git"
+                ),
+                (profile(),),
+            )
+
+    def test_shared_repository_reused_by_build_roles_renders_one_range(self) -> None:
+        for instance, sha in (("prod", BASE), ("testing", HEAD)):
+            artifact = self.store.read_artifact_manifest(f"artifact-{instance}")
+            provenance = artifact.build_provenance
+            self.store.write_artifact_manifest(
+                artifact.model_copy(
+                    update={
+                        "build_provenance": provenance.model_copy(
+                            update={
+                                "base_images": tuple(
+                                    image.model_copy(
+                                        update={
+                                            "source_repository": "example/shared-addons",
+                                            "source_ref": sha,
+                                        }
+                                    )
+                                    for image in provenance.base_images
+                                ),
+                                "build_tools": tuple(
+                                    tool.model_copy(
+                                        update={
+                                            "source_repository": "example/shared-addons",
+                                            "source_ref": sha,
+                                        }
+                                    )
+                                    for tool in provenance.build_tools
+                                ),
+                            }
+                        )
+                    }
+                )
+            )
+        review = self.review()
+        assert review.checklist is not None
+        self.assertTrue(review.checklist_complete)
+        ranges = [
+            source
+            for source in review.checklist.shared_sources
+            if source.repository == "example/shared-addons"
+        ]
+        self.assertEqual(len(ranges), 1)
+
+    def test_current_manifest_reviews_distinct_pins_from_one_repository(self) -> None:
+        from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+        from control_plane.release_review_shared import read_shared_source_changes
+        from tests.support.artifact_manifests import artifact_manifest_v2
+
+        production = artifact_manifest_v2()
+        payload = production.model_dump(mode="json")
+        for image in payload["build_provenance"]["base_images"]:
+            image["source_ref"] = HEAD
+        payload["build_provenance"]["build_tools"][0]["source_ref"] = HEAD
+        payload["dependency_provenance"]["uv_locks"][0]["source_ref"] = HEAD
+        candidate = ArtifactIdentityManifest.model_validate(payload)
+        ranges, unknown = read_shared_source_changes(
+            production=production,
+            candidate=candidate,
+            repository=profile().repository,
+            read=self.github.read,
+        )
+        self.assertEqual(unknown, ())
+        expected = {
+            (image.source_repository, image.source_ref, HEAD)
+            for image in production.build_provenance.base_images
+        } | {
+            (tool.source_repository, tool.source_ref, HEAD)
+            for tool in production.build_provenance.build_tools
+        }
+        self.assertEqual(
+            {
+                (source.repository, source.production_commit, source.candidate_commit)
+                for source in ranges
+            },
+            expected,
+        )
+        self.assertTrue(
+            all(source.items[0].owner_test_notes == self.github.notes for source in ranges)
+        )
+
+    def test_absent_build_provenance_is_unknown_and_cannot_reuse_acceptance(self) -> None:
+        self.accept()
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        self.store.write_artifact_manifest(
+            artifact.model_copy(update={"build_provenance": type(artifact.build_provenance)()})
+        )
+        review = self.review()
+        self.assertFalse(review.approved)
+        self.assertFalse(review.checklist_complete)
+        self.assertTrue(any("UNKNOWN" in value for value in review.blockers))
+        assert review.checklist is not None
+        self.assertTrue(review.checklist.shared_sources)
 
     def test_website_and_two_shared_ranges_are_reviewable_and_persisted(self) -> None:
         review = self.review()

@@ -2,6 +2,20 @@
 title: Client release review
 ---
 
+## Recorded source inputs
+
+Odoo release review lists addon, base-image and build-tool commit ranges from
+both lanes' artifact provenance. Each repository range appears once, with the
+merged PRs and their Client test notes, including engineering-only notes.
+Repository discovery and merge holds use all recorded inputs independently of
+whether another input has complete provenance. There is no repository catalog.
+
+Missing, ambiguous or unpinned source evidence appears as UNKNOWN and blocks
+Client acceptance while known ranges remain visible. New or removed inputs and
+source-selection changes still need review coverage. Existing release identities
+and saved decisions keep their serialized shape; a newly compiled checklist binds
+its additional source ranges and notes to the exact acceptance.
+
 ## Generic-web production settings
 
 The reviewed generic-web candidate includes the production lane's non-secret

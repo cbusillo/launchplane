@@ -498,7 +498,7 @@ def build_release_review(
             review_label=profile.owner.review_label,
             policy_store=store,
         )
-        if production.shared_addons_digest != candidate.shared_addons_digest:
+        if profile.driver_id == "odoo":
             shared_sources, additional_changes = read_shared_source_changes(
                 production=store.read_artifact_manifest(production.artifact_id),
                 candidate=store.read_artifact_manifest(candidate.artifact_id),
