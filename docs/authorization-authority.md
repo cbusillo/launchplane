@@ -1036,7 +1036,10 @@ records are history only, not authority.
 The retired `ordinary-agent-delivery-administration` candidate and its replay
 are no longer accepted by authorization-candidate preparation. Stored records
 remain readable, and administration-rule removal stays guarded by activation
-history. Schema-3 parsing and retained request validation remain supported.
+history. Do not stage or install the retired
+`operator.ordinary-agent-delivery-administration` managed set; remove existing
+rules through a managed-policy-set plan or managed-rule-set reconcile. Schema-3
+parsing and retained request validation remain supported.
 
 ### Preparing Administrator Product Evidence Access
 
