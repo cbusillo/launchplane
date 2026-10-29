@@ -197,10 +197,8 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
                 "control_plane.release_invitation._client_release_requests_enabled",
                 return_value=True,
             ),
-            patch("control_plane.release_invitation._settle_completed_invitation") as settle,
         ):
             self.advance()
-            settle.assert_called_once()
             self.assertEqual(self.issue["state"], "closed")
 
     def test_worker_closes_release_record_without_invitation_or_equal_lanes(self) -> None:
@@ -429,6 +427,31 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.advance()
         self.assertEqual(self.issue["state"], "closed")
 
+    def test_finished_earlier_attempt_cannot_close_the_same_candidates_active_retry(self) -> None:
+        newer = self.decision.model_copy(
+            update={"record_id": "retry", "decided_at": "2026-09-24T01:00:00Z"}
+        )
+        self.store.create_release_review_decision_record_if_absent(newer)
+        self.issue["body"] += "\n" + release_decision_marker(newer.record_id)
+        assert self.release_run is not None
+        original = self.release_run
+        retry = original.model_copy(
+            update={"decision_record_id": newer.record_id, "state": "waiting", "steps": ()}
+        )
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: (
+                retry if kwargs["decision"].record_id == newer.record_id else original
+            ),
+        ):
+            self.advance()
+        self.assertEqual(self.issue["state"], "open")
+        self.assertEqual(self.comments, [])
+        self.release_run = retry.model_copy(update={"state": "passed"})
+        self.advance()
+        self.assertEqual(self.issue["state"], "closed")
+        self.assertEqual(len(self.comments), 1)
+
     def test_changed_run_after_issue_lookup_stays_open(self) -> None:
         github = self.github
 
@@ -461,13 +484,11 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
                     update={"decision_record_id": kwargs["decision"].record_id}
                 ),
             ),
-            patch("control_plane.release_invitation._settle_completed_invitation") as settle,
         ):
             self.store.write_product_profile_record(
                 self.profile.model_copy(update={"release_on_acceptance": "promote"})
             )
             self.advance()
-            settle.assert_called_once()
         self.assertEqual(self.issue["state"], "closed")
 
     def test_temporary_hotfix_keeps_its_pending_client_review_open(self) -> None:

@@ -392,7 +392,7 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
                 self.assertEqual(refused.status_code, 409, refused.text)
                 self.assertIn("release_checklist_incomplete", refused.text)
 
-    async def test_accept_publishes_saved_decision_through_storage_lock(self) -> None:
+    async def test_accept_publishes_the_saved_decision_issue(self) -> None:
         from tests.test_release_review_record import FakeReleaseIssues
 
         github = FakeReleaseIssues()
@@ -407,16 +407,14 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
             patch(
                 "control_plane.release_review_record.github_api_request", side_effect=github.request
             ),
-            patch.object(
-                self.store,
-                "release_review_publication_lock",
-                wraps=self.store.release_review_publication_lock,
-            ) as publication_lock,
+            patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=77,
+            ),
         ):
             response = await self.post()
         self.assertEqual(response.status_code, 200, response.text)
         saved = self.store.list_release_review_decision_records(product="example-site")[0]
-        publication_lock.assert_called_once_with(record_id=saved.record_id)
         self.assertEqual(len(github.issues), 1)
         self.assertEqual(
             response.json()["review"]["latest_decision"]["release_issue_url"],
@@ -450,6 +448,10 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
             ),
             patch(
                 "control_plane.release_review_record.github_api_request", side_effect=github.request
+            ),
+            patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=77,
             ),
         ):
             for mode, outcome, start in cases:

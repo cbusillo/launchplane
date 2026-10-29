@@ -77,6 +77,16 @@ class FakeReleaseIssues:
     def request(
         self, *, path: str, token: str, method: str = "GET", body: dict[str, str] | None = None
     ) -> object:
+        if method == "DELETE":
+            return None
+        if method == "PATCH":
+            assert body is not None
+            with self._lock:
+                issue = next(
+                    issue for issue in self.issues if issue["number"] == int(path.rsplit("/", 1)[1])
+                )
+                issue.update(body)
+                return issue.copy()
         if method == "GET":
             with self._lock:
                 snapshot = list(self.issues)
@@ -86,7 +96,11 @@ class FakeReleaseIssues:
             return snapshot
         assert body is not None
         with self._lock:
-            issue = {"number": 99 + len(self.issues), "body": body["body"]}
+            issue = {
+                "number": 99 + len(self.issues),
+                "body": body["body"],
+                "performed_via_github_app": {"id": 77},
+            }
             self.issues.append(issue)
         if self.lose_response:
             self.lose_response = False
@@ -118,6 +132,9 @@ def concurrent_publication(
         patch(
             "control_plane.release_review_record.resolve_launchplane_github_token",
             return_value="test-token",
+        ),
+        patch(
+            "control_plane.release_review_record.resolve_delivery_github_app_id", return_value=77
         ),
         patch.object(stores[1], "release_review_publication_lock", contender_lock),
         ThreadPoolExecutor(max_workers=2) as workers,
@@ -163,6 +180,12 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         seed(store)
         self.decision = decision(store).model_copy(update={"release_issue_url": ""})
         store.create_release_review_decision_record_if_absent(self.decision)
+        self.enterContext(
+            patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=77,
+            )
+        )
         token = patch(
             "control_plane.release_review_record.resolve_launchplane_github_token",
             return_value="test-token",
