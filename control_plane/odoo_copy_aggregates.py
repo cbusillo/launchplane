@@ -8,7 +8,7 @@ import re
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
-from control_plane.clean_testing_snapshot import preview_snapshot
+from control_plane.clean_testing_snapshot import CleanTestingSnapshot, preview_snapshot
 from control_plane.dokploy import api, source
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceAuthorizationDenied
 from control_plane.launchplane_mutations import control_plane_root
@@ -24,6 +24,11 @@ MAX_ROW_BYTES = 16 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_GROUP_BYTES = 128 * 1024 * 1024
 MAX_ROWS = 2_000_000
+ARCHIVE_UNAVAILABLE_CODES = (
+    "snapshot_unavailable",
+    "archive_tool_unavailable",
+    "archive_unreadable",
+)
 
 
 class AggregateQuery(BaseModel):
@@ -178,6 +183,70 @@ def count_archive_rows(stream: BinaryIO, query: dict[str, str | None]) -> dict[s
     )
 
 
+BASE_VERSION_PATTERN = r"[1-9][0-9]*\.0(?:\.[0-9]+)*"
+
+
+def read_base_module_version(stream: BinaryIO) -> dict[str, str | None]:
+    import csv
+
+    columns: list[str] | None = None
+    version = None
+    completed = False
+    total_bytes = rows = 0
+    header = re.compile(
+        rb'^COPY public\.(?:"ir_module_module"|ir_module_module) \((.+)\) FROM stdin;\n$'
+    )
+    while line := stream.readline(MAX_ROW_BYTES + 1):
+        total_bytes += len(line)
+        if (
+            len(line) > MAX_ROW_BYTES
+            or total_bytes > MAX_EXTRACTED_BYTES
+            or not line.endswith(b"\n")
+        ):
+            raise ValueError("Archive metadata exceeds its bound")
+        if line.startswith(b"COPY "):
+            match = header.fullmatch(line)
+            if columns is not None or match is None:
+                raise ValueError("Archive metadata table selection changed")
+            columns = next(csv.reader([match[1].decode("utf-8")], skipinitialspace=True))
+            if len(columns) != len(set(columns)) or not {
+                "name",
+                "state",
+                "latest_version",
+            }.issubset(columns):
+                raise ValueError("Archive metadata columns unavailable")
+            continue
+        if columns is None:
+            continue
+        if line == b"\\.\n":
+            if completed:
+                raise ValueError("Duplicate metadata terminator")
+            completed = True
+            continue
+        if completed:
+            continue
+        fields = line[:-1].split(b"\t")
+        rows += 1
+        if len(fields) != len(columns) or rows > MAX_ROWS:
+            raise ValueError("Malformed or oversized metadata")
+        if decode_copy_field(fields[columns.index("name")]) != "base":
+            continue
+        candidate = decode_copy_field(fields[columns.index("latest_version")])
+        state = decode_copy_field(fields[columns.index("state")])
+        if (
+            version is not None
+            or state != "installed"
+            or candidate is None
+            or len(candidate) > 64
+            or re.fullmatch(BASE_VERSION_PATTERN, candidate) is None
+        ):
+            raise ValueError("Base module version is unavailable or ambiguous")
+        version = candidate
+    if version is None or not completed:
+        raise ValueError("Incomplete base module metadata")
+    return {"recorded_base_version": version, "preparation_stage": None}
+
+
 ARCHIVE_COUNT_LIBRARY = (
     "from typing import BinaryIO\n"
     + f"MAX_ROW_BYTES={MAX_ROW_BYTES}\nMAX_EXTRACTED_BYTES={MAX_EXTRACTED_BYTES}\nMAX_GROUP_BYTES={MAX_GROUP_BYTES}\nMAX_ROWS={MAX_ROWS}\n"
@@ -185,10 +254,7 @@ ARCHIVE_COUNT_LIBRARY = (
     + inspect.getsource(count_archive_rows)
 )
 
-SNAPSHOT_AGGREGATE_PROGRAM = (
-    CLEAN_TESTING_SNAPSHOT_LIBRARY
-    + ARCHIVE_COUNT_LIBRARY
-    + r"""
+SNAPSHOT_ARCHIVE_PROGRAM = r"""
 import base64,signal,sys
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 prefix=sys.argv[2]
@@ -237,13 +303,13 @@ try:
         process=subprocess.Popen(['docker','exec','-i',identifiers[0],'env','-i','PATH=/usr/local/bin:/usr/bin:/bin',
             'pg_restore','--data-only','--no-owner','--no-privileges','--file=-','--schema=public','--table='+spec['query']['table']],
             stdin=archive,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
-        counts=count_archive_rows(process.stdout,spec['query'])
+        result=read_archive_rows(process.stdout,spec['query'])
         if process.wait(timeout=10)!=0:
             raise ValueError()
         after=os.fstat(archive.fileno())
         if any(getattr(identity,key)!=getattr(after,key) for key in ('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns')):
             raise ValueError()
-    result={'type':'complete','counts':counts}
+    result={'type':'complete',**result}
 except Exception:
     result={'type':'complete','unavailable':stage}
 finally:
@@ -259,6 +325,12 @@ finally:
     signal.alarm(0)
 print(prefix+json.dumps(result),flush=True)
 """
+
+SNAPSHOT_AGGREGATE_PROGRAM = (
+    CLEAN_TESTING_SNAPSHOT_LIBRARY
+    + ARCHIVE_COUNT_LIBRARY
+    + "read_archive_rows=lambda stream,query: {'counts':count_archive_rows(stream,query)}\n"
+    + SNAPSHOT_ARCHIVE_PROGRAM
 )
 
 
@@ -277,13 +349,46 @@ def read_aggregates(
         or generation_binding(generation) != snapshot.snapshot_id
     ):
         raise ValueError("The clean snapshot lacks its completed production-copy provenance.")
-    target = store.read_dokploy_target_record(context_name=lane.context, instance_name="testing")
-    target_id = store.read_dokploy_target_id_record(
-        context_name=lane.context, instance_name="testing"
+    frames = read_snapshot_archive(
+        store=store,
+        context=lane.context,
+        snapshot=snapshot,
+        program=SNAPSHOT_AGGREGATE_PROGRAM,
+        query=query.model_dump(mode="json"),
     )
+    if len(frames) != 1 or set(frames[0]) != {"type", "counts"} or frames[0]["type"] != "complete":
+        reason = frames[0].get("unavailable") if len(frames) == 1 else None
+        code = reason if reason in ARCHIVE_UNAVAILABLE_CODES else "aggregate_unavailable"
+        raise OdooRuntimeReadError(
+            str(code), "The qualified snapshot aggregate read did not complete.", 503
+        )
+    return AggregateEvidence(
+        product=product,
+        context=lane.context,
+        snapshot_id=snapshot.snapshot_id,
+        snapshot_database_sha256=snapshot.database_sha256,
+        snapshot_captured_at=snapshot.captured_at,
+        source_mode=generation.source_mode,
+        source_binding_sha256=generation.source_binding_sha256,
+        operation_id=generation.operation_id,
+        observed_at=datetime.now(timezone.utc).isoformat(),
+        counts=AggregateCounts.model_validate(frames[0]["counts"]),
+    )
+
+
+def read_snapshot_archive(
+    *,
+    store: PostgresRecordStore,
+    context: str,
+    snapshot: CleanTestingSnapshot,
+    program: str,
+    query: dict[str, str | None],
+) -> list[dict[str, object]]:
+    target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+    target_id = store.read_dokploy_target_id_record(context_name=context, instance_name="testing")
     if target.target_type != "compose" or any(
         other.target_id == target_id.target_id
-        and (other.context, other.instance) != (lane.context, "testing")
+        and (other.context, other.instance) != (context, "testing")
         for other in store.list_dokploy_target_id_records()
     ):
         raise ValueError("The archive utility target is not exclusive testing.")
@@ -301,10 +406,10 @@ def read_aggregates(
             host=host,
             token=token,
             server_id=snapshot.server_id,
-            program=SNAPSHOT_AGGREGATE_PROGRAM,
+            program=program,
             payload={
                 "snapshot": snapshot.model_dump(mode="json"),
-                "query": query.model_dump(mode="json"),
+                "query": query,
                 "project": str(provider.get("appName") or ""),
             },
             receive=frames.append,
@@ -312,27 +417,16 @@ def read_aggregates(
         )
     except NativeSourceAuthorizationDenied:
         raise OdooRuntimeReadError(
-            "authorization_denied", "The provider refused the snapshot aggregate read.", 403
+            "authorization_denied", "The provider refused the snapshot archive read.", 403
         ) from None
-    if len(frames) != 1 or set(frames[0]) != {"type", "counts"} or frames[0]["type"] != "complete":
-        reason = frames[0].get("unavailable") if len(frames) == 1 else None
-        code = (
-            reason
-            if reason in {"snapshot_unavailable", "archive_tool_unavailable", "archive_unreadable"}
-            else "aggregate_unavailable"
-        )
-        raise OdooRuntimeReadError(
-            str(code), "The qualified snapshot aggregate read did not complete.", 503
-        )
-    return AggregateEvidence(
-        product=product,
-        context=lane.context,
-        snapshot_id=snapshot.snapshot_id,
-        snapshot_database_sha256=snapshot.database_sha256,
-        snapshot_captured_at=snapshot.captured_at,
-        source_mode=generation.source_mode,
-        source_binding_sha256=generation.source_binding_sha256,
-        operation_id=generation.operation_id,
-        observed_at=datetime.now(timezone.utc).isoformat(),
-        counts=AggregateCounts.model_validate(frames[0]["counts"]),
-    )
+    return frames
+
+
+SNAPSHOT_VERSION_PROGRAM = (
+    CLEAN_TESTING_SNAPSHOT_LIBRARY
+    + ARCHIVE_COUNT_LIBRARY
+    + f"BASE_VERSION_PATTERN={BASE_VERSION_PATTERN!r}\n"
+    + inspect.getsource(read_base_module_version)
+    + "read_archive_rows=lambda stream,query: {'metadata':read_base_module_version(stream)}\n"
+    + SNAPSHOT_ARCHIVE_PROGRAM
+)
