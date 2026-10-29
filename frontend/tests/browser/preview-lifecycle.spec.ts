@@ -1,3 +1,4 @@
+import type { Locator } from "@playwright/test";
 import { expect, test, type Page } from "./state";
 
 async function setup(page: Page, dropped: boolean | "denied" = false, role = "admin") {
@@ -33,6 +34,13 @@ async function setup(page: Page, dropped: boolean | "denied" = false, role = "ad
     } });
   });
   return { requests, errors };
+}
+
+async function retryOriginalSweep(panel: Locator, requests: Awaited<ReturnType<typeof setup>>["requests"]) {
+  await panel.getByRole("button", { name: /Retry original (report|cleanup)/ }).click();
+  await expect(panel.getByRole("region", { name: "Preview sweep result" }).getByRole("heading", { level: 2 })).toContainText("fail");
+  expect(requests).toHaveLength(2);
+  expect(requests[1]).toEqual(requests[0]);
 }
 
 test("native portfolio report and explicit cleanup show held outcomes", { tag: "@responsive" }, async ({ page }, testInfo) => {
@@ -76,10 +84,7 @@ for (const apply of [false, true]) {
       }
     }, fixture.requests[0].key);
     await page.reload();
-    await panel.getByRole("button", { name: /Retry original (report|cleanup)/ }).click();
-    await expect(panel.getByRole("region", { name: "Preview sweep result" }).getByRole("heading", { level: 2 })).toContainText("fail");
-    expect(fixture.requests).toHaveLength(2);
-    expect(fixture.requests[1]).toEqual(fixture.requests[0]);
+    await retryOriginalSweep(panel, fixture.requests);
     expect(fixture.errors).toEqual([]);
   });
 }
@@ -195,8 +200,5 @@ test("a retired page preparing a fingerprint cannot erase its successor's uncert
   await page.evaluate(() => (window as unknown as { releaseRetiredFingerprint: () => Promise<void> }).releaseRetiredFingerprint());
   await page.reload();
   await expect(panel.getByRole("button", { name: /Retry original (report|cleanup)/ })).toBeEnabled();
-  await panel.getByRole("button", { name: /Retry original (report|cleanup)/ }).click();
-  await expect(panel.getByRole("region", { name: "Preview sweep result" }).getByRole("heading", { level: 2 })).toContainText("fail");
-  expect(fixture.requests).toHaveLength(2);
-  expect(fixture.requests[1]).toEqual(fixture.requests[0]);
+  await retryOriginalSweep(panel, fixture.requests);
 });
