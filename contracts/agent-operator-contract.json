@@ -834,6 +834,40 @@
         ]
       },
       {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "sweep_retained_volumes",
+        "path": "/v1/retained-volume-sweep",
+        "purpose": "Inspect, apply, or read back one reviewed retained-volume retirement sweep without exposing provider bindings.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256",
+          "retirement_record_id",
+          "minimum_age_seconds"
+        ],
+        "schema_fingerprint_sha256": "97c57a4d12f191da974363dd089db8bc5baeb8826ac3edb59ac28d97c6ac9ca5",
+        "supported_surfaces": [
+          "operator_ui",
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_identity"
@@ -1249,8 +1283,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "409c83a5be18c5e7e4303b76772e9c764f429ba0"
+    "source_commit_sha": "68df7dd0a7439238b1c7193b841b671d666c371f"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "167abd813bb8e27bfd5ea102aa14a3d5b9cf7d6e56361e69d3dbbf942923ef89"
+  "semantic_digest_sha256": "891238524f43544eb8dbb2d08788be92b1702e03ed0e961082a4a7f6f56e4d98"
 }

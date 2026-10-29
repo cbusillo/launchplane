@@ -29878,6 +29878,51 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.commit()
 
+    def retained_volume_recovery_payloads(self) -> tuple[PayloadDict, ...]:
+        from control_plane.application_state_volume import state_volume_allocation_names
+
+        payloads: list[PayloadDict] = []
+        with self._session_factory() as session:
+            for row_type in (
+                LaunchplaneDisposableReplacementPreparationRow,
+                LaunchplaneDisposableTestingResourceAllocationRow,
+                LaunchplaneFreshOdooTestingGenerationRow,
+                LaunchplaneRetainedTestingGenerationRow,
+                LaunchplaneNativeTestingCopyCaptureRow,
+                LaunchplaneOdooUpgradeRehearsalRow,
+                LaunchplanePreviewGenerationRow,
+                LaunchplaneOdooStableTargetReplacementOperationRow,
+                LaunchplaneTestingCandidateRow,
+            ):
+                rows = tuple(session.scalars(select(row_type.payload).limit(10001)))
+                if len(rows) > 10000:
+                    raise ValueError("Recovery custody inventory exceeds its complete read bound.")
+                payloads.extend(rows)
+            allocations = tuple(
+                session.scalars(
+                    select(LaunchplaneIdempotencyRow.payload)
+                    .where(
+                        LaunchplaneIdempotencyRow.route_path.startswith("/v1/dokploy-targets/setup")
+                    )
+                    .limit(10001)
+                )
+            )
+            if len(allocations) > 10000:
+                raise ValueError("Allocation custody inventory exceeds its complete read bound.")
+            for allocation in allocations:
+                response = allocation.get("response_payload", {})
+                if not isinstance(response, dict):
+                    raise ValueError("Allocation custody payload is unavailable.")
+                result = response.get("result", response)
+                if not isinstance(result, dict):
+                    raise ValueError("Allocation custody result is unavailable.")
+                if result.get("allocation_state") == "retained_uncertain":
+                    plan_id = result.get("plan_id")
+                    if not isinstance(plan_id, str):
+                        raise ValueError("Retained allocation identity is unavailable.")
+                    payloads.append(state_volume_allocation_names(plan_id))
+        return tuple(payloads)
+
     def write_product_retirement_record(self, record: ProductRetirementRecord) -> None:
         with self._session_factory() as session:
             existing = session.get(LaunchplaneProductRetirementRow, record.record_id)
