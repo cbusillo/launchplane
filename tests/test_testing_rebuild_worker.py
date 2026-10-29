@@ -4920,7 +4920,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.fail_after_stop = True
         with self.assertRaises(TimeoutError):
             self.execute()
-        observed = False
+        observed: bool
 
         def unknown(**kwargs: Any) -> dict[str, Any]:
             nonlocal observed
