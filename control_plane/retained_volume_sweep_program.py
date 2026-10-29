@@ -332,6 +332,9 @@ try:
                 raise Unknown()
             emit('held','never_started')
             raise SystemExit
+        if mode=='dry-run' and absence(engine_id):
+            emit('absent','already_absent')
+            raise SystemExit
         volume=one_volume(name)
         backing,metadata=binding(volume,root)
         if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:

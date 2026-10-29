@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
-from control_plane.contracts.retained_volume_sweep import RETAINED_VOLUME_SWEEP_ROUTE
 from control_plane.contracts.release_request import RELEASE_REQUEST_ROUTE
 from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
 
@@ -260,7 +259,6 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/production-backup-gates": "enqueue_production_backup_gate",
     "/v1/odoo-prod-promotions": "enqueue_odoo_prod_promotion",
     SERVICE_RESTART_ROUTE: "restart_lane_service",
-    RETAINED_VOLUME_SWEEP_ROUTE: "sweep_retained_volumes",
     "/v1/odoo-prod-rollbacks": "enqueue_odoo_prod_rollback",
     "/v1/privileged-operations/plans/{operation_id}/cancel": ("cancel_human_privileged_operation"),
     "/v1/privileged-operations/plans/{operation_id}/approve": (

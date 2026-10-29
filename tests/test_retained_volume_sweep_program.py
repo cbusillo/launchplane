@@ -208,6 +208,20 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         self.assertEqual(self.run_program("readback")["status"], "absent")
         self.assertEqual(self.run_program("apply")["status"], "absent")
 
+    def test_fresh_dry_run_accepts_absent_but_original_missing_receipt_stays_unknown(self) -> None:
+        self.state["removed"] = True
+        self.write_state()
+
+        self.assertEqual(
+            self.run_program(operation="provider/fresh"),
+            {"status": "absent", "reason_code": "already_absent"},
+        )
+        self.assertEqual(
+            self.run_program("readback", operation="provider/original"),
+            {"status": "unknown", "reason_code": "inventory_unavailable"},
+        )
+        self.assertNotIn("rm_args", json.loads(self.state_path.read_text()))
+
     def test_confirmed_no_effect_and_never_started_readbacks_settle_without_removal(self) -> None:
         self.assertEqual(self.run_program("readback")["reason_code"], "never_started")
         self.state["rm_fail"] = True
