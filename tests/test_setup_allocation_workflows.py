@@ -48,9 +48,6 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
 
     def test_caller_classifies_recovery_and_requires_apply_confirmation(self) -> None:
         for control, mode, recovery in (
-            (None, "dry_run", "false"),
-            ({}, "apply", "false"),
-            ({"idempotency_key": "fresh key"}, "apply", "false"),
             ({"mode": "readback"}, "dry_run", "true"),
             ({"mode": "apply"}, "apply", "true"),
             (
@@ -122,15 +119,8 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
         return env
 
     def test_caller_recovery_finalizes_only_original_target_artifact(self) -> None:
-        self.render_caller({"idempotency_key": "original-key"})
         target = self.root / "target-plan-request.json"
-        original_bytes = target.read_bytes()
-        for name in (
-            "generic-web-intent.json",
-            "onboarding-plan-request.json",
-            "authz-plan-request.json",
-        ):
-            (self.root / name).unlink()
+        original_bytes = Path("tests/fixtures/onboarding-target-plan.json").read_bytes()
         for mode in ("readback", "apply"):
             with self.subTest(mode=mode):
                 env = self.render_caller({"mode": mode, "idempotency_key": "original-key"})
@@ -142,29 +132,18 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
                 self.assertEqual(
                     outputs["target_plan_sha256"], hashlib.sha256(original_bytes).hexdigest()
                 )
-                self.assertEqual(outputs["onboarding_plan_sha256"], "")
-                self.assertEqual(outputs["authz_plan_sha256"], "")
                 self.assertFalse((self.root / "authz-reconcile-request.json").exists())
 
-    def test_caller_normal_onboarding_keeps_all_planned_artifacts(self) -> None:
-        env = self.render_caller({"idempotency_key": "fresh-reviewed-key"})
-        intent = json.loads((self.root / "generic-web-intent.json").read_text())
-        self.assertEqual(intent["repository_id"], env["REPOSITORY_ID"])
-        self.assertEqual(intent["testing_context"], env["NORMALIZED_TESTING_CONTEXT"])
-        authz = {"fixture": "reviewed configuration"}
-        (self.root / "onboarding-plan.json").write_text(
-            json.dumps({"result": {"plan_sha256": "a" * 64}})
-        )
-        (self.root / "authz-plan.json").write_text(
-            json.dumps({"result": {"plan_sha256": "b" * 64, "configuration": authz}})
-        )
-        result = self.caller_step("Finalize onboarding plan", env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            json.loads((self.root / "authz-reconcile-request.json").read_text()), authz
-        )
-        self.assertEqual(self.output_values()["onboarding_plan_sha256"], "a" * 64)
-        self.assertEqual(self.output_values()["authz_plan_sha256"], "b" * 64)
+    def test_caller_refuses_new_onboarding_before_any_request(self) -> None:
+        for control in (None, {}, {"idempotency_key": "fresh-reviewed-key"}):
+            for mode in ("dry_run", "apply"):
+                with self.subTest(control=control, mode=mode):
+                    result = self.caller_step(
+                        "Validate and normalize typed inputs", self.caller_env(control, mode=mode)
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(self.output.exists())
+                    self.assertEqual(list(self.root.glob("*.json")), [])
 
     def run_step(
         self, workflow: str, job: str, name: str, env: dict[str, str]

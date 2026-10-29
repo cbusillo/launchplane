@@ -2538,24 +2538,20 @@ origin, Fetch Metadata and rotating CSRF checks. The same plan digest,
 idempotency and atomic bundle rules apply. This path writes product records
 without creating preview/testing caller grants or reconciling policy.
 
-The current-source onboarding worker applies only target and product records.
-The wrapper still pins its earlier grant-bearing revision and retains the
-matching planner; source deletion does not change that execution. Native
-replacement must cover target creation, original-key recovery/readback and
-reviewed custody retention before the wrapper retires. Browser target setup
-currently permits reviewed domain repair only. Existing caller-rule retirement
-and independent absence readback remain available.
+New generic-web products use the native target and record operations described
+in [operations](operations.md#native-target-allocation), with repository identity
+resolved through the configured source-host helper. Those operations create no
+preview/testing caller grants. Empty target and record qualification is recorded
+in [#5263](https://github.com/cbusillo/launchplane/issues/5263#issuecomment-6490944855);
+working previews and real-repository provenance need independent verification.
 
-The manual `Product Onboarding` workflow is the supported conventional caller.
-It resolves numeric GitHub repository and repository owner ids with a narrowly scoped
-GitHub App token, plans `create-application` through
-`POST /v1/dokploy-targets/setup`, plans the product bundle, and requests a
-complete generic-web preview authz reconciliation plan from
-`POST /v1/authz-policies/managed-rule-sets/generic-web-preview/plan`. Apply is
-one protected review followed by provider setup, record apply, and the existing
-digest-bound managed authz reconcile endpoint. A target/record partial success
-is safe to replay with the same stable idempotency keys; a later authz failure
-leaves the product unauthorized rather than silently broadening access.
+`Product Onboarding` refuses normal new-product dispatches. It retains only the
+old byte-artifact renderer and unchanged pinned worker for existing allocations'
+original actor/key recovery and reviewed custody retention. The current-source
+worker is not that pinned revision. Keep the original pin and required recovery
+inputs until old custody is accounted for. No new repository token, record plan,
+authz plan or authz reconciliation is issued by the wrapper. Existing caller-rule
+retirement and independent absence readback remain available.
 
 The authz planning route requires `generic_web_preview_authz.plan`, reads the
 active DB-backed policy, retains unrelated managed rules, and returns a complete

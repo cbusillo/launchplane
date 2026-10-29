@@ -341,7 +341,8 @@ supply `{"mode":"readback"}`. The caller renders only the original target reques
 skips repository-token creation and all three planning API calls, and invokes the
 protected worker even though the outer mode is dry_run. The worker retains the
 original workflow identity and allocation key; no product or authorization plan
-is required. Ordinary dry_run without a recovery mode still only plans onboarding.
+is required. Dispatches without a recovery mode are refused; new products use the
+[native target and record path](operations.md#native-target-allocation).
 
 To continue the original allocation, select outer mode apply, provide its exact
 confirmation, and supply `{"mode":"apply"}`. For reviewed retention, add

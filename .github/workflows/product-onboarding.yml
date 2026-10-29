@@ -5,7 +5,7 @@ name: Product Onboarding
   workflow_dispatch:
     inputs:
       mode:
-        description: Plan only or apply after protected review.
+        description: Recovery only. New products use native target and record operations.
         required: true
         default: dry_run
         type: choice
@@ -115,14 +115,9 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      authz_plan_sha256: ${{ steps.plan.outputs.authz_plan_sha256 }}
-      default_branch: ${{ steps.repository.outputs.default_branch }}
-      onboarding_plan_sha256: ${{ steps.plan.outputs.onboarding_plan_sha256 }}
       product: ${{ steps.inputs.outputs.product }}
       recovery: ${{ steps.inputs.outputs.recovery }}
       preview_context: ${{ steps.inputs.outputs.preview_context }}
-      repository_id: ${{ steps.repository.outputs.repository_id }}
-      repository_owner_id: ${{ steps.repository.outputs.repository_owner_id }}
       testing_context: ${{ steps.inputs.outputs.testing_context }}
       target_plan_sha256: ${{ steps.plan.outputs.target_plan_sha256 }}
     env:
@@ -196,6 +191,12 @@ jobs:
           if not isinstance(retain, bool) or not isinstance(custody, str):
               raise SystemExit("allocation_control retention requires a boolean and string digest.")
           recovery = "mode" in control
+          if not recovery:
+              raise SystemExit(
+                  "New products use native target allocation and product-record apply. "
+                  "See docs/operations.md#native-target-allocation. "
+                  "This workflow only recovers existing allocations."
+              )
           if recovery and control["mode"] not in {"readback", "apply"}:
               raise SystemExit("allocation_control mode must be readback or apply.")
           if retain:
@@ -269,55 +270,12 @@ jobs:
               handle.write(f"project_name={project_name}\n")
           PY
 
-      - name: Mint repository metadata token
-        if: steps.inputs.outputs.recovery != 'true'
-        id: repository-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID }}
-          private-key: ${{ secrets.LAUNCHPLANE_ONBOARDING_GITHUB_APP_PRIVATE_KEY }}
-          owner: ${{ steps.inputs.outputs.repository_owner }}
-          repositories: ${{ steps.inputs.outputs.repository_name }}
-          permission-contents: read
-
-      - name: Resolve immutable repository identity
-        if: steps.inputs.outputs.recovery != 'true'
-        id: repository
-        shell: bash
-        env:
-          GH_TOKEN: ${{ steps.repository-token.outputs.token }}
-        run: |
-          set -euo pipefail
-          repository_json="$(gh api "repos/${REPOSITORY}")"
-          repository_id="$(jq -r '.id | tostring' <<< "$repository_json")"
-          repository_owner_id="$(jq -r '.owner.id | tostring' <<< "$repository_json")"
-          default_branch="$(jq -r '.default_branch // empty' <<< "$repository_json")"
-          if ! [[ "$repository_id" =~ ^[0-9]+$ && "$repository_owner_id" =~ ^[0-9]+$ ]]; then
-            echo "GitHub repository identity is incomplete." >&2
-            exit 1
-          fi
-          if [ -z "$default_branch" ]; then
-            echo "GitHub repository default branch is unavailable." >&2
-            exit 1
-          fi
-          {
-            echo "repository_id=$repository_id"
-            echo "repository_owner_id=$repository_owner_id"
-            echo "default_branch=$default_branch"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Render plan requests
         shell: bash
         env:
-          RECOVERY: ${{ steps.inputs.outputs.recovery }}
-          DEFAULT_BRANCH: ${{ steps.repository.outputs.default_branch }}
-          NORMALIZED_PRODUCT: ${{ steps.inputs.outputs.product }}
-          NORMALIZED_PREVIEW_CONTEXT: ${{ steps.inputs.outputs.preview_context }}
-          NORMALIZED_PROJECT_NAME: ${{ steps.inputs.outputs.project_name }}
-          NORMALIZED_TARGET_NAME: ${{ steps.inputs.outputs.target_name }}
           NORMALIZED_TESTING_CONTEXT: ${{ steps.inputs.outputs.testing_context }}
-          REPOSITORY_ID: ${{ steps.repository.outputs.repository_id }}
-          REPOSITORY_OWNER_ID: ${{ steps.repository.outputs.repository_owner_id }}
+          NORMALIZED_TARGET_NAME: ${{ steps.inputs.outputs.target_name }}
+          NORMALIZED_PROJECT_NAME: ${{ steps.inputs.outputs.project_name }}
         run: |
           set -euo pipefail
           jq -n \
@@ -333,181 +291,41 @@ jobs:
               environment_name:$environment_name, server_id:$server_id,
               healthcheck_path:$healthcheck_path}' \
             > target-plan-request.json
-          if [ "$RECOVERY" = true ]; then
-            exit 0
-          fi
-          jq -n \
-            --arg product "$NORMALIZED_PRODUCT" \
-            --arg display_name "$DISPLAY_NAME" \
-            --arg repository "$REPOSITORY" \
-            --arg repository_id "$REPOSITORY_ID" \
-            --arg repository_owner_id "$REPOSITORY_OWNER_ID" \
-            --arg default_branch "$DEFAULT_BRANCH" \
-            --arg image_repository "$IMAGE_REPOSITORY" \
-            --arg health_path "$HEALTH_PATH" \
-            --arg testing_context "$NORMALIZED_TESTING_CONTEXT" \
-            --arg target_name "$NORMALIZED_TARGET_NAME" \
-            --arg project_name "$NORMALIZED_PROJECT_NAME" \
-            --arg server_id "$SERVER_ID" \
-            --arg preview_context "$NORMALIZED_PREVIEW_CONTEXT" \
-            --arg preview_base_url "$PREVIEW_BASE_URL" \
-            --arg domain_certificate_type "$DOMAIN_CERTIFICATE_TYPE" \
-            --argjson runtime_port "$RUNTIME_PORT" \
-            '{schema_version:1, product:$product, display_name:$display_name,
-              repository:$repository, repository_id:$repository_id,
-              repository_owner_id:$repository_owner_id, default_branch:$default_branch,
-              image_repository:$image_repository, runtime_port:$runtime_port,
-              health_path:$health_path, testing_context:$testing_context,
-              target_name:$target_name, project_name:$project_name,
-              server_id:$server_id,
-              preview_context:$preview_context, preview_base_url:$preview_base_url,
-              domain_certificate_type:$domain_certificate_type}' \
-            > generic-web-intent.json
-          jq -n --slurpfile intent generic-web-intent.json \
-            '{schema_version:1, product:"launchplane", mode:"dry_run",
-              generic_web:$intent[0]}' \
-            > onboarding-plan-request.json
-          jq -n \
-            --arg target_product "$NORMALIZED_PRODUCT" \
-            --arg repository "$REPOSITORY" \
-            --arg repository_id "$REPOSITORY_ID" \
-            --arg repository_owner_id "$REPOSITORY_OWNER_ID" \
-            --arg default_branch "$DEFAULT_BRANCH" \
-            --arg preview_context "$NORMALIZED_PREVIEW_CONTEXT" \
-            --arg launchplane_sha "$GITHUB_SHA" \
-            --arg reason "$REASON" \
-            --arg related_issue "$RELATED_ISSUE" \
-            '{schema_version:1, product:"launchplane", operation:"onboard",
-              target_product:$target_product, repository:$repository,
-              repository_id:$repository_id, repository_owner_id:$repository_owner_id,
-              default_branch:$default_branch, preview_context:$preview_context,
-              launchplane_sha:$launchplane_sha, reason:$reason,
-              related_issue:$related_issue}' \
-            > authz-plan-request.json
-
-      - name: Plan Dokploy application target
-        if: steps.inputs.outputs.recovery != 'true'
-        id: target-plan
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dc9fb481d20c6e9a6ccf62b20f5416b237d46191 # launchplane-request
-        with:
-          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
-          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
-          route-path: /v1/dokploy-targets/setup
-          payload-file: target-plan-request.json
-          expected-status: "202"
-          fail-result-paths: ""
-          response-output-file: target-plan.json
-
-      - name: Plan product records
-        if: steps.inputs.outputs.recovery != 'true'
-        id: onboarding-plan
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dc9fb481d20c6e9a6ccf62b20f5416b237d46191 # launchplane-request
-        with:
-          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
-          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
-          route-path: /v1/product-onboarding/apply
-          payload-file: onboarding-plan-request.json
-          expected-status: "202"
-          fail-result-paths: ""
-          response-output-file: onboarding-plan.json
-
-      - name: Plan preview authorization
-        if: steps.inputs.outputs.recovery != 'true'
-        id: authz-plan
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dc9fb481d20c6e9a6ccf62b20f5416b237d46191 # launchplane-request
-        with:
-          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
-          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
-          route-path: /v1/authz-policies/managed-rule-sets/generic-web-preview/plan
-          payload-file: authz-plan-request.json
-          expected-status: "202"
-          fail-result-paths: ""
-          response-output-file: authz-plan.json
 
       - name: Finalize onboarding plan
         id: plan
         shell: bash
         env:
-          RECOVERY: ${{ steps.inputs.outputs.recovery }}
-          NORMALIZED_PREVIEW_CONTEXT: ${{ steps.inputs.outputs.preview_context }}
           NORMALIZED_PRODUCT: ${{ steps.inputs.outputs.product }}
           NORMALIZED_TESTING_CONTEXT: ${{ steps.inputs.outputs.testing_context }}
         run: |
           set -euo pipefail
           target_plan_sha256="$(sha256sum target-plan-request.json | awk '{print $1}')"
-          if [ "$RECOVERY" = true ]; then
-            {
-              echo "onboarding_plan_sha256="
-              echo "authz_plan_sha256="
-              echo "target_plan_sha256=$target_plan_sha256"
-            } >> "$GITHUB_OUTPUT"
-            {
-              echo "## Generic-web allocation recovery"
-              echo
-              echo "- Product: $NORMALIZED_PRODUCT"
-              echo "- Testing context: $NORMALIZED_TESTING_CONTEXT"
-              echo "- Original target request: \`$target_plan_sha256\`"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          onboarding_plan_sha256="$(jq -r '.result.plan_sha256 // empty' onboarding-plan.json)"
-          authz_plan_sha256="$(jq -r '.result.plan_sha256 // empty' authz-plan.json)"
-          if ! [[ "$onboarding_plan_sha256" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "Product onboarding plan did not return a valid digest." >&2
-            exit 1
-          fi
-          if ! [[ "$authz_plan_sha256" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "Preview authz plan did not return a valid digest." >&2
-            exit 1
-          fi
-          jq '.result.configuration' authz-plan.json > authz-reconcile-request.json
+          echo "target_plan_sha256=$target_plan_sha256" >> "$GITHUB_OUTPUT"
           {
-            echo "onboarding_plan_sha256=$onboarding_plan_sha256"
-            echo "authz_plan_sha256=$authz_plan_sha256"
-            echo "target_plan_sha256=$target_plan_sha256"
-          } >> "$GITHUB_OUTPUT"
-          {
-            echo "## Generic-web onboarding plan"
+            echo "## Generic-web allocation recovery"
             echo
             echo "- Product: $NORMALIZED_PRODUCT"
-            echo "- Repository: $REPOSITORY"
             echo "- Testing context: $NORMALIZED_TESTING_CONTEXT"
-            echo "- Preview context: $NORMALIZED_PREVIEW_CONTEXT"
-            echo "- Preview base URL: $PREVIEW_BASE_URL"
-            echo "- Provider operation: create-application"
-            echo "- Launchplane worker SHA: \`$GITHUB_SHA\`"
-            echo "- Provider plan: \`$target_plan_sha256\`"
-            echo "- Product plan: \`$onboarding_plan_sha256\`"
-            echo "- Authz plan: \`$authz_plan_sha256\`"
-            echo "- Authz rules added: $(jq -r '.result.diff.added_rule_count' authz-plan.json)"
-            echo "- Authz rules removed: $(jq -r '.result.diff.removed_rule_count' authz-plan.json)"
-            echo "- Readiness blockers: $(jq -r '.result.diff.operational_readiness_blocked_rule_count' authz-plan.json)"
+            echo "- Original target request: \`$target_plan_sha256\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload onboarding plan evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: generic-web-onboarding-plan
-          path: |
-            generic-web-intent.json
-            target-plan-request.json
-            target-plan.json
-            onboarding-plan.json
-            authz-plan.json
-            authz-reconcile-request.json
+          path: target-plan-request.json
           if-no-files-found: error
           retention-days: 14
 
   apply:
-    if: ${{ inputs.mode == 'apply' || needs.plan.outputs.recovery == 'true' }}
+    if: needs.plan.outputs.recovery == 'true'
     needs: plan
     uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml@a3fbd1c47912b0b0975978a7cd8d18e040e28b2e # main
     with:
       allocation_control: ${{ inputs.allocation_control }}
       product: ${{ needs.plan.outputs.product }}
       testing_context: ${{ needs.plan.outputs.testing_context }}
-      onboarding_plan_sha256: ${{ needs.plan.outputs.onboarding_plan_sha256 }}
-      authz_plan_sha256: ${{ needs.plan.outputs.authz_plan_sha256 }}
       target_plan_sha256: ${{ needs.plan.outputs.target_plan_sha256 }}
       reason: ${{ inputs.reason }}
     secrets: inherit
