@@ -7,6 +7,18 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 POSTGRES_PREVIEW_TRANSPORTS = frozenset({"postgres", "verireel-postgres"})
 
 
+def require_postgres_preview_cleanup(
+    profile: LaunchplaneProductProfileRecord, previews: Iterable[PreviewRecord]
+) -> None:
+    if profile.preview.transport_extension in POSTGRES_PREVIEW_TRANSPORTS and any(
+        preview.context == profile.preview.context and preview.state != "destroyed"
+        for preview in previews
+    ):
+        raise ValueError(
+            "Clean up PostgreSQL previews through preview destroy before retiring the product; application-only retirement cannot remove their databases and roles."
+        )
+
+
 def effective_preview_app_name_prefix(*, profile: LaunchplaneProductProfileRecord) -> str:
     return profile.preview.app_name_prefix.strip() or f"{profile.product}-preview"
 
@@ -54,6 +66,8 @@ def require_unique_preview_namespaces(
 
 
 def _resource_declaration(profile: LaunchplaneProductProfileRecord) -> dict[str, object]:
+    if profile.driver_id not in {"generic-web", "verireel"}:
+        return {}
     preview = profile.preview
     template = next(
         (lane for lane in profile.lanes if lane.instance == preview.template_instance), None

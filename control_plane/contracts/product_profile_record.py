@@ -6,9 +6,6 @@ from typing import Annotated, Literal, get_args
 
 from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
-from control_plane.contracts.postgres_preview import (
-    PreviewSecretEncoding,
-)
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverLane
 from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
@@ -30,6 +27,7 @@ from control_plane.contracts.snapshot_protocol import (
 )
 
 
+PreviewSecretEncoding = Literal["urlsafe", "base64"]
 ProductLifecycleState = Literal["active", "retiring", "retired"]
 ProductPublicWebsite = Literal["required", "none"]
 ProductionUseAuthority = Literal["explicit", "director_agent"]
@@ -451,7 +449,7 @@ class ProductPreviewProfile(BaseModel):
             and not (info.context and info.context.get("stored_product_profile"))
         ):
             raise ValueError(
-                "The retired preview transport is readable only from stored records; use postgres declarations for writes."
+                "The retired preview transport is read-only; apply a reviewed shared-web transition before editing this profile."
             )
         return value
 

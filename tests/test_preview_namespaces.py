@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.postgres_preview import effective_postgres_preview_profile
 from control_plane.contracts.product_retirement import canonical_sha256
 from control_plane.drivers.postgres_preview_transport import (
     PostgresPreviewDestroyEnvelope,
@@ -22,12 +21,13 @@ from control_plane.workflows.postgres_preview import (
     PostgresPreviewDestroyRequest,
     PostgresPreviewDestroyResult,
     PostgresPreviewRefreshConfigError,
-    PostgresPreviewRefreshResult,
-    _build_preview_runtime_identity,
 )
 from tests.test_generic_web_preview_extensions import _driver_profile
 from tests.test_postgres_preview import _refresh_request
-from tests.test_product_retirement import _Store, _observation, _plan
+from tests.test_product_retirement import _Store, _observation, _plan, _request
+from control_plane.product_retirement_no_target import bind_no_target_retirement
+from control_plane.product_retirement import ProductRetirementBlockedError
+from control_plane.product_retirement_previews import validate_product_scope
 
 
 def _site(
@@ -66,6 +66,29 @@ def _preview(profile: LaunchplaneProductProfileRecord) -> PreviewRecord:
 
 
 class PreviewNamespaceTests(unittest.TestCase):
+    def test_stale_profile_refuses_provider_execution(self) -> None:
+        for backend in ("filesystem", "postgres"):
+            with self.subTest(backend=backend), self.store(backend) as store:
+                profile = _driver_profile()
+                store.write_product_profile_record(
+                    profile.model_copy(update={"health_path": "/new"})
+                )
+                with (
+                    patch(
+                        "control_plane.drivers.postgres_preview_transport.execute_postgres_preview_refresh"
+                    ) as execute,
+                    self.assertRaises(PostgresPreviewRefreshConfigError),
+                ):
+                    apply_postgres_preview_refresh_result(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=PostgresPreviewRefreshEnvelope(
+                            product=profile.product, refresh=_refresh_request()
+                        ),
+                        execution_profile=profile,
+                    )
+                execute.assert_not_called()
+
     def test_destroy_preflight_keeps_resources_unrecorded_and_destroyed_cleanup_is_inert(
         self,
     ) -> None:
@@ -102,8 +125,20 @@ class PreviewNamespaceTests(unittest.TestCase):
                         request=request,
                         execution_profile=profile,
                     )
-                    self.assertEqual(records, {})
+                    self.assertEqual(records["transition"], "destroy_failed")
                     self.assertEqual(result["destroy_status"], "fail")
+                    self.assertEqual(store.list_preview_records(), ())
+                    execute.return_value = execute.return_value.model_copy(
+                        update={"destroy_status": "pass"}
+                    )
+                    records, result = apply_postgres_preview_destroy_result(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=request,
+                        execution_profile=profile,
+                    )
+                    self.assertEqual(records["transition"], "destroyed_missing_preview")
+                    self.assertEqual(result["destroy_status"], "pass")
                     self.assertEqual(store.list_preview_records(), ())
                     store.write_preview_record(
                         preview.model_copy(
@@ -119,6 +154,34 @@ class PreviewNamespaceTests(unittest.TestCase):
                     )
                     self.assertEqual(result["destroy_status"], "pass")
                     execute.assert_not_called()
+
+    def test_application_only_retirement_requires_postgres_preview_cleanup(self) -> None:
+        with self.store("postgres") as store:
+            assert isinstance(store, PostgresRecordStore)
+            initial = _driver_profile()
+            profile = initial.model_copy(
+                update={
+                    "lanes": tuple(lane for lane in initial.lanes if lane.instance == "testing"),
+                    "production_use": "prelaunch",
+                }
+            )
+            store.write_product_profile_record(profile)
+            preview = _preview(profile)
+            store.write_preview_record(preview)
+            with self.assertRaises(ValueError):
+                validate_product_scope(store, profile, "testing")
+            with self.assertRaises(ProductRetirementBlockedError):
+                bind_no_target_retirement(
+                    record_store=store,
+                    request=_request(
+                        product=profile.product,
+                        instance="testing",
+                        no_target=True,
+                        expected_target_sha256="",
+                    ),
+                )
+            self.assertEqual(store.read_preview_record(preview.preview_id), preview)
+            self.assertEqual(store.read_product_profile_record(profile.product), profile)
 
     def test_retirement_reads_preserve_legacy_profile_hash_fences(self) -> None:
         payload = _driver_profile().model_dump(mode="json")
@@ -286,114 +349,40 @@ class PreviewNamespaceTests(unittest.TestCase):
                 store.write_product_profile_record(renamed)
                 self.assertEqual(store.read_product_profile_record(first.product), renamed)
 
-    def test_profile_authority_is_rechecked_when_pending_evidence_is_published(self) -> None:
+    def test_preflight_failure_preserves_serving_preview_evidence(self) -> None:
         for backend in ("filesystem", "postgres"):
             with self.subTest(backend=backend), self.store(backend) as store:
                 profile = _driver_profile()
                 store.write_product_profile_record(profile)
-                changed = profile.model_copy(
+                preview = _preview(profile)
+                store.write_preview_record(preview)
+                refresh = _refresh_request().model_copy(
                     update={
-                        "preview": profile.preview.model_copy(update={"app_name_suffix": "-other"})
+                        "context": preview.context,
+                        "anchor_repo": preview.anchor_repo,
+                        "anchor_pr_number": preview.anchor_pr_number,
+                        "preview_slug": preview.preview_label,
+                        "preview_url": "",
                     }
                 )
-                store.write_product_profile_record(changed)
-                with self.assertRaises(ValueError):
-                    store.write_preview_record(_preview(profile), expected_profile=profile)
-                self.assertEqual(store.list_preview_records(), ())
-
-    def test_preflight_failure_leaves_no_resource_and_prepared_refresh_freezes_names(self) -> None:
-        for backend in ("filesystem", "postgres"):
-            with self.subTest(backend=backend), self.store(backend) as store:
-                profile = _driver_profile()
-                store.write_product_profile_record(profile)
-                request = PostgresPreviewRefreshEnvelope(
-                    product=profile.product, refresh=_refresh_request()
-                )
-                with patch(
-                    "control_plane.drivers.postgres_preview_transport.execute_postgres_preview_refresh",
-                    side_effect=PostgresPreviewRefreshConfigError("Missing testing template"),
+                with (
+                    patch(
+                        "control_plane.drivers.postgres_preview_transport.require_forward_preview_build"
+                    ),
+                    patch(
+                        "control_plane.drivers.postgres_preview_transport.execute_postgres_preview_refresh",
+                        side_effect=PostgresPreviewRefreshConfigError("Missing testing template"),
+                    ),
                 ):
                     records, result = apply_postgres_preview_refresh_result(
                         control_plane_root=Path("."),
                         record_store=store,
-                        request=request,
+                        request=PostgresPreviewRefreshEnvelope(
+                            product=profile.product, refresh=refresh
+                        ),
                         execution_profile=profile,
                     )
                 self.assertEqual(records, {})
                 self.assertEqual(result["refresh_status"], "fail")
-                self.assertEqual(store.list_preview_records(), ())
-
-                def execute(**kwargs: object) -> PostgresPreviewRefreshResult:
-                    prepare = kwargs["prepare_preview"]
-                    assert callable(prepare)
-                    prepare()
-                    pending = store.list_preview_records()[0]
-                    self.assertEqual(pending.state, "pending")
-                    generation = store.list_preview_generation_records(
-                        preview_id=pending.preview_id
-                    )[0]
-                    self.assertEqual(generation.state, "deploying")
-                    renamed = profile.model_copy(
-                        update={
-                            "preview": profile.preview.model_copy(
-                                update={"transport_database_prefix": "other_"}
-                            )
-                        }
-                    )
-                    with self.assertRaises(ValueError):
-                        store.write_product_profile_record(renamed)
-                    return PostgresPreviewRefreshResult(
-                        refresh_status="pass",
-                        refresh_started_at=pending.created_at,
-                        refresh_finished_at=pending.updated_at,
-                        application_name="fixture-preview",
-                        application_id="fixture",
-                        preview_url=request.refresh.preview_url,
-                        runtime_identity=_build_preview_runtime_identity(
-                            request=request.refresh,
-                            product=profile.product,
-                            preview_id=pending.preview_id,
-                            preview_generation_id=generation.generation_id,
-                        ),
-                    )
-
-                with patch(
-                    "control_plane.drivers.postgres_preview_transport.execute_postgres_preview_refresh",
-                    side_effect=execute,
-                ):
-                    records, result = apply_postgres_preview_refresh_result(
-                        control_plane_root=Path("."),
-                        record_store=store,
-                        request=request,
-                        execution_profile=profile,
-                    )
-                self.assertEqual(result["refresh_status"], "pass")
-                self.assertEqual(
-                    len(
-                        store.list_preview_generation_records(preview_id=str(records["preview_id"]))
-                    ),
-                    1,
-                )
-
-    def test_legacy_execution_adaptation_preserves_raw_profile_and_fixed_endpoint(self) -> None:
-        baseline = _driver_profile()
-        payload = baseline.model_dump(mode="json")
-        payload["runtime_port"] = 8081
-        payload["health_path"] = "/different"
-        payload["preview"]["transport_extension"] = "verireel-postgres"
-        payload["preview"]["domain_certificate_type"] = "letsencrypt"
-        payload["preview"].pop("generated_secret_env")
-        raw = LaunchplaneProductProfileRecord.model_validate(
-            payload, context={"stored_product_profile": True}
-        )
-        before = raw.model_dump_json()
-        effective = effective_postgres_preview_profile(raw)
-        self.assertEqual(raw.model_dump_json(), before)
-        self.assertEqual(effective.runtime_port, baseline.runtime_port)
-        self.assertEqual(effective.health_path, baseline.health_path)
-        self.assertEqual(
-            effective.preview.domain_certificate_type, baseline.preview.domain_certificate_type
-        )
-        self.assertEqual(
-            effective.preview.generated_secret_env, baseline.preview.generated_secret_env
-        )
+                self.assertEqual(store.read_preview_record(preview.preview_id), preview)
+                self.assertEqual(store.list_preview_generation_records(), ())

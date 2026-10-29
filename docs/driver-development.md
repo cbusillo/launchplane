@@ -133,17 +133,26 @@ product-specific URL rewriting. Maintenance and schedules remain profile-owned.
 This uses the existing isolated PostgreSQL preparation and cleanup rather than
 the plain preview path. Stored `verireel-postgres` declarations remain unchanged
 when read, including profiles embedded in retirement records and their hash
-fences. An execution-only adapter preserves the historical generated keys,
-encodings, URL keys, port, health path and certificate behavior. A reviewed
-generic-web transition materializes the canonical preview declaration and shows
-the effective endpoint before and after; it does not rewrite production endpoint
-settings. New profile and transition inputs reject the retired name.
+fences. The retired transport does not execute. Before preview refresh, cleanup or
+other profile edits, apply a reviewed generic-web transition from the product's
+Shared web driver panel. Declare `postgres`, `generated_secret_env`,
+`preview_url_env_keys` and `preview_domain_env_keys` explicitly from the product's
+runtime contract. Empty collections mean the product requires none; Launchplane
+does not infer product keys. Keep existing resource prefixes and slug/template
+settings when retained previews still need cleanup. The review shows the new
+preview endpoint and HTTPS policy; a legacy effective endpoint is reported as
+unknown. Production endpoint settings are not rewritten. New inputs reject the
+retired name.
 New products declare their own keys
 and prefixes through the product profile or reviewed generic-web transition.
 Historical deployment
 and backup records and retired instance-scoped policy grants remain readable;
 no retired release endpoint is enabled by those grants. Production still changes only through an
 accepted release.
+
+Application-only product retirement cannot clean PostgreSQL databases or roles.
+Destroy retained PostgreSQL previews through their normal preview cleanup route
+before integrated or no-target product retirement.
 
 Product browser checks belong to the product's Build. VeriReel qualifies every
 candidate image using disposable app, database and browser containers before

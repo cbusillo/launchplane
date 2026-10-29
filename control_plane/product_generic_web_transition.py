@@ -6,12 +6,10 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
-from control_plane.contracts.postgres_preview import (
-    PreviewSecretEncoding,
-    effective_postgres_preview_profile,
-)
+
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    PreviewSecretEncoding,
     CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION,
     validate_product_profile_history_transition,
 )
@@ -71,14 +69,19 @@ class GenericWebPreviewEndpoint(BaseModel):
     runtime_port: int
     health_path: str
     certificate_type: Literal["none", "letsencrypt"]
+    https_policy: Literal["preview-url-scheme", "certificate"]
 
 
-def _preview_endpoint(profile: LaunchplaneProductProfileRecord) -> GenericWebPreviewEndpoint:
-    effective = effective_postgres_preview_profile(profile)
+def _preview_endpoint(profile: LaunchplaneProductProfileRecord) -> GenericWebPreviewEndpoint | None:
+    if profile.preview.transport_extension not in {"", "postgres"}:
+        return None
     return GenericWebPreviewEndpoint(
-        runtime_port=effective.runtime_port,
-        health_path=effective.health_path,
-        certificate_type=effective.preview.domain_certificate_type,
+        runtime_port=profile.runtime_port,
+        health_path=profile.health_path,
+        certificate_type=profile.preview.domain_certificate_type,
+        https_policy="preview-url-scheme"
+        if profile.preview.transport_extension == "postgres"
+        else "certificate",
     )
 
 
@@ -87,8 +90,8 @@ class ProductGenericWebTransitionPlan(BaseModel):
 
     product: str
     driver_before: str
-    preview_endpoint_before: GenericWebPreviewEndpoint
-    preview_endpoint_after: GenericWebPreviewEndpoint
+    preview_endpoint_before: GenericWebPreviewEndpoint | None
+    preview_endpoint_after: GenericWebPreviewEndpoint | None
     driver_after: Literal["generic-web"] = "generic-web"
     lanes: tuple[GenericWebLaneDeclaration, ...]
     preview: GenericWebPreviewDeclaration
@@ -121,11 +124,17 @@ def build_generic_web_transition_plan(
         for lane in lanes
     ):
         raise ValueError("The testing verification extension requires the recorded testing lane.")
-    preview = (
-        effective_postgres_preview_profile(profile).preview
-        if profile.preview.transport_extension == "verireel-postgres"
-        else profile.preview
-    )
+    if profile.preview.transport_extension not in {"", "postgres"} and (
+        request.preview is None
+        or request.preview.transport_extension != "postgres"
+        or not {"generated_secret_env", "preview_url_env_keys", "preview_domain_env_keys"}.issubset(
+            request.preview.model_fields_set
+        )
+    ):
+        raise ValueError(
+            "Declare postgres transport, generated_secret_env, preview_url_env_keys and preview_domain_env_keys from the product runtime contract before transitioning a legacy preview profile. Use empty collections only when the product requires none."
+        )
+    preview = profile.preview
     if request.preview is not None:
         updates = request.preview.model_dump(exclude_unset=True, exclude={"generic_web_extensions"})
         if request.preview.generic_web_extensions is not None:

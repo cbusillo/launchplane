@@ -37,6 +37,7 @@ from control_plane.provider_operations import (
     ProviderOperationLease,
 )
 from control_plane.workflows.generic_web_preview import effective_preview_app_name_prefix
+from control_plane.preview_namespaces import require_postgres_preview_cleanup
 
 
 class NoTargetRetirementStore(ProductRetirementStore, Protocol):
@@ -65,6 +66,16 @@ def bind_no_target_retirement(
 ) -> BoundProductRetirement:
     store = cast(NoTargetRetirementStore, record_store)
     profile = store.read_product_profile_record(request.product)
+    try:
+        require_postgres_preview_cleanup(
+            profile,
+            cast(
+                tuple[PreviewRecord, ...],
+                store.list_preview_records(context_name=profile.preview.context),
+            ),
+        )
+    except ValueError as error:
+        raise ProductRetirementBlockedError(str(error)) from error
     if (
         not request.no_target
         or profile.driver_id != "generic-web"

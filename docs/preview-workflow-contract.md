@@ -81,7 +81,7 @@ the generic-web lifecycle route delegates refresh and destroy execution to the
 registered shared capability. The `postgres` capability provides an isolated
 database and role, profile-declared generated secrets and application lifecycle
 commands for any generic-web product with a PostgreSQL testing template. Its
-configuration and legacy conversion are described in
+configuration and the supported legacy transition are described in
 [driver development](driver-development.md). Missing driver
 extensions fail closed instead of falling back to generic environment copying.
 Driver-owned application commands must invoke executables already present in the
@@ -103,14 +103,13 @@ to echo them, and persists that observed identity on the same explicit generatio
 Product-local preview slugs are not substitutes for Launchplane's canonical
 preview and generation identities.
 
-PostgreSQL provisioning performs inert template, configuration and environment
-checks before publishing pending preview and deploying generation evidence.
-That evidence is atomically bound to the current profile before the first provider
-effect and prevents resource declarations changing during provisioning. A failed
-preflight returns a failed operation without creating resource evidence or
-replacing a serving preview's evidence. Destroy uses the same profile check and
-serialization before its first provider effect; an already destroyed record is
-an idempotent success.
+PostgreSQL refresh and destroy use the same product-operation serialization as
+plain previews, rechecking the profile after acquiring it. A profile write cannot
+change resource declarations during a product operation; retained previews keep
+those declarations fixed between operations. This also applies to plain previews:
+clean them up before changing resource names, source or template. Inert refresh
+configuration failures preserve serving evidence. Destroy never creates a record
+for an unrecorded preview; an already destroyed record is an idempotent success.
 
 Because product callers pin reusable workflows while the service deploys
 independently, add any future destroy outcome to the `reusable-preview-feedback-status.yml` allowlist

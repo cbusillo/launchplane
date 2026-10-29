@@ -37,8 +37,8 @@ async function arrange(page: import("@playwright/test").Page, failure: "none" | 
     }
     await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "transition", records: { product_profile: "atlas-commerce" }, result: {
       product: "atlas-commerce", driver_before: "verireel", driver_after: "generic-web", changed: true, applied: body.mode === "apply", plan_sha256: "a".repeat(64), lanes: body.lanes, preview: body.preview,
-      preview_endpoint_before: { runtime_port: 3000, health_path: "/api/health", certificate_type: "none" },
-      preview_endpoint_after: { runtime_port: 8081, health_path: "/ready", certificate_type: "letsencrypt" },
+      preview_endpoint_before: { runtime_port: 3000, health_path: "/api/health", certificate_type: "none", https_policy: "certificate" },
+      preview_endpoint_after: { runtime_port: 8081, health_path: "/ready", certificate_type: "letsencrypt", https_policy: "preview-url-scheme" },
     } } });
   });
   await page.route("**/v1/product-profiles/atlas-commerce/mutation-receipts/generic-web-transition?*", route => route.fulfill({ json: { trace_id: "receipt", product: "atlas-commerce", field: "generic-web-transition", state: "completed", idempotency_key: requests[0]?.key, original_trace_id: "original-transition" } }));
@@ -61,7 +61,7 @@ test("shared-web review, draft invalidation, apply and exact readback", { tag: "
   const apply = panel.getByRole("button", { name: "Apply shared-web profile" });
   await expect(apply).toBeEnabled();
   await expect(panel.locator(".product-owner-plan")).toContainText("verireel-testing");
-  await expect(panel.locator(".product-owner-plan")).toContainText("port 3000, health /api/health, certificate none → port 8081, health /ready, certificate letsencrypt");
+  await expect(panel.locator(".product-owner-plan")).toContainText("port 3000, health /api/health, certificate none, HTTPS from certificate → port 8081, health /ready, certificate letsencrypt, HTTPS from preview URL");
   await panel.getByLabel("Change reason").fill("Revised review.");
   await expect(apply).toBeDisabled();
   await panel.getByRole("button", { name: "Review shared-web transition" }).click();

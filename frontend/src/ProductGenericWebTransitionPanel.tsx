@@ -49,7 +49,8 @@ function endpointSummary(value: unknown): string {
   if (!value || typeof value !== "object") return "not reported";
   const endpoint = value as Record<string, unknown>;
   if (typeof endpoint.runtime_port !== "number" || typeof endpoint.health_path !== "string" || typeof endpoint.certificate_type !== "string") return "not reported";
-  return `port ${endpoint.runtime_port}, health ${endpoint.health_path}, certificate ${endpoint.certificate_type}`;
+  const httpsPolicy = endpoint.https_policy === "preview-url-scheme" ? "from preview URL" : endpoint.https_policy === "certificate" ? "from certificate" : "not reported";
+  return `port ${endpoint.runtime_port}, health ${endpoint.health_path}, certificate ${endpoint.certificate_type}, HTTPS ${httpsPolicy}`;
 }
 function readReview(response: AcceptedEvidenceResponse, product: string, reason: string): Review | null {
   const result = response.result;
@@ -147,8 +148,10 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
   async function save() {
     if (!review || !matches) return;
     setError(""); setNotice("");
-    try { const raw = JSON.stringify(review); sessionStorage.setItem(storageKey, raw); if (sessionStorage.getItem(storageKey) !== raw) throw new Error("Draft unavailable"); }
-    catch { setError("The reviewed draft could not be preserved. Nothing was sent."); return; }
+    let preserved: boolean;
+    try { const raw = JSON.stringify({ request: review.request, changed: review.changed, driverBefore: review.driverBefore }); sessionStorage.setItem(storageKey, raw); preserved = sessionStorage.getItem(storageKey) === raw; }
+    catch { preserved = false; }
+    if (!preserved) { setError("The reviewed draft could not be preserved. Nothing was sent."); return; }
     const response = await apply.run(review.request);
     if (!response) return;
     const expected = review.request; setReview(null);

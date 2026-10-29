@@ -1,6 +1,5 @@
 from control_plane.preview_namespaces import (
     validate_preview_profile_writes,
-    require_unique_preview_namespaces,
 )
 
 import fcntl
@@ -7241,34 +7240,8 @@ class FilesystemRecordStore:
         records.sort(key=lambda record: (record.context, record.instance))
         return tuple(records)
 
-    def _require_preview_profile_locked(
-        self, expected_profile: LaunchplaneProductProfileRecord
-    ) -> None:
-        current = self._read_product_profile_record_path(
-            self._record_path("launchplane_product_profiles", expected_profile.product)
-        )
-        if current != expected_profile:
-            raise ValueError("Product profile changed before preview preparation.")
-        require_unique_preview_namespaces(
-            expected_profile,
-            self._list_product_profile_records_locked(),
-            retained_contexts={
-                record.context
-                for record in self._list_models_locked(PreviewRecord, "launchplane_previews")
-                if record.state != "destroyed"
-            },
-        )
-
-    def write_preview_record(
-        self,
-        record: PreviewRecord,
-        *,
-        expected_profile: LaunchplaneProductProfileRecord | None = None,
-    ) -> Path:
-        with self._product_authority_bundle_lock():
-            if expected_profile is not None:
-                self._require_preview_profile_locked(expected_profile)
-            return self._write_model_locked("launchplane_previews", record.preview_id, record)
+    def write_preview_record(self, record: PreviewRecord) -> Path:
+        return self._write_model("launchplane_previews", record.preview_id, record)
 
     def read_preview_record(self, preview_id: str) -> PreviewRecord:
         return PreviewRecord.model_validate(
@@ -7305,34 +7278,24 @@ class FilesystemRecordStore:
         *,
         preview_record: PreviewRecord,
         generation_record: PreviewGenerationRecord,
-        expected_profile: LaunchplaneProductProfileRecord | None = None,
     ) -> tuple[Path, Path]:
-        with self._product_authority_bundle_lock():
-            if expected_profile is not None:
-                self._require_preview_profile_locked(expected_profile)
-            generation_path = self._record_path(
-                "launchplane_preview_generations",
-                generation_record.generation_id,
-            )
-            preview_path = self._record_path("launchplane_previews", preview_record.preview_id)
-            previous_generation = generation_path.read_bytes() if generation_path.exists() else None
-            previous_preview = preview_path.read_bytes() if preview_path.exists() else None
-            try:
-                written_generation_path = self._write_model_locked(
-                    "launchplane_preview_generations",
-                    generation_record.generation_id,
-                    generation_record,
-                )
-                written_preview_path = self._write_model_locked(
-                    "launchplane_previews", preview_record.preview_id, preview_record
-                )
-            except Exception:
-                with suppress(Exception):
-                    self._restore_record_path(generation_path, previous_generation)
-                with suppress(Exception):
-                    self._restore_record_path(preview_path, previous_preview)
-                raise
-            return written_generation_path, written_preview_path
+        generation_path = self._record_path(
+            "launchplane_preview_generations",
+            generation_record.generation_id,
+        )
+        preview_path = self._record_path("launchplane_previews", preview_record.preview_id)
+        previous_generation = generation_path.read_bytes() if generation_path.exists() else None
+        previous_preview = preview_path.read_bytes() if preview_path.exists() else None
+        try:
+            written_generation_path = self.write_preview_generation_record(generation_record)
+            written_preview_path = self.write_preview_record(preview_record)
+        except Exception:
+            with suppress(Exception):
+                self._restore_record_path(generation_path, previous_generation)
+            with suppress(Exception):
+                self._restore_record_path(preview_path, previous_preview)
+            raise
+        return written_generation_path, written_preview_path
 
     def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord:
         return PreviewGenerationRecord.model_validate(

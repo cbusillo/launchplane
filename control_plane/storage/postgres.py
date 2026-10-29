@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from control_plane.generic_web_onboarding import GenericWebOnboardingIntent
 from control_plane.preview_namespaces import (
+    require_postgres_preview_cleanup,
     preview_resource_declaration_changed,
     preview_product_operation_key,
     validate_preview_profile_writes,
-    require_unique_preview_namespaces,
 )
 from control_plane.timestamps import utc_now_timestamp as _utc_now_timestamp
 
@@ -6340,28 +6340,6 @@ class PostgresRecordStore(HumanSessionStore):
             session.merge(row)
         self._after_product_authority_bundle_step(step_name)
 
-    def _require_preview_profile_in_session(
-        self, session: Any, expected_profile: LaunchplaneProductProfileRecord
-    ) -> None:
-        self._lock_product_authority_bundle_write(session)
-        row = session.get(LaunchplaneProductProfileRow, expected_profile.product)
-        if row is None or self._read_product_profile_payload(row.payload) != expected_profile:
-            raise ValueError("Product profile changed before preview preparation.")
-        require_unique_preview_namespaces(
-            expected_profile,
-            (
-                self._read_product_profile_payload(row.payload)
-                for row in session.scalars(select(LaunchplaneProductProfileRow))
-            ),
-            retained_contexts=set(
-                session.scalars(
-                    select(LaunchplanePreviewRow.context).where(
-                        LaunchplanePreviewRow.state != "destroyed"
-                    )
-                )
-            ),
-        )
-
     def _validate_preview_profile_writes_in_session(
         self, session: Any, replacements: tuple[LaunchplaneProductProfileRecord, ...]
     ) -> None:
@@ -6397,7 +6375,7 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 if excluded is not True:
                     raise ValueError(
-                        "A preview operation is still running; finish it before changing preview resource declarations."
+                        "A product operation is still running; finish it before changing preview resource declarations."
                     )
 
     def _product_profile_row(
@@ -19930,16 +19908,9 @@ class PostgresRecordStore(HumanSessionStore):
             "A retired preview requires fresh generation evidence before it can resume."
         )
 
-    def write_preview_record(
-        self,
-        record: PreviewRecord,
-        *,
-        expected_profile: LaunchplaneProductProfileRecord | None = None,
-    ) -> None:
+    def write_preview_record(self, record: PreviewRecord) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            if expected_profile is not None:
-                self._require_preview_profile_in_session(session, expected_profile)
             self._lock_preview_authority_write(session, preview=record)
             record = self._check_preview_retirement_write(session, record)
             session.merge(
@@ -20097,12 +20068,9 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         preview_record: PreviewRecord,
         generation_record: PreviewGenerationRecord,
-        expected_profile: LaunchplaneProductProfileRecord | None = None,
     ) -> tuple[None, None]:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            if expected_profile is not None:
-                self._require_preview_profile_in_session(session, expected_profile)
             self._lock_preview_authority_write(
                 session, preview=preview_record, generation=generation_record
             )
@@ -29841,6 +29809,7 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.product_retirement import ProductRetirementBlockedError
 
         profile = bound.profile
+        require_postgres_preview_cleanup(profile, bound.previews)
         contexts = (
             {lane.context for lane in profile.lanes}
             | {

@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from click.testing import CliRunner
-from pydantic import ValidationError, BaseModel
+from pydantic import ValidationError
 
 from control_plane.cli import main
 from control_plane.contracts.secret_record import SecretAuditEvent
@@ -2913,12 +2913,8 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self,
     ) -> None:
         class FailingPreviewFilesystemRecordStore(FilesystemRecordStore):
-            def _write_model_locked(
-                self, record_type: str, record_id: str, model: BaseModel
-            ) -> Path:
-                if isinstance(model, PreviewRecord):
-                    raise RuntimeError("preview write failed")
-                return super()._write_model_locked(record_type, record_id, model)
+            def write_preview_record(self, record: PreviewRecord) -> Path:
+                raise RuntimeError("preview write failed")
 
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)

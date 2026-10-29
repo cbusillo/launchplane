@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 import click
 
-from control_plane.contracts.postgres_preview import migrate_legacy_postgres_preview
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -46,20 +45,30 @@ def _driver_profile(
                 base_url="https://testing.example.test",
             ),
         ),
-        preview=ProductPreviewProfile.model_validate(
-            migrate_legacy_postgres_preview(
-                dict(
-                    enabled=True,
-                    context="verireel-testing",
-                    slug_template="pr-{number}",
-                    app_name_prefix="ver-preview",
-                    app_name_suffix="-app" if declared_transport else "",
-                    template_instance="testing",
-                    data_transport_mode="driver",
-                    transport_extension="verireel-postgres" if declared_transport else "",
-                    transport_database_prefix="verireel_preview_" if declared_transport else "",
-                )
-            )
+        preview=ProductPreviewProfile(
+            enabled=True,
+            context="verireel-testing",
+            slug_template="pr-{number}",
+            app_name_prefix="ver-preview",
+            app_name_suffix="-app" if declared_transport else "",
+            template_instance="testing",
+            data_transport_mode="driver",
+            transport_extension="postgres" if declared_transport else "",
+            transport_database_prefix="verireel_preview_" if declared_transport else "",
+            generated_secret_env={
+                "BETTER_AUTH_SECRET": "urlsafe",
+                "VERIREEL_SECRETS_MASTER_KEY": "base64",
+                "VERIREEL_CRON_SECRET": "urlsafe",
+                "VERIREEL_SMOKE_MAINTENANCE_SECRET": "urlsafe",
+            }
+            if declared_transport
+            else {},
+            preview_url_env_keys=("VERIREEL_APP_URL", "BETTER_AUTH_URL")
+            if declared_transport
+            else (),
+            preview_domain_env_keys=("DOKPLOY_PREVIEW_DOMAIN", "NEXT_PUBLIC_DOKPLOY_PREVIEW_DOMAIN")
+            if declared_transport
+            else (),
         ),
         updated_at="2026-07-12T03:00:00Z",
         source="test",
@@ -218,10 +227,7 @@ class GenericWebPreviewExtensionTests(unittest.TestCase):
         self.assertEqual(result["destroy_outcome"], "no_preview_recorded")
 
     def test_unknown_driver_owned_transport_fails_closed(self) -> None:
-        with self.assertRaisesRegex(
-            click.ClickException,
-            "does not register a generic-web preview refresh extension",
-        ):
+        with self.assertRaises(click.ClickException):
             apply_generic_web_preview_driver_refresh(
                 control_plane_root=Path("."),
                 record_store=object(),

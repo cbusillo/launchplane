@@ -26,7 +26,6 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_record import PreviewRecord
-from control_plane.contracts.postgres_preview import effective_postgres_preview_profile
 from control_plane.workflows.preview_resource_destroy import (
     PREVIEW_CLEANUP_SAFETY_UNKNOWN,
     destroy_dokploy_preview_resource,
@@ -901,7 +900,7 @@ def _wait_for_preview_health(
     preview_url: str,
     timeout_seconds: int,
     expected_runtime_identity: RuntimeIdentity,
-    health_path: str = "/api/health",
+    health_path: str,
 ) -> RuntimeIdentity:
     health_url = f"{preview_url.rstrip('/')}{health_path}"
     started_at = time.monotonic()
@@ -993,14 +992,11 @@ def execute_postgres_preview_refresh(
     *,
     control_plane_root: Path,
     request: PostgresPreviewRefreshRequest,
-    prepare_preview: Callable[[], None],
     preview_id: str = "",
     preview_generation_id: str = "",
     record_store: object | None = None,
     profile: LaunchplaneProductProfileRecord,
 ) -> PostgresPreviewRefreshResult:
-    legacy_https = profile.preview.transport_extension == "verireel-postgres"
-    profile = effective_postgres_preview_profile(profile)
     _require_unique_preview_namespaces(record_store, profile)
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
@@ -1109,8 +1105,6 @@ def execute_postgres_preview_refresh(
     except runtime_platform_credentials.PlatformCredentialRefusedError as error:
         raise PostgresPreviewRefreshConfigError(error.message) from error
 
-    prepare_preview()
-
     try:
         admin_database_url = _build_admin_database_url(template_database_url)
         _run_application_command(
@@ -1167,7 +1161,7 @@ def execute_postgres_preview_refresh(
             preview_host=preview_host,
             runtime_port=profile.runtime_port,
             certificate_type=profile.preview.domain_certificate_type,
-            https=legacy_https or urlparse(preview_url).scheme == "https",
+            https=urlparse(preview_url).scheme == "https",
         )
         latest_before = dokploy_api.latest_deployment_for_target(
             host=host,
@@ -1282,11 +1276,9 @@ def execute_postgres_preview_destroy(
     *,
     control_plane_root: Path,
     request: PostgresPreviewDestroyRequest,
-    prepare_destroy: Callable[[], None],
     record_store: object | None = None,
     profile: LaunchplaneProductProfileRecord,
 ) -> PostgresPreviewDestroyResult:
-    profile = effective_postgres_preview_profile(profile)
     _require_unique_preview_namespaces(record_store, profile)
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     template_target, template_application = _template_application_payload(
@@ -1350,8 +1342,6 @@ def execute_postgres_preview_destroy(
         username=role_name,
         password="",
     )
-
-    prepare_destroy()
 
     cleanup_errors: list[str] = []
     if application_id:

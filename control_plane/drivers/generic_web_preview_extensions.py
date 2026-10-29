@@ -4,8 +4,6 @@ from pathlib import Path
 
 import click
 
-from control_plane.preview_namespaces import POSTGRES_PREVIEW_TRANSPORTS
-
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.drivers.generic_web_preview_dispatch import (
     _generic_web_preview_anchor_head_sha,
@@ -107,7 +105,7 @@ def apply_generic_web_preview_driver_refresh(
         return None
     if not _uses_postgres_transport(profile):
         raise click.ClickException(
-            f"Driver {profile.driver_id!r} does not register a generic-web preview refresh extension."
+            f"Driver {profile.driver_id!r} has no declared generic-web PostgreSQL capability; use a reviewed shared-web transition for a generic-web product."
         )
 
     anchor_pr_number = _generic_web_preview_anchor_pr_number(
@@ -174,7 +172,7 @@ def apply_generic_web_preview_driver_destroy(
         return None
     if not _uses_postgres_transport(profile):
         raise click.ClickException(
-            f"Driver {profile.driver_id!r} does not register a generic-web preview destroy extension."
+            f"Driver {profile.driver_id!r} has no declared generic-web PostgreSQL capability; use a reviewed shared-web transition for a generic-web product."
         )
 
     anchor_pr_number = request.anchor_pr_number or preview_pr_number_from_slug(
@@ -225,7 +223,4 @@ def apply_generic_web_preview_driver_destroy(
 
 
 def _uses_postgres_transport(profile: LaunchplaneProductProfileRecord) -> bool:
-    return (
-        profile.driver_id == "generic-web"
-        and profile.preview.transport_extension in POSTGRES_PREVIEW_TRANSPORTS
-    )
+    return profile.driver_id == "generic-web" and profile.preview.transport_extension == "postgres"
