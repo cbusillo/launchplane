@@ -13,6 +13,7 @@ from __future__ import annotations
 from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
 from control_plane.timestamps import utc_now_timestamp as _utc_now
+from control_plane.http_error_evidence import log_handled_error_cause
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
@@ -2387,6 +2388,7 @@ def _run_preview_operation(
         operation_key += f":interrupted-{disposal_original}"
     reservation_scope = reconcile_reservation_scope(profile.product)
     plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
+    trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
     plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
     reservation = record_store.read_idempotency_record(
         scope=reservation_scope, route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key=plan_id
@@ -2510,7 +2512,7 @@ def _run_preview_operation(
             reservation_scope=reservation_scope,
             idempotency_key=plan_id,
             request_fingerprint=_fingerprint({"operation_key": operation_key}),
-            trace_id=f"{RECONCILE_SOURCE}-{uuid4().hex}",
+            trace_id=trace_id,
             execute_apply=execute_apply,
             observe_apply=preview_hooks.observe_apply,
             supersession_is_quiescent=preview_hooks.quiescence_check,
@@ -2649,7 +2651,10 @@ def _run_preview_operation(
     except OdooPreviewApplyConfigError as error:
         plan["missing_keys"] = list(env_key_names(error.missing_keys))
         return _preview_failure(plan, "preview_config_refused")
-    except OdooPreviewPlanProvenanceError:
+    except OdooPreviewPlanProvenanceError as error:
+        plan["failure_trace_id"] = trace_id
+        plan["preview_result_error_code"] = error.code
+        log_handled_error_cause(error, trace_id, operation_id=plan_id)
         return _preview_failure(plan, "preview_provenance_refused")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         if is_transient_dokploy_error(error):

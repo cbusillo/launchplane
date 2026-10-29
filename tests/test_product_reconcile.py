@@ -6480,6 +6480,49 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile()["preview_result_status"], "pass")
         self.assertEqual(self.provider.applied, [("destroy", 5)])
 
+    def test_legacy_preview_source_refusal_keeps_serving_evidence_and_logs_its_cause(self) -> None:
+        from control_plane import http_error_evidence, preview_source
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        before = self.snapshot()
+        applied = list(self.provider.applied)
+        read_original = self.store.read_original_mutation_intent
+        legacy_ids = {
+            original.record_id
+            for original in self.store.list_odoo_preview_originals(product="site", number=5)
+        }
+
+        def legacy_intent(reservation: Any) -> dict[str, Any]:
+            intent = read_original(reservation)
+            if reservation.record_id not in legacy_ids:
+                return intent
+            return {key: value for key, value in intent.items() if key != "effective_source"}
+
+        self.github.add_run(51, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with (
+            patch.object(self.store, "read_original_mutation_intent", side_effect=legacy_intent),
+            patch(
+                "control_plane.product_reconcile.log_handled_error_cause",
+                wraps=http_error_evidence.log_handled_error_cause,
+            ) as log_cause,
+            self.assertLogs(http_error_evidence.__name__, "WARNING") as captured,
+        ):
+            failed = self.run_once()
+
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(self.provider.applied, applied)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(
+            failed.last_plan["preview_result_error_code"], log_cause.call_args.args[0].code
+        )
+        evidence = json.loads(captured.records[0].getMessage())
+        self.assertIn(preview_source.__name__, {site["module"] for site in evidence["sites"]})
+        self.assertEqual(evidence["operation_id"], failed.last_plan["preview_plan_id"])
+        self.assertEqual(evidence["trace_id"], failed.last_plan["failure_trace_id"])
+
     def test_reopened_pr_retains_unknown_source_fence_after_exhausted_destroy(self) -> None:
         from control_plane.preview_source import require_source_free_preview_history
 
