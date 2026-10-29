@@ -31,14 +31,21 @@ from control_plane.storage.postgres import PostgresRecordStore
 SweepStatus = Literal["eligible", "held", "removed", "absent", "unknown"]
 
 
-def _strings(value: object) -> set[str]:
+def _strings(value: object, *, parse_environments: bool = False) -> set[str]:
     if isinstance(value, str):
         return {value}
     if isinstance(value, Mapping):
-        return set().union(*(_strings(item) for item in value.values()))
+        result = set().union(
+            *(_strings(item, parse_environments=parse_environments) for item in value.values())
+        )
+        if parse_environments and isinstance(value.get("env"), str):
+            result.update(api.parse_dokploy_env_text(value["env"]).values())
+        return result
     if isinstance(value, (list, tuple)):
         collection: list[object] | tuple[object, ...] = value
-        return set().union(*(_strings(item) for item in collection))
+        return set().union(
+            *(_strings(item, parse_environments=parse_environments) for item in collection)
+        )
     return set()
 
 
@@ -48,7 +55,7 @@ def _volume_referenced(name: str, payload: object, *, exact: bool = False) -> bo
         or not exact
         and name.startswith((value + "-", value + "_"))
         or name in value.replace(":", "/").split("/")
-        for value in _strings(payload)
+        for value in _strings(payload, parse_environments=exact)
         if value
     )
 
@@ -116,16 +123,27 @@ def compose_volume_names(
     return tuple(names)
 
 
+def _environment_referenced(name: str, owner: Mapping[str, object]) -> bool:
+    raw = owner.get("env")
+    if raw is not None and not isinstance(raw, str):
+        return True
+    return _volume_referenced(name, {"env": raw}, exact=True)
+
+
 def _inventory_clear(
     root: Path, binding: RetainedVolumeBinding, *, ignored_compose_id: str = "", exact: bool = False
 ) -> bool:
     host, token = source.read_dokploy_config(control_plane_root=root)
     for project in api.fetch_dokploy_projects(host=host, token=token):
+        if exact and _environment_referenced(binding.volume_name, project):
+            return False
         environments = project.get("environments")
         if not isinstance(environments, list):
             return False
         for environment in environments:
             if not isinstance(environment, dict):
+                return False
+            if exact and _environment_referenced(binding.volume_name, environment):
                 return False
             for kind, (target_type, identifier) in TARGET_COLLECTIONS.items():
                 targets = environment.get(kind)
@@ -157,18 +175,11 @@ def _inventory_clear(
                         ):
                             return False
                         payload = database_payload
-                    reference_payload: object = payload
-                    if exact:
-                        environment_text = payload.get("env")
-                        if environment_text is not None and not isinstance(environment_text, str):
-                            return False
-                        reference_payload = (
-                            payload,
-                            api.parse_dokploy_env_text(environment_text or ""),
-                        )
+                    if exact and _environment_referenced(binding.volume_name, payload):
+                        return False
                     mounts = payload.get("mounts")
                     if not isinstance(mounts, list) or _volume_referenced(
-                        binding.volume_name, reference_payload, exact=exact
+                        binding.volume_name, payload, exact=exact
                     ):
                         return False
                     if target_type == "compose":

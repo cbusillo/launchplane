@@ -454,6 +454,32 @@ class RecipientRetirementTests(unittest.TestCase):
             self.adapter.current()
         self.assertFalse(self.effects)
 
+    def test_shared_provider_environment_protects_old_project_files(self) -> None:
+        self.fixture.provider["other-compose"] = {
+            "composeId": "other-compose",
+            "appName": "independent-project",
+            "mounts": [],
+            "env": "OLD_PROJECT=${{project.OLD_PROJECT}}",
+            "composeFile": json.dumps(
+                {"services": {"worker": {"env_file": "/etc/dokploy/compose/${OLD_PROJECT}/.env"}}}
+            ),
+        }
+        for scope in ("project", "environment"):
+
+            def projects(**kwargs: Any) -> tuple[dict[str, Any], ...]:
+                rows = self.projects(**kwargs)
+                owner = rows[0] if scope == "project" else rows[0]["environments"][0]
+                owner["env"] = "OLD_PROJECT=" + self.record.retained_target.target_name
+                return rows
+
+            with (
+                self.subTest(scope=scope),
+                patch.object(api, "fetch_dokploy_projects", side_effect=projects),
+                self.assertRaises(ValueError),
+            ):
+                self.adapter.current()
+        self.assertFalse(self.effects)
+
     def test_new_stopped_host_mount_after_admission_is_protected(self) -> None:
         original_delete = self.delete
 
