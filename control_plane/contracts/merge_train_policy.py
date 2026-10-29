@@ -1,5 +1,3 @@
-import hashlib
-import json
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic_core import CoreSchema
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 MergeTrainActorRole = Literal["repo_owner", "repo_admin"]
@@ -62,15 +61,33 @@ def normalize_merge_train_policy_timestamp(value: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
+DependencyUpdateFormat = Literal["dependabot_trailer", "renovate_metadata"]
+DependencyUpdateType = Literal["patch", "minor", "digest"]
+
+
+class MergeTrainDependencyBotPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    github_user_id: PositiveInt
+    metadata_format: DependencyUpdateFormat
+    allowed_update_types: tuple[DependencyUpdateType, ...] = Field(min_length=1)
+
+    @field_validator("allowed_update_types")
+    @classmethod
+    def _normalize_update_types(
+        cls, value: tuple[DependencyUpdateType, ...]
+    ) -> tuple[DependencyUpdateType, ...]:
+        return tuple(sorted(set(value)))
+
+
 class MergeTrainEnqueuePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     label_required: bool = True
     allowed_actor_roles: tuple[MergeTrainActorRole, ...] = ("repo_owner", "repo_admin")
     trusted_automation_github_user_ids: tuple[PositiveInt, ...] = ()
-    # Pull requests these identities open enqueue without the label when every
-    # named update stays within one major version (merge_train_dependency_updates).
     dependency_update_github_user_ids: tuple[PositiveInt, ...] = ()
+    dependency_update_bots: tuple[MergeTrainDependencyBotPolicy, ...] = ()
 
     @model_validator(mode="after")
     def _validate_enqueue_policy(self) -> "MergeTrainEnqueuePolicy":
@@ -89,7 +106,29 @@ class MergeTrainEnqueuePolicy(BaseModel):
             raise ValueError(
                 "merge train dependency update identities must also be trusted automation"
             )
+        identities = [bot.github_user_id for bot in self.dependency_update_bots]
+        if len(set(identities)) != len(identities):
+            raise ValueError("merge train dependency bot identities must be unique")
+        if not set(identities) <= set(self.trusted_automation_github_user_ids):
+            raise ValueError("merge train dependency bots must also be trusted automation")
+        self.dependency_update_bots = tuple(
+            sorted(self.dependency_update_bots, key=lambda bot: bot.github_user_id)
+        )
         return self
+
+    @property
+    def dependency_identity_ids(self) -> frozenset[int]:
+        return frozenset(self.dependency_update_github_user_ids) | {
+            bot.github_user_id for bot in self.dependency_update_bots
+        }
+
+    def dependency_bot(self, github_user_id: object) -> MergeTrainDependencyBotPolicy | None:
+        if not isinstance(github_user_id, int) or isinstance(github_user_id, bool):
+            return None
+        return next(
+            (bot for bot in self.dependency_update_bots if bot.github_user_id == github_user_id),
+            None,
+        )
 
     @model_serializer(mode="wrap")
     def _serialize_enqueue_policy(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -98,6 +137,8 @@ class MergeTrainEnqueuePolicy(BaseModel):
             payload.pop("trusted_automation_github_user_ids", None)
         if not self.dependency_update_github_user_ids:
             payload.pop("dependency_update_github_user_ids", None)
+        if not self.dependency_update_bots:
+            payload.pop("dependency_update_bots", None)
         return payload
 
 
@@ -538,8 +579,7 @@ def merge_train_policy_sha256(policy: MergeTrainPolicy) -> str:
             "provider_delivery_protection_expectation"
         ):
             repository_policy.pop("provider_delivery_protection_expectation", None)
-    encoded = json.dumps(policy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(policy_payload)
 
 
 def merge_train_policy_provider_expectation_projection(
@@ -556,34 +596,6 @@ def merge_train_policy_provider_expectation_projection(
                 expectation.model_dump(mode="json"),
             )
     return projection
-
-
-def merge_train_repository_policy_delivery_semantics_sha256(
-    policy: MergeTrainRepositoryPolicy,
-) -> str:
-    expectation = policy.provider_delivery_protection_expectation
-    payload = {
-        "repository": policy.repository,
-        "base_branch": policy.base_branch,
-        "enqueue_label": policy.enqueue_label,
-        "blocked_label": policy.blocked_label,
-        "stack_child_disposition_label": policy.stack_child_disposition_label,
-        "merge_method": policy.merge_method,
-        "failure_policy": policy.failure_policy,
-        "engineering_review_mode": policy.engineering_review_mode,
-        "enqueue": {
-            "label_required": policy.enqueue.label_required,
-            "allowed_actor_roles": sorted(policy.enqueue.allowed_actor_roles),
-            "trusted_automation_github_user_ids": sorted(
-                policy.enqueue.trusted_automation_github_user_ids
-            ),
-        },
-        "provider_delivery_protection_expectation": (
-            expectation.model_dump(mode="json") if expectation is not None else None
-        ),
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _normalize_required_value(value: str, message: str) -> str:
@@ -624,9 +636,7 @@ def merge_train_repository_authority_projection(
 
 
 def _projection_sha256(payload: dict[str, object]) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def merge_train_repository_authority_sha256(policy: MergeTrainRepositoryPolicy) -> str:

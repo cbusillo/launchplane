@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
@@ -12,6 +10,7 @@ from control_plane.contracts.privileged_operation import (
     ManagedMergeTrainPolicyImportProposalInput,
     PrivilegedOperationRecord,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 PRIVILEGED_OPERATION_EXECUTION_SCOPE = "privileged-operation-execution"
@@ -105,6 +104,4 @@ def require_managed_merge_train_policy_import_execution_identity(
 
 
 def _digest(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)

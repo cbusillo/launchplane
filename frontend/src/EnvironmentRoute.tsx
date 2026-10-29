@@ -1,3 +1,4 @@
+import { PreviewSettingsRoute } from "./PreviewSettingsRoute";
 import {
   AlertCircle,
   AlertTriangle,
@@ -12,7 +13,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import {
-  LaunchplaneApiError,
+  isLaunchplaneHttpError,
   readProductEnvironment,
   readProductEnvironmentConfigStatus,
   readProductPromotionStatus,
@@ -24,6 +25,7 @@ import {
 import { EnvironmentActionsView } from "./EnvironmentActions";
 import { EnvironmentDiagnostics } from "./EnvironmentDiagnostics";
 import { EnvironmentIncidents } from "./EnvironmentIncidents";
+import { HostNetworkCapacity } from "./HostNetworkCapacity";
 import {
   ManagedSecretsView,
   RuntimeSettingsView,
@@ -60,6 +62,7 @@ import {
 } from "./router";
 import { safeExternalUrl } from "./url";
 import { useEvidenceRefresh } from "./use-evidence-refresh";
+import { TestingHoldPanel } from "./TestingHoldPanel";
 
 import type {
   ProductEnvironmentConfigStatus,
@@ -73,7 +76,7 @@ import type {
 
 type ConditionTone = "pass" | "warning" | "danger" | "unknown";
 
-export function ProductEnvironmentRoute({
+function StableProductEnvironmentRoute({
   environmentKey,
   fixtureMode,
   productKey,
@@ -89,6 +92,7 @@ export function ProductEnvironmentRoute({
   view: EnvironmentView;
 }) {
   const [retryToken, setRetryToken] = useState(0);
+  const [capacityAvailable, setCapacityAvailable] = useState(false);
   const [evidenceRefreshToken, setEvidenceRefreshToken] = useState(0);
   const [detailResource, setDetailResource] = useState<
     ResourceState<ProductEnvironmentDetail>
@@ -117,6 +121,7 @@ export function ProductEnvironmentRoute({
     let active = true;
     const controller = new AbortController();
     const sameEnvironment = detailLoadedKey.current === resourceKey;
+    if (!sameEnvironment) setCapacityAvailable(false);
     setDetailResource((current) => ({
       ...current,
       status: "loading",
@@ -156,6 +161,7 @@ export function ProductEnvironmentRoute({
           return;
         }
         detailLoadedKey.current = resourceKey;
+        setCapacityAvailable(response.host_network_capacity_available ?? false);
         setDetailResource(readyResource(response.environment));
       } catch (error) {
         if (!active || controller.signal.aborted) {
@@ -360,6 +366,7 @@ export function ProductEnvironmentRoute({
   };
   return (
     <EnvironmentPage
+      capacityAvailable={capacityAvailable}
       configResource={configResource}
       detail={expireEnvironmentEvidence(detailResource.data)}
       productOverview={productOverview}
@@ -377,6 +384,7 @@ export function ProductEnvironmentRoute({
 }
 
 function EnvironmentPage({
+  capacityAvailable,
   configResource,
   detail,
   productOverview,
@@ -390,6 +398,7 @@ function EnvironmentPage({
   readinessRefreshToken,
   view,
 }: {
+  capacityAvailable: boolean;
   configResource: ResourceState<ProductEnvironmentConfigStatus>;
   detail: ProductEnvironmentDetail;
   productOverview: ProductSiteOverview | null;
@@ -480,7 +489,11 @@ function EnvironmentPage({
       />
 
       {view === "overview" ? (
-        <EnvironmentOverview detail={detail} fixtureMode={fixtureMode} />
+        <>
+          {detail.environment === "testing" ? <TestingHoldPanel detail={detail} fixtureMode={Boolean(fixtureMode)}
+            refreshToken={readinessRefreshToken} onRefresh={onConfigApplied} /> : null}
+          <EnvironmentOverview detail={detail} fixtureMode={fixtureMode} capacityAvailable={capacityAvailable} />
+        </>
       ) : null}
       {view === "actions" ? (
         <EnvironmentActionsView
@@ -519,9 +532,11 @@ function EnvironmentPage({
 function EnvironmentOverview({
   detail,
   fixtureMode,
+  capacityAvailable,
 }: {
   detail: ProductEnvironmentDetail;
   fixtureMode: DevFixtureMode;
+  capacityAvailable: boolean;
 }) {
   const tlsDomains = detail.topology.observed.tls_domains;
   const observedPlacement = detail.topology.observed.placement;
@@ -535,10 +550,13 @@ function EnvironmentOverview({
   const currentIncidentId =
     openIncident?.incident_id || "";
   const actionableMonitoringFailure = effectiveChecks.some(
-    (check) => check.incident_eligible && check.status === "fail",
+    (check) => !check.advisory && check.incident_eligible && check.status === "fail",
   );
   const readinessMonitoringFailure = effectiveChecks.some(
-    (check) => check.status === "fail",
+    (check) => check.status === "fail" || check.advisory && (
+      check.status !== "pass" || !["verified", "recorded"].includes(check.trust_state) ||
+      Date.parse(check.provenance.stale_after) < Date.now()
+    ),
   );
   const primaryTls =
     tlsDomains.find((domain) => domain.role === "primary") ?? tlsDomains[0] ?? null;
@@ -557,16 +575,14 @@ function EnvironmentOverview({
           label="Monitoring"
           timestamp={evidenceTimestamp(detail.public_ingress.provenance)}
           tone={
-            openIncidentSeverity === "critical"
+            openIncidentSeverity === "critical" || actionableMonitoringFailure
               ? "danger"
               : openIncidentSeverity === "warning"
                 ? "warning"
-                : actionableMonitoringFailure
-                  ? "danger"
               : readinessMonitoringFailure
                 ? "warning"
                 : conditionTone(
-                    effectiveChecks.length && effectiveChecks.every(check => check.status === "pass") ? "pass" : "unknown",
+                    effectiveChecks.length && effectiveChecks.filter(check => !check.advisory).every(check => check.status === "pass") ? "pass" : "unknown",
                     monitoringEvidenceTrust(detail.health_monitoring.checks),
                   )
           }
@@ -621,7 +637,7 @@ function EnvironmentOverview({
       <div className="environment-evidence-grid">
         <IngressEvidence detail={detail} />
         <TlsEvidence detail={detail} tlsDomains={tlsDomains} />
-        <PlacementEvidence detail={detail} />
+        <PlacementEvidence detail={detail} capacityAvailable={capacityAvailable} fixtureMode={fixtureMode} />
       </div>
 
       <EnvironmentIncidents
@@ -686,6 +702,7 @@ function DiagnosisCallout({ diagnosis }: { diagnosis: Diagnosis }) {
 
 function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
   const ingress = detail.topology.provider_recorded.ingress;
+  const split = detail.topology.provider_recorded.external_ingress;
   const effectiveChecks = detail.health_monitoring.checks.filter(
     (check) => check.probe_effective,
   );
@@ -727,7 +744,9 @@ function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
         <EvidenceFact label={detail.health_monitoring.monitoring_intent === "private" ? "Public ingress" : detail.topology.observed.ingress.probe_effective ? "Current public observation" : detail.public_ingress.status ? "Public observation history" : "Public ingress"} value={detail.public_ingress.status ? humanize(detail.public_ingress.status) : "No observation"} />
         <EvidenceFact label="Summary" value={detail.public_ingress.summary || "No public ingress summary was returned."} />
         <EvidenceFact label="Desired endpoint" value={detail.topology.desired.base_url || "Not recorded"} />
-        <EvidenceFact label="Recorded path" value={humanize(ingress.path)} />
+        <EvidenceFact label="Recorded path" value={split ? "Separate business and recovery paths" : humanize(ingress.path)} />
+        {split && <EvidenceFact label="External custodian" value={`${split.custodian}: ${split.domains.join(", ")}`} />}
+        {split && detail.topology.provider_recorded.domains.map(domain => <EvidenceFact key={domain.domain_name} label={domain.domain_name} value={`${domain.ingress?.provider ?? "Unknown ingress"} · TLS: ${domain.tls?.owner ?? "Unknown"}`} />)}
         <EvidenceFact label="Route authority" value={trustLabel(detail.topology.provider_recorded.trust_state)} />
         <EvidenceFact label="Termination" value={humanize(ingress.termination_kind)} />
         <EvidenceFact label="Incident" value={detail.public_ingress.incident_status ? humanize(detail.public_ingress.incident_status) : "No incident recorded"} />
@@ -744,6 +763,7 @@ function TlsEvidence({
   tlsDomains: ProductObservedTlsDomain[];
 }) {
   const recordedTls = detail.topology.provider_recorded.tls;
+  const split = detail.topology.provider_recorded.external_ingress;
   return (
     <section className="environment-evidence-panel" id="tls-evidence">
       <div className="evidence-panel-head">
@@ -764,8 +784,8 @@ function TlsEvidence({
             "Not recorded"
           }
         />
-        <EvidenceFact label="TLS managed by" value={humanize(recordedTls.owner)} />
-        <EvidenceFact label="Terminator" value={humanize(recordedTls.terminator)} />
+        <EvidenceFact label="TLS managed by" value={split ? "Recorded per hostname" : humanize(recordedTls.owner)} />
+        <EvidenceFact label="Terminator" value={split ? "Separate ingress paths" : humanize(recordedTls.terminator)} />
       </dl>
       {tlsDomains.length ? (
         <ul className="tls-domain-list">
@@ -774,6 +794,7 @@ function TlsEvidence({
               <div>
                 <strong>{domain.domain_name}</strong>
                 <span>{domain.role}</span>
+                {split && <span>TLS: {detail.topology.provider_recorded.domains.find(record => record.domain_name === domain.domain_name)?.tls?.owner ?? "Unknown"}</span>}
               </div>
               <div>
                 <strong>{humanize(domain.status)}</strong>
@@ -802,7 +823,7 @@ function TlsEvidence({
   );
 }
 
-function PlacementEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
+function PlacementEvidence({ detail, capacityAvailable, fixtureMode }: { detail: ProductEnvironmentDetail; capacityAvailable: boolean; fixtureMode: DevFixtureMode }) {
   const observedPlacement = detail.topology.observed.placement;
   const expected = observedPlacement.expected_runtime_identity;
   const observed = observedPlacement.observed_runtime_identity;
@@ -829,6 +850,7 @@ function PlacementEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
         <EvidenceFact label="Expected artifact" value={expected?.artifact_id || "Not recorded"} mono />
         <EvidenceFact label="Observed artifact" value={observed?.artifact_id || "Not recorded"} mono />
       </dl>
+      <HostNetworkCapacity key={`${detail.product}:${detail.environment}`} product={detail.product} environment={detail.environment} available={capacityAvailable} fixtureMode={fixtureMode} />
     </section>
   );
 }
@@ -1110,7 +1132,14 @@ function errorResource<T>(data: T | null, error: unknown): ResourceState<T> {
     data,
     error:
       error instanceof Error ? error.message : "Launchplane environment request failed.",
-    traceId: error instanceof LaunchplaneApiError ? error.traceId : "",
-    statusCode: error instanceof LaunchplaneApiError ? error.statusCode : 503,
+    traceId: isLaunchplaneHttpError(error) ? error.traceId : "",
+    statusCode: isLaunchplaneHttpError(error) ? error.statusCode : 503,
   };
+}
+
+export function ProductEnvironmentRoute(props: Parameters<typeof StableProductEnvironmentRoute>[0]) {
+  if (props.environmentKey === "preview") {
+    return <PreviewSettingsRoute product={props.productKey} view={props.view} refreshToken={props.refreshToken} />;
+  }
+  return <StableProductEnvironmentRoute {...props} />;
 }

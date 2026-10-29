@@ -31,6 +31,10 @@ from control_plane.service_auth import (
     TokenVerifier,
     load_authz_policy,
 )
+from control_plane.service_agent_identities import (
+    AGENT_BEARER_ENVIRONMENT_KEYS,
+    load_service_agent_identities,
+)
 from control_plane.service_human_auth import (
     GitHubOAuthClient,
     HumanSessionManager,
@@ -43,19 +47,7 @@ from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
 from control_plane.preview_lifecycle_scheduler import PreviewLifecycleScheduler
 from control_plane.release_digest import ReleaseDigestScheduler
-from control_plane.work_graph_github_projects import (
-    build_github_project_planning_facts,
-    load_github_project_planning_facts_config_from_env,
-)
-from control_plane.work_graph_issue_inbox import (
-    build_github_issue_inbox_read_model,
-    load_github_issue_inbox_config_from_env,
-    reconcile_github_issue_inbox,
-)
-
-
-def _utc_now_timestamp() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+from control_plane.discussion_reminders import DiscussionReminderScheduler
 
 
 def _now_timestamp() -> str:
@@ -72,30 +64,6 @@ def _engineering_review_worker_runtime_id_from_env() -> str:
 
 def _engineering_review_worker_host_from_env() -> str:
     return os.environ.get("LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST", "").strip()
-
-
-def _terminal_agent_read_token_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN", "").strip()
-
-
-def _terminal_agent_subject_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_SUBJECT", "").strip()
-
-
-def _terminal_agent_token_label_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL", "").strip()
-
-
-def _local_operator_token_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN", "").strip()
-
-
-def _local_operator_subject_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT", "").strip()
-
-
-def _local_operator_token_label_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL", "").strip()
 
 
 def _local_admin_token_from_env() -> str:
@@ -118,12 +86,10 @@ def _bearer_identity_config_from_env() -> BearerIdentityConfig:
         local_admin_token=_local_admin_token_from_env(),
         local_admin_subject=_local_admin_subject_from_env(),
         local_admin_token_label=_local_admin_token_label_from_env(),
-        local_operator_token=_local_operator_token_from_env(),
-        local_operator_subject=_local_operator_subject_from_env(),
-        local_operator_token_label=_local_operator_token_label_from_env(),
-        terminal_agent_token=_terminal_agent_read_token_from_env(),
-        terminal_agent_subject=_terminal_agent_subject_from_env(),
-        terminal_agent_token_label=_terminal_agent_token_label_from_env(),
+        **{
+            field: os.environ.get(key, "").strip()
+            for field, key in AGENT_BEARER_ENVIRONMENT_KEYS.items()
+        },
     )
 
 
@@ -144,6 +110,7 @@ def create_launchplane_service_application(
     verifier: TokenVerifier,
     service_record_store: PostgresRecordStore,
     control_plane_root_path: Path | None = None,
+    start_schedulers: bool = True,
 ) -> FastAPI:
     resolved_fastapi_policy = resolve_launchplane_authz_policy(
         record_store=service_record_store,
@@ -157,37 +124,6 @@ def create_launchplane_service_application(
         source=resolved_fastapi_policy.source,
         record_id=resolved_fastapi_policy.record_id,
         revision=resolved_fastapi_policy.revision,
-    )
-    work_graph_project_config = load_github_project_planning_facts_config_from_env(dict(os.environ))
-    work_graph_planning_facts_provider = (
-        (lambda: build_github_project_planning_facts(work_graph_project_config))
-        if work_graph_project_config is not None
-        else None
-    )
-    work_graph_issue_inbox_config = load_github_issue_inbox_config_from_env(
-        dict(os.environ),
-        project_config=work_graph_project_config,
-    )
-    work_graph_issue_inbox_provider = (
-        (
-            lambda: build_github_issue_inbox_read_model(
-                generated_at=_utc_now_timestamp(),
-                config=work_graph_issue_inbox_config,
-            )
-        )
-        if work_graph_issue_inbox_config is not None
-        else None
-    )
-    work_graph_issue_inbox_reconcile_provider = (
-        (
-            lambda request: reconcile_github_issue_inbox(
-                generated_at=_utc_now_timestamp(),
-                config=work_graph_issue_inbox_config,
-                request=request,
-            )
-        )
-        if work_graph_issue_inbox_config is not None
-        else None
     )
     github_oauth_config = load_github_oauth_config_from_env()
     human_session_manager = (
@@ -214,22 +150,36 @@ def create_launchplane_service_application(
             service_record_store,
             control_plane_root=control_plane_root_path or control_plane_root(),
             public_url=github_oauth_config.public_url if github_oauth_config else "",
-        ),
-        health_monitor_scheduler=HealthMonitorScheduler(service_record_store),
-        testing_drill_scheduler=OdooTestingDrillScheduler(service_record_store),
+        )
+        if start_schedulers
+        else None,
+        discussion_reminder_scheduler=DiscussionReminderScheduler(
+            service_record_store,
+            control_plane_root=control_plane_root_path or control_plane_root(),
+            public_url=github_oauth_config.public_url if github_oauth_config else "",
+        )
+        if start_schedulers
+        else None,
+        health_monitor_scheduler=HealthMonitorScheduler(service_record_store)
+        if start_schedulers
+        else None,
+        testing_drill_scheduler=OdooTestingDrillScheduler(service_record_store)
+        if start_schedulers
+        else None,
         preview_lifecycle_scheduler=PreviewLifecycleScheduler(
             service_record_store,
             control_plane_root=control_plane_root_path or control_plane_root(),
+        )
+        if start_schedulers
+        else None,
+        bearer_identity_config=load_service_agent_identities(
+            store=service_record_store, bootstrap=_bearer_identity_config_from_env()
         ),
-        bearer_identity_config=_bearer_identity_config_from_env(),
         human_session_manager=human_session_manager,
         github_oauth_client=github_oauth_client,
         oauth_login_state_store=oauth_login_state_store,
         control_plane_root_path=control_plane_root_path or control_plane_root(),
         state_dir=state_dir,
-        work_graph_planning_facts_provider=work_graph_planning_facts_provider,
-        work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
-        work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
         trusted_maintenance_github_webhook_handler=(
             handle_trusted_maintenance_github_webhook_request
         ),

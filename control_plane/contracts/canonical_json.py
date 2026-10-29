@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from pydantic import BaseModel
 
 CANONICAL_JSON_INTEGER_MIN = -(2**63)
 CANONICAL_JSON_INTEGER_MAX = 2**63 - 1
@@ -43,7 +44,19 @@ def canonical_json_bytes(payload: object) -> bytes:
     ).encode("utf-8")
 
 
+def nonvalidating_compact_sorted_json_sha256(payload: object) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def canonical_json_sha256(payload: object) -> str:
     """Return the lowercase SHA-256 digest of public canonical JSON bytes."""
 
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def canonical_model_sha256(model: BaseModel, *, exclude: set[str] | None = None) -> str:
+    return canonical_json_sha256(
+        model.model_dump(mode="json", exclude_defaults=True, exclude=exclude)
+    )

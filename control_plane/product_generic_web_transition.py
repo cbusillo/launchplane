@@ -1,15 +1,15 @@
 """Review a profile's shared-web driver declarations without replacing runtime state."""
 
-import hashlib
-import json
 import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    PreviewSecretEncoding,
     CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION,
     validate_product_profile_history_transition,
 )
@@ -17,6 +17,7 @@ from control_plane.workflows.generic_web_deploy import product_profile_uses_gene
 from control_plane.workflows.generic_web_post_deploy import (
     generic_web_post_deploy_executor_for_profile,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 class GenericWebLaneDeclaration(BaseModel):
@@ -31,8 +32,14 @@ class GenericWebPreviewDeclaration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     data_transport_mode: Literal["none", "driver"]
-    transport_extension: Literal["", "verireel-postgres"] = ""
+    transport_extension: Literal["", "postgres"] = ""
     transport_database_prefix: str = ""
+    copied_env_keys: tuple[str, ...] = ()
+    required_template_env_keys: tuple[str, ...] = ()
+    omitted_env_keys: tuple[str, ...] = ()
+    generated_secret_env: dict[str, PreviewSecretEncoding] = Field(default_factory=dict)
+    preview_url_env_keys: tuple[str, ...] = ()
+    preview_domain_env_keys: tuple[str, ...] = ()
     app_name_suffix: str = ""
     generic_web_extensions: GenericWebLaneExtensions | None = None
 
@@ -60,11 +67,34 @@ class ProductGenericWebTransitionRequest(BaseModel):
         return self
 
 
+class GenericWebPreviewEndpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    runtime_port: int
+    health_path: str
+    certificate_type: Literal["none", "letsencrypt"]
+    https_policy: Literal["preview-url-scheme", "certificate"]
+
+
+def _preview_endpoint(profile: LaunchplaneProductProfileRecord) -> GenericWebPreviewEndpoint | None:
+    if profile.preview.transport_extension not in {"", "postgres"}:
+        return None
+    return GenericWebPreviewEndpoint(
+        runtime_port=profile.runtime_port,
+        health_path=profile.health_path,
+        certificate_type=profile.preview.domain_certificate_type,
+        https_policy="preview-url-scheme"
+        if profile.preview.transport_extension == "postgres"
+        else "certificate",
+    )
+
+
 class ProductGenericWebTransitionPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product: str
     driver_before: str
+    preview_endpoint_before: GenericWebPreviewEndpoint | None
+    preview_endpoint_after: GenericWebPreviewEndpoint | None
     driver_after: Literal["generic-web"] = "generic-web"
     lanes: tuple[GenericWebLaneDeclaration, ...]
     preview: GenericWebPreviewDeclaration
@@ -97,13 +127,18 @@ def build_generic_web_transition_plan(
         for lane in lanes
     ):
         raise ValueError("The testing verification extension requires the recorded testing lane.")
-    if legacy_profile and any(
-        lane.instance == "testing"
-        and lane.generic_web_extensions.verification_extension != "verireel-testing"
-        for lane in lanes
+    if profile.preview.transport_extension not in {"", "postgres"} and (
+        request.preview is None
+        or request.preview.transport_extension != "postgres"
+        or not {
+            "copied_env_keys",
+            "generated_secret_env",
+            "preview_url_env_keys",
+            "preview_domain_env_keys",
+        }.issubset(request.preview.model_fields_set)
     ):
         raise ValueError(
-            "The existing lane qualification must have a supported shared-web declaration."
+            "Declare postgres transport, copied_env_keys, generated_secret_env, preview_url_env_keys and preview_domain_env_keys from the product runtime contract before transitioning a legacy preview profile. Use empty collections only when the product requires none."
         )
     preview = profile.preview
     if request.preview is not None:
@@ -154,13 +189,13 @@ def build_generic_web_transition_plan(
         "preview": preview_declaration.model_dump(mode="json"),
         "reason": request.reason,
     }
-    digest = hashlib.sha256(
-        json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(fingerprint)
     return (
         ProductGenericWebTransitionPlan(
             product=profile.product,
             driver_before=profile.driver_id,
+            preview_endpoint_before=_preview_endpoint(profile),
+            preview_endpoint_after=_preview_endpoint(replacement),
             lanes=lane_declarations,
             preview=preview_declaration,
             changed=profile != replacement,

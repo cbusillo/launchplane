@@ -26,9 +26,17 @@ from control_plane.integration_allowances import (
     read_integration_allowances,
 )
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
-from tests.http_app_test_support import _AsgiResponse, _asgi_request
+from tests.http_app_test_support import (
+    _AsgiResponse,
+    _asgi_request,
+    _browser_mutation_headers,
+    _github_human_identity,
+    _github_oauth_config,
+    _github_human_product_config_policy,
+)
 from tests.support.auth import _identity, _StubVerifier
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.support.stores import _sqlite_database_url
@@ -476,6 +484,99 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": "Bearer valid-token"},
         )
 
+    async def test_browser_session_reads_allowances_without_losing_lane_authorization(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            before = store.read_dokploy_target_record(
+                context_name=_CONTEXT, instance_name="testing"
+            )
+            identity = _github_human_identity()
+            policy = _github_human_product_config_policy(
+                actions=("product_environment.read",),
+                product=_PRODUCT,
+                context=_CONTEXT,
+                instances=("testing",),
+                schema_version=2,
+            )
+            manager = HumanSessionManager(
+                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+            )
+            session = manager.issue(identity)
+            headers = {"Cookie": manager.session_cookie_header(session)}
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=policy,
+                human_session_manager=manager,
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            path = f"{INTEGRATION_ALLOWANCES_ROUTE}?product={_PRODUCT}&context={_CONTEXT}"
+            initial = await _asgi_request(app, "GET", "/v1/auth/session", headers=headers)
+            self.assertEqual(initial.status_code, 200)
+            accepted = await _asgi_request(app, "GET", f"{path}&instance=testing", headers=headers)
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            self.assertEqual(accepted.json()["result"]["allowances"], [])
+            denied = await _asgi_request(app, "GET", f"{path}&instance=prod", headers=headers)
+            self.assertEqual(denied.status_code, 403)
+            denied_plan = await _asgi_request(
+                app,
+                "POST",
+                INTEGRATION_ALLOWANCES_APPLY_ROUTE,
+                headers=_browser_mutation_headers(manager, session),
+                payload=_request_payload(),
+            )
+            self.assertEqual(denied_plan.status_code, 403)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(self._identity()),
+                authz_policy=_github_human_product_config_policy(
+                    actions=("product_config.plan", "product_config.apply"),
+                    product=_PRODUCT,
+                    context=_CONTEXT,
+                    instances=("testing",),
+                    schema_version=2,
+                ),
+                human_session_manager=manager,
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            missing_csrf = await _asgi_request(
+                app,
+                "POST",
+                INTEGRATION_ALLOWANCES_APPLY_ROUTE,
+                headers=headers,
+                payload=_request_payload(),
+            )
+            self.assertEqual(missing_csrf.status_code, 403)
+            plan = await _asgi_request(
+                app,
+                "POST",
+                INTEGRATION_ALLOWANCES_APPLY_ROUTE,
+                headers=_browser_mutation_headers(manager, session),
+                payload=_request_payload(),
+            )
+            self.assertEqual(plan.status_code, 202, plan.text)
+            self.assertEqual(
+                store.read_dokploy_target_record(context_name=_CONTEXT, instance_name="testing"),
+                before,
+            )
+            applied = await _asgi_request(
+                app,
+                "POST",
+                INTEGRATION_ALLOWANCES_APPLY_ROUTE,
+                headers={
+                    **_browser_mutation_headers(manager, session),
+                    "Idempotency-Key": "browser-allowance-apply",
+                },
+                payload=_request_payload(
+                    mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+                ),
+            )
+            self.assertEqual(applied.status_code, 202, applied.text)
+            read_back = await _asgi_request(app, "GET", f"{path}&instance=testing", headers=headers)
+            self.assertEqual(read_back.status_code, 200)
+            self.assertTrue(read_back.json()["result"]["allowances"])
+
     async def test_dry_run_apply_replay_and_read(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -483,6 +584,7 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
             app = self._app(store, root, "product_config.plan", "product_config.apply")
 
             dry_run = await self._post(app, _request_payload())
+            self.assertEqual(dry_run.status_code, 202, dry_run.text)
             plan = dry_run.json()["result"]
             missing_key = await self._post(
                 app, _request_payload(mode="apply", reviewed_plan_sha256=plan["plan_sha256"])
@@ -603,6 +705,38 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invalid.status_code, 400)
         self.assertNotIn("hunter2", invalid.text)
         self.assertIn(missing.status_code, {403, 404})
+
+    async def test_refuses_a_lane_claimed_by_another_product(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            profile = store.read_product_profile_record(_PRODUCT)
+            store.write_product_profile_record(
+                profile.model_copy(
+                    update={
+                        "product": "other-product",
+                        "preview": profile.preview.model_copy(
+                            update={"app_name_prefix": "other-product-preview"}
+                        ),
+                    }
+                )
+            )
+            app = self._app(store, root, "product_config.plan", "product_config.apply")
+
+            read = await self._get(app)
+            dry_run = await self._post(app, _request_payload())
+
+        self.assertIn(read.status_code, {403, 404})
+        self.assertIn(dry_run.status_code, {403, 404})
+
+
+class GenericWebIntegrationAllowancesRouteTests(IntegrationAllowancesRouteTests):
+    @staticmethod
+    def _store(root: Path) -> FilesystemRecordStore:
+        store = IntegrationAllowancesRouteTests._store(root)
+        profile = store.read_product_profile_record(_PRODUCT)
+        store.write_product_profile_record(profile.model_copy(update={"driver_id": "generic-web"}))
+        return store
 
 
 if __name__ == "__main__":

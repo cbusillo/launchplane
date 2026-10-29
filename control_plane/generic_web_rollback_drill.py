@@ -65,8 +65,20 @@ def run_generic_web_rollback_drill(
         raise click.ClickException("The accepted rollback target is not ready.")
     planned = plan.planned_deploy
     trace_id = f"client-release-{decision.record_id}"
-    previous_inventory, _promotion = rollback_drill_previous_inventory(
+    previous_inventory, promotion = rollback_drill_previous_inventory(
         store=store, decision=decision, deployment=deployment, scope=scope
+    )
+    if promotion is None and (
+        decision.checklist.production.runtime_settings is not None
+        or decision.checklist.candidate.runtime_settings is not None
+    ):
+        raise click.ClickException("The rollback drill lacks its pinned forward promotion.")
+    source_deployment_record_id = (
+        promotion.deployment_record_id
+        if promotion is not None
+        else store.read_environment_inventory(
+            context_name=lane.context, instance_name=lane.instance
+        ).deployment_record_id
     )
 
     class RollbackDrillAdapter(GenericWebProdPromotionProviderMutationAdapter):
@@ -90,13 +102,22 @@ def run_generic_web_rollback_drill(
         def apply(
             self, provider_operation_key: str, lease: ProviderOperationLease
         ) -> ProviderMutationOutcome:
-            effects_started = False
+            if not isinstance(lease, ProviderEvidenceLease):
+                raise ValueError("Rollback drill requires an evidence-bound provider lease.")
+            # Read the exact original reservation before checkpoint_effect takes
+            # its nonreentrant heartbeat lock. The in-lock callback uses only
+            # this local state, updated after the durable checkpoint succeeds.
+            effects_started = bool(lease.evidence_reservation().provider_effect_started_at)
+
+            def require_admission() -> None:
+                if not effects_started:
+                    validate_checkpoint()
 
             def checkpoint(phase: str) -> None:
                 nonlocal effects_started
-                # This is forward drill work; recovery inside a failed promotion
-                # keeps its separate rule allowing rollback after revocation.
-                validate_checkpoint()
+                # Once this inverse starts, finish its protective restore even
+                # if a later decision or hold revokes fresh forward work.
+                require_admission()
                 require_generic_web_promotion_target(
                     record_store=store,
                     lane=lane,
@@ -106,7 +127,7 @@ def run_generic_web_rollback_drill(
                 effects_started = True
 
             try:
-                self._validate_before_effect(self.resolve_deploy_target())
+                require_admission()
                 current = build_generic_web_rollback_plan(record_store=store, request=request)
                 if current.status != "ready" or current.planned_deploy != planned:
                     raise click.ClickException("The accepted rollback target changed.")
@@ -115,9 +136,9 @@ def run_generic_web_rollback_drill(
                     lane=lane,
                     resolved_deploy_target=self.resolve_deploy_target(),
                 )
-                if not isinstance(lease, ProviderEvidenceLease):
-                    raise ValueError("Rollback drill requires an evidence-bound provider lease.")
-                with store.provider_evidence_guard(lease.evidence_reservation):
+                with store.provider_evidence_guard(
+                    lease.evidence_reservation, effect_admission_checkpoint=require_admission
+                ):
                     outcome = _roll_back_production(
                         control_plane_root=control_plane_root,
                         record_store=store,
@@ -130,6 +151,7 @@ def run_generic_web_rollback_drill(
                             previous_inventory=previous_inventory,
                         ),
                         production_changed=True,
+                        source_deployment_record_id=source_deployment_record_id,
                         deploy_provider=self._deploy_provider,
                         provider_operation_title=provider_operation_title(provider_operation_key),
                         deployment_record_id=self._deployment_record_id(provider_operation_key),

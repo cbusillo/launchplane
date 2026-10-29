@@ -4,11 +4,13 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.npmplus import (
+    NpmplusHostIdentity,
     NpmplusAuthRequest,
     NpmplusForwardScheme,
     NpmplusLocationPayload,
     NpmplusProxyHost,
     NpmplusProxyHostPayload,
+    PRIVATE_BEARER_FORWARDING,
 )
 
 
@@ -73,7 +75,9 @@ _CHANGE_CATEGORY_FIELDS: dict[NpmplusIngressChangeCategory, frozenset[str]] = {
 
 
 class NpmplusIngressClient(Protocol):
-    def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]: ...
+    def list_proxy_hosts(self) -> tuple[NpmplusHostIdentity, ...]: ...
+
+    def get_proxy_host(self, host_id: int) -> NpmplusProxyHost: ...
 
     def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost: ...
 
@@ -113,20 +117,6 @@ class IngressIdentityAccessBinding(BaseModel):
         if self.provider in {"anubis", "tinyauth", "authelia", "authentik"}:
             return self.provider
         raise ValueError("Unsupported ingress identity/access provider")
-
-
-def identity_access_from_npmplus_auth_request(
-    auth_request: NpmplusAuthRequest,
-) -> IngressIdentityAccessBinding:
-    if auth_request == "none":
-        return IngressIdentityAccessBinding()
-    if auth_request == "authentik":
-        return IngressIdentityAccessBinding(mode="forward-auth", provider="authentik")
-    if auth_request == "authentik-send-basic-auth":
-        return IngressIdentityAccessBinding(
-            mode="forward-auth", provider="authentik", send_basic_auth=True
-        )
-    return IngressIdentityAccessBinding(mode="forward-auth", provider=auth_request)
 
 
 class NpmplusIngressRouteDesiredState(BaseModel):
@@ -240,12 +230,19 @@ def apply_npmplus_ingress_route(
     request: NpmplusIngressApplyRequest,
 ) -> NpmplusIngressApplyResult:
     desired_payload = request.route.to_proxy_host_payload()
-    existing_host = find_npmplus_proxy_host_by_domains(
+    claim = find_npmplus_proxy_host_by_domains(
         client.list_proxy_hosts(),
         domain_names=desired_payload.domain_names,
         expected_host_id=request.expected_host_id,
         require_exact_expected_host_domains=request.require_exact_expected_host_domains,
     )
+    existing_host = None
+    if claim is not None:
+        existing_host = client.get_proxy_host(claim.id)
+        if set(existing_host.domain_names) != set(claim.domain_names):
+            raise click.ClickException(
+                "The selected NPMplus hostname claim changed before qualification."
+            )
     desired_payload = _inherit_existing_npmplus_fields(
         route=request.route,
         desired_payload=desired_payload,
@@ -303,20 +300,23 @@ def _inherit_existing_npmplus_fields(
     desired_payload: NpmplusProxyHostPayload,
     existing_host: NpmplusProxyHost | None,
 ) -> NpmplusProxyHostPayload:
-    # Omitted advanced_config inherits the live provider host value. Explicit
-    # values, including an empty string, replace or clear the provider value.
-    if existing_host is None or "advanced_config" in route.model_fields_set:
+    if existing_host is None:
         return desired_payload
-    return desired_payload.model_copy(update={"advanced_config": existing_host.advanced_config})
+    inherited = {}
+    if existing_host.npmplus_location_config == PRIVATE_BEARER_FORWARDING:
+        inherited["npmplus_location_config"] = existing_host.npmplus_location_config
+    if "advanced_config" not in route.model_fields_set:
+        inherited["advanced_config"] = existing_host.advanced_config
+    return desired_payload.model_copy(update=inherited)
 
 
 def find_npmplus_proxy_host_by_domains(
-    proxy_hosts: tuple[NpmplusProxyHost, ...],
+    proxy_hosts: tuple[NpmplusHostIdentity, ...],
     *,
     domain_names: tuple[str, ...],
     expected_host_id: int | None = None,
     require_exact_expected_host_domains: bool = False,
-) -> NpmplusProxyHost | None:
+) -> NpmplusHostIdentity | None:
     desired_domains = set(_normalize_domains(domain_names))
     domain_matches = tuple(
         host for host in proxy_hosts if desired_domains.intersection(host.domain_names)
@@ -430,13 +430,6 @@ def _plan_operations(
     )
 
 
-def _payload_matches(
-    existing_host: NpmplusProxyHost,
-    desired_payload: NpmplusProxyHostPayload,
-) -> bool:
-    return _comparable_payload(existing_host) == _comparable_payload(desired_payload)
-
-
 def _create_change_categories(
     desired_payload: NpmplusProxyHostPayload,
 ) -> tuple[NpmplusIngressChangeCategory, ...]:
@@ -481,7 +474,9 @@ def _ordered_change_categories(
 def _comparable_payload(
     payload: NpmplusProxyHostPayload,
 ) -> dict[str, object]:
-    comparable = payload.model_dump(mode="json", exclude={"enabled", "id", "meta"})
+    comparable = payload.model_dump(
+        mode="json", exclude={"enabled", "id", "meta", "npmplus_location_config"}
+    )
     locations = comparable.get("locations")
     if isinstance(locations, list):
         comparable["locations"] = [

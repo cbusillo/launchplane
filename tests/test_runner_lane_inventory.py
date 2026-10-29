@@ -11,7 +11,7 @@ from control_plane.cli import main
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.merge_train_github import MergeTrainGitHubError
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 
 
 CLI_MAIN = cast(Command, main)
@@ -169,7 +169,6 @@ class RunnerLaneInventoryCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-inventory",
                     "--repository",
                     "cbusillo/repo",
@@ -186,7 +185,7 @@ class RunnerLaneInventoryCliTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=True):
             result = CliRunner().invoke(
                 CLI_MAIN,
-                ["work-graph", "runner-inventory", "--repository", "cbusillo/repo"],
+                ["runner-inventory", "--repository", "cbusillo/repo"],
             )
 
         self.assertNotEqual(result.exit_code, 0)

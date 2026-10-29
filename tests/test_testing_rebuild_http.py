@@ -16,6 +16,7 @@ from control_plane.build_provenance import VerifiedBuildArtifact
 from control_plane.contracts.artifact_identity import ArtifactSourceBuild
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_routes import testing_rebuild as routes
+from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane import testing_rebuild_preflight as preflight
 from control_plane import odoo_target_replacement_apply_http as admission
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
@@ -106,6 +107,243 @@ class TestingRebuildHttpFixture(unittest.TestCase):
 
 
 class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsyncioTestCase):
+    def settlement_payload(self) -> dict[str, object]:
+        return {
+            **self.payload,
+            "original_scope": idempotency_scope(_github_human_identity()),
+        }
+
+    async def test_exclusion_is_durable_and_cannot_be_reused_for_another_intent(self) -> None:
+        payload = self.settlement_payload()
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        excluded = await self.call("POST", payload, path=self.url + "/settle")
+        self.assertEqual(excluded.status_code, 200, excluded.text)
+        self.assertEqual(excluded.json()["outcome"], "excluded")
+        repeated = await self.call("POST", payload, path=self.url + "/settle")
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertEqual(repeated.json()["outcome"], "excluded")
+        for changed, status in (
+            ({"reason": "Another intent"}, 409),
+            ({"original_scope": "another-actor"}, 403),
+        ):
+            refused = await self.call("POST", {**payload, **changed}, path=self.url + "/settle")
+            self.assertEqual(refused.status_code, status, refused.text)
+            self.assertNotIn("operation_id", refused.text)
+        late = await self.call("POST", self.payload)
+        self.assertEqual(late.status_code, 409, late.text)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_settlement_observes_admitted_operation_without_cancelling_it(self) -> None:
+        accepted = await self.call("POST", self.payload)
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        settled = await self.call("POST", self.settlement_payload(), path=self.url + "/settle")
+        self.assertEqual(settled.status_code, 200, settled.text)
+        self.assertEqual(settled.json()["outcome"], "observed")
+        self.assertEqual(settled.json()["operation"], accepted.json()["operation"])
+        again = await self.call("POST", self.payload)
+        self.assertEqual(again.json()["operation"], accepted.json()["operation"])
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_actor_binding_replays_the_legacy_original_request(self) -> None:
+        accepted = await self.call("POST", self.payload)
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        bound = await self.call("POST", self.settlement_payload())
+        self.assertEqual(bound.status_code, 200, bound.text)
+        self.assertEqual(bound.json()["operation"], accepted.json()["operation"])
+
+    async def test_settlement_requires_original_actor_binding_and_csrf(self) -> None:
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        missing_binding = await self.call("POST", self.payload, path=self.url + "/settle")
+        self.assertEqual(missing_binding.status_code, 400, missing_binding.text)
+        missing_csrf = await self.call(
+            "POST", self.settlement_payload(), path=self.url + "/settle", csrf=False
+        )
+        self.assertEqual(missing_csrf.status_code, 403, missing_csrf.text)
+        foreign_submit = await self.call(
+            "POST", {**self.payload, "original_scope": "another-actor"}
+        )
+        self.assertEqual(foreign_submit.status_code, 403, foreign_submit.text)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_settlement_excludes_original_held_before_admission(self) -> None:
+        entered = asyncio.Event()
+        release = Event()
+        loop = asyncio.get_running_loop()
+        inspect = preflight.inspect_testing_rebuild
+
+        def held_inspection(**kwargs: Any) -> object:
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(LIFESPAN_HANG_DEADLINE_SECONDS):
+                raise AssertionError("Original inspection was not released")
+            return inspect(**kwargs)
+
+        def headers() -> dict[str, str]:
+            current = _browser_mutation_headers(self.sessions, self.session)
+            current["Idempotency-Key"] = "settlement-race"
+            return current
+
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        with patch.object(routes, "inspect_testing_rebuild", side_effect=held_inspection):
+            async with lifespan_client(self.app) as client:
+                original = asyncio.create_task(
+                    request(client, "POST", self.url, headers=headers(), payload=self.payload)
+                )
+                try:
+                    await asyncio.wait_for(entered.wait(), LIFESPAN_HANG_DEADLINE_SECONDS)
+                    absent = await request(
+                        client,
+                        "POST",
+                        self.url + "/lookup",
+                        headers=headers(),
+                        payload=self.payload,
+                    )
+                    self.assertEqual(absent.status_code, 404, absent.text)
+                    settled = await request(
+                        client,
+                        "POST",
+                        self.url + "/settle",
+                        headers=headers(),
+                        payload=self.settlement_payload(),
+                    )
+                    self.assertEqual(settled.status_code, 200, settled.text)
+                    self.assertEqual(settled.json()["outcome"], "excluded")
+                    self.assertFalse(original.done())
+                finally:
+                    release.set()
+                    late = await original
+                self.assertEqual(late.status_code, 409, late.text)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_director_operator_can_queue_native_testing_without_an_apply_rule(self) -> None:
+        from control_plane.service_auth import (
+            BearerIdentityConfig,
+            configured_local_operator_identity,
+            launchplane_identity_actor,
+        )
+        from control_plane.odoo_target_replacement_apply_http import (
+            ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+        )
+        from control_plane.odoo_target_replacement_plan_http import (
+            ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+        )
+        from control_plane.contracts.odoo_stable_target_replacement import (
+            OdooStableTargetReplacementRequest,
+        )
+
+        config = BearerIdentityConfig(
+            local_operator_token="fixture-operator",
+            local_operator_subject="fixture-agent",
+            local_operator_token_label="fixture-agent-token",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.policy,
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.root,
+            bearer_identity_config=config,
+        )
+        replacement = self.fixture.operation.request.model_copy(
+            update={"reason": "Rebuild the disposable testing copy"}
+        )
+        identity = configured_local_operator_identity(config)
+        assert identity is not None
+        hold = self.fixture.apply_staff_hold(
+            True,
+            "Stage an independent empty copy",
+            purpose="isolation_staging",
+            actor=launchplane_identity_actor(identity),
+        )
+        intent = self.fixture.intent.model_copy(update={"before": self.fixture.current()})
+        with patch.object(preflight, "capture_rebuild_intent", return_value=intent):
+            inspected = await request(
+                app,
+                "POST",
+                ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+                headers={"Authorization": "Bearer fixture-operator"},
+                payload={
+                    "product": self.product,
+                    "replacement": replacement.model_dump(
+                        mode="json", include=set(OdooStableTargetReplacementRequest.model_fields)
+                    ),
+                },
+            )
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        ordinary = await request(
+            app,
+            "POST",
+            ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+            headers={"Authorization": "Bearer fixture-operator", "Idempotency-Key": "ordinary"},
+            payload={
+                "product": self.product,
+                "replacement": replacement.model_copy(
+                    update={"strategy": "recreate-in-place"}
+                ).model_dump(mode="json"),
+            },
+        )
+        self.assertEqual(ordinary.status_code, 403, ordinary.text)
+        response = await request(
+            app,
+            "POST",
+            ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+            headers={
+                "Authorization": "Bearer fixture-operator",
+                "Idempotency-Key": "native-director-rebuild",
+            },
+            payload={"product": self.product, "replacement": replacement.model_dump(mode="json")},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        operations = self.store.list_odoo_stable_target_replacement_operation_records()
+        saved = next(
+            item for item in operations if item.idempotency_key == "native-director-rebuild"
+        )
+        self.assertEqual(saved.request, replacement)
+        self.assertTrue(saved.is_native_testing_rebuild)
+        self.assertEqual(self.fixture.effects, [])
+        self.assertEqual(self.fixture.current().target.policies.staff_testing_hold, hold)
+        cancelled = await request(
+            app,
+            "POST",
+            f"/v1/drivers/odoo/target-replacement/operations/{saved.operation_id}/cancel",
+            headers={"Authorization": "Bearer fixture-operator"},
+            payload={"reason": "Withdraw the pending testing rebuild"},
+        )
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(
+                saved.operation_id
+            ).status,
+            "cancelled",
+        )
+        from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
+
+        profile = self.store.read_product_profile_record(self.product)
+        profile.preview.clean_testing_snapshot = True
+        testing = next(lane for lane in profile.lanes if lane.instance == "testing")
+        testing.odoo_testing_drill_storage = None
+        self.store.write_product_profile_record(profile)
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        for mode in ("production_restore", "upstream_restore"):
+            with self.subTest(source=mode):
+                refused = await request(
+                    app,
+                    "POST",
+                    ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+                    headers={"Authorization": "Bearer fixture-operator", "Idempotency-Key": mode},
+                    payload={
+                        "product": self.product,
+                        "replacement": replacement.model_copy(
+                            update={"data_source_mode": mode}
+                        ).model_dump(mode="json"),
+                    },
+                )
+                self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertEqual(refused.json()["error"]["code"], TESTING_STORAGE_BUDGET_REQUIRED)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
     async def test_native_preflight_exposes_fixed_checkpoint_without_private_exception(
         self,
     ) -> None:
@@ -153,6 +391,203 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
 
+    async def test_lookup_rejects_missing_or_malformed_body_without_changing_operations(
+        self,
+    ) -> None:
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        for body in (b"", b'{"replacement":'):
+            with self.subTest(body=body):
+                headers = _browser_mutation_headers(self.sessions, self.session)
+                headers.update({"Idempotency-Key": "invalid-body", "Content-Type": "text/plain"})
+                response = await request(
+                    self.app,
+                    "POST",
+                    self.url + "/lookup",
+                    headers=headers,
+                    raw_body=body,
+                    capture_server_error_response=True,
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_director_reads_preserve_original_binding_and_mutation_guards(self) -> None:
+        from control_plane.service_auth import (
+            BearerIdentityConfig,
+            configured_local_operator_identity,
+            configured_terminal_agent_identity,
+        )
+        from control_plane.contracts.environment_inventory import EnvironmentInventory
+        from control_plane.contracts.promotion_record import (
+            ArtifactIdentityReference,
+            DeploymentEvidence,
+        )
+        from tests.support.auth import scoped_agent_transport
+
+        config = BearerIdentityConfig(
+            local_operator_token="fixture-director",
+            local_operator_subject="fixture-agent",
+            local_operator_token_label="local-lookup",
+            terminal_agent_token="fixture-terminal",
+            terminal_agent_subject="fixture-terminal",
+            terminal_agent_token_label="terminal-lookup",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.policy,
+            bearer_identity_config=config,
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.root,
+        )
+        artifact = self.fixture.fixture.fixture.artifact
+        self.store.write_environment_inventory(
+            EnvironmentInventory(
+                context=self.fixture.operation.context,
+                instance="testing",
+                artifact_identity=ArtifactIdentityReference(artifact_id=artifact.artifact_id),
+                source_git_ref=artifact.source_commit,
+                deploy=DeploymentEvidence(
+                    deploy_mode="compose",
+                    target_type="compose",
+                    status="pass",
+                    target_name=self.fixture.intent.before.target.target_name,
+                ),
+                updated_at=self.fixture.operation.created_at,
+                deployment_record_id="lookup-serving-build",
+            )
+        )
+        for omit_defaults in (False, True):
+            with self.subTest(omitted_defaults=omit_defaults):
+                key = f"native-lookup-{omit_defaults}"
+                headers = {"Authorization": "Bearer fixture-director", "Idempotency-Key": key}
+                replacement = self.fixture.operation.request.model_copy(
+                    update={
+                        "reason": "Rebuild the disposable testing copy",
+                        "no_cache": True,
+                        "expected_current_artifact_id": artifact.artifact_id,
+                    }
+                ).model_dump(mode="json", exclude_defaults=omit_defaults)
+                body: dict[str, object] = {"product": self.product, "replacement": replacement}
+                admitted = await request(
+                    app,
+                    "POST",
+                    admission.ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+                    headers=headers,
+                    payload=body,
+                )
+                self.assertEqual(admitted.status_code, 202, admitted.text)
+                original = next(
+                    item
+                    for item in self.store.list_odoo_stable_target_replacement_operation_records()
+                    if item.idempotency_key == key
+                )
+                self.store.write_odoo_stable_target_replacement_operation_record(
+                    original.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "error_message": "Fixture completed without a candidate",
+                            "finished_at": original.updated_at,
+                        }
+                    )
+                )
+                before = self.store.list_odoo_stable_target_replacement_operation_records()
+                operation_path = self.url + "/operations/" + original.operation_id
+                for token, configure, lookup_status in (
+                    ("fixture-director", configured_local_operator_identity, 200),
+                    ("fixture-terminal", configured_terminal_agent_identity, 404),
+                ):
+                    identity = configure(config)
+                    assert identity is not None
+                    caller_headers = {**headers, "Authorization": "Bearer " + token}
+                    for method, path, payload in (
+                        ("GET", self.url + "/inputs", None),
+                        ("GET", operation_path, None),
+                        ("POST", self.url + "/lookup", body),
+                    ):
+                        observed = await request(
+                            app, method, path, headers=caller_headers, payload=payload
+                        )
+                        self.assertEqual(
+                            observed.status_code,
+                            lookup_status if method == "POST" else 200,
+                            observed.text,
+                        )
+                        if method == "GET" and path.endswith("inputs"):
+                            self.assertEqual(
+                                observed.json()["original_scope"], idempotency_scope(identity)
+                            )
+                        if method == "POST" and lookup_status == 200:
+                            self.assertEqual(
+                                observed.json()["operation"]["operation_id"], original.operation_id
+                            )
+                        with scoped_agent_transport():
+                            refused = await request(
+                                app, method, path, headers=caller_headers, payload=payload
+                            )
+                        self.assertEqual(refused.status_code, 403, refused.text)
+                    for path in (self.url, self.url + "/settle"):
+                        refused = await request(
+                            app,
+                            "POST",
+                            path,
+                            headers=caller_headers,
+                            payload={**self.payload, "original_scope": idempotency_scope(identity)},
+                        )
+                        self.assertEqual(refused.status_code, 403, refused.text)
+                for change in ({"reason": "other intent"}, {"no_cache": False}):
+                    refused = await request(
+                        app,
+                        "POST",
+                        self.url + "/lookup",
+                        headers=headers,
+                        payload={**body, "replacement": {**replacement, **change}},
+                    )
+                    self.assertEqual(refused.status_code, 409, refused.text)
+                normalized = (
+                    {**replacement, "verify_logo": True}
+                    if omit_defaults
+                    else {
+                        name: value for name, value in replacement.items() if name != "verify_logo"
+                    }
+                )
+                refused = await request(
+                    app,
+                    "POST",
+                    self.url + "/lookup",
+                    headers=headers,
+                    payload={**body, "replacement": normalized},
+                )
+                self.assertEqual(refused.status_code, 409, refused.text)
+                foreign = await request(
+                    app,
+                    "GET",
+                    operation_path.replace(self.product, "other-product"),
+                    headers=headers,
+                )
+                self.assertEqual(foreign.status_code, 404, foreign.text)
+                wrong_shape = await request(
+                    app, "POST", self.url + "/lookup", headers=headers, payload=self.payload
+                )
+                self.assertEqual(wrong_shape.status_code, 400, wrong_shape.text)
+                human_wrong_shape = await self.call(
+                    "POST", body, path=self.url + "/lookup", key=key
+                )
+                self.assertEqual(human_wrong_shape.status_code, 400, human_wrong_shape.text)
+                with patch(
+                    "control_plane.http_routes.testing_rebuild.read_active_authz_policy_record",
+                    side_effect=LookupError,
+                ):
+                    refused = await request(app, "GET", self.url + "/inputs", headers=headers)
+                self.assertEqual(refused.status_code, 503, refused.text)
+                self.assertEqual(
+                    self.store.list_odoo_stable_target_replacement_operation_records(), before
+                )
+                with self.assertRaises(FileNotFoundError):
+                    self.store.read_artifact_manifest(self.manifest.artifact_id)
+                self.assertEqual(self.fixture.effects, [])
+
     async def test_read_only_preflight_does_not_admit_artifact_or_candidate(self) -> None:
         before = self.store.list_odoo_stable_target_replacement_operation_records()
         response = await self.call("GET", path=self.url + "/inputs")
@@ -163,6 +598,53 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         with self.assertRaises(FileNotFoundError):
             self.store.read_artifact_manifest(self.manifest.artifact_id)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_signed_in_staging_preflight_and_submit_keep_the_original_hold(self) -> None:
+        from control_plane.service_auth import launchplane_identity_actor
+
+        hold = self.fixture.apply_staff_hold(
+            True,
+            "Prepare the independent empty testing copy",
+            purpose="isolation_staging",
+            actor=launchplane_identity_actor(self.session.identity),
+        )
+        intent = self.fixture.intent.model_copy(update={"before": self.fixture.current()})
+        with patch.object(preflight, "capture_rebuild_intent", return_value=intent):
+            inspected = await self.call("GET", path=self.url + "/inputs")
+            submitted = await self.call("POST", self.payload)
+        self.assertEqual(inspected.status_code, 200, inspected.text)
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        self.assertEqual(self.fixture.current().target.policies.staff_testing_hold, hold)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_snapshot_hold_without_budget_refuses_before_enqueue(self) -> None:
+        from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
+
+        profile = self.fixture.intent.profile.model_copy(deep=True)
+        profile.preview.clean_testing_snapshot = True
+        testing = next(lane for lane in profile.lanes if lane.instance == "testing")
+        testing.odoo_testing_drill_storage = None
+        intent = self.fixture.intent.model_copy(update={"profile": profile})
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        with (
+            patch.object(preflight, "capture_rebuild_intent", return_value=intent),
+            patch.object(preflight, "native_testing_source_authority") as source,
+        ):
+            for mode in ("production_restore", "upstream_restore"):
+                with self.subTest(source=mode):
+                    self.payload["data_source_mode"] = mode
+                    inspected = await self.call(
+                        "GET", path=self.url + "/inputs?data_source_mode=" + mode
+                    )
+                    submitted = await self.call("POST", self.payload, key=mode)
+                    self.assertEqual(inspected.status_code, 409, inspected.text)
+                    self.assertEqual(
+                        inspected.json()["error"]["code"], TESTING_STORAGE_BUDGET_REQUIRED
+                    )
+                    self.assertEqual(submitted.status_code, 409, submitted.text)
+        source.assert_not_called()
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
 
     async def test_submit_admission_disposition_is_independent_of_inspection_checkpoint(
@@ -181,6 +663,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             self.assertEqual(response.status_code, 409, response.text)
             self.assertEqual(response.json()["error"]["code"], code)
             self.assertEqual(response.json()["error"]["message"], str(failure))
+            self.assertEqual(response.json()["error"]["reason"], failure.code)
             self.assertTrue(response.json()["trace_id"])
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
@@ -188,7 +671,11 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
     async def test_provider_denial_and_unavailable_preflight_cannot_queue(self) -> None:
         import click
         from control_plane.dokploy import api
-        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.dokploy.native_copy_stream import (
+            NativeSourceUnavailable,
+            NativeProgramFailed,
+        )
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
         before = self.store.list_odoo_stable_target_replacement_operation_records()
         for failure, status in (
@@ -214,6 +701,12 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             (ValueError("private-retained-identity-message"), 409),
             (FileNotFoundError("private-retained-record"), 409),
             (NativeSourceUnavailable("private-transient-observation"), 409),
+            (
+                NativeProgramFailed(
+                    "private-value", predicate=ReadbackPredicate.CUSTODY, kind="refused"
+                ),
+                409,
+            ),
         ):
             for method in ("GET", "POST"):
                 with (
@@ -237,6 +730,8 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                         if isinstance(failure, NativeSourceUnavailable)
                         else "testing_rebuild_inputs_unverified",
                     )
+                    if isinstance(failure, NativeProgramFailed):
+                        self.assertIn(failure.code, response.text)
                     self.assertNotIn("private-", response.text)
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
@@ -398,6 +893,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             ("GET", self.url + "/inputs", None),
             ("POST", self.url, self.payload),
             ("POST", self.url + "/lookup", self.payload),
+            ("POST", self.url + "/settle", self.settlement_payload()),
         ):
             result = await self.call(method, payload, path=path)
             self.assertEqual(result.status_code, 403, result.json())

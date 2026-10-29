@@ -1,4 +1,6 @@
 from contextlib import nullcontext, contextmanager
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
@@ -316,6 +318,14 @@ class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
             idempotency_key="original-key",
             request_fingerprint="original-request",
             provider_target_key=key,
+            provider_target_origin=ProviderTargetOrigin(
+                product=_PRODUCT,
+                context=_CONTEXT,
+                instance="testing",
+                provider_id="dokploy",
+                target_type="compose",
+                target_id="rehearsal-target",
+            ),
             reconciliation_key="original-binding",
             lease_owner="original-worker",
         )
@@ -550,13 +560,13 @@ class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
         payload = _payload(
             hold=False, mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
         )
-        original = self.store.commit_testing_hold_rehearsal
+        original = self.store.commit_testing_hold
 
         def lost_response(**kwargs: object) -> object:
             original(**kwargs)  # type: ignore[arg-type]
             raise RuntimeError("fixture lost response")
 
-        with patch.object(self.store, "commit_testing_hold_rehearsal", side_effect=lost_response):
+        with patch.object(self.store, "commit_testing_hold", side_effect=lost_response):
             with self.assertRaisesRegex(RuntimeError, "fixture lost response"):
                 await self.post(payload, "lost-receipt")
         self.assertIsNone(_read_hold(self.store))

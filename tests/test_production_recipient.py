@@ -9,6 +9,7 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
+from control_plane import http_error_evidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -17,6 +18,7 @@ from control_plane.contracts.production_recipient import (
     ProductionRecipientRequest,
     RecipientServiceLimits,
 )
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.production_recipient import (
     ROUTE,
     ProductionRecipientAdapter,
@@ -24,6 +26,7 @@ from control_plane.production_recipient import (
     plan,
     qualified_render,
     read_provider_compose,
+    runtime_values,
 )
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.runtime_environments import SiteRuntimeEnvironment
@@ -35,6 +38,14 @@ class ProductionRecipientTests(unittest.TestCase):
     database_url = ""
 
     def setUp(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
+        self.capacity_read = self.enterContext(
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+            )
+        )
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -223,7 +234,9 @@ class ProductionRecipientTests(unittest.TestCase):
             return self.provider["new-recipient"]
         self.fail(f"Unexpected provider effect {path}")
 
-    def inspect_resources(self, root: Path, record: Any, *, prepare: bool, checkpoint: Any) -> None:
+    def inspect_resources(
+        self, root: Path, record: Any, *, prepare: bool, checkpoint: Any, materialize: bool = False
+    ) -> None:
         checkpoint("prepare_resources" if prepare else "inspect_resources")
         self.assertNotIn("old-database", record.volumes.values())
         self.assertNotIn("old-config", record.volumes.values())
@@ -262,6 +275,27 @@ class ProductionRecipientTests(unittest.TestCase):
         self.assertEqual(self.provider["old-recipient"]["env"], "OLD_VALUE=preserve")
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
 
+    def test_capacity_refusal_leaves_no_custody_and_original_key_can_continue(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+        from control_plane.dokploy.network_capacity import (
+            BRIDGE_NETWORK_CAPACITY_MARGIN,
+            BridgeNetworkCapacityRefused,
+        )
+
+        for free in (0, BRIDGE_NETWORK_CAPACITY_MARGIN):
+            self.capacity_read.return_value = BridgeNetworkCapacity(total_slots=16, free_slots=free)
+            with self.subTest(free=free), self.assertRaises(BridgeNetworkCapacityRefused):
+                self.run_operation()
+            self.assertEqual(self.effects, [])
+            self.assertIsNone(custody(self.store, self.product, self.context))
+        self.capacity_read.return_value = BridgeNetworkCapacity(
+            total_slots=16, free_slots=1 + BRIDGE_NETWORK_CAPACITY_MARGIN
+        )
+        self.assertEqual(self.run_operation().response_status_code, 202)
+        self.assertEqual(
+            self.capacity_read.call_args.kwargs["server_id"], self.body.destination_server_id
+        )
+
     def test_preparation_replay_readback_preserve_old_and_never_deploy_or_delete(self) -> None:
         first = self.run_operation()
         self.assertEqual(first.response_status_code, 202, first)
@@ -271,9 +305,61 @@ class ProductionRecipientTests(unittest.TestCase):
         saved = custody(self.store, self.product, self.context)
         assert saved is not None
         self.adapter.verify(saved)
+        from control_plane.dokploy import api
+
+        provider = self.provider[saved.target_id]
+        original_environment = str(provider["env"])
+        values = api.parse_dokploy_env_text(original_environment)
+        for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS:
+            values.pop(key, None)
+            provider["env"] = api.serialize_dokploy_env_text(values)
+            self.adapter.verify(saved)
+        provider["env"] = original_environment
         self.assertTrue(saved.qualified_at)
         output = json.dumps(plan(saved))
         self.assertNotIn(self.values["DB_PASSWORD"], output)
+        self.assert_old_preserved()
+
+    def test_canonical_image_placeholders_share_the_verified_artifact(self) -> None:
+        for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS:
+            with self.subTest(image_key=key):
+                self.document["services"]["web"]["image"] = "${" + key + "}"
+                record = self.adapter.current()
+                rendered = qualified_render(record, runtime_values(self.store, self.root, record))
+                self.assertEqual(rendered["services"]["web"]["image"], record.image_reference)
+
+    def test_unencodable_input_retains_prior_fences_without_configure_checkpoint(self) -> None:
+        from control_plane.dokploy import api
+
+        self.values["APP_SETTING"] = "fixture\x00value"
+        effects: list[str] = []
+        checkpoint = self.store.checkpoint_mutation_provider_effect
+
+        def record_checkpoint(**kwargs: Any) -> Any:
+            effects.append(kwargs["effect_phase"])
+            return checkpoint(**kwargs)
+
+        with (
+            patch.object(
+                self.store, "checkpoint_mutation_provider_effect", side_effect=record_checkpoint
+            ),
+            patch.object(
+                api, "serialize_dokploy_env_text", wraps=api.serialize_dokploy_env_text
+            ) as render,
+        ):
+            result = self.run_operation()
+        self.assertEqual(result.response_status_code, 409)
+        self.assertTrue(
+            any(
+                call.args[0].get("APP_SETTING") == "fixture\x00value"
+                for call in render.call_args_list
+            )
+        )
+        self.assertNotIn("configure_recipient", effects)
+        self.assertTrue(effects)
+        self.assertIn("/api/compose.create", self.effects)
+        self.assertNotIn("/api/compose.update", self.effects)
+        self.assertTrue(self.store.list_held_provider_target_reservations())
         self.assert_old_preserved()
 
     def test_unknown_create_retains_custody_and_refuses_new_keys_without_redispatch(self) -> None:
@@ -336,6 +422,36 @@ class ProductionRecipientTests(unittest.TestCase):
         self.assertEqual(self.effects, effects)
         self.assert_old_preserved()
 
+    def test_configured_recipient_without_materialized_source_continues_original_key(self) -> None:
+        materialized: dict[str, str] = {}
+
+        def prepare_source(
+            root: Path, record: Any, *, prepare: bool, checkpoint: Any, materialize: bool = False
+        ) -> None:
+            self.inspect_resources(root, record, prepare=prepare, checkpoint=checkpoint)
+            document = json.loads(record.compose_source)
+            for volume in document["volumes"].values():
+                volume["external"] = True
+            if materialize:
+                self.assertFalse(prepare)
+                materialized[record.target_id] = json.dumps(document)
+
+        with patch(
+            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+            side_effect=lambda **kwargs: materialized.get(kwargs["compose_id"], "null"),
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 409)
+            effects = list(self.effects)
+            with patch(
+                "control_plane.production_recipient.inspect_resources", side_effect=prepare_source
+            ):
+                self.assertEqual(self.run_operation().response_status_code, 202)
+        self.assertEqual(self.effects, effects)
+        saved = custody(self.store, self.product, self.context)
+        assert saved is not None
+        self.assertTrue(saved.qualified_at)
+        self.assert_old_preserved()
+
     def test_changed_authority_or_review_never_creates_recipient(self) -> None:
         changed = self.profile.model_copy(update={"updated_at": "2026-10-15T11:00:00Z"})
         self.store.write_product_profile_record(changed)
@@ -347,17 +463,123 @@ class ProductionRecipientTests(unittest.TestCase):
     def test_provider_render_drift_never_qualifies_and_old_binding_survives(self) -> None:
         def wrong_render(**kwargs: Any) -> str:
             document = json.loads(self.provider[kwargs["compose_id"]]["composeFile"])
+            document["networks"] = {"dokploy-network": {"external": True}}
             document["services"]["database"]["deploy"]["resources"]["limits"]["cpus"] = "8"
             return json.dumps(document)
 
-        with patch(
-            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
-            side_effect=wrong_render,
+        with (
+            patch(
+                "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+                side_effect=wrong_render,
+            ),
+            self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs,
         ):
             self.assertEqual(self.run_operation().response_status_code, 409)
+            effects = list(self.effects)
+            apply_logs = list(logs.records)
+            logs.records.clear()
+            with patch("control_plane.production_recipient.inspect_resources") as host_check:
+                self.assertEqual(self.run_operation().response_status_code, 409)
+            host_check.assert_not_called()
+            self.assertEqual(self.effects, effects)
+        self.assertTrue(apply_logs)
+        self.assertTrue(logs.records)
+        for entry in [*apply_logs, *logs.records]:
+            evidence = json.loads(entry.getMessage())
+            self.assertEqual(evidence["trace_id"], self.adapter.trace_id)
+            self.assertTrue(evidence["sites"])
+            self.assertNotIn(self.values["DB_PASSWORD"], entry.getMessage())
         saved = custody(self.store, self.product, self.context)
         assert saved is not None
         self.assertFalse(saved.qualified_at)
+        self.assert_old_preserved()
+
+    def converted_with_unused_provider_network(self, **kwargs: Any) -> str:
+        document = json.loads(self.provider[kwargs["compose_id"]]["composeFile"])
+        document.setdefault("networks", {})["dokploy-network"] = {"external": True}
+        return json.dumps(document)
+
+    def test_unused_provider_network_allows_original_key_reconciliation(self) -> None:
+        with patch.object(self.adapter, "verify", side_effect=ValueError("render unavailable")):
+            self.assertEqual(self.run_operation().response_status_code, 409)
+        effects = list(self.effects)
+
+        with patch(
+            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+            side_effect=self.converted_with_unused_provider_network,
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 202)
+        saved = custody(self.store, self.product, self.context)
+        assert saved is not None
+        self.assertTrue(saved.qualified_at)
+        self.assertEqual(self.effects, effects)
+        self.assert_old_preserved()
+
+    def test_unused_provider_network_matches_empty_source_networks(self) -> None:
+        self.document["networks"] = {}
+        self.adapter.request = self.body.model_copy(
+            update={"reviewed_plan_sha256": self.adapter.current().plan_sha256}
+        )
+        with patch(
+            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+            side_effect=self.converted_with_unused_provider_network,
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 202)
+        self.assert_old_preserved()
+
+    def test_attached_or_changed_provider_network_refuses_verification(self) -> None:
+        self.assertEqual(self.run_operation().response_status_code, 202)
+        saved = custody(self.store, self.product, self.context)
+        assert saved is not None
+        for networks, attachment in (
+            ({"dokploy-network": {"external": True}}, ["dokploy-network"]),
+            ({"dokploy-network": {"external": True}}, {"dokploy-network": {}}),
+            (
+                {"dokploy-network": {"external": True}},
+                ["${RECIPIENT_NET:-dokploy-network}"],
+            ),
+            ({"dokploy-network": {"external": True, "name": "foreign-network"}}, None),
+            ({"dokploy-network": {"external": 1}}, None),
+            ({"foreign-network": {"external": True}}, None),
+        ):
+            with self.subTest(networks=networks, attachment=attachment):
+                document = json.loads(self.provider[saved.target_id]["composeFile"])
+                document["networks"] = networks
+                if attachment is not None:
+                    document["services"]["web"]["networks"] = attachment
+                with (
+                    patch(
+                        "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+                        return_value=json.dumps(document),
+                    ),
+                    self.assertRaises(ValueError),
+                ):
+                    self.adapter.verify(saved)
+        self.assert_old_preserved()
+
+    def test_provider_network_is_not_normalized_for_declared_source_networks(self) -> None:
+        self.document["networks"] = {"backend": {"internal": True}}
+        self.document["services"]["web"]["networks"] = ["backend"]
+        self.adapter.request = self.body.model_copy(
+            update={"reviewed_plan_sha256": self.adapter.current().plan_sha256}
+        )
+        with patch(
+            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+            side_effect=self.converted_with_unused_provider_network,
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 409)
+        self.assert_old_preserved()
+
+    def test_interpolated_source_network_cannot_join_provider_network(self) -> None:
+        self.document["services"]["web"]["networks"] = ["${RECIPIENT_NET:-dokploy-network}"]
+        self.adapter.request = self.body.model_copy(
+            update={"reviewed_plan_sha256": self.adapter.current().plan_sha256}
+        )
+        with patch(
+            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+            side_effect=self.converted_with_unused_provider_network,
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 409)
         self.assert_old_preserved()
 
     def test_storage_alias_ports_missing_limits_buffer_pool_or_mutable_app_image_refuse(

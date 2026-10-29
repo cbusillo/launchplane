@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
 from control_plane.contracts.merge_train_policy import MergeTrainGitHubTokenSource
+from control_plane.contracts.merge_train_controller_state import (
+    MergeTrainControllerReconciliationRequiredError,
+    merge_train_controller_alias_reconciliation_detail,
+)
 from control_plane.contracts.repository_evidence import (
     RepositoryEvidenceProvider,
 )
@@ -76,9 +82,9 @@ class GovernanceMergeTrainReadStore(Protocol):
 
 @dataclass(frozen=True)
 class LiveGovernanceCurrentReadinessProvider:
-    github_token: Callable[[MergeTrainGitHubTokenSource, str], str]
+    github_token: Callable[[MergeTrainGitHubTokenSource, str], str | GitHubAppInstallationToken]
     evaluator_factory: Callable[
-        [object, RepositoryEvidenceProvider, str],
+        [object, RepositoryEvidenceProvider, str | GitHubAppInstallationToken],
         object,
     ] = lambda store, provider, token: LiveMergeAdmissionEvaluator(
         store=store,
@@ -145,6 +151,12 @@ class LiveGovernanceCurrentReadinessProvider:
             if candidate_record is None:
                 return _unavailable_readiness()
             controller_store = require_merge_train_controller_state_record_store(store)
+            if merge_train_controller_alias_reconciliation_detail(
+                controller_store.list_merge_train_controller_state_alias_records(
+                    repository=repository, base_branch=base_branch
+                )
+            ):
+                return _unavailable_readiness()
             controller_records = controller_store.list_merge_train_controller_state_records(
                 repository=repository,
                 base_branch=base_branch,
@@ -175,7 +187,7 @@ class LiveGovernanceCurrentReadinessProvider:
                 )
             ):
                 return _unavailable_readiness()
-            token = self.github_token(github_token_source, repository).strip()
+            token = self.github_token(github_token_source, repository)
             if not token:
                 return _unavailable_readiness()
             evaluator = cast(
@@ -208,6 +220,7 @@ class LiveGovernanceCurrentReadinessProvider:
             )
         except (
             LookupError,
+            MergeTrainControllerReconciliationRequiredError,
             MergeAdmissionDeniedError,
             MergeTrainGitHubError,
             StopIteration,

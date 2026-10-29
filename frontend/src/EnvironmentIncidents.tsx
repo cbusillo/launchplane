@@ -10,7 +10,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  LaunchplaneApiError,
+  isLaunchplaneHttpError,
   listProductEnvironmentIncidents,
   readProductEnvironmentIncident,
 } from "./api";
@@ -735,7 +735,7 @@ function errorResource<T>(
   error: unknown,
   fallbackStatusCode = 503,
 ): ResourceState<T> {
-  if (error instanceof LaunchplaneApiError) {
+  if (isLaunchplaneHttpError(error)) {
     return {
       status: "error",
       data,

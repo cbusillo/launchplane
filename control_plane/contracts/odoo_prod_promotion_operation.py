@@ -12,9 +12,11 @@ from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
     DurableOperationCancellation,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 ODOO_PROD_PROMOTION_RUN_ACTION = "odoo_prod_promotion_run.execute"
+DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS = 3
 ODOO_CUTOVER_RECONCILIATION_DELAY = timedelta(seconds=30)
 
 
@@ -272,11 +274,7 @@ def validate_release_operation_state(record: object, *, label: str) -> None:
 
 
 def odoo_prod_promotion_request_fingerprint(request: OdooProdPromotionRunRequest) -> str:
-    return hashlib.sha256(
-        json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(request.model_dump(mode="json"))
 
 
 def build_odoo_prod_promotion_operation_id(

@@ -19,7 +19,7 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.provider_key_adoption import LaneProviderEnv
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.contracts.secret_record import SecretRecord
+from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
@@ -157,6 +157,84 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
             database_url=self.database_url,
             include_site_shared=True,
         )
+
+    def test_adoption_origin_uses_value_backed_lane_history_without_disabling_adoption(
+        self,
+    ) -> None:
+        profile = self.store.read_product_profile_record("example-site")
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"historical_contexts": ("example-old",)})
+        )
+        cases = (
+            ("example-site", "testing", "runtime_environment", True, None),
+            ("example-site", "", "runtime_environment", True, None),
+            ("example-site", "testing", "retired:runtime_environment", True, None),
+            ("example-old", "testing", "runtime_environment", True, None),
+            ("unrelated-site", "testing", "runtime_environment", True, "provider"),
+            ("example-site", "prod", "runtime_environment", True, "provider"),
+            ("example-site", "testing", "runtime_environment", False, "provider"),
+        )
+        for index, (context, instance, integration, backed, expected) in enumerate(cases):
+            with self.subTest(
+                context=context, instance=instance, integration=integration, backed=backed
+            ):
+                key = f"HISTORY_CASE_{index}_TOKEN"
+                if backed:
+                    secrets.write_secret_value(
+                        record_store=self.store,
+                        scope="context_instance" if instance else "context",
+                        integration="runtime_environment",
+                        name=key,
+                        binding_key=key,
+                        context_name=context,
+                        instance_name=instance,
+                        plaintext_value="synthetic-generated-value",
+                        value_origin="generated",
+                    )
+                    historical = next(
+                        row
+                        for row in self.store.list_secret_bindings(limit=None)
+                        if row.binding_key == key
+                    ).model_copy(update={"status": "disabled", "integration": integration})
+                else:
+                    historical = SecretBinding(
+                        binding_id="empty-onboarding-placeholder",
+                        secret_id="no-value-record",
+                        integration=integration,
+                        binding_key=key,
+                        context=context,
+                        instance=instance,
+                        status="disabled",
+                        created_at="2026-01-01T00:00:00Z",
+                        updated_at="2026-01-01T00:00:00Z",
+                    )
+                self.store.write_secret_binding(historical)
+                control_plane_product_config.apply_product_config_bundle(
+                    record_store=self.store,
+                    payload=self._payload(
+                        "apply", [_adopted_secret(key, name=f"adopted-{index}")], "testing"
+                    ),
+                    mode="apply",
+                    actor="fixture",
+                    source_label="test",
+                    lane_provider_env_reader=lambda: LaneProviderEnv(
+                        env={key: "synthetic-provider-value"}, template_defaults={}
+                    ),
+                )
+                record = next(
+                    row
+                    for row in self.store.list_secret_records(instance_name="testing")
+                    if row.name == f"adopted-{index}"
+                )
+                self.assertEqual(
+                    self.store.read_secret_version(record.current_version_id).value_origin, expected
+                )
+                destination = next(
+                    row
+                    for row in self.store.list_secret_bindings(limit=None)
+                    if row.secret_id == record.secret_id and row.status == "configured"
+                )
+                self.assertEqual(destination.value_source, "provider")
 
     async def test_reviewed_adoption_stores_provider_values_without_returning_them(self) -> None:
         adopted = [
@@ -318,7 +396,7 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
         await self._post(self._payload("dry-run", adopted))
         original_write = self.store.write_product_authority_bundle
 
-        def record_then_write(bundle: ProductAuthorityBundle) -> None:
+        def record_then_write(bundle: ProductAuthorityBundle, **write_options: Any) -> None:
             _, other_bundle = control_plane_product_config.plan_product_config_authority_bundle(
                 record_store=self.store,
                 payload={
@@ -332,7 +410,7 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
                 source_label="test",
             )
             original_write(other_bundle)
-            original_write(bundle)
+            original_write(bundle, **write_options)
 
         with patch.object(self.store, "write_product_authority_bundle", record_then_write):
             response = await self._post(self._payload("apply", adopted), key="raced")

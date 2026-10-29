@@ -10,6 +10,31 @@ from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
 
 
 class MergeTrainControllerFeedbackTests(TestCase):
+    def test_unverified_base_retest_removal_does_not_claim_verified_recovery(self) -> None:
+        for observation in ("absent_after_uncertain_attempt", "removed_by_foreign_actor"):
+            with self.subTest(observation=observation):
+                message = feedback._feedback_message(
+                    controller_action="recover_candidate_block",
+                    event="waiting",
+                    result={
+                        "reason_code": "candidate_block_new_base_retest",
+                        "details": {"removal_observation": observation},
+                    },
+                    controller_record_id="failed-candidate",
+                    phase="controller",
+                )
+
+                self.assertEqual(
+                    message,
+                    feedback._feedback_message(
+                        controller_action="recover_candidate_block",
+                        event="waiting",
+                        result={"details": {"removal_observation": observation}},
+                        controller_record_id="failed-candidate",
+                        phase="controller",
+                    ),
+                )
+
     def test_build_feedback_payloads_emits_building_candidate_entries(self) -> None:
         response: dict[str, Any] = {
             "result": {
@@ -172,6 +197,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
         self.assertNotIn("updated", cast(str, payloads[0]["message"]))
 
     def test_build_feedback_payloads_marks_pending_checks_waiting(self) -> None:
+        diagnostic = "missing-example-gate"
         response: dict[str, Any] = {
             "result": {
                 "repository": "cbusillo/example",
@@ -180,6 +206,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
                 "candidate": {
                     "status": "building",
                     "required_checks_status": "pending",
+                    "required_checks_observation_error": diagnostic,
                     "entries": [{"pull_request_number": 7}],
                 },
             },
@@ -191,6 +218,7 @@ class MergeTrainControllerFeedbackTests(TestCase):
         self.assertEqual(1, len(payloads))
         self.assertEqual("waiting", payloads[0]["event"])
         self.assertIn("waiting", cast(str, payloads[0]["message"]))
+        self.assertIn(diagnostic, cast(str, payloads[0]["message"]))
 
     def test_build_feedback_payloads_marks_merged_landing_plan_completed(self) -> None:
         response: dict[str, Any] = {

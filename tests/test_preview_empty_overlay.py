@@ -1,0 +1,404 @@
+import hashlib
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import time
+from typing import Any, cast
+import shutil
+import unittest
+from unittest.mock import Mock, patch
+
+from control_plane._preview_preservation_program import PREVIEW_PRESERVATION_PROGRAM
+from control_plane.preview_preservation import PREVIEW_PRESERVATION_CAPTURE_PHASE
+from tests.test_filestore_capture import capture_namespace
+
+
+class EmptyOverlayPreservationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(TemporaryDirectory())).resolve()
+        self.enterContext(patch.object(Path, "home", return_value=self.root))
+        self.namespace = capture_namespace(PREVIEW_PRESERVATION_PROGRAM)
+        self.source: dict[str, Any] = {
+            "compose_project": "fixture-preview",
+            "database_name": "fixture_db",
+            "preview_volumes": {role: f"fixture-{role}" for role in ("data", "database", "logs")},
+            "provider_binding_sha256": "fixture-provider",
+        }
+        self.snapshot = {
+            "snapshot_id": hashlib.sha256(b"original snapshot").hexdigest(),
+            "database_sha256": hashlib.sha256(b"retained database").hexdigest(),
+            "filestore_sha256": hashlib.sha256(b"retained attachments").hexdigest(),
+        }
+        self.lower = (
+            self.root
+            / self.namespace["CLEAN_SNAPSHOT_STATE_DIRECTORY"]
+            / self.snapshot["snapshot_id"]
+            / "filestore"
+        )
+        self.lower.mkdir(parents=True)
+        (self.lower / "retained-attachment").write_bytes(b"shared retained bytes")
+        (self.lower.parent / "receipt.json").write_text(json.dumps(self.snapshot))
+        self.authority = {
+            "server_id": "fixture-server",
+            "product": "fixture",
+            "context": "fixture-testing",
+        }
+        self.identifier = hashlib.sha256(b"original authority").hexdigest()
+        self.namespace.update(
+            spec={
+                "authority": self.authority,
+                "preservation_id": self.identifier,
+                "source": self.source,
+                "mode": "preserve",
+                "provider_effect_phase": PREVIEW_PRESERVATION_CAPTURE_PHASE,
+                "snapshot": self.snapshot,
+            },
+            deadline=time.monotonic() + 60,
+        )
+        self.volumes: dict[str, Any] = {}
+        for role, name in self.source["preview_volumes"].items():
+            backing = self.root / "docker-volumes" / name / "_data"
+            backing.mkdir(parents=True)
+            self.volumes[name] = {
+                "Name": name,
+                "Driver": "local",
+                "Options": {},
+                "CreatedAt": "fixture-created",
+                "Mountpoint": str(backing),
+                "Labels": {"com.docker.compose.project": self.source["compose_project"]},
+            }
+        data_name = self.source["preview_volumes"]["data"]
+        self.private = (
+            Path(self.volumes[data_name]["Mountpoint"]).parent / "launchplane-preview-filestore"
+        )
+        for child in ("upper", "work/work"):
+            (self.private / child).mkdir(parents=True)
+        self.backing = Path(self.volumes[data_name]["Mountpoint"])
+        (self.backing / "filestore").mkdir()
+        (self.backing / "addons/20.0").mkdir(parents=True)
+        overlay_name = data_name + "-filestore"
+        self.volumes[overlay_name] = {
+            "Name": overlay_name,
+            "Driver": "local",
+            "CreatedAt": "fixture-overlay-created",
+            "Mountpoint": str(self.root / "merged"),
+            "Options": {
+                "type": "overlay",
+                "device": "overlay",
+                "o": f"lowerdir={self.lower},upperdir={self.private}/upper,workdir={self.private}/work,userxattr",
+            },
+            "Labels": {
+                "com.docker.compose.project": self.source["compose_project"],
+                "io.launchplane.preview-snapshot": self.snapshot["snapshot_id"],
+            },
+        }
+        destinations = {
+            "database": {"/var/lib/postgresql/data": "database"},
+            "web": {
+                "/volumes/data": "data",
+                "/volumes/logs": "logs",
+                f"/volumes/data/filestore/{self.source['database_name']}": "overlay",
+            },
+            "script-runner": {
+                "/volumes/data": "data",
+                "/volumes/logs": "logs",
+                f"/volumes/data/filestore/{self.source['database_name']}": "overlay",
+            },
+            "preview-router": {},
+        }
+        self.containers: dict[str, Any] = {
+            service: {
+                "Id": service,
+                "Image": "sha256:fixture",
+                "ExecIDs": None,
+                "State": {"Running": service in {"database", "preview-router"}},
+                "Config": {
+                    "Labels": {
+                        "com.docker.compose.project": self.source["compose_project"],
+                        "com.docker.compose.service": service,
+                    },
+                    "Env": ["PLATFORM_INSTANCE=preview", "ODOO_DB_NAME=fixture_db"],
+                },
+                "HostConfig": {},
+                "Mounts": [
+                    {
+                        "Type": "volume",
+                        "Name": overlay_name
+                        if role == "overlay"
+                        else self.source["preview_volumes"][role],
+                        "Source": self.volumes[
+                            overlay_name
+                            if role == "overlay"
+                            else self.source["preview_volumes"][role]
+                        ]["Mountpoint"],
+                        "Destination": destination,
+                        "RW": True,
+                    }
+                    for destination, role in mounts.items()
+                ],
+            }
+            for service, mounts in destinations.items()
+        }
+        self.database_facts: dict[str, Any] = {
+            "databases": ["postgres"],
+            "connections": 0,
+            "relations": 0,
+            "prepared": 0,
+        }
+        self.calls: list[tuple[str, ...]] = []
+        self.namespace["docker"] = self.docker
+        self.path = self.root / "retained"
+
+    def docker(self, *arguments: str, stdin: bytes | None = None) -> bytes:
+        self.calls.append(arguments)
+        if arguments[:2] == ("volume", "ls"):
+            return "\n".join(self.volumes).encode()
+        if arguments[:2] == ("volume", "inspect"):
+            return json.dumps([self.volumes[arguments[2]]]).encode()
+        if arguments[0] == "inspect":
+            return json.dumps([self.containers[arguments[1]]]).encode()
+        if arguments[0] == "ps":
+            if arguments[-1].startswith("name="):
+                return b""
+            if arguments[-1].startswith("volume="):
+                name = arguments[-1].removeprefix("volume=")
+                return "\n".join(
+                    service
+                    for service, container in self.containers.items()
+                    if any(mount["Name"] == name for mount in container["Mounts"])
+                ).encode()
+            return "\n".join(self.containers).encode()
+        if arguments[0] == "exec":
+            del stdin
+            return json.dumps(self.database_facts).encode()
+        if arguments[0] in {"start", "stop"}:
+            self.assertIn(
+                arguments[-1],
+                {"database"} if arguments[0] == "start" else {"database", "web", "script-runner"},
+            )
+            self.containers[arguments[-1]]["State"]["Running"] = arguments[0] == "start"
+            return b""
+        self.fail(f"unexpected provider effect: {arguments}")
+
+    def preserve(self) -> dict[str, Any]:
+        return cast(dict[str, Any], self.namespace["preserve"](self.path, self.source))
+
+    def test_empty_overlay_qualifies_without_rewriting_restore_or_copying_shared_lower(
+        self,
+    ) -> None:
+        receipt = self.preserve()
+        self.assertTrue(receipt["empty_overlay_verified"])
+        self.assertNotIn("database_restore_verified", receipt)
+        self.assertFalse((self.path / "database.dump").exists())
+        self.assertFalse((self.path / "filestore.tar.gz").exists())
+        self.namespace["verify_preservation_source"](receipt, self.source)
+        self.assertEqual(
+            (self.lower / "retained-attachment").read_bytes(), b"shared retained bytes"
+        )
+        self.namespace["docker"] = lambda *args, **kwargs: self.fail("provider is absent")
+        shutil.rmtree(self.lower.parent)
+        self.assertEqual(self.namespace["verify_preservation"](self.path), receipt)
+
+    def test_use_or_unique_private_data_never_publishes_empty_custody(self) -> None:
+        for key, value in (
+            ("databases", ["fixture_db", "postgres"]),
+            ("databases", ["foreign", "postgres"]),
+            ("connections", 1),
+            ("relations", 1),
+            ("prepared", 1),
+        ):
+            with self.subTest(key=key, value=value):
+                previous = self.database_facts[key]
+                self.database_facts[key] = value
+                with self.assertRaises(RuntimeError):
+                    self.preserve()
+                self.database_facts[key] = previous
+                self.assertFalse(self.path.exists())
+
+        for path in (
+            self.private / "upper/attachment",
+            self.private / "work/private",
+            self.backing / "filestore/attachment",
+            self.backing / "addons/private",
+            self.backing / "sessions",
+            Path(self.volumes["fixture-logs"]["Mountpoint"]) / "log",
+        ):
+            with self.subTest(path=path):
+                path.write_bytes(b"only copy")
+                with self.assertRaises(RuntimeError):
+                    self.preserve()
+                self.assertEqual(path.read_bytes(), b"only copy")
+                path.unlink()
+                self.assertFalse(self.path.exists())
+
+    def test_running_database_custody_is_checked_before_stopping_idle_runner(self) -> None:
+        self.containers["script-runner"]["State"]["Running"] = True
+        self.database_facts["databases"].append(self.source["database_name"])
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertTrue(self.containers["script-runner"]["State"]["Running"])
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+        self.assertFalse(self.path.exists())
+
+    def test_reopened_source_storage_drift_and_changed_pin_refuse_each_checkpoint(self) -> None:
+        receipt = self.preserve()
+        self.containers["web"]["State"]["Running"] = True
+        with self.assertRaises(RuntimeError):
+            self.namespace["verify_preservation_source"](receipt, self.source)
+        self.containers["web"]["State"]["Running"] = False
+        self.volumes["fixture-data"]["CreatedAt"] = "replacement"
+        with self.assertRaises(RuntimeError):
+            self.namespace["verify_preservation_source"](receipt, self.source)
+        self.volumes["fixture-data"]["CreatedAt"] = "fixture-created"
+        self.database_facts["databases"].append("fixture_db")
+        with self.assertRaises(RuntimeError):
+            self.namespace["verify_preservation_source"](receipt, self.source)
+        (self.lower.parent / "receipt.json").write_text("{}")
+        with self.assertRaises(RuntimeError):
+            self.namespace["verify_preservation_source"](receipt, self.source)
+        self.namespace["spec"]["snapshot"] = {
+            **self.snapshot,
+            "snapshot_id": hashlib.sha256(b"changed original").hexdigest(),
+        }
+        with self.assertRaises(RuntimeError):
+            self.namespace["verify_preservation"](self.path)
+
+    def test_same_operation_recovers_interrupted_receipt_without_changing_source(self) -> None:
+        writer = self.namespace["write_snapshot_receipt"]
+
+        def interrupt(path: Path, value: object) -> None:
+            if path.name == "receipt.json":
+                raise TimeoutError("receipt publication interrupted")
+            writer(path, value)
+
+        self.namespace["write_snapshot_receipt"] = interrupt
+        with self.assertRaises(TimeoutError):
+            self.preserve()
+        self.assertFalse(self.path.exists())
+        self.namespace["inspect_pending_preservation"](self.path, self.source)
+        self.namespace["write_snapshot_receipt"] = writer
+        receipt = self.preserve()
+        self.namespace["verify_preservation_source"](receipt, self.source)
+        self.assertFalse(self.path.with_name(".pending-" + self.path.name).exists())
+
+    def test_idle_runner_and_cold_database_use_existing_quiesce_and_cleanup(self) -> None:
+        self.containers["script-runner"]["State"]["Running"] = True
+        self.containers["database"]["State"]["Running"] = False
+        self.namespace["wait_database"] = Mock()
+        self.namespace["observe_memory_headroom"] = Mock(return_value=2048)
+        self.namespace["spec"]["memory_floor"] = 1024
+        self.namespace["inspect_pending_preservation"](self.path, self.source)
+        self.assertFalse(any(call[0] in {"start", "stop"} for call in self.calls))
+        (self.backing / "sessions/empty").mkdir(parents=True)
+        receipt = self.preserve()
+        self.assertFalse(self.containers["script-runner"]["State"]["Running"])
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+        self.namespace["verify_preservation_source"](receipt, self.source)
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+
+    def test_published_receipt_inspection_never_starts_a_cold_database(self) -> None:
+        receipt = self.namespace["execute"]()
+        self.containers["database"]["State"]["Running"] = False
+        self.namespace["spec"].update(mode="inspect", memory_floor=None)
+        self.namespace["wait_database"] = Mock()
+        self.calls.clear()
+        self.assertEqual(self.namespace["execute"](), receipt)
+        self.assertFalse(any(call[0] in {"start", "stop"} for call in self.calls))
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+        self.namespace["spec"]["mode"] = "preserve"
+        self.database_facts["databases"].append(self.source["database_name"])
+        with self.assertRaises(RuntimeError):
+            self.namespace["execute"]()
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+
+    def test_running_empty_database_needs_no_start_capacity_but_cold_start_stays_guarded(
+        self,
+    ) -> None:
+        receipt = self.preserve()
+        capacity = Mock(side_effect=AssertionError("no allocation is needed"))
+        self.namespace.update(observe_memory_headroom=capacity)
+        self.namespace["spec"].update(
+            mode="verify", memory_floor=1024, memory_floor_unavailable=True
+        )
+        self.namespace["verify_preservation_source"](receipt, self.source)
+        capacity.assert_not_called()
+        self.containers["database"]["State"]["Running"] = False
+        self.calls.clear()
+        with self.assertRaises(RuntimeError):
+            self.namespace["verify_preservation_source"](receipt, self.source)
+        self.assertFalse(any(call[0] == "start" for call in self.calls))
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+
+    def test_snapshot_model_growth_keeps_the_original_identity_and_rejects_changed_pins(
+        self,
+    ) -> None:
+        receipt = self.preserve()
+        self.namespace["spec"]["snapshot"] = {**self.snapshot, "new_metadata": "default"}
+        self.assertEqual(self.namespace["verify_preservation"](self.path), receipt)
+        for key in self.snapshot:
+            with self.subTest(key=key):
+                self.namespace["spec"]["snapshot"] = {
+                    **self.snapshot,
+                    key: hashlib.sha256(key.encode()).hexdigest(),
+                }
+                with self.assertRaises(RuntimeError):
+                    self.namespace["verify_preservation"](self.path)
+
+    def test_plain_router_layout_keeps_the_existing_database_capture_path(self) -> None:
+        for service in ("web", "script-runner"):
+            self.containers[service]["Mounts"].pop()
+        containers = self.namespace["preview_containers"](self.source)
+        self.assertEqual(set(containers), set(self.containers))
+        self.assertFalse(self.namespace["has_overlay_mount"](self.source, containers))
+        self.namespace["spec"]["storage_budget"] = {
+            "filestore_bytes": 1024,
+            "database_bytes": 1024,
+            "reserve_bytes": 1024,
+        }
+
+        def query(container: str, database: str, sql: bytes) -> str:
+            del container, database
+            if b"pg_database" in sql:
+                return json.dumps(sorted([self.source["database_name"], "postgres"]))
+            return "0"
+
+        def capture(
+            arguments: object, path: Path, bound: int, **kwargs: object
+        ) -> tuple[int, bytes, bool]:
+            del arguments, bound, kwargs
+            path.write_bytes(b"retained database")
+            return 0, b"", False
+
+        self.namespace.update(
+            database_query=query,
+            capture_snapshot_file=capture,
+            restore_verification=Mock(return_value=0),
+        )
+        receipt = self.preserve()
+        self.assertTrue(receipt["database_restore_verified"])
+        self.assertEqual((self.path / "database.dump").read_bytes(), b"retained database")
+
+    def test_foreign_consumers_mounts_active_exec_and_missing_pin_stay_held(self) -> None:
+        for service in self.containers:
+            with self.subTest(service=service):
+                self.containers[service]["ExecIDs"] = ["foreign-exec"]
+                with self.assertRaises(RuntimeError):
+                    self.preserve()
+                self.containers[service]["ExecIDs"] = None
+        mount = self.containers["web"]["Mounts"][-1]
+        previous = mount["Source"]
+        mount["Source"] = str(self.root / "foreign-storage")
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        mount["Source"] = previous
+        self.containers["preview-router"]["Mounts"].append(dict(mount))
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.containers["preview-router"]["Mounts"].clear()
+        self.namespace["spec"]["snapshot"] = {
+            **self.snapshot,
+            "snapshot_id": hashlib.sha256(b"other snapshot").hexdigest(),
+        }
+        with self.assertRaises((RuntimeError, OSError)):
+            self.preserve()
+        self.assertFalse(self.path.exists())

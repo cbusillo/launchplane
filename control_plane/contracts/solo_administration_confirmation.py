@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import hashlib
 import hmac
-import json
 import re
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from control_plane.contracts.record_fields import SHA256_PATTERN
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 SOLO_ADMINISTRATION_CONFIRMATION_SCHEMA_VERSION: Final[Literal[1]] = 1
@@ -19,7 +20,6 @@ SoloAdministrationConfirmationLifecycleEventType = Literal[
     "issued", "consumed", "revoked", "expired"
 ]
 
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _CONFIRMATION_ID_PATTERN = re.compile(
     r"^solo-administration-confirmation-[a-z0-9][a-z0-9_-]{7,127}$"
 )
@@ -38,7 +38,7 @@ def _normalize_token(value: str, field_name: str) -> str:
 
 def _normalize_sha256(value: str, field_name: str) -> str:
     normalized = _normalize_token(value, field_name).lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
+    if SHA256_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
     return normalized
 
@@ -89,17 +89,6 @@ def verify_solo_administration_acknowledgement(
     return hmac.compare_digest(expected_digest, supplied_digest)
 
 
-def solo_administration_acknowledgement_sha256(acknowledgement: str) -> str:
-    return solo_administration_confirmation_acknowledgement_sha256(acknowledgement)
-
-
-def verify_solo_administration_confirmation_acknowledgement(
-    acknowledgement: str,
-    acknowledgement_sha256: str,
-) -> bool:
-    return verify_solo_administration_acknowledgement(acknowledgement, acknowledgement_sha256)
-
-
 def build_solo_administration_confirmation_id(
     *,
     reviewed_plan_sha256: str,
@@ -121,9 +110,7 @@ def build_solo_administration_confirmation_id(
         ),
         "reviewed_plan_sha256": _normalize_sha256(reviewed_plan_sha256, "reviewed_plan_sha256"),
     }
-    digest = hashlib.sha256(
-        json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(binding)
     return f"solo-administration-confirmation-{digest}"
 
 

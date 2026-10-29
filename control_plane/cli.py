@@ -71,7 +71,7 @@ from control_plane.cli_runtime_environments import (
 from control_plane.cli_records import RecordsCliCallbacks, register_record_commands
 from control_plane.cli_service import ServiceCliCallbacks, register_service_commands
 from control_plane.cli_storage_secrets import register_storage_secret_commands
-from control_plane.cli_work_graph import register_work_graph_core_commands
+from control_plane.cli_merge_train import register_merge_train_commands
 from control_plane.config_authority_audit import (
     build_config_authority_audit,
     evaluate_config_authority_gate,
@@ -353,7 +353,12 @@ def _sync_launchplane_bootstrap_policy(
             target_type=target_type,
             target_id=target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(env_map),
+            env_text=dokploy_api.serialize_dokploy_env_text(
+                env_map,
+                target_type=target_type,
+                compose_type=str(target_payload.get("composeType") or "docker-compose"),
+                current_env_text=raw_env_text,
+            ),
             launchplane_service_target=True,
         )
     current_policy_sha256 = ""
@@ -1274,12 +1279,6 @@ def _launchplane_service_env_alias_value(
     return ""
 
 
-def _launchplane_service_env_alias_present(
-    *, env_map: dict[str, str], env_keys: tuple[str, ...]
-) -> bool:
-    return bool(_launchplane_service_env_alias_value(env_map=env_map, env_keys=env_keys))
-
-
 def _launchplane_service_any_env_keys_present(
     *, env_map: dict[str, str], env_keys: tuple[str, ...]
 ) -> bool:
@@ -1287,16 +1286,6 @@ def _launchplane_service_any_env_keys_present(
         _launchplane_service_env_key_present(env_map=env_map, env_key=env_key)
         for env_key in env_keys
     )
-
-
-def _launchplane_present_env_keys(
-    *, env_map: dict[str, str], env_keys: tuple[str, ...]
-) -> list[str]:
-    return [
-        env_key
-        for env_key in env_keys
-        if _launchplane_service_env_key_present(env_map=env_map, env_key=env_key)
-    ]
 
 
 def _launchplane_path_payload(path: Path, *, kind: str) -> dict[str, object]:
@@ -1811,13 +1800,6 @@ def _resolve_dokploy_target(
     return resolved_target, deploy_timeout_seconds
 
 
-def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
-    return promotion_ship_resolution.resolve_deploy_mode(
-        configured_ship_mode=configured_ship_mode,
-        target_type=target_type,
-    )
-
-
 def _load_runtime_environment_values(*, context_name: str, instance_name: str) -> dict[str, str]:
     try:
         return control_plane_runtime_environments.resolve_runtime_environment_values(
@@ -1992,14 +1974,7 @@ def _run_compose_post_deploy_update(
         dokploy_source.protected_shopify_store_keys_for_target_definition(target_definition)
     )
     if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
-        override_runtime_store = (
-            PostgresRecordStore(database_url=database_url)
-            if any(
-                item.value.source in {"runtime_environment", "secret_binding"}
-                for item in odoo_override_record.config_parameters
-            )
-            else None
-        )
+        override_runtime_store = PostgresRecordStore(database_url=database_url)
         try:
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
@@ -2021,8 +1996,7 @@ def _run_compose_post_deploy_update(
             )
             raise
         finally:
-            if override_runtime_store is not None:
-                override_runtime_store.close()
+            override_runtime_store.close()
     try:
         dokploy_post_deploy.run_compose_post_deploy_update(
             host=host,
@@ -2497,6 +2471,18 @@ def _sync_artifact_image_reference_for_target(
     finally:
         postgres_store.close()
 
+    # Validate the complete wire environment before changing the Compose source.
+    prepared_env_text = dokploy_api.serialize_dokploy_env_text(
+        desired_env_map,
+        target_type=resolved_target.target_type,
+        compose_type=str(target_payload.get("composeType") or "docker-compose"),
+        current_env_text=str(target_payload.get("env") or ""),
+    )
+    dokploy_api.refuse_app_runtime_env_write(
+        env_text=prepared_env_text,
+        current_env_text=str(target_payload.get("env") or ""),
+        target="Ship runtime environment sync",
+    )
     runtime_source_evidence: dict[str, str] = {}
     if desired_image_reference and resolved_target.target_type == "compose":
         target_domains: tuple[str, ...] = ()
@@ -2545,7 +2531,7 @@ def _sync_artifact_image_reference_for_target(
             target_type=resolved_target.target_type,
             target_id=resolved_target.target_id,
             target_payload=target_payload,
-            env_text=dokploy_api.serialize_dokploy_env_text(desired_env_map),
+            env_text=prepared_env_text,
         )
         target_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
@@ -2559,6 +2545,16 @@ def _sync_artifact_image_reference_for_target(
         for env_key, env_value in desired_env_map.items()
         if refreshed_env_map.get(env_key, "") != env_value
     )
+    if resolved_target.target_type == "compose" and target_payload.get("composeType") != "stack":
+        missing_or_mismatched_keys = sorted(
+            set(missing_or_mismatched_keys)
+            | set(
+                dokploy_api.compose_unqualified_keys(
+                    str(target_payload.get("env") or ""),
+                    dokploy_api.compose_literal_keys(prepared_env_text),
+                )
+            )
+        )
     if missing_or_mismatched_keys:
         raise click.ClickException(
             "Dokploy target env did not persist Launchplane DB-backed runtime key(s): "
@@ -2688,6 +2684,7 @@ def _read_source_release_tuple_for_promotion(
             f"Ship artifact {request.artifact_id} into {request.context}/{request.from_instance} first."
         ) from None
     return control_plane_release_tuples.require_source_release_tuple_for_promotion(
+        record_store=record_store,
         source_tuple=source_tuple,
         artifact_id=request.artifact_id,
         context_name=request.context,
@@ -2716,6 +2713,7 @@ def _read_source_release_tuple_for_promotion_record(
             f"Write or mint {promotion_record.context}/{promotion_record.from_instance} first."
         ) from None
     return control_plane_release_tuples.require_source_release_tuple_for_promotion(
+        record_store=record_store,
         source_tuple=source_tuple,
         artifact_id=artifact_id,
         context_name=promotion_record.context,
@@ -2916,22 +2914,6 @@ def _build_environment_overview_payloads(
     ]
 
 
-def _build_runtime_environment_rows(
-    *,
-    entries: dict[str, object],
-    source_name: str,
-) -> list[dict[str, object]]:
-    return [
-        {
-            "key": key_name,
-            "value": str(entries[key_name]),
-            "source": source_name,
-            "overrides": (),
-        }
-        for key_name in sorted(entries)
-    ]
-
-
 def _summarize_secret_binding_record(binding: SecretBinding) -> dict[str, object]:
     return {
         "binding_id": binding.binding_id,
@@ -2951,19 +2933,14 @@ def main() -> None:
     """Control-plane CLI."""
 
 
-@main.group("work-graph")
-def work_graph() -> None:
-    """Work graph recommendation commands."""
-
-
-register_runner_lane_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
-register_preview_workflow_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
-register_work_graph_core_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
+register_runner_lane_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
+register_preview_workflow_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
+register_merge_train_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_ci_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_local_consumer_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_action_pin_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_dependency_health_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
-register_every_code_commands(cast(click.Group, main), store_factory=_store)  # type: ignore[redundant-cast]
+register_every_code_commands(main)
 register_ingress_commands(
     cast(click.Group, main),  # type: ignore[redundant-cast]
     callbacks=IngressCliCallbacks(

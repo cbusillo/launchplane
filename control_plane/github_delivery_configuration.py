@@ -1,18 +1,10 @@
 """Plan the service's Delivery App selector without copying or minting credentials."""
 
-from datetime import UTC, datetime
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy.exc import IntegrityError
 
-from control_plane.delivery_apply_receipt import (
-    delivery_request_fingerprint,
-    read_delivery_apply_receipt,
-)
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.delivery_apply_receipt import apply_reviewed_service_bundle
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.launchplane_github_delivery import (
     DELIVERY_GITHUB_APP_ID_KEY,
@@ -24,6 +16,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     SecretCopySourceExpectation,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 GITHUB_DELIVERY_CONFIGURATION_ROUTE = "/v1/service/github-delivery/configuration"
 
@@ -125,21 +118,17 @@ def plan_delivery_github_configuration(
         write.expected_record.model_dump(mode="json") if write.expected_record else None
         for write in bundle.runtime_environment_writes
     ]
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "app_id": request.app_id,
-                "integration": request.integration,
-                "reason": request.reason,
-                "actor": actor,
-                "baseline": baseline,
-                "secret_record": record.model_dump(mode="json"),
-                "binding": binding.model_dump(mode="json"),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "app_id": request.app_id,
+            "integration": request.integration,
+            "reason": request.reason,
+            "actor": actor,
+            "baseline": baseline,
+            "secret_record": record.model_dump(mode="json"),
+            "binding": binding.model_dump(mode="json"),
+        }
+    )
     summary = {
         "status": "ok",
         "actor": actor,
@@ -165,56 +154,13 @@ def apply_delivery_github_configuration(
     trace_id: str,
     idempotency_key: str,
 ) -> dict[str, object]:
-    scope = f"github-delivery-configuration:{actor}"
-    fingerprint = delivery_request_fingerprint(request)
-    if request.mode == "apply":
-        if not idempotency_key.strip():
-            raise ValueError("Delivery App apply requires Idempotency-Key.")
-        previous = read_delivery_apply_receipt(
-            store=store,
-            request=request,
-            actor=actor,
-            scope=scope,
-            route_path=GITHUB_DELIVERY_CONFIGURATION_ROUTE,
-            idempotency_key=idempotency_key,
-        )
-        if previous is not None:
-            return dict(previous.response_payload)
-    try:
-        summary, bundle = plan_delivery_github_configuration(
-            store=store, request=request, actor=actor
-        )
-        summary["trace_id"] = trace_id
-        if request.mode == "dry-run":
-            return summary
-        if request.expected_plan_digest != summary["plan_digest"]:
-            raise ValueError("Delivery App configuration changed since the reviewed dry-run.")
-        now = datetime.now(UTC).isoformat()
-        receipt = LaunchplaneIdempotencyRecord(
-            record_id=f"idempotency-{trace_id}",
-            scope=scope,
-            route_path=GITHUB_DELIVERY_CONFIGURATION_ROUTE,
-            idempotency_key=idempotency_key,
-            request_fingerprint=fingerprint,
-            response_status_code=200,
-            response_trace_id=trace_id,
-            recorded_at=now,
-            response_payload=summary,
-        )
-        store.write_product_authority_bundle(
-            bundle.model_copy(update={"idempotency_record": receipt})
-        )
-        return summary
-    except (ValueError, FileNotFoundError, IntegrityError):
-        if request.mode == "apply":
-            previous = read_delivery_apply_receipt(
-                store=store,
-                request=request,
-                actor=actor,
-                scope=scope,
-                route_path=GITHUB_DELIVERY_CONFIGURATION_ROUTE,
-                idempotency_key=idempotency_key,
-            )
-            if previous is not None:
-                return dict(previous.response_payload)
-        raise
+    return apply_reviewed_service_bundle(
+        store=store,
+        request=request,
+        actor=actor,
+        trace_id=trace_id,
+        idempotency_key=idempotency_key,
+        scope=f"github-delivery-configuration:{actor}",
+        route_path=GITHUB_DELIVERY_CONFIGURATION_ROUTE,
+        plan=lambda: plan_delivery_github_configuration(store=store, request=request, actor=actor),
+    )

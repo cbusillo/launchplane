@@ -1,6 +1,9 @@
 import base64
+import hashlib
+import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from control_plane.odoo_preview_import_source import FishbowlPreviewSource
@@ -12,8 +15,13 @@ from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
+    odoo_override_intent_payload,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    product_target_owner_products,
+)
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployAddonSetting
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployConfigParameter
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
@@ -24,11 +32,15 @@ from control_plane.runtime_key_safety import runtime_key_safety_environment_clas
 from control_plane.contracts.public_hosts import resolve_origin_base_url, resolve_public_base_url
 from control_plane.odoo_import_overrides import import_runtime_value, runtime_values_for_override
 
-ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
+from control_plane.contracts.odoo_post_deploy_payload import (
+    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY as ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+)
+
 LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY = "LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED"
 LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY = "LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED"
 ODOO_OVERRIDE_SECRET_ENV_PREFIX = "ODOO_OVERRIDE_SECRET__"
 SHOPIFY_ADDON_NAME = "shopify"
+SHOPIFY_STORE_SETTINGS = ("shop_url_key", "shop_url", "store_url")
 SHOPIFY_ACTION_SETTING = "action"
 SHOPIFY_ACTION_APPLY = "apply"
 SHOPIFY_ACTION_CLEAR = "clear"
@@ -82,10 +94,12 @@ def _render_literal_payload_override(*, value: ScalarValue) -> OdooPostDeployRen
 def shopify_store_handle(raw_key: str) -> str:
     """Reduce a store key, myshopify domain or admin URL to its bare store handle."""
 
-    handle = raw_key.strip().lower()
-    if "://" in handle:
-        handle = handle.split("://", 1)[1]
-    handle = handle.split("/", 1)[0].rstrip(".")
+    normalized = raw_key.strip().lower()
+    parsed = urlsplit(normalized if "://" in normalized else f"https://{normalized}")
+    handle = (parsed.hostname or "").rstrip(".")
+    path = parsed.path.strip("/").split("/")
+    if handle == "admin.shopify.com" and len(path) >= 2 and path[0] == "store":
+        handle = path[1]
     if handle.endswith(".myshopify.com"):
         handle = handle[: -len(".myshopify.com")]
     return handle
@@ -98,6 +112,74 @@ def shopify_store_key_is_protected(
         shopify_store_handle(raw_key) for raw_key in protected_shopify_store_keys if raw_key.strip()
     }
     return shopify_store_handle(shop_url_key) in protected_handles
+
+
+def shopify_record_store_keys(record: OdooInstanceOverrideRecord) -> tuple[str, ...]:
+    values = [
+        setting.value
+        for setting in record.addon_settings
+        if setting.addon == SHOPIFY_ADDON_NAME and setting.setting in SHOPIFY_STORE_SETTINGS
+    ]
+    values.extend(
+        parameter.value
+        for parameter in record.config_parameters
+        if parameter.key in {f"shopify.{setting}" for setting in SHOPIFY_STORE_SETTINGS}
+    )
+    return tuple(
+        value.value
+        for value in values
+        if value.source == "literal" and isinstance(value.value, str) and value.value.strip()
+    )
+
+
+def require_shopify_store_separation(
+    record: OdooInstanceOverrideRecord, protected_store_keys: tuple[str, ...]
+) -> None:
+    if any(
+        shopify_store_key_is_protected(key, protected_store_keys)
+        for key in shopify_record_store_keys(record)
+    ):
+        raise click.ClickException("Shopify settings match a protected or production store.")
+
+
+def production_shopify_store_keys(
+    record_store: object | None,
+    *,
+    context: str,
+    instance: str,
+    profile: LaunchplaneProductProfileRecord | None = None,
+) -> tuple[str, ...]:
+    if record_store is None or odoo_instance_is_production(instance):
+        return ()
+    read_override = getattr(record_store, "read_odoo_instance_override_record", None)
+    list_profiles = getattr(record_store, "list_product_profile_records", None)
+    if not callable(read_override):
+        return ()
+    if profile is not None:
+        profiles: tuple[LaunchplaneProductProfileRecord, ...] = (profile,)
+    elif callable(list_profiles):
+        profiles = cast(tuple[LaunchplaneProductProfileRecord, ...], list_profiles())
+    else:
+        return ()
+    protected: list[str] = []
+    for candidate in profiles:
+        if not product_target_owner_products((candidate,), context=context, instance=instance):
+            continue
+        for lane in candidate.lanes:
+            if not odoo_instance_is_production(lane.instance):
+                continue
+            try:
+                record = cast(
+                    OdooInstanceOverrideRecord,
+                    read_override(
+                        context_name=lane.context.strip().lower(),
+                        instance_name=lane.instance.strip(),
+                    ),
+                )
+            except FileNotFoundError:
+                continue
+            protected.extend(shopify_record_store_keys(record))
+    return tuple(protected)
 
 
 def odoo_instance_is_production(instance_name: str) -> bool:
@@ -240,6 +322,15 @@ def render_post_deploy_payload(
     selected_website_settings: OdooWebsiteSettings | None = None,
     preview_import_source: "FishbowlPreviewSource | None" = None,
 ) -> OdooPostDeployPayload:
+    store_keys = shopify_record_store_keys(record)
+    if store_keys:
+        protected_shopify_store_keys = (
+            *protected_shopify_store_keys,
+            *production_shopify_store_keys(
+                record_store, context=record.context, instance=record.instance
+            ),
+        )
+        require_shopify_store_separation(record, protected_shopify_store_keys)
     try:
         if preview_import_source is not None:
             preview_import_source.require_override_agreement(record)
@@ -453,6 +544,43 @@ def build_post_deploy_environment(
     )
 
 
+class PreviewBootstrapStore(Protocol):
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord: ...
+
+
+def resolve_preview_website_bootstrap(
+    store: PreviewBootstrapStore, *, context: str, template_instance: str, preview_slug: str
+) -> tuple[OdooInstanceOverrideRecord | None, str]:
+    try:
+        record = store.read_odoo_instance_override_record(
+            context_name=context, instance_name=preview_slug
+        )
+    except FileNotFoundError:
+        record = None
+    if record is not None and "preview" in record.apply_on:
+        if (
+            record.context != context
+            or record.instance != preview_slug
+            or record.apply_on != ("preview",)
+            or record.config_parameters
+            or record.addon_settings
+            or record.website_settings is not None
+        ):
+            raise ValueError("Exact preview bootstrap intent contains conflicting settings.")
+        digest = hashlib.sha256(
+            json.dumps(odoo_override_intent_payload(record), sort_keys=True).encode()
+        ).hexdigest()
+        return record.model_copy(update={"apply_on": ("deploy",)}), digest
+    try:
+        return store.read_odoo_instance_override_record(
+            context_name=context, instance_name=template_instance
+        ), ""
+    except FileNotFoundError:
+        return None, ""
+
+
 def build_preview_website_bootstrap_environment(
     record: OdooInstanceOverrideRecord | None,
     *,
@@ -476,18 +604,3 @@ def build_preview_website_bootstrap_environment(
     # Preview website bootstrap carries only bootstrap intent. Preview integration-key
     # enforcement is tracked separately and is not decided by this payload.
     return build_post_deploy_environment(preview_record, clear_undeclared_shopify=False)
-
-
-def render_post_deploy_environment(
-    record: OdooInstanceOverrideRecord,
-    *,
-    workflow_intent: PostDeployWorkflowIntent = "deploy",
-    protected_shopify_store_keys: tuple[str, ...] = (),
-    record_store: object | None = None,
-) -> dict[str, str]:
-    return build_post_deploy_environment(
-        record,
-        workflow_intent=workflow_intent,
-        protected_shopify_store_keys=protected_shopify_store_keys,
-        record_store=record_store,
-    ).inline_environment

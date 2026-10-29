@@ -4,6 +4,7 @@ import {
   productActivityPath,
   productEnvironmentPath,
   productPath,
+  productTopicsPath,
   type AppRoute,
   type EnvironmentView,
 } from "./router";
@@ -40,6 +41,10 @@ export function ProductWorkspaceNav({
           </AppLink>
         );
       })}
+      {product.preview.context ? <AppLink
+        data-active={route.kind === "product-environment" && route.environment === "preview"}
+        to={productEnvironmentPath(product.product, "preview", "runtime-settings")}
+      >Preview settings</AppLink> : null}
       <AppLink
         aria-current={route.kind === "product-activity" ? "page" : undefined}
         data-active={route.kind === "product-activity"}
@@ -47,6 +52,7 @@ export function ProductWorkspaceNav({
       >
         Activity
       </AppLink>
+      <AppLink to={productTopicsPath(product.product)}>Topics to discuss</AppLink>
     </nav>
   );
 }

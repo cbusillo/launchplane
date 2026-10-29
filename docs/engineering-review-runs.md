@@ -55,4 +55,5 @@ Credential hashes, ciphertext, key identifiers, worker host names, and resolved
 executable paths remain internal persistence fields and are excluded from
 ordinary review-run reads and OpenAPI response schemas.
 
-For the Codex Lab executable and authority cutover, see [worker runtime](codex-lab-workers.md).
+The retained CLI and historical workspace compatibility are described in
+[historical worker compatibility](codex-lab-workers.md).

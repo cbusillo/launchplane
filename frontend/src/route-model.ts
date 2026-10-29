@@ -2,6 +2,7 @@ export type AppRoute =
   | { kind: "product-index" }
   | { kind: "product-workspace"; product: string }
   | { kind: "product-activity"; product: string }
+  | { kind: "product-topics"; product: string }
   | {
       kind: "product-environment";
       product: string;
@@ -22,14 +23,13 @@ export type EnvironmentView =
 
 export type EngineeringView =
   | "hub"
-  | "work-graph"
-  | "issue-inbox"
-  | "every-code"
   | "merge-train"
   | "tenant-admission"
   | "governance-projection"
   | "github-delivery"
-  | "privileged-operations";
+  | "privileged-operations"
+  | "runtime-setting-removal"
+  | "preview-lifecycle";
 
 export function productIndexPath(): string {
   return "/ui/products";
@@ -41,6 +41,10 @@ export function productPath(product: string): string {
 
 export function productActivityPath(product: string): string {
   return `${productPath(product)}/activity`;
+}
+
+export function productTopicsPath(product: string): string {
+  return `${productPath(product)}/topics`;
 }
 
 export function productEnvironmentPath(
@@ -62,17 +66,10 @@ export function ownerReviewPath(): string {
 }
 
 export function engineeringViewLabel(view: EngineeringView): string {
+  if (view === "runtime-setting-removal") return "Remove stored settings";
+  if (view === "preview-lifecycle") return "Preview cleanup";
   if (view === "github-delivery") {
     return "GitHub delivery";
-  }
-  if (view === "work-graph") {
-    return "Work graph";
-  }
-  if (view === "issue-inbox") {
-    return "Issue inbox";
-  }
-  if (view === "every-code") {
-    return "Every Code";
   }
   if (view === "merge-train") {
     return "Merge train";
@@ -114,14 +111,13 @@ export function parseAppRoute(pathname: string): AppRoute {
     if (
       routeSegments.length === 1 &&
       [
-        "work-graph",
-        "issue-inbox",
-        "every-code",
         "merge-train",
         "tenant-admission",
         "governance-projection",
         "github-delivery",
+        "preview-lifecycle",
         "privileged-operations",
+        "runtime-setting-removal",
       ].includes(view)
     ) {
       return { kind: "engineering", view };
@@ -140,6 +136,9 @@ export function parseAppRoute(pathname: string): AppRoute {
     }
     if (routeSegments.length === 2 && routeSegments[1] === "activity") {
       return { kind: "product-activity", product };
+    }
+    if (routeSegments.length === 2 && routeSegments[1] === "topics") {
+      return { kind: "product-topics", product };
     }
     if (routeSegments[1] === "environments") {
       const environment = decodeRouteSegment(routeSegments[2] ?? "");

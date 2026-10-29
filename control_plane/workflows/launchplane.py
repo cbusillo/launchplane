@@ -15,24 +15,18 @@ import click
 
 from control_plane.contracts.artifact_identity import ArtifactSourceBuild
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane import release_tuples as control_plane_release_tuples
-from control_plane.contracts.github_pull_request_event import (
-    GitHubPullRequestEvent,
-)
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewGenerationState,
     PreviewPullRequestSummary,
     PreviewSourceRecord,
 )
-from control_plane.contracts.preview_manifest import LaunchplaneResolvedPreviewManifest
 from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
 from control_plane.contracts.preview_request_metadata import (
     LaunchplanePreviewRequestMetadata,
-    LaunchplanePreviewRequestParseResult,
 )
 from control_plane.contracts.preview_record import PreviewRecord, PreviewState
 from control_plane.contracts.product_profile_record import (
@@ -342,95 +336,6 @@ def _github_comment_url(comment_payload: dict[str, object]) -> str:
     if isinstance(html_url, str):
         return html_url.strip()
     return ""
-
-
-def resolve_pull_request_event_manifest(
-    *,
-    control_plane_root: Path,
-    event: GitHubPullRequestEvent,
-    resolved_context: str,
-    preview: PreviewRecord | None,
-    request_metadata: LaunchplanePreviewRequestParseResult,
-    companion_summaries_snapshot: tuple[PreviewPullRequestSummary, ...] = (),
-) -> LaunchplaneResolvedPreviewManifest | None:
-    effective_context = preview.context if preview is not None else resolved_context
-    if not effective_context:
-        return None
-    metadata = _resolved_preview_request_metadata(request_metadata=request_metadata)
-    if metadata is None:
-        return None
-    try:
-        release_tuple = control_plane_release_tuples.resolve_release_tuple(
-            context_name=effective_context,
-            channel_name=metadata.baseline_channel,
-        )
-    except click.ClickException:
-        return None
-    companion_sources, companion_summaries = _resolve_companion_sources(
-        control_plane_root=control_plane_root,
-        context_name=effective_context,
-        anchor_pr_url=event.pr_url,
-        metadata=metadata,
-        companion_summaries_snapshot=companion_summaries_snapshot,
-    )
-    if metadata.companions and companion_sources is None:
-        return None
-    source_map = tuple(
-        [
-            PreviewSourceRecord(repo=event.repo, git_sha=event.head_sha, selection="anchor"),
-            *(companion_sources or ()),
-            *[
-                PreviewSourceRecord(repo=repo_name, git_sha=git_sha, selection="baseline")
-                for repo_name, git_sha in sorted(release_tuple.repo_shas.items())
-                if repo_name != event.repo
-                and repo_name not in {item.repo for item in (companion_sources or ())}
-            ],
-        ]
-    )
-    return LaunchplaneResolvedPreviewManifest(
-        context=effective_context,
-        baseline_channel=metadata.baseline_channel,
-        baseline_release_tuple_id=release_tuple.tuple_id,
-        resolved_manifest_fingerprint=generate_preview_manifest_fingerprint(
-            baseline_channel=metadata.baseline_channel,
-            baseline_release_tuple_id=release_tuple.tuple_id,
-            source_map=source_map,
-        ),
-        source_map=source_map,
-        companion_summaries=companion_summaries or (),
-    )
-
-
-def generate_preview_manifest_fingerprint(
-    *,
-    baseline_channel: str,
-    baseline_release_tuple_id: str,
-    source_map: tuple[PreviewSourceRecord, ...],
-) -> str:
-    fingerprint_payload = {
-        "baseline_channel": baseline_channel,
-        "baseline_release_tuple_id": baseline_release_tuple_id,
-        "source_map": [
-            {
-                "repo": item.repo,
-                "git_sha": item.git_sha,
-                "selection": item.selection,
-            }
-            for item in source_map
-        ],
-    }
-    normalized_payload = json.dumps(fingerprint_payload, separators=(",", ":"), sort_keys=True)
-    return f"launchplane-manifest-{hashlib.sha256(normalized_payload.encode('utf-8')).hexdigest()[:16]}"
-
-
-def _resolved_preview_request_metadata(
-    *, request_metadata: LaunchplanePreviewRequestParseResult
-) -> LaunchplanePreviewRequestMetadata | None:
-    if request_metadata.status == "invalid":
-        return None
-    if request_metadata.metadata is not None:
-        return request_metadata.metadata
-    return LaunchplanePreviewRequestMetadata(baseline_channel=DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL)
 
 
 def _resolve_companion_sources(
@@ -854,8 +759,9 @@ def build_preview_generation_record_from_request(
     *,
     record_store: PreviewMutationRecordStore,
     request: PreviewGenerationMutationRequest,
+    preview_record: PreviewRecord | None = None,
 ) -> PreviewGenerationRecord:
-    preview = find_preview_record(
+    preview = preview_record or find_preview_record(
         record_store=record_store,
         context_name=request.context,
         anchor_repo=request.anchor_repo,
@@ -865,6 +771,12 @@ def build_preview_generation_record_from_request(
         raise click.ClickException(
             f"No Launchplane preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
         )
+    if (preview.context, preview.anchor_repo, preview.anchor_pr_number) != (
+        request.context,
+        request.anchor_repo,
+        request.anchor_pr_number,
+    ):
+        raise ValueError("Generation request does not match its preview anchor.")
 
     existing_generations = record_store.list_preview_generation_records(
         preview_id=preview.preview_id

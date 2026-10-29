@@ -1,3 +1,4 @@
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 from dataclasses import dataclass
 from typing import Callable, Literal
 
@@ -85,7 +86,7 @@ def execute_merge_train_stack_collapse_run_once(
     request: MergeTrainStackCollapseRunOnceEnvelope,
     policy: MergeTrainPolicy,
     policy_sha256: str,
-    token: str,
+    token: str | GitHubAppInstallationToken,
     trace_id: str,
     recorded_at: str,
     stack_collapse_store: MergeTrainStackCollapsePlanRecordStore,
@@ -238,6 +239,7 @@ def _execute_admit_mode(
         raise ValueError("merge train stack collapse policy digest no longer matches")
     snapshot = GitHubMergeTrainSnapshotReader(
         transport=transport,
+        source_screening=True,
         branch_refresh_store=review_store,
         repository_policy=policy.find_repository_policy(
             repository=request.repository, base_branch=request.base_branch

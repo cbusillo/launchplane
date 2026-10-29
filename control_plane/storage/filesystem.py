@@ -1,3 +1,7 @@
+from control_plane.preview_namespaces import (
+    validate_preview_profile_writes,
+)
+
 import fcntl
 import hashlib
 import json
@@ -16,11 +20,18 @@ from pydantic import BaseModel
 
 from control_plane.storage.delivery_evidence import (
     DeliveryEvidenceIndex,
+    DeliveryFailureObservation,
+    normalized_time,
     FILESYSTEM_TYPES,
     filesystem_index,
     source_changed,
 )
+from control_plane.timestamps import utc_now_timestamp
 
+from control_plane.generic_web_source_qualification import (
+    GenericWebSourceSnapshot,
+    generic_web_source_target_key,
+)
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -48,14 +59,7 @@ from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationPolicyRecord,
 )
 from control_plane.contracts.every_code_work_request import (
-    EveryCodeWorkRequestHeartbeat,
     EveryCodeWorkRequestRecord,
-    EveryCodeWorkRequestStatusUpdate,
-    apply_every_code_work_request_status,
-    claim_every_code_work_request,
-    close_every_code_work_request_for_pull_request,
-    heartbeat_every_code_work_request,
-    recover_stale_every_code_work_request,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
@@ -80,8 +84,11 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
+    MergeTrainControllerReconciliationRequiredError,
     MergeTrainControllerStateRecord,
     build_merge_train_controller_resume_detail,
+    require_canonical_merge_train_controller_state,
+    merge_train_controller_alias_reconciliation_detail,
 )
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
@@ -199,6 +206,7 @@ from control_plane.contracts.product_retirement import (
     product_retirement_secret_authority,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.integration_attestation import IntegrationAttestationRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventRecord,
@@ -243,7 +251,10 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_host_hygiene import (
     sanitize_runner_host_hygiene_audit_record_for_persistence,
 )
-from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.contracts.runner_lane_registration import (
+    RunnerLaneRegistrationAuditRecord,
+    validate_runner_lane_registration_audit_identity,
+)
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
     build_cancelled_verireel_prod_backup_gate_record,
@@ -268,6 +279,8 @@ from control_plane.storage.product_authority_bundle import (
     odoo_instance_override_records_match,
     SecretRecordConflictError,
     require_bundle_context_owner,
+    require_absent_products,
+    require_runtime_key_safety_policies,
     ProductAuthorityBundle,
     ProductProfileConflictError,
     ProviderTargetWrite,
@@ -341,7 +354,7 @@ class _AuthorityBundleStageManifest(BaseModel):
 
 
 def _utc_now_timestamp() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return utc_now_timestamp()
 
 
 def _lease_expires_at(*, observed_at: str, lease_seconds: int) -> str:
@@ -389,6 +402,12 @@ class FilesystemRecordStore:
             return self._write_model_locked(record_type, record_id, model)
 
     def _write_model_locked(self, record_type: str, record_id: str, model: BaseModel) -> Path:
+        if isinstance(model, LaunchplaneProductProfileRecord):
+            validate_preview_profile_writes(
+                profiles=self._list_product_profile_records_locked(),
+                replacements=(model,),
+                previews=self._list_models_locked(PreviewRecord, "launchplane_previews"),
+            )
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_path = tempfile.mkstemp(
@@ -463,7 +482,12 @@ class FilesystemRecordStore:
     ) -> RecordModel:
         record_path = self._record_path(record_type, record_id)
         payload = json.loads(record_path.read_text(encoding="utf-8"))
-        return model_type.model_validate(payload)
+        return model_type.model_validate(
+            payload,
+            context={"stored_product_profile": True}
+            if model_type is ProductRetirementRecord
+            else None,
+        )
 
     def _record_dir(self, record_type: str) -> Path:
         return self.state_dir / record_type
@@ -484,7 +508,14 @@ class FilesystemRecordStore:
         records: list[RecordModel] = []
         for record_path in sorted(record_dir.glob("*.json")):
             payload = json.loads(record_path.read_text(encoding="utf-8"))
-            records.append(model_type.model_validate(payload))
+            records.append(
+                model_type.model_validate(
+                    payload,
+                    context={"stored_product_profile": True}
+                    if model_type is ProductRetirementRecord
+                    else None,
+                )
+            )
         return tuple(records)
 
     def _product_authority_bundle_stage_root(self) -> Path:
@@ -533,8 +564,44 @@ class FilesystemRecordStore:
             return
         with self._product_authority_bundle_lock():
             profiles = self._list_product_profile_records_locked()
+            validate_preview_profile_writes(
+                profiles=profiles,
+                replacements=bundle.product_profiles,
+                previews=self._list_models_locked(PreviewRecord, "launchplane_previews"),
+            )
+            require_absent_products(bundle.absent_product_ids, profiles)
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
+            if bundle.expected_runtime_key_safety_policies is not None:
+                require_runtime_key_safety_policies(
+                    bundle.expected_runtime_key_safety_policies,
+                    (
+                        item
+                        for item in self._list_models_locked(
+                            RuntimeKeySafetyPolicyRecord, "launchplane_runtime_key_safety_policies"
+                        )
+                        if item.status == "active"
+                    ),
+                )
+            for model_type, record_type, expected_records in (
+                (DokployTargetRecord, "dokploy_targets", bundle.expected_dokploy_targets),
+                (DokployTargetIdRecord, "dokploy_target_ids", bundle.expected_dokploy_target_ids),
+            ):
+                for expected in expected_records:
+                    try:
+                        current = self._read_model_locked(
+                            model_type,
+                            record_type,
+                            _context_instance_record_id(expected.context, expected.instance),
+                        )
+                    except FileNotFoundError as error:
+                        raise DokployTargetRecordChanged(
+                            "Adopted target disappeared before onboarding commit."
+                        ) from error
+                    if current != expected:
+                        raise DokployTargetRecordChanged(
+                            "Adopted target changed before onboarding commit."
+                        )
             for expected_profile in bundle.expected_product_profiles:
                 if current_profiles.get(expected_profile.product) != expected_profile:
                     raise ProductProfileConflictError("Product profile changed before commit.")
@@ -650,9 +717,12 @@ class FilesystemRecordStore:
     ) -> None:
         for write in bundle.odoo_instance_override_writes:
             record_id = f"{write.record.context}-{write.record.instance}"
-            current = self._read_model_locked(
-                OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
-            )
+            try:
+                current = self._read_model_locked(
+                    OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
+                )
+            except FileNotFoundError:
+                current = None
             if not odoo_instance_override_records_match(current, write.expected_record):
                 raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             self._stage_product_authority_bundle_write(
@@ -1097,18 +1167,26 @@ class FilesystemRecordStore:
         persisted_record = sanitize_runner_host_hygiene_audit_record_for_persistence(record)
         return self._write_model(
             "launchplane_runner_host_hygiene_audits",
-            _runner_host_hygiene_audit_record_id(persisted_record.audit_record_key),
+            _runner_audit_record_id(persisted_record.audit_record_key),
             persisted_record,
         )
 
     def write_runner_lane_registration_audit_record(
         self, record: RunnerLaneRegistrationAuditRecord
     ) -> Path:
-        return self._write_model(
-            "launchplane_runner_lane_registration_audits",
-            _runner_lane_registration_audit_record_id(record.audit_record_key),
-            record,
-        )
+        record = RunnerLaneRegistrationAuditRecord.model_validate(record.model_dump(mode="python"))
+        record_type = "launchplane_runner_lane_registration_audits"
+        record_id = _runner_audit_record_id(record.audit_record_key)
+        with self._product_authority_bundle_lock():
+            try:
+                existing = self._read_model_locked(
+                    RunnerLaneRegistrationAuditRecord, record_type, record_id
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                validate_runner_lane_registration_audit_identity(existing, record)
+            return self._write_model_locked(record_type, record_id, record)
 
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> Path:
         return self._write_model("launchplane_agent_write_intents", record.record_id, record)
@@ -2208,6 +2286,16 @@ class FilesystemRecordStore:
     def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> Path:
         return self._write_model("launchplane_merge_train_pr_feedback", record.feedback_id, record)
 
+    def read_merge_train_pr_feedback_record(
+        self, feedback_id: str
+    ) -> MergeTrainPrFeedbackRecord | None:
+        try:
+            return self._read_model(
+                MergeTrainPrFeedbackRecord, "launchplane_merge_train_pr_feedback", feedback_id
+            )
+        except FileNotFoundError:
+            return None
+
     def list_merge_train_pr_feedback_records(
         self,
         *,
@@ -2226,7 +2314,7 @@ class FilesystemRecordStore:
                 MergeTrainPrFeedbackRecord,
                 "launchplane_merge_train_pr_feedback",
             )
-            if (not repository or record.repository == repository)
+            if (not repository or record.repository == repository.lower())
             and (not base_branch or record.base_branch == base_branch)
             and (pr_number is None or record.pull_request_number == pr_number)
         ]
@@ -2285,8 +2373,12 @@ class FilesystemRecordStore:
     def write_merge_train_controller_state_record(
         self, record: MergeTrainControllerStateRecord
     ) -> Path:
+        record = require_canonical_merge_train_controller_state(record)
         record_type = "launchplane_merge_train_controller_states"
         with self._exclusive_record_lock(record_type, record.controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=record.repository, base_branch=record.base_branch
+            )
             return self._write_model_locked(
                 record_type,
                 _merge_train_controller_storage_id(record.controller_key),
@@ -2296,12 +2388,10 @@ class FilesystemRecordStore:
     def read_merge_train_controller_state_record(
         self, controller_key: str
     ) -> MergeTrainControllerStateRecord:
-        return MergeTrainControllerStateRecord.model_validate(
-            self._read_model(
-                MergeTrainControllerStateRecord,
-                "launchplane_merge_train_controller_states",
-                _merge_train_controller_storage_id(controller_key),
-            ).model_dump(mode="json")
+        return self._read_model(
+            MergeTrainControllerStateRecord,
+            "launchplane_merge_train_controller_states",
+            _merge_train_controller_storage_id(controller_key),
         )
 
     def list_merge_train_controller_state_records(
@@ -2326,6 +2416,28 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        return tuple(
+            record
+            for record in self.list_merge_train_controller_state_records()
+            if record.repository.lower() == repository.lower()
+            and record.repository != repository.lower()
+            and record.base_branch == base_branch
+        )
+
+    def _require_inert_merge_train_controller_aliases(
+        self, *, repository: str, base_branch: str
+    ) -> None:
+        detail = merge_train_controller_alias_reconciliation_detail(
+            self.list_merge_train_controller_state_alias_records(
+                repository=repository, base_branch=base_branch
+            )
+        )
+        if detail:
+            raise MergeTrainControllerReconciliationRequiredError(detail)
 
     def acquire_merge_train_controller_state_record(
         self,
@@ -2363,6 +2475,9 @@ class FilesystemRecordStore:
         )
         storage_id = _merge_train_controller_storage_id(controller_key)
         with self._exclusive_record_lock(record_type, controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=repository, base_branch=base_branch
+            )
             observed_at = _utc_now_timestamp()
             record_path = self._record_path(record_type, storage_id)
             current_record = (
@@ -2432,9 +2547,13 @@ class FilesystemRecordStore:
         expected_lease_acquired_at: str,
         lease_seconds: int,
     ) -> MergeTrainControllerStateRecord:
+        record = require_canonical_merge_train_controller_state(record)
         record_type = "launchplane_merge_train_controller_states"
         storage_id = _merge_train_controller_storage_id(record.controller_key)
         with self._exclusive_record_lock(record_type, record.controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=record.repository, base_branch=record.base_branch
+            )
             observed_at = _utc_now_timestamp()
             try:
                 current_record = self._read_model_locked(
@@ -2622,6 +2741,9 @@ class FilesystemRecordStore:
         controller_record_type = "launchplane_merge_train_controller_states"
         controller_storage_id = _merge_train_controller_storage_id(record.controller_key)
         with self._exclusive_record_lock(controller_record_type, record.controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=record.repository, base_branch=record.base_branch
+            )
             controller_path = self._record_path(
                 controller_record_type,
                 controller_storage_id,
@@ -2816,7 +2938,7 @@ class FilesystemRecordStore:
                 MergeTrainStackCollapsePlanRecord,
                 "launchplane_merge_train_stack_collapse_plans",
             )
-            if (not repository or record.plan.repository == repository)
+            if (not repository or record.plan.repository == repository.lower())
             and (not base_branch or record.plan.base_branch == base_branch)
             and (not status or record.status == status)
             and (
@@ -2947,7 +3069,7 @@ class FilesystemRecordStore:
         return self._read_model(
             RunnerHostHygieneApplyAuditRecord,
             "launchplane_runner_host_hygiene_audits",
-            _runner_host_hygiene_audit_record_id(audit_record_key),
+            _runner_audit_record_id(audit_record_key),
         )
 
     def list_runner_lane_registration_audit_records(
@@ -2986,18 +3108,6 @@ class FilesystemRecordStore:
         with self._exclusive_record_lock(record_type, record.request_id):
             return self._write_model(record_type, record.request_id, record)
 
-    def create_every_code_work_request_record_if_absent(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> tuple[EveryCodeWorkRequestRecord, bool]:
-        created = self._create_model_if_absent(
-            "launchplane_every_code_work_requests",
-            record.request_id,
-            record,
-        )
-        if created:
-            return record, True
-        return self.read_every_code_work_request_record(record.request_id), False
-
     def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
         return EveryCodeWorkRequestRecord.model_validate(
             self._read_model(
@@ -3030,169 +3140,6 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
-
-    def close_every_code_work_request_for_pull_request_record(
-        self,
-        *,
-        request_id: str,
-        expected_lifecycle_id: str,
-        pr_url: str,
-        merged: bool,
-        closed_at: str,
-    ) -> EveryCodeWorkRequestRecord | None:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            record = self.read_every_code_work_request_record(request_id)
-            if record.lifecycle_id != expected_lifecycle_id:
-                return None
-            closed_record = close_every_code_work_request_for_pull_request(
-                record,
-                pr_url=pr_url,
-                merged=merged,
-                closed_at=closed_at,
-            )
-            if closed_record is None:
-                return None
-            self._write_model(record_type, request_id, closed_record)
-            return closed_record
-
-    def claim_every_code_work_request_record(
-        self,
-        *,
-        request_id: str,
-        host: str,
-        claimed_at: str,
-        lease_seconds: int = 1800,
-        idempotency_record_factory: (
-            Callable[[EveryCodeWorkRequestRecord], LaunchplaneIdempotencyRecord] | None
-        ) = None,
-    ) -> EveryCodeWorkRequestRecord | None:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            record = self.read_every_code_work_request_record(request_id)
-            claimed_record = claim_every_code_work_request(
-                record, host=host, claimed_at=claimed_at, lease_seconds=lease_seconds
-            )
-            if claimed_record is None:
-                return None
-            self._write_model(record_type, request_id, claimed_record)
-            if idempotency_record_factory is not None:
-                self.write_idempotency_record(idempotency_record_factory(claimed_record))
-            return claimed_record
-
-    def heartbeat_every_code_work_request_record(
-        self,
-        *,
-        request_id: str,
-        host: str,
-        fencing_token: int,
-        heartbeat_at: str,
-        lease_expires_at: str,
-        lease_seconds: int = 1800,
-    ) -> bool:
-        del lease_seconds
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            try:
-                record = self.read_every_code_work_request_record(request_id)
-            except FileNotFoundError:
-                return False
-            updated = heartbeat_every_code_work_request(
-                record,
-                EveryCodeWorkRequestHeartbeat(
-                    host=host,
-                    fencing_token=fencing_token,
-                    heartbeat_at=heartbeat_at,
-                    lease_expires_at=lease_expires_at,
-                ),
-            )
-            if updated is None:
-                return False
-            self._write_model(record_type, request_id, updated)
-            return True
-
-    def update_every_code_work_request_status_record(
-        self,
-        *,
-        request_id: str,
-        update: EveryCodeWorkRequestStatusUpdate,
-    ) -> EveryCodeWorkRequestRecord:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            record = self.read_every_code_work_request_record(request_id)
-            if record.fencing_token > 0 and update.fencing_token != record.fencing_token:
-                raise ValueError(
-                    f"Every Code status update fencing token {update.fencing_token} "
-                    f"does not match record fencing token {record.fencing_token}"
-                )
-            updated = apply_every_code_work_request_status(record, update)
-            self._write_model(record_type, request_id, updated)
-            return updated
-
-    def compare_and_write_every_code_work_request_record(
-        self,
-        *,
-        expected_record: EveryCodeWorkRequestRecord,
-        record: EveryCodeWorkRequestRecord,
-        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
-    ) -> Literal["updated", "changed", "missing"]:
-        if expected_record.request_id != record.request_id:
-            raise ValueError("Every Code compare-and-write requires matching request IDs")
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, expected_record.request_id):
-            try:
-                current = self.read_every_code_work_request_record(expected_record.request_id)
-            except FileNotFoundError:
-                return "missing"
-            if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
-                return "changed"
-            self._write_model(record_type, record.request_id, record)
-            if idempotency_record is not None:
-                self.write_idempotency_record(idempotency_record)
-            return "updated"
-
-    def list_stale_every_code_work_request_records(
-        self,
-        *,
-        as_of: str,
-        limit: int = 50,
-    ) -> tuple[EveryCodeWorkRequestRecord, ...]:
-        stale_states = {"claimed", "running"}
-        records = [
-            record
-            for record in self._list_models(
-                EveryCodeWorkRequestRecord,
-                "launchplane_every_code_work_requests",
-            )
-            if record.state in stale_states
-            and record.lease_expires_at
-            and record.lease_expires_at < as_of
-        ]
-        records.sort(key=lambda r: (r.lease_expires_at, r.request_id))
-        return tuple(records[:limit])
-
-    def recover_stale_every_code_work_request_record(
-        self,
-        *,
-        expected_record: EveryCodeWorkRequestRecord,
-        recovered_at: str,
-    ) -> EveryCodeWorkRequestRecord | None:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, expected_record.request_id):
-            try:
-                current = self.read_every_code_work_request_record(expected_record.request_id)
-            except FileNotFoundError:
-                return None
-            if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
-                return None
-            if not current.lease_expires_at or current.lease_expires_at >= recovered_at:
-                return None
-            recovered = recover_stale_every_code_work_request(
-                current,
-                recovered_at=recovered_at,
-            )
-            self._write_model(record_type, recovered.request_id, recovered)
-            return recovered
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> Path:
         return self._write_model("launchplane_every_code_pr_feedback", record.feedback_id, record)
@@ -3971,6 +3918,13 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def collection_read_coverage(self, collection: str) -> str:
+        return (
+            "complete"
+            if collection in {"product_profiles", "secret_records", "secret_bindings"}
+            else "unsupported"
+        )
+
     def write_secret_version(self, version: SecretVersion) -> Path:
         return self._write_model("launchplane_secret_versions", version.version_id, version)
 
@@ -4544,6 +4498,15 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def read_public_ingress_observation_record(
+        self, record_id: str
+    ) -> PublicIngressObservationRecord:
+        return self._read_model(
+            PublicIngressObservationRecord,
+            "launchplane_public_ingress_observations",
+            record_id,
+        )
+
     def list_public_ingress_observation_records(
         self,
         *,
@@ -4578,6 +4541,27 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def list_delivery_failure_observations(
+        self, *, incident_id: str
+    ) -> tuple[DeliveryFailureObservation, ...]:
+        failures: dict[str, DeliveryFailureObservation] = {}
+        for observation in self._list_models(
+            PublicIngressObservationRecord, "launchplane_public_ingress_observations"
+        ):
+            if observation.incident_id != incident_id or observation.status != "fail":
+                continue
+            previous = failures.get(observation.summary)
+            observed_at = observation.observed_at
+            target_url = observation.targets[0].url if observation.targets else ""
+            if previous is not None:
+                if normalized_time(previous.observed_at) < normalized_time(observed_at):
+                    observed_at = previous.observed_at
+                target_url = max(target_url, previous.target_url)
+            failures[observation.summary] = DeliveryFailureObservation(
+                summary=observation.summary, observed_at=observed_at, target_url=target_url
+            )
+        return tuple(failures[summary] for summary in sorted(failures))
 
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> Path:
         return self._write_model("launchplane_public_ingress_incidents", record.incident_id, record)
@@ -4767,6 +4751,33 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def read_generic_web_source_snapshot(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> GenericWebSourceSnapshot:
+        with self._product_authority_bundle_lock():
+            profile = self._read_product_profile_record_path(
+                self._record_path("launchplane_product_profiles", product)
+            )
+            inventory = self._read_model_locked(
+                EnvironmentInventory, "inventory", f"{context_name}-{instance_name}"
+            )
+            deployment = self._read_model_locked(
+                DeploymentRecord, "deployments", inventory.deployment_record_id
+            )
+            target = self._read_model_locked(
+                ProviderTargetRecord,
+                "launchplane_provider_targets",
+                _context_instance_record_id(context_name, instance_name),
+            )
+            target_key = generic_web_source_target_key(target, deployment.deploy.target_type)
+            held = tuple(
+                record
+                for record in self._list_models_locked(LaunchplaneIdempotencyRecord, "idempotency")
+                if record.state in {"running", "reconcile_required"}
+                and record.provider_target_key == target_key
+            )
+            return GenericWebSourceSnapshot(profile, inventory, deployment, target, held)
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         with self._product_authority_bundle_lock():
@@ -7259,22 +7270,6 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
-    def list_retired_preview_enablement_payloads(self) -> tuple[dict[str, object], ...]:
-        """Return stored payloads of the retired preview enablement record type.
-
-        Nothing writes these records any more. Detached application retirement
-        still scans existing payloads as an authority source, so they are read
-        as raw JSON without a record model.
-        """
-        with self._product_authority_bundle_lock():
-            record_dir = self._record_dir("launchplane_preview_enablement")
-            if not record_dir.exists():
-                return ()
-            return tuple(
-                json.loads(record_path.read_text(encoding="utf-8"))
-                for record_path in sorted(record_dir.glob("*.json"))
-            )
-
     def write_preview_generation_record(self, record: PreviewGenerationRecord) -> Path:
         return self._write_model("launchplane_preview_generations", record.generation_id, record)
 
@@ -7514,6 +7509,34 @@ class FilesystemRecordStore:
             f"product-review-{purpose}", f"{repository.casefold()}#{pull_request_number}"
         ):
             yield
+
+    def list_integration_attestation_records(
+        self, *, repository: str, pull_request_number: int
+    ) -> tuple[IntegrationAttestationRecord, ...]:
+        return tuple(
+            record
+            for record in self._list_models(
+                IntegrationAttestationRecord, "launchplane_integration_attestations"
+            )
+            if record.evidence.repository == repository
+            and record.evidence.pull_request_number == pull_request_number
+        )
+
+    def write_integration_attestation_record_if_absent(
+        self, record: IntegrationAttestationRecord
+    ) -> IntegrationAttestationRecord:
+        kind = "launchplane_integration_attestations"
+        with self._exclusive_record_lock(kind, record.record_id):
+            path = self._record_path(kind, record.record_id)
+            if path.exists():
+                existing = IntegrationAttestationRecord.model_validate_json(path.read_text())
+                if existing.review != record.review or existing.statement != record.statement:
+                    raise ValueError(
+                        "Integration attestation is immutable; read back the original."
+                    )
+                return existing
+            self._write_model(kind, record.record_id, record)
+        return record
 
     def write_product_review_decision_record(self, record: ProductReviewDecisionRecord) -> Path:
         return self._write_model("launchplane_product_review_decisions", record.record_id, record)
@@ -7794,7 +7817,7 @@ def _odoo_stable_bootstrap_lane_reservation_id(
     return f"{record.product}-{record.context}-{record.instance}".replace("/", "-") + f"-{digest}"
 
 
-def _runner_host_hygiene_audit_record_id(audit_record_key: str) -> str:
+def _runner_audit_record_id(audit_record_key: str) -> str:
     digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
     normalized_key = audit_record_key.strip()
     filename_prefix = "".join(
@@ -7802,11 +7825,6 @@ def _runner_host_hygiene_audit_record_id(audit_record_key: str) -> str:
         for character in normalized_key
     )[:200]
     return f"{filename_prefix or 'audit'}-{digest}"
-
-
-def _runner_lane_registration_audit_record_id(audit_record_key: str) -> str:
-    digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
-    return audit_record_key.strip().replace("/", "-") + f"-{digest}"
 
 
 def _context_instance_record_id(context: str, instance: str) -> str:

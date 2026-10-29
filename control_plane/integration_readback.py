@@ -22,8 +22,15 @@ from dataclasses import dataclass
 from typing import Literal
 
 from control_plane.contracts.dokploy_target_record import DokployTargetPolicies
-from control_plane.odoo_instance_overrides import shopify_store_handle
-from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.contracts.odoo_instance_override_record import ODOO_CONFIG_PARAMETER_KEY_PATTERN
+from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.odoo_instance_overrides import SHOPIFY_STORE_SETTINGS, shopify_store_handle
+from control_plane.runtime_key_safety import (
+    INTEGRATION_KEY_MARKERS,
+    runtime_key_required_integrations,
+    runtime_key_integrations,
+    runtime_key_safety_environment_class,
+)
 from control_plane.odoo_connection_isolation import connection_isolation_library
 
 IntegrationReadbackWorkflowMode = Literal["maintenance", "bootstrap", "restore"]
@@ -36,11 +43,16 @@ INTEGRATION_READBACK_CHECKED_MARKER = "integration_readback_checked"
 INTEGRATION_READBACK_REFUSED_MARKER = "integration_readback_refused"
 INTEGRATION_READBACK_ALLOWED_MARKER = "integration_readback_allowed"
 INTEGRATION_READBACK_NAME_LIST_MARKERS = frozenset(
-    {INTEGRATION_READBACK_REFUSED_MARKER, INTEGRATION_READBACK_ALLOWED_MARKER}
+    {
+        INTEGRATION_READBACK_REFUSED_MARKER,
+        INTEGRATION_READBACK_ALLOWED_MARKER,
+        "odoo_config_parameter_present",
+        "odoo_config_parameter_missing",
+    }
 )
 _NAME_LIST_PATTERN = re.compile(r"[a-z0-9_.:/,-]{1,2000}")
 _IDENTIFIER_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,62}")
-_CONFIG_PARAMETER_PATTERN = re.compile(r"[a-z][a-z0-9_.]{0,127}")
+_CONFIG_PARAMETER_PATTERN = re.compile(ODOO_CONFIG_PARAMETER_KEY_PATTERN)
 
 
 @dataclass(frozen=True)
@@ -81,9 +93,7 @@ INTEGRATION_FAMILIES: tuple[IntegrationFamily, ...] = (
     IntegrationFamily(
         integration="shopify",
         config_parameters=(
-            "shopify.shop_url_key",
-            "shopify.shop_url",
-            "shopify.store_url",
+            *(f"shopify.{setting}" for setting in SHOPIFY_STORE_SETTINGS),
             "shopify.api_token",
             "shopify.webhook_key",
         ),
@@ -126,7 +136,7 @@ INTEGRATION_FAMILIES: tuple[IntegrationFamily, ...] = (
             # only providers with no remote service are exempt.
             IntegrationTableSetting(
                 table="payment_provider",
-                configured_when="state <> 'disabled' AND code NOT IN ('none', 'custom', 'demo')",
+                configured_when="coalesce(code, '') NOT IN ('none', 'custom', 'demo')",
             ),
         ),
     ),
@@ -141,6 +151,55 @@ INTEGRATION_FAMILIES: tuple[IntegrationFamily, ...] = (
 )
 
 
+def integration_credential_warnings(
+    summary: LaunchplaneLaneSummary | None, *, record_store: object | None = None
+) -> tuple[str, ...]:
+    if (
+        summary is None
+        or not summary.secret_bindings
+        or runtime_key_safety_environment_class(summary.instance) == "prod"
+    ):
+        return ()
+    allowed = (
+        {item.integration for item in summary.dokploy_target.policies.integration_allowances}
+        if summary.dokploy_target is not None
+        else set()
+    )
+    list_policies = getattr(record_store, "list_runtime_key_safety_policy_records", None)
+    policies = list_policies(status="active", limit=1) if callable(list_policies) else ()
+    extra_markers = policies[0].integration_key_markers if policies else ()
+    integrations: set[str] = set()
+    unknown_integration = False
+    for binding in summary.secret_bindings:
+        if (
+            binding.status != "configured"
+            or binding.context != summary.context
+            or binding.instance != summary.instance
+        ):
+            continue
+        if binding.integration in INTEGRATION_KEY_MARKERS:
+            integrations.add(binding.integration)
+            continue
+        if binding.integration != "runtime_environment":
+            continue
+        matched = set(runtime_key_integrations(binding.binding_key))
+        integrations.update(matched)
+        if (
+            runtime_key_required_integrations(binding.binding_key, extra_markers=extra_markers)
+            - matched
+            - allowed
+        ):
+            unknown_integration = True
+    return tuple(
+        f"Stored {integration} credentials have no integration allowance for this non-production lane."
+        for integration in sorted(integrations - allowed)
+    ) + (
+        ("Stored integration credentials cannot be matched to a lane allowance.",)
+        if unknown_integration
+        else ()
+    )
+
+
 @dataclass(frozen=True)
 class IntegrationReadbackPolicy:
     """What the read-back checks on one lane for one workflow run."""
@@ -148,6 +207,7 @@ class IntegrationReadbackPolicy:
     families: tuple[IntegrationFamily, ...]
     allowed_integrations: tuple[str, ...]
     protected_shopify_store_handles: tuple[str, ...]
+    verify_parameter_presence: bool = False
 
     @property
     def required(self) -> bool:
@@ -169,6 +229,7 @@ class IntegrationReadbackPolicy:
             "allowed_integrations": list(self.allowed_integrations),
             "connection_isolation_required": bool(self.families),
             "protected_shopify_store_handles": list(self.protected_shopify_store_handles),
+            "verify_parameter_presence": self.verify_parameter_presence,
         }
         return base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
 
@@ -194,6 +255,7 @@ def integration_readback_policy(
             if workflow_mode == "restore" or not family.restore_only
         )
     return IntegrationReadbackPolicy(
+        verify_parameter_presence=runtime_key_safety_environment_class(instance_name) == "testing",
         families=families,
         allowed_integrations=tuple(
             allowance.integration for allowance in policies.integration_allowances
@@ -257,6 +319,7 @@ INTEGRATION_READBACK_PROGRAM = (
     + """import base64
 import json
 import os
+import re
 import sys
 
 import psycopg2
@@ -285,13 +348,35 @@ def present_config_parameters(cursor, keys):
     return sorted(row[0] for row in cursor.fetchall())
 
 
+def payment_provider_activation(cursor: object) -> str:
+    cursor.execute(
+        "SELECT attribute.attname, format_type(attribute.atttypid, NULL)"
+        " FROM pg_attribute attribute JOIN ir_model_fields field"
+        " ON field.name = attribute.attname AND field.model = 'payment.provider'"
+        " WHERE attribute.attrelid = to_regclass('payment_provider')"
+        " AND attribute.attnum > 0 AND NOT attribute.attisdropped"
+    )
+    columns = dict(cursor.fetchall())
+    text_types = {"character varying", "text"}
+    legacy = columns.get("state") in text_types
+    current = columns.get("active") == "boolean" and columns.get("is_live") == "boolean"
+    if columns.get("code") not in text_types or legacy == current:
+        raise SystemExit("Unsupported payment_provider schema")
+    if legacy:
+        return "state IS DISTINCT FROM 'disabled'"
+    if "state" in columns:
+        raise SystemExit("Unsupported payment_provider schema")
+    return "active IS DISTINCT FROM FALSE"
+
+
 def table_is_configured(cursor, table):
     cursor.execute("SELECT to_regclass(%s) IS NOT NULL", (table["table"],))
     if not cursor.fetchone()[0]:
         return False
-    cursor.execute(
-        "SELECT EXISTS (SELECT 1 FROM " + table["table"] + " WHERE " + table["configured_when"] + ")"
-    )
+    predicate = table["configured_when"]
+    if table["table"] == "payment_provider":
+        predicate = "(" + payment_provider_activation(cursor) + ") AND " + predicate
+    cursor.execute("SELECT EXISTS (SELECT 1 FROM " + table["table"] + " WHERE " + predicate + ")")
     return bool(cursor.fetchone()[0])
 
 
@@ -309,6 +394,17 @@ def protected_store_key_present(cursor, handles):
 refused = []
 allowed = []
 checked = 0
+parameter_keys = []
+encoded_payload = os.environ.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "")
+if encoded_payload and spec.get("verify_parameter_presence", False):
+    payload = json.loads(base64.b64decode(encoded_payload, validate=True))
+    parameter_keys = sorted({
+        item["key"] for item in payload.get("config_parameters", [])
+        if item.get("value", {}).get("source") == "secret_binding"
+        and re.fullmatch(r"[a-z0-9_.-]{1,128}", item["key"])
+    })
+present_parameters = []
+missing_parameters = []
 connection = psycopg2.connect(
     host=(os.environ.get("ODOO_DB_HOST") or "database").strip(),
     port=(os.environ.get("ODOO_DB_PORT") or "5432").strip(),
@@ -319,6 +415,10 @@ connection = psycopg2.connect(
 try:
     with connection.cursor() as cursor:
         cursor.execute("SET TRANSACTION READ ONLY")
+        if parameter_keys:
+            checked += len(parameter_keys)
+            present_parameters = present_config_parameters(cursor, parameter_keys)
+            missing_parameters = sorted(set(parameter_keys) - set(present_parameters))
         if spec["connection_isolation_required"]:
             refused.extend(connection_isolation(cursor, apply=False))
         handles = spec["protected_shopify_store_handles"]
@@ -346,6 +446,10 @@ finally:
     connection.close()
 
 print("integration_readback_checked=" + str(checked))
+if present_parameters:
+    print("odoo_config_parameter_present=" + ",".join(present_parameters))
+if missing_parameters:
+    print("odoo_config_parameter_missing=" + ",".join(missing_parameters))
 if allowed:
     print("integration_readback_allowed=" + ",".join(allowed))
 if refused:
@@ -363,6 +467,11 @@ if refused:
     raise SystemExit(
         "Non-production lane holds integration settings with no allowance: " + ", ".join(refused)
     )
+if missing_parameters:
+    print("integration_readback_ok=false")
+    if report_only:
+        raise SystemExit(0)
+    raise SystemExit("Testing Odoo secret parameters are empty or missing: " + ", ".join(missing_parameters))
 print("integration_readback_ok=true")
 """
 )

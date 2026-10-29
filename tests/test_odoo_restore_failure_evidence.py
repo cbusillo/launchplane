@@ -10,6 +10,7 @@ def _run_restore(log_lines: tuple[str, ...]) -> dict[str, str]:
         context="opw", instance="testing", target_id="compose-123", target_name="opw-testing"
     )
     with (
+        patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
         patch(
             "control_plane.dokploy.api.fetch_dokploy_target_payload",
             return_value={
@@ -35,7 +36,11 @@ def _run_restore(log_lines: tuple[str, ...]) -> dict[str, str]:
             return_value={"deploymentId": "schedule-before"},
         ),
         patch(
-            "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+            "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+            return_value={"deploymentId": "schedule-after"},
+        ),
+        patch(
+            "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
             return_value="deployment=schedule-after status=done",
         ),
         patch(

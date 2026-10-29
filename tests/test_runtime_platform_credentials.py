@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -83,14 +84,21 @@ class _LaneFixture:
         )
 
     def sync(
-        self, *, provider_env: str, apply_changes: bool = True
+        self,
+        *,
+        provider_env: str,
+        apply_changes: bool = True,
+        before_provider_mutation: Callable[[], None] | None = None,
+        requalify_literal_keys: tuple[str, ...] = (),
+        readback_env: str | None = None,
+        selected_keys: tuple[str, ...] | None = None,
     ) -> tuple[dict[str, object], list[dict[str, object]]]:
         updates: list[dict[str, object]] = []
 
         def fetch(**_kwargs: object) -> dict[str, object]:
             env = provider_env
             if updates:
-                env = str(updates[-1]["env_text"])
+                env = str(updates[-1]["env_text"]) if readback_env is None else readback_env
             return {"name": "example-site-testing", "env": env}
 
         with (
@@ -118,11 +126,95 @@ class _LaneFixture:
                 no_cache=False,
                 deploy_timeout_seconds=None,
                 deploy_trigger=Mock(),
+                before_provider_mutation=before_provider_mutation,
+                requalify_literal_keys=requalify_literal_keys,
+                selected_keys=selected_keys,
             )
         return result, updates
 
 
 class StableLaneSyncRefusalTests(unittest.TestCase):
+    def test_unchanged_compose_literal_can_be_explicitly_qualified(self) -> None:
+        value = "hello $NAME"
+        lane = _LaneFixture(self, _instance_record({"APP_MODE": value}))
+        _seed_tracked_target_records(
+            database_url=lane.database_url,
+            context="example-site",
+            instance="testing",
+            target_id="app-testing",
+            target_type="compose",
+            target_name="example-site-testing",
+        )
+        legacy = dokploy_api.serialize_dokploy_env_text({"APP_MODE": value})
+        report, updates = lane.sync(provider_env=legacy, apply_changes=False)
+        self.assertEqual(updates, [])
+        transport = report["compose_transport"]
+        assert isinstance(transport, dict)
+        self.assertEqual(transport["unqualified_keys"], ["APP_MODE"])
+        unchanged, updates = lane.sync(provider_env=legacy)
+        self.assertEqual(updates, [])
+        assert isinstance(unchanged["apply"], dict)
+        self.assertFalse(unchanged["apply"]["env_updated"])
+        report, updates = lane.sync(provider_env=legacy, requalify_literal_keys=("APP_MODE",))
+        apply_result = report["apply"]
+        assert isinstance(apply_result, dict)
+        self.assertTrue(apply_result["env_updated"])
+        self.assertEqual(apply_result["verification"]["status"], "pass")
+        transport = report["compose_transport"]
+        assert isinstance(transport, dict)
+        self.assertEqual(transport["unqualified_keys"], [])
+        self.assertTrue(transport["env_written_without_deploy"])
+        self.assertEqual(len(updates), 1)
+        unchanged, no_updates = lane.sync(
+            provider_env=str(updates[0]["env_text"]), requalify_literal_keys=("APP_MODE",)
+        )
+        self.assertEqual(no_updates, [])
+        assert isinstance(unchanged["apply"], dict)
+        self.assertFalse(unchanged["apply"]["env_updated"])
+        no_op_transport = unchanged["compose_transport"]
+        assert isinstance(no_op_transport, dict)
+        self.assertFalse(no_op_transport["env_written_without_deploy"])
+        self.assertEqual(
+            dokploy_api.parse_dokploy_env_text(str(updates[0]["env_text"])), {"APP_MODE": value}
+        )
+        from tests.test_dokploy_compose_environment import (
+            consumer_commands_available,
+            consume_compose_environment,
+        )
+
+        if consumer_commands_available():
+            actual, _ = consume_compose_environment(str(updates[0]["env_text"]), ("APP_MODE",))
+            for service in actual.values():
+                self.assertEqual(service, {"APP_MODE": value.replace("$", "$$")})
+        with self.assertRaises(LiveTargetRuntimeError) as refusal:
+            lane.sync(
+                provider_env=legacy, requalify_literal_keys=("APP_MODE",), readback_env=legacy
+            )
+        self.assertEqual(refusal.exception.code, "dokploy_target_verification_failed")
+
+    def test_unknown_literal_key_refuses_before_mutation(self) -> None:
+        lane = _LaneFixture(self, _instance_record({"APP_MODE": "on"}))
+        checkpoint = Mock()
+        with self.assertRaises(LiveTargetRuntimeError) as refusal:
+            lane.sync(
+                provider_env="APP_MODE=on",
+                requalify_literal_keys=("MISSING",),
+                before_provider_mutation=checkpoint,
+            )
+        self.assertEqual(refusal.exception.code, "compose_literal_keys_invalid")
+        checkpoint.assert_not_called()
+
+    def test_unencodable_value_refuses_before_mutation_checkpoint_or_write(self) -> None:
+        lane = _LaneFixture(self, _instance_record({"APP_MODE": "fixture\x00value"}))
+        checkpoint = Mock()
+        with (
+            patch.object(dokploy_api, "update_dokploy_target_env") as update,
+            self.assertRaises(dokploy_api.DokployEnvironmentEncodingError),
+        ):
+            lane.sync(provider_env="APP_MODE=off", before_provider_mutation=checkpoint)
+        checkpoint.assert_not_called()
+        update.assert_not_called()
+
     def test_instance_record_platform_credential_refuses_the_sync(self) -> None:
         lane = _LaneFixture(
             self, _instance_record({"APP_MODE": "on", "GITHUB_TOKEN": "record-token-value"})

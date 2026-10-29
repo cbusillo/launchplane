@@ -1,3 +1,4 @@
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 from dataclasses import dataclass
 from typing import Callable, Literal, Protocol, cast
 
@@ -30,6 +31,8 @@ from control_plane.merge_train_github import (
     MergeTrainBranchRefreshReadStore,
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
+    requires_full_odoo_build,
+    is_canonical_candidate_ref,
 )
 
 
@@ -137,7 +140,7 @@ def execute_merge_train_batch_candidate_run_once(
     request: MergeTrainBatchCandidateRunOnceEnvelope,
     policy: MergeTrainPolicy,
     policy_sha256: str,
-    token: str,
+    token: str | GitHubAppInstallationToken,
     trace_id: str,
     recorded_at: str,
     batch_store: MergeTrainBatchCandidateRecordStore,
@@ -190,6 +193,13 @@ def execute_merge_train_batch_candidate_run_once(
     else:
         if mutation_checkpoint is not None:
             mutation_checkpoint("observe_required_checks", None)
+        if (
+            candidate.head_check_reuse is None
+            and existing_record.ordinary_job_binding is None
+            and is_canonical_candidate_ref(candidate)
+            and requires_full_odoo_build(review_store, repository=request.repository)
+        ):
+            github_client.ensure_batch_pull_request(candidate=candidate)
         candidate = github_client.observe_batch_candidate_checks(candidate=candidate)
     return _persist_candidate_result(
         candidate=candidate,
@@ -252,6 +262,7 @@ def _execute_plan_mode(
 ) -> MergeTrainBatchCandidateRunOnceResult:
     snapshot = GitHubMergeTrainSnapshotReader(
         transport=transport,
+        source_screening=True,
         branch_refresh_store=review_store,
         repository_policy=policy.find_repository_policy(
             repository=request.repository, base_branch=request.base_branch

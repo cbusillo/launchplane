@@ -326,7 +326,6 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             "authz_diagnostic.evaluate": "read",
             "owner_acceptance.read": "read",
             "product_environment.read": "read",
-            "work_graph.rank": "read",
             "preview_pr_feedback_notification_attempt.read": "read",
             "preview_pr_feedback.write": "safe_write",
             "owner_acceptance_event.write": "safe_write",
@@ -352,7 +351,6 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
     def test_limited_remote_user_action_allowlist_excludes_privileged_families(self) -> None:
         allowed_actions = (
             "product_environment.read",
-            "work_graph.rank",
             "owner_acceptance_event.write",
             "preview_pr_feedback.write",
         )
@@ -1340,6 +1338,58 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
                             target=AuthorizationTarget(scope="instance", instances=("testing",)),
                         )
                     )
+
+    def test_generic_web_rollback_rule_authorizes_only_its_exact_lane(self) -> None:
+        identity = _local_operator_identity()
+        for version in (2, 3):
+            with self.subTest(version=version):
+                policy = LaunchplaneAuthzPolicy(
+                    schema_version=version,
+                    local_operators=(
+                        LocalOperatorPolicyRule(
+                            subjects=(identity.subject,),
+                            token_labels=(identity.token_label,),
+                            products=("example-site",),
+                            contexts=("example-context",),
+                            instances=("prod",),
+                            actions=("generic_web_rollback.execute",),
+                        ),
+                    ),
+                )
+                restored = LaunchplaneAuthzPolicy.model_validate_json(policy.model_dump_json())
+                request: dict[str, Any] = {
+                    "identity": identity,
+                    "action": "generic_web_rollback.execute",
+                    "product": "example-site",
+                    "context": "example-context",
+                    "target": AuthorizationTarget(scope="instance", instances=("prod",)),
+                }
+                self.assertTrue(restored.allows(**request))
+                refused: tuple[dict[str, Any], ...] = (
+                    {"product": "other-site"},
+                    {"context": "other-context"},
+                    {"target": AuthorizationTarget(scope="instance", instances=("testing",))},
+                    {
+                        "target": AuthorizationTarget(
+                            scope="instance", instances=("prod", "testing")
+                        )
+                    },
+                    {"target": AuthorizationTarget(scope="context")},
+                    {"action": "generic_web_prod_promotion.execute"},
+                    {"action": "generic_web_prod_rollback.execute"},
+                    {"identity": _local_operator_identity(subject="other-agent")},
+                    {"identity": _local_operator_identity(token_label="other-token")},
+                )
+                for changes in refused:
+                    with self.subTest(changes=changes):
+                        self.assertFalse(restored.allows(**{**request, **changes}))
+                historical = LaunchplaneAuthzPolicy(
+                    schema_version=version,
+                    local_operators=(
+                        policy.local_operators[0].model_copy(update={"instances": ()}),
+                    ),
+                )
+                self.assertFalse(historical.allows(**request))
 
     def test_policy_schema_rejects_ambiguous_instance_rule_shapes(self) -> None:
         with self.assertRaisesRegex(

@@ -1,5 +1,12 @@
 import { expect, setClockTime, test, waitForState } from "./state";
 import { DEADLINE_RETRY_INTERVAL_MS, READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
+
+const fixtureBootstrapPath = "/ui/products?fixture=products";
+
+test.beforeEach(async ({ page }) => {
+  await page.route(`**${fixtureBootstrapPath}`, route => route.fulfill({ contentType: "text/html", body: "" }));
+});
 
 for (const view of ["index", "workspace", "environment"] as const) {
   for (const journey of ["long-lived", "stopped", "failed"] as const) {
@@ -8,7 +15,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
       : journey === "stopped" ? "retains stopped evidence and bounds follow-up reads"
         : "returns failed deadline reads to normal polling";
     test(`open ${view} ${purpose}`, { tag: "@responsive" }, async ({ page }, testInfo) => {
-      await page.goto("/ui/products?fixture=products");
+      await page.goto(fixtureBootstrapPath);
       const fixture = await page.evaluate(async () => {
         const modulePath = "/ui/src/dev-fixtures.ts";
         const module = await import(modulePath);
@@ -68,10 +75,6 @@ for (const view of ["index", "workspace", "environment"] as const) {
       const productUrl = `**/v1/products/${fixture.product.product}`;
       const detailUrl = `${productUrl}/environments/prod`;
       const target = view === "index" ? "**/v1/products" : view === "workspace" ? productUrl : detailUrl;
-      if (view !== "index") await page.route("**/v1/products", async route => {
-        serviceTime = browserTime;
-        return route.fulfill({ json: { status: "ok", products: [response(fixture.product)] } });
-      });
       await page.route(target, async route => {
         reads++;
         if (unavailable) return route.fulfill({ status: 503, json: { error: { code: "read_unavailable", message: "Cadence fixture unavailable" } } });
@@ -92,6 +95,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
       const signal = findSignal(main);
       const attribute = view === "index" ? "data-operational" : "data-tone";
       const healthy = view === "environment" ? "pass" : "verified";
+      const unverified = view === "environment" ? "warning" : "danger";
       await expect(signal).toHaveAttribute(attribute, healthy);
       await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
       const advanceRead = async (milliseconds: number) => {
@@ -120,14 +124,13 @@ for (const view of ["index", "workspace", "environment"] as const) {
           continue;
         }
         // Observe expiry before publication and consecutive stale responses.
-        await advance(origin + (minute + 1) * cadence + 1 - browserTime, "warning");
+        await advance(origin + (minute + 1) * cadence + 1 - browserTime, unverified);
         // Publishing at +11 seconds leaves +5 and +10 second responses stale.
-        await advance(DEADLINE_RETRY_INTERVAL_MS, "warning");
-        await advance(DEADLINE_RETRY_INTERVAL_MS, "warning");
+        await advance(DEADLINE_RETRY_INTERVAL_MS, unverified);
+        await advance(DEADLINE_RETRY_INTERVAL_MS, unverified);
         await advance(DEADLINE_RETRY_INTERVAL_MS, healthy);
       }
       if (journey === "long-lived") {
-        await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-${view}-${testInfo.project.name}.png`, fullPage: true });
         expect(mutations).toEqual([]);
         return;
       }
@@ -135,7 +138,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
       // not keep polling at the short follow-up interval.
       const recoveredReads = reads;
       await advanceRead(DEADLINE_RETRY_INTERVAL_MS * 2);
-      await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-recovered-${journey}-${view}-${testInfo.project.name}.png`, fullPage: true });
+      await page.screenshot({ path: smokeArtifact(`production-cadence-recovered-${journey}-${view}-${testInfo.project.name}.png`), fullPage: true });
       expect(reads).toBe(recoveredReads);
       if (journey === "failed") {
         unavailable = true;
@@ -144,7 +147,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
         await expect(page.getByText("Cadence fixture unavailable", { exact: false }).first()).toBeVisible();
         const failedReads = reads;
         await advanceRead(DEADLINE_RETRY_INTERVAL_MS * 2);
-        await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-failed-${view}-${testInfo.project.name}.png`, fullPage: true });
+        await page.screenshot({ path: smokeArtifact(`production-cadence-failed-${view}-${testInfo.project.name}.png`), fullPage: true });
         expect(reads).toBe(failedReads);
         unavailable = false;
         await advance(READ_REFRESH_INTERVAL_MS + DEADLINE_RETRY_INTERVAL_MS, healthy);
@@ -154,14 +157,14 @@ for (const view of ["index", "workspace", "environment"] as const) {
       }
       // Successful GETs must not renew stopped monitor evidence.
       stoppedAt = serviceTime;
-      await advance(cadence, "warning");
+      await advance(cadence, unverified);
       // Repeated successful reads cannot renew the stopped observation, and the
       // short follow-up ends after one cadence rather than spinning forever.
-      await advance(READ_REFRESH_INTERVAL_MS, "warning");
+      await advance(READ_REFRESH_INTERVAL_MS, unverified);
       const stoppedReads = reads;
       browserTime += DEADLINE_RETRY_INTERVAL_MS * 2;
       await page.clock.runFor(DEADLINE_RETRY_INTERVAL_MS * 2);
-      await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-stopped-${view}-${testInfo.project.name}.png`, fullPage: true });
+      await page.screenshot({ path: smokeArtifact(`production-cadence-stopped-${view}-${testInfo.project.name}.png`), fullPage: true });
       expect(reads).toBe(stoppedReads);
       unavailable = true;
       await advanceRead(READ_REFRESH_INTERVAL_MS);
@@ -169,7 +172,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
       // Check after the response renders too, so queued intercepted requests
       // cannot escape the earlier synchronous no-spin assertion.
       expect(reads).toBe(stoppedReads + 1);
-      await expect(signal).toHaveAttribute(attribute, "warning");
+      await expect(signal).toHaveAttribute(attribute, unverified);
       expect(mutations).toEqual([]);
     });
   }
@@ -177,7 +180,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
 
 for (const heldRead of [false, true]) {
   test(`staggered lane deadlines recover independently${heldRead ? " across a pending read" : ""}`, async ({ page }) => {
-    await page.goto("/ui/products?fixture=products");
+    await page.goto(fixtureBootstrapPath);
     const fixture = await page.evaluate(async () => {
       const modulePath = "/ui/src/dev-fixtures.ts";
       const module = await import(modulePath);
@@ -240,7 +243,7 @@ for (const heldRead of [false, true]) {
     if (heldRead) {
       await page.clock.runFor(5_001);
       await waitForState(() => Boolean(releaseRead)).toBe(true);
-      await expect(prod).toHaveAttribute("data-operational", "warning");
+      await expect(prod).toHaveAttribute("data-operational", "danger");
       await expect(testing).toHaveAttribute("data-operational", "verified");
       await page.clock.runFor(2_000);
       await expect(testing).toHaveAttribute("data-operational", "warning");
@@ -249,7 +252,7 @@ for (const heldRead of [false, true]) {
       await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
     } else {
       await advance(5_001);
-      await expect(prod).toHaveAttribute("data-operational", "warning");
+      await expect(prod).toHaveAttribute("data-operational", "danger");
       await expect(testing).toHaveAttribute("data-operational", "verified");
       await advance(2_000);
       await expect(testing).toHaveAttribute("data-operational", "warning");

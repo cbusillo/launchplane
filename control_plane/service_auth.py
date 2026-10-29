@@ -35,6 +35,7 @@ from control_plane.authz_scope import (
     instance_scoped_authz_actions,
 )
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule
+from control_plane.contracts.snapshot_protocol import LaneInstance
 
 
 GITHUB_ACTIONS_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
@@ -97,6 +98,22 @@ LaunchplaneIdentity: TypeAlias = (
     | LocalOperatorIdentity
     | LocalAdminIdentity
 )
+
+
+def launchplane_identity_actor(identity: LaunchplaneIdentity) -> str:
+    if isinstance(identity, GitHubHumanIdentity):
+        return f"github:{identity.login}"
+    if isinstance(identity, LocalOperatorIdentity):
+        return f"local-operator:{identity.subject}"
+    if isinstance(identity, LocalAdminIdentity):
+        return f"local-admin:{identity.subject}"
+    if isinstance(identity, TerminalAgentIdentity):
+        return f"terminal-agent:{identity.subject}"
+    return (
+        f"github-actions:{identity.repository}:{identity.workflow_ref or identity.job_workflow_ref}"
+    )
+
+
 AuthorizationScope: TypeAlias = Literal["global", "context", "instance", "preview"]
 AuthzPolicySchemaVersion: TypeAlias = Literal[1, 2, 3]
 AgentConsumerSubjectType: TypeAlias = Literal[
@@ -224,7 +241,7 @@ def _validated_instance_selectors(instances: tuple[str, ...]) -> tuple[str, ...]
 
 
 AuthzInstanceSelectors = Annotated[
-    tuple[str, ...],
+    tuple[LaneInstance, ...],
     AfterValidator(_validated_instance_selectors),
 ]
 
@@ -429,16 +446,6 @@ def configured_local_operator_identity(
         )
     except PermissionError:
         return None
-
-
-def read_bearer_token(authorization_header: str) -> str:
-    header = authorization_header.strip()
-    if not header:
-        raise PermissionError("Authorization header is required.")
-    scheme, _, token = header.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
-        raise PermissionError("Authorization header must use Bearer token format.")
-    return token.strip()
 
 
 def bearer_identity_from_token(
@@ -860,7 +867,6 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
     if normalized_action in {
         "agent_write_intent.plan",
         "authz_diagnostic.evaluate",
-        "work_graph.rank",
     } or (normalized_action.endswith(".read")):
         return "read"
     if (
@@ -1469,37 +1475,6 @@ def authz_policy_allows_immutable_github_id_administration(
     *, policy: LaunchplaneAuthzPolicy, github_id: int
 ) -> bool:
     return github_id > 0 and github_id in strict_immutable_github_human_administrator_ids(policy)
-
-
-def matching_github_human_policy_rules(
-    *,
-    policy: LaunchplaneAuthzPolicy,
-    identity: GitHubHumanIdentity,
-    action: str,
-    product: str,
-    context: str,
-    target: AuthorizationTarget | None = None,
-    managed_only: bool = False,
-) -> tuple[GitHubHumanPolicyRule, ...]:
-    resolved_target = target or AuthorizationTarget(scope="context")
-    if identity.role == "owner":
-        return ()
-    if identity.role == "read_only" and not limited_remote_user_action_allowed(action):
-        return ()
-    return tuple(
-        rule
-        for rule in policy.github_humans
-        if (not managed_only or rule.managed_set_id is not None)
-        and (not managed_only or rule.managed_rule_id is not None)
-        and rule.allows(
-            identity=identity,
-            action=action,
-            product=product,
-            context=context,
-            target=resolved_target,
-            schema_version=policy.schema_version,
-        )
-    )
 
 
 def migrate_authz_policy_to_schema_v2(

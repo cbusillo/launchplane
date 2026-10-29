@@ -1,3 +1,4 @@
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 from dataclasses import dataclass
 import logging
 from typing import Callable, Literal, Protocol, cast
@@ -125,7 +126,7 @@ def execute_merge_train_batch_landing_run_once(
     request: MergeTrainBatchLandingRunOnceEnvelope,
     repository_policy: MergeTrainRepositoryPolicy,
     policy_sha256: str,
-    token: str,
+    token: str | GitHubAppInstallationToken,
     trace_id: str,
     recorded_at: str,
     candidate_store: MergeTrainBatchCandidateRecordStore,
@@ -266,7 +267,7 @@ def _execute_land_mode(
     request: MergeTrainBatchLandingRunOnceEnvelope,
     repository_policy: MergeTrainRepositoryPolicy,
     policy_sha256: str,
-    token: str,
+    token: str | GitHubAppInstallationToken,
     trace_id: str,
     recorded_at: str,
     candidate_store: MergeTrainBatchCandidateRecordStore,

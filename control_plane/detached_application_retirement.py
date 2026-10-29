@@ -80,8 +80,6 @@ class DetachedApplicationRetirementStore(Protocol):
         limit: int | None = None,
     ) -> tuple[object, ...]: ...
 
-    def list_retired_preview_enablement_payloads(self) -> tuple[object, ...]: ...
-
     def list_preview_generation_records(
         self,
         *,
@@ -295,7 +293,6 @@ _AUTHORITY_SOURCES: tuple[
     (_PROVIDER_TARGET_AUTHORITY_SOURCE, lambda store: store.list_provider_target_records()),
     ("preview", lambda store: store.list_preview_records()),
     ("preview_desired_state", lambda store: store.list_preview_desired_state_records()),
-    ("preview_enablement", lambda store: store.list_retired_preview_enablement_payloads()),
     ("preview_generation", lambda store: store.list_preview_generation_records()),
     ("preview_inventory", lambda store: store.list_preview_inventory_scan_records()),
     ("preview_lifecycle_cleanup", lambda store: store.list_preview_lifecycle_cleanup_records()),

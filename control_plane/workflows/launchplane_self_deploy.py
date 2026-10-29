@@ -56,6 +56,17 @@ LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_LOCAL_ADMIN_TOKEN",
         "LAUNCHPLANE_LOCAL_ADMIN_SUBJECT",
         "LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL",
+        "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN",
+        NPMPLUS_BASE_URL_ENV_KEY,
+        NPMPLUS_IDENTITY_ENV_KEY,
+        NPMPLUS_SECRET_ENV_KEY,
+    }
+)
+
+
+# Removed sources may be cleaned up during deploy, but cannot be reinstalled.
+_RETIRED_WORK_GRAPH_ENV_KEYS = frozenset(
+    {
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER",
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER",
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT",
@@ -63,11 +74,7 @@ LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES",
         "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT",
         "LAUNCHPLANE_WORK_GRAPH_GH_BINARY",
-        "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN",
         "GH_TOKEN",
-        NPMPLUS_BASE_URL_ENV_KEY,
-        NPMPLUS_IDENTITY_ENV_KEY,
-        NPMPLUS_SECRET_ENV_KEY,
     }
 )
 
@@ -136,7 +143,9 @@ class LaunchplaneSelfDeployRequest(BaseModel):
         normalized_oauth_env_removals: list[str] = []
         for env_key in self.oauth_env_removals:
             normalized_key = env_key.strip()
-            if normalized_key not in LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS:
+            if normalized_key not in (
+                LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS | _RETIRED_WORK_GRAPH_ENV_KEYS
+            ):
                 raise ValueError(
                     f"Launchplane self deploy does not accept oauth_env_removals key {normalized_key!r}."
                 )
@@ -256,6 +265,9 @@ def _execute_launchplane_self_deploy(
     )
     raw_env_text = str(target_payload.get("env") or "")
     previous_env_map = dokploy_api.parse_dokploy_env_text(raw_env_text)
+    from control_plane.deployment_maintenance import require_deployment_available
+
+    require_deployment_available(previous_env_map)
     if request.target_type == "compose":
         _validate_launchplane_compose_target(
             target_payload=target_payload, env_map=previous_env_map
@@ -285,6 +297,8 @@ def _execute_launchplane_self_deploy(
         raw_env_text,
         updates=updates,
         removals=removals,
+        target_type=request.target_type,
+        compose_type=str(target_payload.get("composeType") or "docker-compose"),
     )
     updated_env_map = dokploy_api.parse_dokploy_env_text(updated_env_text)
     _validate_bootstrap_target_env(updated_env_map)

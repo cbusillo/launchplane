@@ -86,6 +86,9 @@ class HttpErrorFactory(Protocol):
         code: str,
         message: str,
         authz: dict[str, object] | None = None,
+        records: dict[str, str] | None = None,
+        reason: str | None = None,
+        details: dict[str, str] | None = None,
     ) -> HTTPException: ...
 
 

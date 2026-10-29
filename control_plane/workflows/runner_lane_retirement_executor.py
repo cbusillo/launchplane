@@ -13,9 +13,13 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationPolicy
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationRequest
 from control_plane.contracts.runner_lane_registration import plan_runner_lane_retirement
+from control_plane.contracts.text_fields import require_text
 from control_plane.github_payload import repository_full_name
 from control_plane.workflows.runner_lane_registration_executor import AuditPoster
 from control_plane.workflows.runner_lane_registration_executor import RemoteCommandRunner
+from control_plane.workflows.runner_lane_registration_executor import (
+    runner_directory_identity_checks,
+)
 
 
 ActiveRunReader = Callable[[str], tuple[int, ...]]
@@ -43,16 +47,16 @@ class RunnerLaneRetirementExecutorRequest(BaseModel):
     @model_validator(mode="after")
     def _normalize_request(self) -> "RunnerLaneRetirementExecutorRequest":
         self.repository = repository_full_name(self.repository)
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner lane retirement executor requires host_name"
         ).lower()
-        self.execution_lane = _required_text(
+        self.execution_lane = require_text(
             self.execution_lane, "runner lane retirement executor requires execution_lane"
         ).lower()
-        self.service_user = _required_text(
+        self.service_user = require_text(
             self.service_user, "runner lane retirement executor requires service_user"
         )
-        self.lane_name = _required_text(
+        self.lane_name = require_text(
             self.lane_name, "runner lane retirement executor requires lane_name"
         ).lower()
         _validate_slug(
@@ -68,12 +72,12 @@ class RunnerLaneRetirementExecutorRequest(BaseModel):
             "runner lane retirement executor lane_name must use letters, numbers, dots, underscores, or hyphens",
         )
         self.registration_root = _normalized_path(
-            _required_text(
+            require_text(
                 self.registration_root,
                 "runner lane retirement executor requires registration_root",
             )
         )
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key,
             "runner lane retirement executor requires audit_record_key",
         )
@@ -322,21 +326,7 @@ def _verify_runner_directory(
     request: RunnerLaneRetirementExecutorRequest,
     remote_runner: RemoteCommandRunner,
 ) -> None:
-    script = "\n".join(
-        (
-            'runner_dir="$RUNNER_DIRECTORY"',
-            'registration_root="$RUNNER_REGISTRATION_ROOT"',
-            'test -d "$registration_root"',
-            'test ! -L "$registration_root"',
-            'test "$(realpath -e "$registration_root")" = "$registration_root"',
-            'test "$(stat -c %U "$registration_root")" = "$RUNNER_SERVICE_USER"',
-            'test -d "$runner_dir"',
-            'test ! -L "$runner_dir"',
-            'case "$runner_dir" in "$registration_root"/*) ;; *) exit 1 ;; esac',
-            'test "$(realpath -e "$runner_dir")" = "$runner_dir"',
-            'test "$(stat -c %U "$runner_dir")" = "$RUNNER_SERVICE_USER"',
-        )
-    )
+    script = "\n".join(runner_directory_identity_checks())
     _run_retirement_command(
         step="verify runner directory identity",
         command=("sh", "-eu", "-c", script),
@@ -440,15 +430,7 @@ def _remove_runner_directory(
 ) -> None:
     script = "\n".join(
         (
-            'runner_dir="$RUNNER_DIRECTORY"',
-            'registration_root="$RUNNER_REGISTRATION_ROOT"',
-            'test -d "$runner_dir"',
-            'test ! -L "$runner_dir"',
-            'case "$runner_dir" in "$registration_root"/*) ;; *) exit 1 ;; esac',
-            'test "$(realpath -e "$registration_root")" = "$registration_root"',
-            'test "$(realpath -e "$runner_dir")" = "$runner_dir"',
-            'test "$(stat -c %U "$registration_root")" = "$RUNNER_SERVICE_USER"',
-            'test "$(stat -c %U "$runner_dir")" = "$RUNNER_SERVICE_USER"',
+            *runner_directory_identity_checks(),
             "command -v lsof >/dev/null 2>&1",
             "lsof_status=0",
             'lsof -t +D "$runner_dir" >/dev/null 2>&1 || lsof_status=$?',
@@ -526,13 +508,6 @@ def _normalized_path(value: str) -> str:
     if not segments:
         raise ValueError("runner lane retirement executor requires scoped absolute root")
     return "/" + "/".join(segments)
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized
 
 
 def _validate_slug(value: str, message: str) -> None:

@@ -107,7 +107,7 @@ class PreviewTransportCompatibilityTests(unittest.TestCase):
                         with (
                             patch(
                                 "control_plane.drivers.generic_web_preview_extensions."
-                                "apply_verireel_preview_refresh_result"
+                                "apply_postgres_preview_refresh_result"
                             ) as driver_refresh,
                             self.assertRaises(click.ClickException),
                         ):
@@ -193,7 +193,6 @@ class PreviewTransportCompatibilityTests(unittest.TestCase):
                         "data_transport_mode": mode,
                         "copied_env_keys": [],
                         "omitted_env_keys": [],
-                        "override_env_keys": [],
                         "preview_url_env_keys": [],
                         "preview_domain_env_keys": [],
                         "migration_command_configured": commands,

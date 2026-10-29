@@ -46,8 +46,13 @@ def repository_source_url(repository: str) -> str:
 def require_empty_compose_source(payload: JsonObject, compose_id: str) -> None:
     if payload.get("composeId") != compose_id or not payload.get("environmentId"):
         raise ValueError("Compose source setup requires exact provider identity and environment.")
+    require_empty_target_source(payload)
+
+
+def require_empty_target_source(payload: JsonObject) -> None:
+    """An unconfigured provider default is not a partial repository or image source."""
     if payload.get("sourceType") not in (None, "", "github", "git", "raw"):
-        raise ValueError("Compose target already has a different source type.")
+        raise ValueError("Target already has a different source type.")
     # A provider's default sourceType/composePath is not a configured source.
     # Reject partial source and credential bindings as well as complete sources.
     for key in (
@@ -77,7 +82,7 @@ def require_empty_compose_source(payload: JsonObject, compose_id: str) -> None:
         "gitlabPathNamespace",
     ):
         if payload.get(key):
-            raise ValueError("Compose target already has a configured or partial source.")
+            raise ValueError("Target already has a configured or partial source.")
 
 
 def configure_empty_compose_source(

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -19,6 +18,7 @@ from control_plane.contracts.production_backup_gate import (
     ProductionBackupGateRequest,
     ProductionBackupGateWorkerRequest,
 )
+from control_plane.contracts.text_fields import require_text as _normalize_required
 
 VeriReelProdBackupGateOperationStatus = Literal["pending", "running", "pass", "fail", "cancelled"]
 VeriReelProdBackupGateOperationPhase = Literal[
@@ -69,6 +69,12 @@ class VeriReelProdBackupGateOperationRecord(BaseModel):
     error_code: str = ""
     error_message: str = ""
     runner_trace_id: str = ""
+    previous_attempt: VeriReelProdBackupGateOperationRecord | None = None
+    previous_backup: BackupGateRecord | None = None
+    continuation_digest: str = ""
+    continuation_reason: str = ""
+    continuation_actor: str = ""
+    continued_at: str = ""
 
     @model_validator(mode="after")
     def _validate_record(self) -> "VeriReelProdBackupGateOperationRecord":
@@ -181,26 +187,6 @@ class VeriReelProdBackupGateOperationRecord(BaseModel):
         return self
 
 
-def build_verireel_prod_backup_gate_operation_id(
-    *, product: str, context: str, instance: str, backup_record_id: str
-) -> str:
-    normalized_product = product.strip().lower().replace("/", "-")
-    normalized_context = context.strip().lower()
-    normalized_instance = instance.strip().lower()
-    normalized_backup_record_id = backup_record_id.strip()
-    digest = hashlib.sha256(
-        "|".join(
-            (
-                normalized_product,
-                normalized_context,
-                normalized_instance,
-                normalized_backup_record_id,
-            )
-        ).encode("utf-8")
-    ).hexdigest()[:16]
-    return f"verireel-prod-backup-gate-{normalized_context}-{normalized_instance}-{digest}"
-
-
 def build_cancelled_verireel_prod_backup_gate_record(
     operation: VeriReelProdBackupGateOperationRecord,
 ) -> BackupGateRecord:
@@ -223,16 +209,3 @@ def build_cancelled_verireel_prod_backup_gate_record(
             "cancellation_reason": operation.cancellation.reason,
         },
     )
-
-
-def verireel_prod_backup_gate_operation_is_terminal(
-    record: VeriReelProdBackupGateOperationRecord,
-) -> bool:
-    return record.status in VERIREEL_PROD_BACKUP_GATE_TERMINAL_OPERATION_STATUSES
-
-
-def _normalize_required(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized

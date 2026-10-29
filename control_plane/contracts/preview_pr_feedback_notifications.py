@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
+from control_plane.contracts.text_fields import require_text
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 PreviewPrFeedbackNotificationDestinationKind = Literal["discord"]
@@ -30,7 +30,7 @@ class PreviewPrFeedbackNotificationDestination(BaseModel):
 
     @model_validator(mode="after")
     def _validate_destination(self) -> "PreviewPrFeedbackNotificationDestination":
-        self.destination_id = _required_text(
+        self.destination_id = require_text(
             self.destination_id,
             "preview PR feedback notification destination requires destination_id",
         )
@@ -59,17 +59,17 @@ class PreviewPrFeedbackNotificationPolicyRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_policy(self) -> "PreviewPrFeedbackNotificationPolicyRecord":
-        self.policy_id = _required_text(
+        self.policy_id = require_text(
             self.policy_id, "preview PR feedback notification policy requires policy_id"
         )
         self.product = self.product.strip()
         self.context = self.context.strip()
         self.repository = self.repository.strip()
-        self.created_at = _required_text(
+        self.created_at = require_text(
             self.created_at,
             "preview PR feedback notification policy requires created_at",
         )
-        self.updated_at = _required_text(
+        self.updated_at = require_text(
             self.updated_at,
             "preview PR feedback notification policy requires updated_at",
         )
@@ -110,20 +110,20 @@ class PreviewPrFeedbackNotificationAttemptRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_attempt(self) -> "PreviewPrFeedbackNotificationAttemptRecord":
-        self.attempt_id = _required_text(
+        self.attempt_id = require_text(
             self.attempt_id, "preview PR feedback notification attempt requires attempt_id"
         )
-        self.feedback_id = _required_text(
+        self.feedback_id = require_text(
             self.feedback_id, "preview PR feedback notification attempt requires feedback_id"
         )
-        self.policy_id = _required_text(
+        self.policy_id = require_text(
             self.policy_id, "preview PR feedback notification attempt requires policy_id"
         )
-        self.destination_id = _required_text(
+        self.destination_id = require_text(
             self.destination_id,
             "preview PR feedback notification attempt requires destination_id",
         )
-        self.attempted_at = _required_text(
+        self.attempted_at = require_text(
             self.attempted_at,
             "preview PR feedback notification attempt requires attempted_at",
         )
@@ -157,18 +157,14 @@ def build_preview_pr_feedback_notification_attempt_id(
     policy_id: str,
     destination_id: str,
 ) -> str:
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "feedback_id": feedback_id.strip(),
-                "event": event.strip(),
-                "policy_id": policy_id.strip(),
-                "destination_id": destination_id.strip(),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "feedback_id": feedback_id.strip(),
+            "event": event.strip(),
+            "policy_id": policy_id.strip(),
+            "destination_id": destination_id.strip(),
+        }
+    )[:16]
     return "-".join(
         _record_token(value)
         for value in (
@@ -187,10 +183,3 @@ def _record_token(value: str) -> str:
     return "".join(
         character if character.isalnum() else "-" for character in value.strip().lower()
     ).strip("-")
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

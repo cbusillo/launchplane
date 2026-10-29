@@ -1,4 +1,5 @@
 import { LocalConsumerDeliveryPanel } from "./LocalConsumerDeliveryPanel";
+import { OdooSecretParameterPanel } from "./OdooSecretParameterPanel";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -152,6 +153,9 @@ export function ManagedSecretsView({
       ) : null}
       {configResource.status === "ready" && configResource.data ? (
         <LocalConsumerDeliveryPanel product={detail.product} context={configResource.data.context} environment={detail.environment} />
+      ) : null}
+      {configResource.status === "ready" && configResource.data ? (
+        <OdooSecretParameterPanel config={configResource.data} fixtureMode={Boolean(fixtureMode)} />
       ) : null}
       {configResource.data ? <ConfigStatusSummary items={secrets} /> : null}
       {(configResource.status === "idle" || configResource.status === "loading") &&

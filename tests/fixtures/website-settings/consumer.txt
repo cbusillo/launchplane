@@ -22,6 +22,30 @@ SETTINGS_FIELDS = frozenset(
 NATIVE_FIELDS = ("google_analytics_key", "cookies_bar", "block_third_party_domains")
 
 
+def read_string_parameter(parameters: Any, key: str) -> str:
+    read = getattr(parameters, "get_str", None) or parameters.get_param
+    return read(key, default="")
+
+
+def write_string_parameter(parameters: Any, key: str, value: str) -> None:
+    write = getattr(parameters, "set_str", None) or parameters.set_param
+    write(key, value)
+
+
+def website_is_loaded(env: Any) -> bool:
+    if "website" not in env.registry:
+        return False
+    module = (
+        env["ir.module.module"]
+        .sudo()
+        .search(
+            [("name", "=", "website"), ("state", "in", ("installed", "to upgrade", "to remove"))],
+            limit=1,
+        )
+    )
+    return bool(module)
+
+
 def exclude_collection(websites: Any, parameters: Any) -> None:
     for website in websites.search([]):
         if "google_analytics_key" not in website._fields:
@@ -31,8 +55,8 @@ def exclude_collection(websites: Any, parameters: Any) -> None:
         website.invalidate_recordset(["google_analytics_key"])
         if website.google_analytics_key:
             raise RuntimeError("Nonproduction website analytics exclusion readback failed.")
-    parameters.set_param(INDEXING_PARAMETER, "0")
-    if str(parameters.get_param(INDEXING_PARAMETER)).lower() not in {"0", "false"}:
+    write_string_parameter(parameters, INDEXING_PARAMETER, "0")
+    if read_string_parameter(parameters, INDEXING_PARAMETER).lower() not in {"0", "false"}:
         raise RuntimeError("Nonproduction website indexing exclusion readback failed.")
 
 
@@ -44,9 +68,9 @@ def apply_website_settings(env: Any, payload: dict[str, object] | None, *, insta
     """
     raw = payload.get("website_settings") if payload else None
     production = instance.strip().lower() in PRODUCTION_INSTANCE_NAMES
-    if "website" not in env.registry:
+    if not website_is_loaded(env):
         if raw is not None:
-            raise RuntimeError("Website settings require the native website model.")
+            raise RuntimeError("Website settings require the installed website addon.")
         return
     websites = env["website"].sudo()
     parameters = env["ir.config_parameter"].sudo()
@@ -117,8 +141,8 @@ def apply_website_settings(env: Any, payload: dict[str, object] | None, *, insta
         if getattr(website, field) != expected:
             raise RuntimeError("Native website settings readback failed.")
     indexing = "1" if raw["public_indexing_enabled"] else "0"
-    parameters.set_param(INDEXING_PARAMETER, indexing)
-    if parameters.get_param(INDEXING_PARAMETER) != indexing:
+    write_string_parameter(parameters, INDEXING_PARAMETER, indexing)
+    if read_string_parameter(parameters, INDEXING_PARAMETER) != indexing:
         raise RuntimeError("Website indexing readback failed.")
     digest = hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return digest

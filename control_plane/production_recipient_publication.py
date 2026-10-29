@@ -33,7 +33,6 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.storage.postgres import (
     PostgresRecordStore,
     LaunchplaneProductionRecipientRow,
-    LaunchplanePrivateHealthEndpointRow,
     LaunchplaneProductionBackupPolicyRow,
     LaunchplaneProductionBackupTargetRow,
     LaunchplaneDeploymentRow,
@@ -210,18 +209,7 @@ def commit_publication(
             session.flush()
             session.merge(store._production_backup_policy_row(policy))
         for endpoint in publication.health_endpoints:
-            session.merge(
-                LaunchplanePrivateHealthEndpointRow(
-                    endpoint_key=endpoint.endpoint_key,
-                    product=endpoint.product,
-                    context=endpoint.context,
-                    instance=endpoint.instance,
-                    url=endpoint.url,
-                    status=endpoint.status,
-                    updated_at=endpoint.updated_at,
-                    payload=endpoint.model_dump(mode="json"),
-                )
-            )
+            store._merge_private_health_endpoint_record(session, endpoint)
         result = record.model_copy(
             update={
                 "phase": "published",
@@ -285,13 +273,22 @@ class RecipientOwnedAuthorityChanged(RecipientAuthorityChanged):
 
 
 def require_owned_publication_rows(
-    store: PostgresRecordStore, record: ProductionRecipientRecord
+    store: PostgresRecordStore,
+    record: ProductionRecipientRecord,
+    *,
+    inventory_timestamp_required: bool = True,
 ) -> None:
     published = RecipientPublication.model_validate(record.publication["published"])
     current = authority_snapshot(store, record.product, record.context)
     expected = published.model_dump(mode="json")
     for key in ("target", "target_id", "provider", "inventory"):
-        if current[key] != expected[key]:
+        actual_row, expected_row = current[key], expected[key]
+        if key == "inventory" and not inventory_timestamp_required and actual_row is not None:
+            actual_row = {name: value for name, value in actual_row.items() if name != "updated_at"}
+            expected_row = {
+                name: value for name, value in expected_row.items() if name != "updated_at"
+            }
+        if actual_row != expected_row:
             raise RecipientOwnedAuthorityChanged(
                 "An owned authority row changed; preserve it for review."
             )
@@ -363,18 +360,7 @@ def rollback_publication(
         )
         for endpoint in before["health_endpoints"]:
             old = PrivateHealthEndpointRecord.model_validate(endpoint)
-            session.merge(
-                LaunchplanePrivateHealthEndpointRow(
-                    endpoint_key=old.endpoint_key,
-                    product=old.product,
-                    context=old.context,
-                    instance=old.instance,
-                    url=old.url,
-                    status=old.status,
-                    updated_at=old.updated_at,
-                    payload=old.model_dump(mode="json"),
-                )
-            )
+            store._merge_private_health_endpoint_record(session, old)
         inverse_policies = []
         for policy in published.backup_policies:
             old_policy = next(

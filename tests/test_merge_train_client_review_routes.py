@@ -11,7 +11,7 @@ from control_plane.merge_train_batch_candidate import (
 from control_plane.merge_train_branch_refresh import (
     require_merge_train_client_review_read_store,
 )
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.merge_train_run_once import (
     MergeTrainRunOnceEnvelope,
     execute_merge_train_run_once,
@@ -22,7 +22,8 @@ from tests.merge_train_policy_fixtures import (
     build_test_merge_train_policy_record,
 )
 from tests.test_merge_train_github import (
-    _check_run,
+    _required_check_run,
+    _protected_branch_with_checks,
     _owner_review_check,
     _advisory_runtime_records,
     _combined_status,
@@ -38,6 +39,7 @@ CLIENT_STATUS = "launchplane/owner-review"
 
 def _review_store(*, review_label: str = "owner-review") -> Any:
     profile = SimpleNamespace(
+        driver_id="generic-web",
         release_on_acceptance="held",
         is_active=True,
         repository=REPOSITORY,
@@ -47,6 +49,7 @@ def _review_store(*, review_label: str = "owner-review") -> Any:
         list_product_profile_records=lambda: (profile,),
         list_runtime_environment_records=_advisory_runtime_records,
         list_merge_train_branch_refresh_records=lambda **_: (),
+        read_merge_train_pr_feedback_record=lambda _feedback_id: None,
     )
 
 
@@ -63,8 +66,15 @@ def _labelled_pull_request_transport(
             pull,
             {"permission": "admin"},
             _label_events(),
+            _protected_branch_with_checks("ci-status", app_id=None),
+            [],
             _combined_status(statuses=({"context": "ci", "state": "success"},)),
-            {"check_runs": [_check_run("completed", "success"), *client_statuses]},
+            {
+                "check_runs": [
+                    _required_check_run("ci-status", "completed", "success"),
+                    *client_statuses,
+                ]
+            },
             _conversation_rule(),
             [],  # no active branch rules
         )
@@ -112,6 +122,33 @@ class LegacyRunOnceClientReviewTests(unittest.TestCase):
                     )
                 dry_run = cast(dict[str, Any], result.accepted_result["dry_run_result"])
                 self.assertEqual(dry_run["intended_next_action"], expected_action)
+
+    def test_odoo_level1_routes_to_candidate_controller_without_a_merge(self) -> None:
+        store = _review_store()
+        store.list_product_profile_records()[0].driver_id = "odoo"
+        transport = _labelled_pull_request_transport((_owner_review_check("success"),))
+        with patch(
+            "control_plane.merge_train_run_once.UrllibMergeTrainGitHubTransport",
+            return_value=transport,
+        ):
+            result = execute_merge_train_run_once(
+                request=MergeTrainRunOnceEnvelope(repository=REPOSITORY, mutate=True),
+                policy=build_test_merge_train_policy(),
+                policy_sha256="policy-sha",
+                token="token",
+                trace_id="trace-odoo-controller",
+                recorded_at="2026-10-03T18:00:00Z",
+                review_store=store,
+            )
+        self.assertFalse(
+            [
+                item
+                for item in transport.requests
+                if item.method != "GET" and item.path != "/graphql"
+            ]
+        )
+        dry_run = cast(dict[str, Any], result.accepted_result["dry_run_result"])
+        self.assertEqual(dry_run["intended_next_action"], "wait_for_checks")
 
     def test_mutating_run_once_does_not_merge_without_current_head_review(self) -> None:
         transport = _labelled_pull_request_transport(())
@@ -183,12 +220,16 @@ class StandaloneCandidatePlanningClientReviewTests(unittest.TestCase):
                 first,
                 {"permission": "admin"},
                 _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 second,
                 _label_events(),
+                _protected_branch_with_checks("ci-status", app_id=None),
+                [],
                 _combined_status(),
-                {"check_runs": [_check_run("completed", "success")]},
+                {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
                 _conversation_rule(),
                 [],  # no active branch rules
             )

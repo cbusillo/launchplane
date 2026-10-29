@@ -79,18 +79,34 @@ def build_feedback_payloads(
                 "repository": repository,
                 "base_branch": base_branch,
                 "pull_request_number": pull_request_number,
-                "event": "blocked",
+                "event": held_out_event,
                 "controller_action": controller_action,
                 "controller_record_id": controller_record_id,
                 "message": held_out_message,
                 "source": source,
             }
-            for pull_request_number, held_out_message in _held_out_messages(
+            for pull_request_number, held_out_event, held_out_message in _held_out_feedback(
                 result=result,
                 base_branch=base_branch,
                 stopped=controller_action == "candidate_failed",
             )
         )
+    payloads.extend(
+        {
+            "schema_version": 1,
+            "repository": repository,
+            "base_branch": base_branch,
+            "pull_request_number": entry["number"],
+            "event": "blocked",
+            "controller_action": "stack_unsupported",
+            "controller_record_id": controller_record_id,
+            "message": "; ".join(entry["deferred_reasons"])
+            + ". Unrelated pull requests can proceed.",
+            "source": source,
+        }
+        for value in _as_list(_as_dict(result.get("dry_run_result")).get("queue"))
+        if (entry := _as_dict(value)).get("eligible") is False and entry.get("deferred_reasons")
+    )
     return payloads
 
 
@@ -214,10 +230,14 @@ def _container_identity(container: dict[str, Any], container_name: str) -> tuple
 
 
 def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
+    if controller_action == "target_not_ready":
+        return "blocked"
     if result.get("reason_code") == "candidate_block_confirmation_pending":
         return "waiting"
     if controller_action == "recover_candidate_block":
         return "waiting" if _as_dict(result.get("details")).get("block_removed") is True else "skip"
+    if result.get("reason_code") == "base_failure_exploration_exhausted":
+        return "waiting"
     if result.get("reason_code") == "base_checks_not_green":
         return (
             "waiting"
@@ -280,6 +300,21 @@ def _feedback_message(
                 "reconciling its saved recovery attempt. Recheck the current head and "
                 "post a fresh checked gh-pr.py ready handoff to rejoin the train."
             )
+        if result.get("reason_code") == "candidate_block_new_base_retest":
+            return (
+                "Launchplane cleared its failed-candidate block after the failed checks "
+                "passed on the exact new protected base. The unchanged head returns to "
+                "normal admission with its existing current-head Ready handoff; the one "
+                "automatic base-retest budget is recorded."
+            )
+        if result.get("reason_code") == "candidate_block_unrelated_setup_reviewed":
+            return (
+                "Launchplane cleared its failed-candidate block after verifying an unrelated "
+                "missing pnpm-store file before browser tests, unchanged install inputs, "
+                "green current-head checks and a weighed review. The one-time recovery "
+                "budget is recorded. Post a fresh checked gh-pr.py ready handoff to "
+                "rejoin normal train validation."
+            )
         return (
             "Launchplane cleared its failed-candidate block after verifying a different "
             "current head, green checks and a weighed review. Post a fresh checked "
@@ -299,6 +334,11 @@ def _feedback_message(
                 "fresh mergeability and required checks."
             )
         return "Launchplane needs to refresh this pull request's branch before continuing."
+    if controller_action == "target_not_ready":
+        return (
+            f"Launchplane cannot land pull requests here yet: {_blocking_detail(result)} "
+            "The train resumes on its own once the setting is in place."
+        )
     if event == "blocked":
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
         if selected.get("client_test_notes_error"):
@@ -342,15 +382,25 @@ def _feedback_message(
             return f"Launchplane needs attention before the train can continue: {detail}"
         return "Launchplane needs attention before the train can continue."
     if event == "waiting":
-        if result.get("reason_code") == "base_checks_not_green":
+        if result.get("reason_code") == "base_failure_exploration_exhausted" and _as_list(
+            _as_dict(result.get("details")).get("deferred_roots")
+        ):
+            return _blocking_detail(result)
+        if result.get("reason_code") in {
+            "base_checks_not_green",
+            "base_failure_exploration_exhausted",
+        }:
             return f"Launchplane is waiting for the base checks: {_blocking_detail(result)}"
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))
+        candidate = _as_dict(result.get("candidate"))
+        diagnostic = _string((candidate or selected).get("required_checks_observation_error"))
+        detail = f" Check evidence: {diagnostic}." if diagnostic else ""
         if selected.get("owner_review_required") is True and "candidate" not in result:
             return (
                 "Launchplane is waiting for current-head Client review and required checks "
-                "on this pull request."
+                "on this pull request." + detail
             )
-        return "Launchplane is waiting for required checks or fresh GitHub state."
+        return "Launchplane is waiting for required checks or fresh GitHub state." + detail
     if controller_record_id:
         return f"Launchplane is advancing `{controller_action}` with `{controller_record_id}`."
     return f"Launchplane is advancing `{controller_action}` for this train pass."
@@ -402,9 +452,9 @@ def _blocking_detail(result: dict[str, Any]) -> str:
     return ""
 
 
-def _held_out_messages(
+def _held_out_feedback(
     *, result: dict[str, Any], base_branch: str, stopped: bool
-) -> list[tuple[int, str]]:
+) -> list[tuple[int, str, str]]:
     """Tell each held-out pull request why it waits outside the batch.
 
     A stopped failed batch reports only the pull requests its own probe just held
@@ -425,7 +475,7 @@ def _held_out_messages(
         if stopped
         else "The rest of the queue continues without it."
     )
-    messages: list[tuple[int, str]] = []
+    messages: list[tuple[int, str, str]] = []
     for held_out in _as_list(_as_dict(result.get("candidate")).get("held_out")):
         held_out_entry = _as_dict(held_out)
         number = held_out_entry.get("pull_request_number")
@@ -437,9 +487,23 @@ def _held_out_messages(
             # Nothing for its author to do; it joins the next candidate.
             continue
         if held_out_entry.get("reason") == "failure_isolation":
+            if _as_dict(result.get("details")).get("base_checks_status") in {"fail", "unknown"}:
+                messages.append(
+                    (
+                        number,
+                        "waiting",
+                        _blocking_detail(result)
+                        if stopped
+                        else "Launchplane held this pull request while the base checks are "
+                        "unproved. Eligible changes may be tested separately. No queued pull "
+                        "request is blamed; nothing is needed from its author.",
+                    )
+                )
+                continue
             messages.append(
                 (
                     number,
+                    "blocked",
                     "Launchplane is waiting with this pull request while it retests the "
                     "pull requests ahead of it on their own, to find which change broke "
                     "their merge-train batch. It rejoins the queue once that test "
@@ -460,6 +524,7 @@ def _held_out_messages(
         messages.append(
             (
                 number,
+                "blocked",
                 f"Launchplane left this pull request out of the merge-train batch: it "
                 f"{conflict}. {queue_state} It rejoins the queue when its head changes; "
                 "resolve the conflict, typically after the others land.",
@@ -474,6 +539,14 @@ def _pull_request_numbers(
     if controller_action == "recover_candidate_block":
         number = _as_dict(result.get("details")).get("pull_request_number")
         return [number] if type(number) is int and number > 0 else []
+    if controller_action == "target_not_ready":
+        return [
+            number
+            for number in _as_list(
+                _as_dict(result.get("details")).get("ready_pull_request_numbers")
+            )
+            if type(number) is int and number > 0
+        ]
     selected_actions = {"wait_for_checks", "block", "update_branch"}
     if controller_action in selected_actions and "candidate" not in result:
         selected = _as_dict(_as_dict(result.get("dry_run_result")).get("selected_pr"))

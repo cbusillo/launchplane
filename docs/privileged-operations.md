@@ -42,12 +42,8 @@ policy mutation. Remaining deletion is tracked by
 
 ## Agent Policy Proposals
 
-The configured `local_operator` identity may submit prepared access-policy and merge-train
-policy requests to `POST /v1/agent/privileged-operations/plans`. This requires
-exactly one explicit managed proposal rule in both runtime policy and a fresh
-active policy record. The two existing descriptors are
-`managed-authz-policy-set` and `managed-merge-train-policy-import`; secret
-rotation and retired delivery descriptors are not accepted by this surface.
+Agent proposal admission and supported descriptors are defined by the
+[privileged-operation API contract](service-boundary.md#privileged-operation-api).
 
 The request carries the descriptor, request, reason, related issue, and a stable
 `source_event_id`. Reuse that source event when a response is interrupted:
@@ -62,16 +58,13 @@ the proposal and returns the review link without approving or applying it.
 Creation persists a `planned` record and its event only. It installs no rule,
 changes no merge policy, and schedules no execution. The signed-in Director
 reviews the proposer, redacted change evidence and counts, then approves or
-rejects through the existing browser lifecycle. Callers with a `local_operator` identity cannot approve,
+rejects through the existing browser lifecycle. Agent requesters cannot approve,
 cancel, revoke, or execute a plan, even if a policy mistakenly lists those
-actions. The independent `local_operator` requester stores only a domain-separated
-principal fingerprint, so its history and replay do not depend on terminal-agent
-credentials or ordinary-agent enrollment, sessions or leases.
+actions. The requester stores only a domain-separated principal fingerprint; historical
+records do not depend on ordinary-agent enrollment, sessions or leases.
 
-Before first use, the Director prepares **agent proposal access** in the Access
-policy tab and approves that separate managed authorization plan. See
-[the proposer grant](authorization-authority.md#preparing-agent-proposal-access).
-Code landing does not install it. Removing proposer access does not cancel
+Proposal admission follows the [API contract](service-boundary.md#privileged-operation-api).
+Removing proposer access does not cancel
 already pending plans; those still need separate Director approval or cancellation.
 After the first `local_operator` requester record is persisted, rollback must
 retain a reader that supports that requester type. Older records remain readable.
@@ -79,6 +72,40 @@ Stage 2 scheduler activation remains a separate
 later proposal and approval.
 
 ## Approval And Execution Boundary
+
+The signed-in Director's access-policy review shows each added or removed
+rule's principal, browser roles, permissions and scope. Updated rules show
+both their removed and added sides. Role effects come from the existing
+managed-set planner's candidate and the policy's sign-in role resolver,
+including rules outside the changed set. The display distinguishes losing
+all browser access, losing administrator access while retaining read-only
+access, and a role retained through another rule. Team or organization
+membership and unresolved overlapping selectors are marked unknown rather
+than treated as proof of losing access.
+
+Only the signed-in Director with immutable-ID admin permission receives this display in
+the semantic review; agent and read-only projections omit it. Immutable
+GitHub IDs are labeled with public account logins where available, using
+credential-free, cached GitHub account metadata; an unavailable lookup keeps
+the account ID visible. This lookup provides no membership claims. No secret
+values or request free text enter the display. Token labels and workflow
+repository identity pins are selector identifiers and are displayed; credential
+values are never read. An ID's login is used for role evaluation only when
+observed in the signed-in identity or an ID-bound provider reply; a rule's login
+selector is never substituted for a failed lookup. Unknown effects assert no
+before/after role. Exact login-only selectors use the public account lookup in
+the other direction, keeping both its returned immutable ID and canonical
+login. An unavailable lookup stays unknown, and a renamed account does not
+silently satisfy its former login selector. Both lookup directions share the
+same per-response admission budget.
+
+Across one response, at most ten account lookups may start within a one-second
+admission window. Each uses a three-second socket timeout; this is not a hard
+wall deadline for network or DNS work. IDs remain visible when the admission
+budget is spent. Truncated provider replies also fall back to IDs. If the current planner no
+longer matches the saved plan, current role effects are shown as unavailable.
+These are review fields only; approval, cancellation and worker apply rules
+are unchanged.
 
 Planning remains typed and dry-run-only. Phase 2 adds a separate finite human
 approval and a supervised service-internal worker; it adds no HTTP execute
@@ -96,7 +123,8 @@ route, execute action, static execution credential, or agent execution path.
   explicit `schema_migration` mode, reason, and optional related issue. The
   migration mode defaults to `reject`; `migrate_v2_to_v3` is accepted only with
   a schema-v3 desired policy and remains bound into planning, replay, approval,
-  and worker execution. Planning persists the proposal as operation data but
+  and worker execution; applying it is refused because ordinary-agent rules can
+  no longer be added. Planning persists the proposal as operation data but
   never writes the active authorization policy. The separate policy-write
   transition and its fences are described in the authorization authority
   [Current Transitional Model](authorization-authority.md#current-transitional-model).
@@ -373,7 +401,20 @@ pre-state are unchanged, until withdrawn (cancelled before approval or revoked
 after approval) or executed. Approval and execution keep the existing policy
 checks and compare-and-swap refusal for stale revisions. Changing a policy
 requires preparing the remaining change for fresh review; elapsed time alone
-does not. Reads do not reconcile time-based expiry or append events.
+does not. Pending policy-plan list and detail reviews compare the saved evidence
+with the current planner evidence, using the same comparison as approval. A stale
+plan is readable with an explicit warning and no approval control. The stale
+category also covers current policy evidence that cannot be verified; refreshing
+can make the same saved plan usable again when that evidence becomes available.
+If the policy has changed, an administrator can cancel the plan and prepare a
+new one. Unavailable current planning is identified separately and can also be
+checked again by refreshing. Existing transition authorization and browser
+cancellation controls are unchanged. Policy storage read
+failures leave the affected review unavailable instead of presenting saved
+evidence as current. Detailed access changes are withheld when current eligibility
+is blocked. These reads do not expire or cancel the plan, reconcile time-based
+expiry, or append events. Approved and terminal records retain their historical
+review and revoke/cancel behavior.
 
 New records and approvals store an empty `expires_at`. Legacy timestamps and
 terminal `expired` records remain readable with their original digests; pending
@@ -457,8 +498,8 @@ deeper authorized disclosure. Mutation, challenge, worker, agent-summary,
 approval, revoke, cancel, and execution behavior is unchanged.
 The projection explicitly records that it authorizes neither approval nor
 execution and persists no state; its `can_approve` and `can_revoke` values are
-non-authoritative UI affordances derived from persisted lifecycle and blocker
-state.
+non-authoritative UI affordances derived from persisted lifecycle, blockers,
+and current policy-plan availability.
 
 ## HTTP, UI, And Worker
 

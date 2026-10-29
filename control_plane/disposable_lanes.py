@@ -1,11 +1,13 @@
 """Lane eligibility is separate from identity and from historical recovery proof."""
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
-from typing import Protocol
+from typing import Literal, Protocol
 
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -15,6 +17,7 @@ from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.lane_usage import evaluate_lane_usage
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 LaneConfigurationRecord = (
     RuntimeEnvironmentRecord
@@ -129,9 +132,87 @@ def disposable_lane_binding_sha256(
             key=lambda item: json.dumps(item, sort_keys=True),
         )
     )
-    return hashlib.sha256(
-        json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(bindings)
+
+
+@dataclass(frozen=True)
+class DisposableLaneObservationBinding:
+    profile: LaunchplaneProductProfileRecord
+    target: DokployTargetRecord | None
+    target_id: DokployTargetIdRecord | None
+    preview: PreviewRecord | None
+    binding_sha256: str
+
+
+def disposable_lane_observation_sha256(observation: DisposableLaneSafety | None) -> str:
+    """Bind the reviewed report, including its evidence and freshness, or its absence."""
+    return canonical_json_sha256(observation.model_dump(mode="json") if observation else None)
+
+
+def resolve_disposable_observation_binding(
+    store: DisposableLaneStore,
+    *,
+    product: str,
+    context: str,
+    instance: str,
+    preview_id: str = "",
+) -> DisposableLaneObservationBinding:
+    """Use the same exact lane and binding for inspection and evidence writes."""
+    profile = store.read_product_profile_record(product)
+    preview = None
+    if preview_id:
+        preview = resolve_disposable_preview(store, profile, context, instance)
+        if preview.preview_id != preview_id:
+            raise ValueError("Observation does not match the owned preview.")
+    elif instance != "testing" or not any(
+        (lane.context, lane.instance) == (context, instance) for lane in profile.lanes
+    ):
+        raise ValueError("Observation requires an exact owned testing lane.")
+    try:
+        target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
+    except FileNotFoundError:
+        target = None
+    try:
+        target_id = store.read_dokploy_target_id_record(
+            context_name=context, instance_name=instance
+        )
+    except FileNotFoundError:
+        target_id = None
+    return DisposableLaneObservationBinding(
+        profile=profile,
+        target=target,
+        target_id=target_id,
+        preview=preview,
+        binding_sha256=disposable_lane_binding_sha256(
+            profile,
+            target,
+            target_id,
+            preview,
+            disposable_lane_configuration(store, context, instance),
+        ),
+    )
+
+
+def require_lane_target_ownership(
+    targets: tuple[DokployTargetIdRecord | ProviderTargetRecord, ...],
+    *,
+    context: str,
+    instance: str,
+    target_id: str = "",
+) -> None:
+    owned_targets = {
+        target.target_id
+        for target in targets
+        if (target.context, target.instance) == (context, instance)
+    }
+    if target_id:
+        owned_targets.add(target_id)
+    if any(
+        target.target_id in owned_targets
+        and (target.context, target.instance) != (context, instance)
+        for target in targets
+    ):
+        raise DisposableLaneSafetyUnknown("The target aliases another lane's target.")
 
 
 def require_disposable_lane(
@@ -142,8 +223,11 @@ def require_disposable_lane(
     instance: str,
     retirement: bool = False,
     separation_only: bool = False,
-    preview_refresh: bool = False,
-    preview_cleanup: bool = False,
+    preview_operation: Literal["refresh", "destroy"] | None = None,
+    same_artifact_restart: bool = False,
+    restart_running: bool = False,
+    recovery: bool = False,
+    runtime_stopped: bool = False,
     preview: PreviewRecord | None = None,
     now: datetime | None = None,
     testing_hold_actor: str = "",
@@ -190,13 +274,12 @@ def require_disposable_lane(
         )
     except FileNotFoundError:
         target_id = None
-    if target_id is not None and any(
-        (other.context, other.instance) != (context, instance)
-        and other.target_id == target_id.target_id
-        for other in store.list_dokploy_target_id_records()
-    ):
-        raise DisposableLaneSafetyUnknown(
-            "The testing or preview target aliases another lane's target."
+    if target_id is not None:
+        require_lane_target_ownership(
+            store.list_dokploy_target_id_records(),
+            context=context,
+            instance=instance,
+            target_id=target_id.target_id,
         )
     rehearsal_binding = ""
     if target is not None and target.policies.staff_testing_hold is not None:
@@ -206,7 +289,7 @@ def require_disposable_lane(
             or instance != "testing"
             or retirement
             or separation_only
-            or preview_refresh
+            or preview_operation
             or hold.purpose != "staff_testing"
             or hold.recorded_by != testing_hold_actor
             or hold.rehearsal is None
@@ -225,14 +308,6 @@ def require_disposable_lane(
             }
         )
     evidence = store.read_disposable_lane_safety(product, context, instance)
-    if (
-        evidence is not None
-        and evidence.observer_kind == "director_agent_preview_cleanup"
-        and not (preview_cleanup or preview_refresh or retirement)
-    ):
-        raise DisposableLaneSafetyUnknown(
-            "Preview cleanup observations do not qualify other lane mutations."
-        )
     usage = evaluate_lane_usage(
         usage_store if usage_store is not None else store,
         profile=profile,
@@ -240,29 +315,35 @@ def require_disposable_lane(
         target_id=target_id,
         instance=instance,
         usage=evidence.usage if evidence else "unknown",
-        require_unused=not (preview_refresh or retirement),
+        require_unused=not (preview_operation or retirement),
         now=now,
+        runtime_stopped=runtime_stopped,
     )
-    if preview_refresh:
-        # Overall direction makes previews disposable unless there is an actual
-        # protected use or needed copy. No source produces a universal positive
-        # occupancy/custody fact. Resource safety is checked separately against
-        # the real Docker host immediately before refresh effects.
-        if not owned_preview or profile.driver_id != "odoo":
+    down_recovery = (
+        recovery and not (preview_operation or retirement) and usage.reason == "verified_down"
+    )
+    if same_artifact_restart and (not restart_running or down_recovery):
+        if instance != "testing" or preview is not None:
             raise DisposableLaneSafetyUnknown(
-                "Refresh qualification requires an owned Odoo preview."
+                "Existing-container recovery requires an owned testing lane."
             )
-        if preview is not None and preview.state != "active":
-            raise DisposableLaneSafetyUnknown("Only an active existing preview can be refreshed.")
-        if evidence is not None and (
-            usage.protected
-            or evidence.data == "only_copy"
-            or evidence.production_resources in {"shared", "separation_ready"}
+        if usage.protected or (
+            evidence is not None and evidence.production_resources in {"shared", "separation_ready"}
         ):
-            # Expiry or config drift cannot silently erase a protective report.
             raise DisposableLaneSafetyUnknown(
-                "The preview has a recorded protected use or resource."
+                "Recovery is held by use, needed data or shared production resources."
             )
+        return ""
+    if preview_operation:
+        if not owned_preview or profile.driver_id != "odoo":
+            raise DisposableLaneSafetyUnknown("Preview operations require an owned Odoo preview.")
+        if (
+            preview_operation == "refresh"
+            and preview is not None
+            and preview.state not in {"active", "destroyed"}
+        ):
+            raise DisposableLaneSafetyUnknown("The preview lifecycle does not admit a refresh.")
+        require_unprotected_preview(target, evidence)
         binding = disposable_lane_binding_sha256(
             profile,
             target,
@@ -305,6 +386,8 @@ def require_disposable_lane(
             preview,
             disposable_lane_configuration(store, context, instance),
         )
+    if evidence is not None and evidence.observer_kind != "director_agent":
+        raise DisposableLaneSafetyUnknown("Historical observations cannot qualify lane mutations.")
     if evidence is None:
         raise DisposableLaneSafetyUnknown(
             "Disposable lane usage, only-copy and production-isolation evidence is unavailable."
@@ -325,13 +408,10 @@ def require_disposable_lane(
     allowed_resources = {"isolated", "separation_ready"} if separation_only else {"isolated"}
     if (
         usage.protected
+        or evidence.data == "only_copy"
         or evidence.data != "reproducible"
-        # Cleanup removes the exact preview target, not credentials it reads.
-        # Target aliases are refused above; resource deletion owns its destroy set.
-        or (
-            not (preview_cleanup and owned_preview)
-            and evidence.production_resources not in allowed_resources
-        )
+        and not down_recovery
+        or evidence.production_resources not in allowed_resources
     ):
         raise DisposableLaneSafetyUnknown(
             "The lane is in use, holds needed data, shares production resources, or safety is unknown."
@@ -339,11 +419,27 @@ def require_disposable_lane(
     return evidence.binding_sha256
 
 
+def require_unprotected_preview(
+    target: DokployTargetRecord | None, evidence: DisposableLaneSafety | None
+) -> None:
+    if (target is not None and target.policies.staff_testing_hold is not None) or (
+        evidence is not None
+        and (
+            evidence.usage == "in_use"
+            or evidence.data == "only_copy"
+            or evidence.production_resources in {"shared", "separation_ready"}
+        )
+    ):
+        raise DisposableLaneSafetyUnknown("The preview has a recorded protected use or resource.")
+
+
 def resolve_disposable_preview(
     store: DisposableLaneStore,
     profile: LaunchplaneProductProfileRecord,
     context: str,
     instance: str,
+    *,
+    allow_destroyed: bool = False,
 ) -> PreviewRecord:
     """Resolve an actual uniquely owned preview; a slug alone is never authority."""
     if instance == "prod" or context != profile.preview.context:
@@ -371,7 +467,7 @@ def resolve_disposable_preview(
             profile.repository,
             profile.repository.partition("/")[2],
         }
-        or matches[0].state == "destroyed"
+        or (matches[0].state == "destroyed" and not allow_destroyed)
     ):
         raise DisposableLaneSafetyUnknown(
             "The preview is absent, ambiguous or owned by another product."
@@ -405,14 +501,16 @@ def disposable_lane_configuration(
         policies = store.list_runtime_key_safety_policy_records(status="active", limit=1)
         template = profiles[0].preview.template_instance
         instances.add(template)
-        try:
-            overrides.append(
-                store.read_odoo_instance_override_record(
-                    context_name=context, instance_name=template
+        instances.add("preview")
+        for override_instance in dict.fromkeys((template, instance)):
+            try:
+                overrides.append(
+                    store.read_odoo_instance_override_record(
+                        context_name=context, instance_name=override_instance
+                    )
                 )
-            )
-        except FileNotFoundError:
-            pass
+            except FileNotFoundError:
+                pass
     # Site values and version pointers stay inside the service and only enter
     # the digest. Secret values are never read or returned.
     bindings = tuple(

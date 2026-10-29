@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 from urllib.parse import quote
 
@@ -467,6 +467,156 @@ class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiProviderHoldAttentionReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_service_read_returns_bounded_sanitized_page_without_writes(self) -> None:
+        from tests.test_provider_hold_attention import reserve_attention_hold
+        from tests.support.http import get
+        from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "attention.db")
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            for name in ("PRIVATE-FIRST", "PRIVATE-SECOND", "PRIVATE-THIRD"):
+                reserve_attention_hold(store, name)
+            before = store.list_provider_target_holds()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="operations.read", context="launchplane"),
+                record_store_factory=lambda: store,
+            )
+            response = await get(
+                app,
+                PROVIDER_HOLD_ATTENTION_ROUTE + "?limit=1",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            page = response.json()["attention"]
+            self.assertEqual(len(page["items"]), 1)
+            self.assertTrue(page["has_more"])
+            self.assertEqual(page["completeness"], "partial")
+            self.assertEqual(page["items"][0]["original_scope"]["product"], "retired-product")
+            next_page = await get(
+                app,
+                PROVIDER_HOLD_ATTENTION_ROUTE
+                + "?limit=1&cursor="
+                + quote(page["next_cursor"], safe=""),
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(next_page.status_code, 200)
+            self.assertNotEqual(next_page.json()["attention"]["items"], page["items"])
+            self.assertEqual(before, store.list_provider_target_holds())
+            for private in (
+                "PRIVATE-",
+                "source_sha256",
+                "provider_target_key",
+                "fingerprint",
+                "original_intent",
+            ):
+                self.assertNotIn(private, response.text)
+
+    async def test_denied_and_unauthenticated_cannot_read_unknown_rows_or_counts(self) -> None:
+        from tests.support.http import get
+        from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+
+        class Probe:
+            calls = 0
+
+            def read_provider_hold_attention_page(self, **kwargs: object) -> None:
+                self.calls += 1
+                raise AssertionError("held store was read")
+
+        for context, authorization, expected in (
+            ("product-lane", "Bearer valid-token", 403),
+            ("launchplane", "", 401),
+        ):
+            store = Probe()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="operations.read", context=context),
+                record_store_factory=lambda: store,
+            )
+            response = await get(
+                app, PROVIDER_HOLD_ATTENTION_ROUTE, headers={"Authorization": authorization}
+            )
+            self.assertEqual(response.status_code, expected)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            self.assertEqual(store.calls, 0)
+            self.assertNotIn("attention", response.json())
+
+    async def test_missing_storage_corrupt_source_and_invalid_page_are_ordinary_errors(
+        self,
+    ) -> None:
+        from tests.support.http import get
+        from control_plane.provider_hold_attention import (
+            PROVIDER_HOLD_ATTENTION_ROUTE,
+            PROVIDER_HOLD_PAGE_LIMIT,
+        )
+
+        class CorruptStore:
+            def read_provider_hold_attention_page(self, **kwargs: object) -> None:
+                raise ValueError("PRIVATE malformed row")
+
+        for store, query, expected, code in (
+            (_MissingProductReadStore(), "", 503, "database_storage_required"),
+            (CorruptStore(), "", 503, "provider_attention_unavailable"),
+            (CorruptStore(), "?cursor=private", 400, "invalid_cursor"),
+            (CorruptStore(), f"?limit={PROVIDER_HOLD_PAGE_LIMIT + 1}", 400, "validation_error"),
+        ):
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="operations.read", context="launchplane"),
+                record_store_factory=lambda: store,
+            )
+            response = await get(
+                app,
+                PROVIDER_HOLD_ATTENTION_ROUTE + query,
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(response.status_code, expected)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            if query != f"?limit={PROVIDER_HOLD_PAGE_LIMIT + 1}":
+                self.assertEqual(response.json()["error"]["code"], code)
+            self.assertNotIn("PRIVATE", response.text)
+
+    async def test_openapi_exposes_closed_attention_models_and_existing_error_contract(
+        self,
+    ) -> None:
+        from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+
+        response = await openapi_response()
+        schema = response.json()
+        operation = schema["paths"][PROVIDER_HOLD_ATTENTION_ROUTE]["get"]
+        self.assertTrue({"200", "400", "401", "403", "503"}.issubset(operation["responses"]))
+
+        def resolve(value: dict[str, Any]) -> dict[str, Any]:
+            reference = value.get("$ref")
+            if isinstance(reference, str):
+                return cast(
+                    dict[str, Any], schema["components"]["schemas"][reference.rsplit("/", 1)[-1]]
+                )
+            return value
+
+        response_schema = resolve(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]
+        )
+        page = resolve(response_schema["properties"]["attention"])
+        item = resolve(page["properties"]["items"]["items"])
+        scope = next(
+            resolve(value)
+            for value in item["properties"]["original_scope"]["anyOf"]
+            if "$ref" in value
+        )
+        for model in (response_schema, page, item, scope):
+            self.assertFalse(model["additionalProperties"])
+        properties = item["properties"]
+        self.assertIn("operation_reference", properties)
+        self.assertNotIn("reservation", properties)
+
+
 class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_recent_operations_returns_operator_read_model(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -697,6 +847,17 @@ class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             secret_ids = _write_secret_status_records(database_url)
             app_store = PostgresRecordStore(database_url=database_url)
+            record = app_store.read_secret_record(secret_ids["context"])
+            version = app_store.read_secret_version(record.current_version_id).model_copy(
+                update={
+                    "version_id": f"{record.current_version_id}-provider-fixture",
+                    "value_origin": "provider",
+                }
+            )
+            app_store.write_secret_version(version)
+            app_store.write_secret_record(
+                record.model_copy(update={"current_version_id": version.version_id})
+            )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_record_read_policy(
@@ -739,6 +900,14 @@ class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(show_payload["status"], "ok")
         self.assertEqual(show_payload["secret"]["secret_id"], secret_ids["context"])
         self.assertEqual(show_payload["secret"]["context"], "example-site")
+        for payload in (context_payload, instance_payload):
+            selected = next(
+                secret for secret in payload["secrets"] if secret["secret_id"] == version.secret_id
+            )
+            self.assertEqual(selected["current_version_value_origin"], version.value_origin)
+        self.assertEqual(
+            show_payload["secret"]["current_version_value_origin"], version.value_origin
+        )
         self.assertEqual(
             show_payload["secret"]["binding"]["binding_key"],
             "GITHUB_WEBHOOK_SECRET",
@@ -1111,7 +1280,7 @@ class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiPublicIngressMonitorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_product_scoped_monitor_authority_cannot_attest_for_another_product(self) -> None:
+    async def test_product_scoped_monitor_authority_cannot_run_for_another_product(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory) / "state")
             scoped_policy = _public_ingress_monitor_policy().model_dump(mode="json")
@@ -1121,88 +1290,16 @@ class FastApiPublicIngressMonitorTests(unittest.IsolatedAsyncioTestCase):
                 authz_policy=LaunchplaneAuthzPolicy.model_validate(scoped_policy),
                 record_store_factory=lambda: store,
             )
-            with patch("control_plane.http_app.reconcile_refused_production_requests") as reconcile:
+            with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
                 for product, status in (("example-product", 400), ("launchplane", 403)):
                     response = await _post_public_ingress_monitor(
-                        app,
-                        {
-                            "product": product,
-                            "notify": False,
-                            "refused_production_requests": [
-                                {
-                                    "incident_id": "other-product-refusal",
-                                    "caller_retired": True,
-                                    "caller_retired_at": "2026-10-16T20:00:00Z",
-                                    "caller_retirement_evidence": "https://example.test/changes/caller-retired",
-                                }
-                            ],
-                        },
+                        app, {"product": product, "notify": False}
                     )
                     self.assertEqual(response.status_code, status)
-                reconcile.assert_not_called()
+                run_monitor.assert_not_called()
                 self.assertEqual(store.list_public_ingress_incident_records(), ())
 
-    async def test_refusal_reconciliation_uses_existing_monitor_authority_and_replays(self) -> None:
-        with TemporaryDirectory() as directory:
-            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
-            payload = {
-                "notify": False,
-                "refused_production_requests": [
-                    {
-                        "incident_id": "historical-refusal",
-                        "caller_retired": True,
-                        "caller_retired_at": "2026-10-16T20:00:00Z",
-                        "caller_retirement_evidence": "https://example.test/changes/retired-caller",
-                    }
-                ],
-            }
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_public_ingress_monitor_identity()),
-                authz_policy=_public_ingress_monitor_policy(),
-                record_store_factory=lambda: store,
-            )
-            with (
-                patch(
-                    "control_plane.http_app.run_public_ingress_monitor_once",
-                    return_value=PublicIngressMonitorResult(
-                        checked_at="2026-10-16T21:00:00Z",
-                        target_count=0,
-                    ),
-                ),
-                patch(
-                    "control_plane.http_app.reconcile_refused_production_requests",
-                    return_value=("historical-refusal",),
-                ) as reconcile,
-            ):
-                response = await _post_public_ingress_monitor(
-                    app, payload, idempotency_key="reconcile-refusal"
-                )
-                self.assertEqual(response.status_code, 202)
-                self.assertEqual(
-                    response.json()["result"]["refused_production_requests_resolved"],
-                    ["historical-refusal"],
-                )
-                replay = await _post_public_ingress_monitor(
-                    app, payload, idempotency_key="reconcile-refusal"
-                )
-                self.assertTrue(replay.json()["replayed"])
-                reconcile.assert_called_once()
-                self.assertEqual(
-                    reconcile.call_args.kwargs["requests"][0].incident_id, "historical-refusal"
-                )
-            denied_app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_deployment_write_identity()),
-                authz_policy=_deployment_write_policy(context="example-site"),
-                record_store_factory=lambda: store,
-            )
-            with patch("control_plane.http_app.reconcile_refused_production_requests") as reconcile:
-                denied = await _post_public_ingress_monitor(denied_app, payload)
-                self.assertEqual(denied.status_code, 403)
-                reconcile.assert_not_called()
-
-    async def test_refusal_reconciliation_returns_a_supported_refusal_for_unqualified_history(
-        self,
-    ) -> None:
+    async def test_removed_refusal_reconciliation_input_is_rejected_before_monitoring(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory) / "state")
             app = create_launchplane_fastapi_app(
@@ -1210,28 +1307,16 @@ class FastApiPublicIngressMonitorTests(unittest.IsolatedAsyncioTestCase):
                 authz_policy=_public_ingress_monitor_policy(),
                 record_store_factory=lambda: store,
             )
-            with patch(
-                "control_plane.http_app.run_public_ingress_monitor_once",
-                return_value=PublicIngressMonitorResult(
-                    checked_at="2026-10-16T21:00:00Z",
-                    target_count=0,
-                ),
-            ):
-                response = await _post_public_ingress_monitor(
-                    app,
-                    {
-                        "notify": False,
-                        "refused_production_requests": [
-                            {
-                                "incident_id": "missing-refusal",
-                                "caller_retired": True,
-                                "caller_retired_at": "2026-10-16T20:00:00Z",
-                                "caller_retirement_evidence": "https://example.test/changes/retired-caller",
-                            }
-                        ],
-                    },
-                )
-            self.assertEqual(response.status_code, 409)
+            with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
+                for requests in ([], [{"incident_id": "historical-refusal"}]):
+                    with self.subTest(requests=requests):
+                        response = await _post_public_ingress_monitor(
+                            app,
+                            {"notify": False, "refused_production_requests": requests},
+                        )
+                        self.assertEqual(response.status_code, 400)
+                        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+                run_monitor.assert_not_called()
             self.assertEqual(store.list_public_ingress_incident_records(), ())
 
     async def test_public_ingress_monitor_runs_for_authorized_workflow(self) -> None:

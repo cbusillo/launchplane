@@ -1,7 +1,5 @@
 """Prepare a same-product production source for a disposable Odoo testing restore."""
 
-import hashlib
-import json
 import re
 from typing import Literal
 
@@ -11,6 +9,42 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductOdooLaneDataPolicy,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+
+
+def director_testing_storage_allowed(
+    existing: LaunchplaneProductProfileRecord | None,
+    replacement: LaunchplaneProductProfileRecord,
+) -> bool:
+    if (
+        existing is None
+        or not existing.is_active
+        or existing.driver_id != "odoo"
+        or len(existing.lanes) != len(replacement.lanes)
+    ):
+        return False
+    changed = [
+        index
+        for index, (before, after) in enumerate(zip(existing.lanes, replacement.lanes, strict=True))
+        if before != after
+    ]
+    if len(changed) != 1:
+        return False
+    index = changed[0]
+    before = existing.lanes[index]
+    budget = replacement.lanes[index].odoo_testing_drill_storage
+    if before.instance != "testing" or budget is None:
+        return False
+    retained = (
+        before.odoo_testing_drill_storage.retained_copy_bindings
+        if before.odoo_testing_drill_storage is not None
+        else ()
+    )
+    if budget.retained_copy_bindings != retained:
+        return False
+    expected = existing.model_copy(deep=True)
+    expected.lanes[index].odoo_testing_drill_storage = budget
+    return replacement == expected
 
 
 class TestingRestorePolicyRequest(BaseModel):
@@ -79,18 +113,14 @@ def build_testing_restore_policy_plan(
         upstream_source=f"{profile.product}:{upstream.context}:{upstream.instance}",
         requires_runtime_identity=True,
     )
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "profile": profile.model_dump(mode="json"),
-                "context": request.context,
-                "policy": policy.model_dump(mode="json"),
-                "reason": request.reason,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "profile": profile.model_dump(mode="json"),
+            "context": request.context,
+            "policy": policy.model_dump(mode="json"),
+            "reason": request.reason,
+        }
+    )
     replacement = profile.model_copy(
         update={
             "lanes": tuple(

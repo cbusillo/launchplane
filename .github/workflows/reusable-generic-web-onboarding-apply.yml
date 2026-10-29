@@ -4,6 +4,14 @@ name: Reusable Generic Web Onboarding Apply
 "on":
   workflow_call:
     inputs:
+      allocation_control:
+        description: >-
+          Closed allocation JSON: mode (readback or apply), optional original
+          idempotency_key, retain_allocation, expected_allocation_custody_sha256.
+          Including mode selects recovery without product-record apply.
+        required: false
+        default: ""
+        type: string
       product:
         description: Product key from the reviewed plan.
         required: true
@@ -14,11 +22,8 @@ name: Reusable Generic Web Onboarding Apply
         type: string
       onboarding_plan_sha256:
         description: Product-record plan digest from the planning job.
-        required: true
-        type: string
-      authz_plan_sha256:
-        description: Managed-authz plan digest from the planning job.
-        required: true
+        required: false
+        default: ""
         type: string
       target_plan_sha256:
         description: Provider-target request digest from the planning job.
@@ -39,10 +44,10 @@ jobs:
     environment: launchplane-authz-admin
     env:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      ALLOCATION_CONTROL: ${{ inputs.allocation_control }}
       PRODUCT: ${{ inputs.product }}
       REASON: ${{ inputs.reason }}
       ONBOARDING_PLAN_SHA256: ${{ inputs.onboarding_plan_sha256 }}
-      AUTHZ_PLAN_SHA256: ${{ inputs.authz_plan_sha256 }}
       TARGET_PLAN_SHA256: ${{ inputs.target_plan_sha256 }}
       TESTING_CONTEXT: ${{ inputs.testing_context }}
     steps:
@@ -53,55 +58,85 @@ jobs:
           path: .
 
       - name: Render apply requests
+        id: requests
         shell: bash
         run: |
           set -euo pipefail
-          artifact_onboarding_plan_sha256="$(jq -r '.result.plan_sha256 // empty' onboarding-plan.json)"
-          artifact_authz_plan_sha256="$(jq -r '.result.plan_sha256 // empty' authz-plan.json)"
+          idempotency_key="generic-web-onboarding:target:${PRODUCT}:${TESTING_CONTEXT}:v1"
+          if ! jq -en --arg key "$idempotency_key" '$key | length > 0 and all(explode[]; . >= 32 and . != 127)' >/dev/null; then
+            echo "Invalid original onboarding allocation key." >&2
+            exit 1
+          fi
+          recovery=false
+          mode=apply
+          retain=false
+          custody=""
+          if [ -n "$ALLOCATION_CONTROL" ]; then
+            jq -e '
+              type == "object"
+              and (keys - ["mode", "idempotency_key", "retain_allocation", "expected_allocation_custody_sha256"] | length == 0)
+              and ((has("mode") | not) or .mode == "readback" or .mode == "apply")
+              and (if has("idempotency_key") then (.idempotency_key | type == "string" and length > 0 and all(explode[]; . >= 32 and . != 127)) else true end)
+              and (if has("retain_allocation") then (.retain_allocation | type == "boolean") else true end)
+              and (if has("expected_allocation_custody_sha256") then (.expected_allocation_custody_sha256 | type == "string") else true end)
+            ' <<< "$ALLOCATION_CONTROL" >/dev/null
+            recovery="$(jq -r 'has("mode")' <<< "$ALLOCATION_CONTROL")"
+            mode="$(jq -r '.mode // "apply"' <<< "$ALLOCATION_CONTROL")"
+            idempotency_key="$(jq -r --arg key "$idempotency_key" '.idempotency_key // $key' <<< "$ALLOCATION_CONTROL")"
+            retain="$(jq -r '.retain_allocation // false' <<< "$ALLOCATION_CONTROL")"
+            custody="$(jq -r '.expected_allocation_custody_sha256 // ""' <<< "$ALLOCATION_CONTROL")"
+          fi
+          if [ "$retain" = true ]; then
+            if [ "$recovery" != true ] || [ "$mode" != apply ] || ! [[ "$custody" =~ ^[a-f0-9]{64}$ ]]; then
+              echo "Retention requires apply and the reviewed custody digest." >&2
+              exit 1
+            fi
+          elif [ -n "$custody" ]; then
+            echo "A custody digest requires retain_allocation." >&2
+            exit 1
+          fi
           artifact_target_plan_sha256="$(sha256sum target-plan-request.json | awk '{print $1}')"
-          if [ "$artifact_onboarding_plan_sha256" != "$ONBOARDING_PLAN_SHA256" ]; then
-            echo "Reviewed onboarding plan digest does not match its artifact." >&2
-            exit 1
-          fi
-          if [ "$artifact_authz_plan_sha256" != "$AUTHZ_PLAN_SHA256" ]; then
-            echo "Reviewed authz plan digest does not match its artifact." >&2
-            exit 1
-          fi
           if [ "$artifact_target_plan_sha256" != "$TARGET_PLAN_SHA256" ]; then
             echo "Reviewed provider plan digest does not match its artifact." >&2
             exit 1
           fi
-          if ! diff -u \
-            <(jq -S '.result.configuration' authz-plan.json) \
-            <(jq -S . authz-reconcile-request.json); then
-            echo "Reviewed authz configuration does not match its plan artifact." >&2
+          if [ "$recovery" = true ]; then
+            jq -e --arg context "$TESTING_CONTEXT" '
+              .operation == "create-application" and .instance == "testing"
+              and .context == $context and ((.state_volume_path // "") == "")
+            ' target-plan-request.json >/dev/null
+          fi
+          jq --arg mode "$mode" --arg reason "$REASON" \
+            --argjson retain "$retain" --arg custody "$custody" '
+            .mode=$mode | .confirmation=(if $mode == "apply" then "APPLY DOKPLOY TARGET SETUP" else "" end)
+            | .reason=$reason
+            | if $retain then .retain_allocation=true | .expected_allocation_custody_sha256=$custody else . end
+          ' target-plan-request.json > target-apply-request.json
+          printf 'idempotency_key=%s\nrecovery=%s\n' "$idempotency_key" "$recovery" >> "$GITHUB_OUTPUT"
+          if [ "$recovery" = true ]; then
+            exit 0
+          fi
+          artifact_onboarding_plan_sha256="$(jq -r '.result.plan_sha256 // empty' onboarding-plan.json)"
+          if [ "$artifact_onboarding_plan_sha256" != "$ONBOARDING_PLAN_SHA256" ]; then
+            echo "Reviewed onboarding plan digest does not match its artifact." >&2
             exit 1
           fi
-          jq \
-            --arg reason "$REASON" \
-            '.mode="apply" | .confirmation="APPLY DOKPLOY TARGET SETUP" | .reason=$reason' \
-            target-plan-request.json > target-apply-request.json
-          jq \
-            --arg reviewed "$artifact_authz_plan_sha256" \
-            '.mode="apply" | .reviewed_plan_sha256=$reviewed' \
-            authz-reconcile-request.json > authz-apply-request.json
 
       - name: Create Dokploy application target
         id: target-apply
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dc9fb481d20c6e9a6ccf62b20f5416b237d46191 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
           route-path: /v1/dokploy-targets/setup
           payload-file: target-apply-request.json
-          idempotency-key: >-
-            ${{ format('generic-web-onboarding:target:{0}:{1}:v1',
-              inputs.product, inputs.testing_context) }}
+          idempotency-key: ${{ steps.requests.outputs.idempotency_key }}
           expected-status: "202"
           fail-result-paths: ""
           response-output-file: target-apply.json
 
       - name: Render product records apply request
+        if: steps.requests.outputs.recovery != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -120,8 +155,9 @@ jobs:
             > onboarding-apply-request.json
 
       - name: Apply product records
+        if: steps.requests.outputs.recovery != 'true'
         id: onboarding-apply
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dc9fb481d20c6e9a6ccf62b20f5416b237d46191 # launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
@@ -134,21 +170,6 @@ jobs:
           fail-result-paths: ""
           response-output-file: onboarding-apply.json
 
-      - name: Apply preview authorization
-        id: authz-apply
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
-        with:
-          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
-          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
-          route-path: /v1/authz-policies/managed-rule-sets/reconcile
-          payload-file: authz-apply-request.json
-          idempotency-key: >-
-            ${{ format('authz-managed:operator.generic-web-preview:{0}',
-              inputs.authz_plan_sha256) }}
-          expected-status: "202"
-          fail-result-paths: ""
-          response-output-file: authz-apply.json
-
       - name: Summarize applied onboarding
         if: always()
         shell: bash
@@ -160,13 +181,9 @@ jobs:
             echo "- Product: $PRODUCT"
             echo "- Testing context: $TESTING_CONTEXT"
             echo "- Product plan: \`$ONBOARDING_PLAN_SHA256\`"
-            echo "- Authz plan: \`$AUTHZ_PLAN_SHA256\`"
             echo "- Provider plan: \`$TARGET_PLAN_SHA256\`"
             if [ -f target-apply.json ]; then
               echo "- Provider target: $(jq -r '.result.setup.target_record.target_name // ""' target-apply.json)"
-            fi
-            if [ -f authz-apply.json ]; then
-              echo "- Authz changed: $(jq -r '.result.changed // false' authz-apply.json)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -178,6 +195,5 @@ jobs:
           path: |
             target-apply.json
             onboarding-apply.json
-            authz-apply.json
           if-no-files-found: warn
           retention-days: 14

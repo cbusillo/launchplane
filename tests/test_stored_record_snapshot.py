@@ -1,13 +1,14 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+from typing import Any
 from itertools import chain, repeat
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import insert, select, text, update
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
@@ -30,6 +31,42 @@ from tests.test_postgres_store import _inventory_record, _merge_train_run_record
 
 
 class StoredRecordSnapshotTests(unittest.TestCase):
+    def test_retired_postgres_transport_survives_raw_row_snapshot_and_storage_read(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneProductProfileRow
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        profile = _driver_profile()
+        self.store.write_product_profile_record(profile)
+        legacy = profile.model_dump(mode="json")
+        legacy["preview"]["transport_extension"] = "verireel-postgres"
+        legacy["preview"].pop("generated_secret_env", None)
+        legacy["preview"]["preview_url_env_keys"] = []
+        legacy["preview"]["preview_domain_env_keys"] = []
+        with self.store._engine.begin() as connection:
+            connection.execute(
+                update(LaunchplaneProductProfileRow)
+                .where(LaunchplaneProductProfileRow.product == profile.product)
+                .values(payload=legacy)
+            )
+        snapshot = self.store.export_stored_record_snapshot()
+        scrubbed = snapshot.tables["launchplane_product_profiles"][0]["payload"]
+        self.assertEqual(
+            scrubbed["preview"]["transport_extension"], legacy["preview"]["transport_extension"]
+        )
+        restored = self.store._read_product_profile_payload(scrubbed)
+        self.assertEqual(
+            restored.preview.generated_secret_env, legacy["preview"].get("generated_secret_env", {})
+        )
+        self.assertEqual(
+            restored.preview.transport_extension, legacy["preview"]["transport_extension"]
+        )
+        self.assertEqual(
+            self.store.read_product_profile_record(profile.product),
+            LaunchplaneProductProfileRecord.model_validate(
+                legacy, context={"stored_product_profile": True}
+            ),
+        )
+
     def setUp(self) -> None:
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -91,6 +128,47 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         LaunchplaneProductProfileRecord.model_validate(profile)
         self.assertEqual(before, self.store.list_authz_policy_records()[0].model_dump_json())
 
+    def test_encoded_preview_export_keeps_unsafe_values_invalid_without_exposing_them(self) -> None:
+        import base64
+        from control_plane.contracts.odoo_post_deploy_payload import (
+            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        )
+        from control_plane.preview_settings import validate_preview_scope
+        from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
+
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
+        encoded = base64.b64encode(
+            json.dumps(
+                {
+                    "context": profile.preview.context,
+                    "instance": "preview",
+                    "addon_settings": [
+                        {
+                            "addon": "connector",
+                            "setting": "api_token",
+                            "value": {"source": "literal", "value": "private-sentinel"},
+                        }
+                    ],
+                }
+            ).encode()
+        ).decode()
+        profile.preview.override_env = {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: encoded}
+        self.store.write_product_profile_record(profile)
+        for version in (1, 2):
+            with self.subTest(version=version):
+                exported = self.store.export_stored_record_snapshot(format_version=version)
+                row = next(
+                    row
+                    for family, row in iter_snapshot_rows(exported)
+                    if family == "launchplane_product_profiles"
+                )
+                scrubbed = row["payload"]["preview"]
+                with self.assertRaises(ValueError):
+                    validate_preview_scope(scrubbed["override_env"], context=scrubbed["context"])
+                self.assertNotIn("private-sentinel", json.dumps(row))
+                self.assertNotIn(encoded, json.dumps(row))
+        self.assertEqual(profile, self.store.read_product_profile_record(profile.product))
+
     def test_lifecycle_schedules_and_preview_suffix_remain_readable_after_scrubbing(self) -> None:
         from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
 
@@ -129,6 +207,53 @@ class StoredRecordSnapshotTests(unittest.TestCase):
                     profile.lanes[0].generic_web_extensions.schedules,
                 )
 
+    def test_valid_cross_field_profiles_remain_readable_after_scrubbing(self) -> None:
+        from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
+        from tests.test_generic_web_preview_extensions import _driver_profile
+        from tests.test_public_dns_diagnostics import _dns_profile
+
+        secrets = product_profile_payload("secret-requirements")
+        secrets["expected_config"] = {
+            "managed_secret_bindings": [
+                {
+                    "binding_key": "PRIVATE_BOT_TOKEN",
+                    "context": "secret-requirements-testing",
+                    "external_provider": "discord_bot",
+                },
+                {"binding_key": "PRIVATE_DB_PASSWORD", "testing_local_credential": True},
+            ]
+        }
+        drill = product_profile_payload("testing-drill")
+        drill["lanes"][0]["odoo_testing_drill_enabled"] = True  # type: ignore[index]
+        transport = _driver_profile(driver_id="generic-web", declared_transport=True)
+        transport = transport.model_copy(
+            update={
+                "product": "declared-transport",
+                "preview": transport.preview.model_copy(
+                    update={
+                        "app_name_prefix": "sample-preview",
+                        "transport_database_prefix": "a" * 40,
+                    }
+                ),
+            }
+        )
+        profiles = (
+            LaunchplaneProductProfileRecord.model_validate(secrets),
+            LaunchplaneProductProfileRecord.model_validate(drill),
+            transport,
+            _dns_profile().model_copy(update={"product": "dns-expectations"}),
+        )
+        for profile in profiles:
+            self.store.write_product_profile_record(profile)
+        for version in (1, 2):
+            snapshot = self.store.export_stored_record_snapshot(format_version=version)
+            for family, row in iter_snapshot_rows(snapshot):
+                if family != "launchplane_product_profiles":
+                    continue
+                with self.subTest(format_version=version, product=row["payload"]["product"]):
+                    LaunchplaneProductProfileRecord.model_validate(row["payload"])
+                    self.assertNotIn("PRIVATE_", json.dumps(row["payload"]))
+
     def test_invalid_historical_schedule_and_suffix_still_fail_after_scrubbing(self) -> None:
         from control_plane.stored_record_snapshot import _Scrubber
 
@@ -158,6 +283,191 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             ("preview", "app_name_suffix"),
             {tuple(item["loc"]) for item in oversized.exception.errors()},
         )
+
+    def test_invalid_historical_dns_and_database_prefix_still_fail_after_scrubbing(self) -> None:
+        from control_plane.stored_record_snapshot import _Scrubber
+        from tests.test_generic_web_preview_extensions import _driver_profile
+        from tests.test_public_dns_diagnostics import _dns_profile
+
+        schema = LaunchplaneProductProfileRecord.model_json_schema()
+        dns = _dns_profile().model_dump(mode="json")
+        target = dns["lanes"][0]["health_monitoring"]["checks"][0]["expected_dns_targets"][0]
+        profile = _driver_profile(driver_id="generic-web", declared_transport=True)
+        transport = profile.model_copy(
+            update={"preview": profile.preview.model_copy(update={"app_name_prefix": "app"})}
+        ).model_dump(mode="json")
+        prefix_limit = schema["$defs"]["ProductPreviewProfile"]["properties"][
+            "transport_database_prefix"
+        ]["maxLength"]
+        invalid = (
+            (dns, target, "public_name", "bad_name"),
+            (dns, target, "addresses", ["10.0.0.1"]),
+            (
+                transport,
+                transport["preview"],
+                "transport_database_prefix",
+                "x" * (prefix_limit + 1),
+            ),
+            (transport, transport["preview"], "transport_database_prefix", "Bad-Prefix"),
+        )
+        for payload, holder, field, value in invalid:
+            original = holder[field]
+            holder[field] = value
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ValidationError):
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _Scrubber().scrub(payload, schema, schema)
+                    )
+            holder[field] = original
+
+    def test_invalid_historical_duplicates_still_fail_after_scrubbing(self) -> None:
+        from control_plane.stored_record_snapshot import _Scrubber
+        from tests.test_public_dns_diagnostics import _dns_profile
+
+        schema = LaunchplaneProductProfileRecord.model_json_schema()
+        dns = _dns_profile().model_dump(mode="json")
+        targets = dns["lanes"][0]["health_monitoring"]["checks"][0]["expected_dns_targets"]
+        targets.append({**targets[0], "public_name": targets[0]["public_name"].upper() + "."})
+        inputs = product_profile_payload()
+        inputs["promotion_workflow"] = {"dry_run_input": "bump"}
+        for payload in (dns, inputs):
+            with self.subTest(product=payload["product"]):
+                with self.assertRaises(ValidationError):
+                    LaunchplaneProductProfileRecord.model_validate(payload)
+                with self.assertRaises(ValidationError):
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _Scrubber().scrub(payload, schema, schema)
+                    )
+
+    def test_private_values_equal_to_code_words_never_survive(self) -> None:
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        code_words = (
+            "testing",
+            "prod",
+            "main",
+            "runtime_environment",
+            "pr-{number}",
+            "promote-prod.yml",
+            "dry_run",
+            "bump",
+        )
+        payload = product_profile_payload()
+        preview = payload["preview"]
+        assert isinstance(preview, dict)
+        preview["override_env"] = {
+            f"PRIVATE_{index}": word for index, word in enumerate(code_words)
+        }
+        payload["historical_contexts"] = list(code_words)
+        schema = LaunchplaneProductProfileRecord.model_json_schema()
+        scrubbed = _Scrubber().scrub(payload, schema, schema)
+        LaunchplaneProductProfileRecord.model_validate(scrubbed)
+        survivors = {
+            *scrubbed["preview"]["override_env"].values(),
+            *scrubbed["historical_contexts"],
+        }
+        self.assertFalse(survivors & set(code_words))
+
+    def test_lane_kinds_scrub_identically_at_every_reference_site(self) -> None:
+        from control_plane.contracts.environment_inventory import EnvironmentInventory
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        scrubber = _Scrubber()
+
+        def scrub(model: type[BaseModel], payload: dict[str, Any]) -> Any:
+            schema = model.model_json_schema()
+            return scrubber.scrub(payload, schema, schema)
+
+        payload = product_profile_payload()
+        lanes = payload["lanes"]
+        preview = payload["preview"]
+        assert isinstance(lanes, (list, tuple)) and isinstance(preview, dict)
+        payload["lanes"] = [*lanes, {**lanes[0], "instance": "staging"}]
+        preview["template_instance"] = "staging"
+        payload["expected_config"] = {
+            "runtime_environment_keys": [{"key": "A", "context": "c", "instance": "staging"}],
+            "managed_secret_bindings": [
+                {"binding_key": "B", "context": "c", "instance": "testing"}
+            ],
+        }
+        profile = scrub(LaunchplaneProductProfileRecord, payload)
+        inventory = _inventory_record().model_copy(
+            update={
+                "instance": "staging",
+                "promoted_from_instance": "testing",
+                "runtime_identity": RuntimeIdentity(
+                    context="opw",
+                    instance="staging",
+                    deployment_record_id="deployment",
+                    artifact_id="artifact",
+                    source_git_ref="ref",
+                ),
+            }
+        )
+        scrubbed_inventory = scrub(EnvironmentInventory, inventory.model_dump(mode="json"))
+        authz = scrub(
+            LaunchplaneAuthzPolicyRecord,
+            {"policy": {"github_actions": [{"instances": ["staging", "testing"]}]}},
+        )
+        sites = (
+            *(lane["instance"] for lane in profile["lanes"]),
+            profile["preview"]["template_instance"],
+            profile["expected_config"]["runtime_environment_keys"][0]["instance"],
+            profile["expected_config"]["managed_secret_bindings"][0]["instance"],
+            scrubbed_inventory["instance"],
+            scrubbed_inventory["promoted_from_instance"],
+            scrubbed_inventory["runtime_identity"]["instance"],
+            *authz["policy"]["github_actions"][0]["instances"],
+        )
+        LaunchplaneProductProfileRecord.model_validate(profile)
+        EnvironmentInventory.model_validate(scrubbed_inventory)
+        self.assertNotIn("staging", sites)
+        self.assertEqual({"testing", scrubber.string("staging", "instance")}, set(sites))
+
+    def test_positional_slots_and_numeric_digests_remain_readable_after_scrubbing(self) -> None:
+        from control_plane.stored_record_snapshot import _Scrubber
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        payload = _driver_profile().model_dump(mode="json")
+        payload["lanes"][0]["odoo_testing_drill_storage"] = {
+            "database_bytes": 1,
+            "filestore_bytes": 1,
+            "staging_bytes": 1,
+            "reserve_bytes": 1,
+            "retained_copy_bindings": ["ab12" * 16],
+        }
+        payload["lanes"].append(
+            {
+                "instance": "prod",
+                "context": "hidden-context",
+                "generic_web_cutover": {
+                    "route_id": "hidden-route",
+                    "host": "hidden.example.test",
+                    "runtime_settings_sha256": "cd34" * 16,
+                    "writers": [],
+                    "slots": [
+                        {
+                            "slot_id": name,
+                            "target_id": f"{name}-target",
+                            "target_type": "application",
+                            "private_url": f"http://{name}:8080",
+                        }
+                        for name in ("hidden-blue", "hidden-green")
+                    ],
+                },
+            }
+        )
+        LaunchplaneProductProfileRecord.model_validate(payload)
+        schema = LaunchplaneProductProfileRecord.model_json_schema()
+        scrubbed = _Scrubber().scrub(payload, schema, schema)
+        profile = LaunchplaneProductProfileRecord.model_validate(scrubbed)
+        encoded = json.dumps(scrubbed)
+        for private in ("hidden", "ab12" * 16, "cd34" * 16):
+            self.assertNotIn(private, encoded)
+        cutover = profile.lanes[1].generic_web_cutover
+        assert cutover is not None
+        self.assertEqual("application", cutover.slots[0].target_type)
 
     def test_aggregate_product_scopes_include_history_without_current_profiles(self) -> None:
         from sqlalchemy import insert
@@ -475,6 +785,97 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             del value
             retained = tracemalloc.get_traced_memory()[0] - baseline
             self.assertLess(retained, source_value_size * 4)
+        finally:
+            if not already_tracing:
+                tracemalloc.stop()
+
+    def _store_policy_history(self, revisions: int) -> None:
+        record = self.store.list_authz_policy_records()[0]
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=tuple(
+                GitHubActionsPolicyRule(
+                    repository=f"private/example-{index}",
+                    workflow_refs=(
+                        f"private/example-{index}/.github/workflows/deploy.yml@refs/heads/main",
+                    ),
+                    products=(f"product-{index}",),
+                    contexts=(f"context-{index}",),
+                    actions=("launchplane_service.read",),
+                )
+                for index in range(40)
+            ),
+            github_humans=self.policy.github_humans,
+        )
+        current = LaunchplaneAuthzPolicyRecord.model_validate(
+            {**record.model_dump(mode="json"), "policy": policy, "policy_sha256": ""}
+        ).model_dump(mode="json")
+        with self.store._engine.begin() as connection:
+            connection.execute(
+                update(LaunchplaneAuthzPolicyRow).values(
+                    policy_sha256=current["policy_sha256"], payload=current
+                )
+            )
+            for revision in range(2, revisions + 1):
+                historical = dict(
+                    current, record_id=f"history-{revision}", revision=revision, status="superseded"
+                )
+                connection.execute(
+                    insert(LaunchplaneAuthzPolicyRow).values(
+                        **{key: historical[key] for key in ("record_id", "status", "source")},
+                        revision=revision,
+                        updated_at=historical["updated_at"],
+                        policy_sha256=historical["policy_sha256"],
+                        payload=historical,
+                    )
+                )
+
+    def test_export_cost_follows_distinct_rules_not_history_length(self) -> None:
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        def scrubbed_strings() -> int:
+            with patch.object(
+                _Scrubber, "string", autospec=True, side_effect=_Scrubber.string
+            ) as string:
+                self.store.export_stored_record_snapshot(format_version=2)
+            return string.call_count
+
+        self._store_policy_history(1)
+        one_revision = scrubbed_strings()
+        self._store_policy_history(11)
+        ten_more_revisions = scrubbed_strings() - one_revision
+        self.assertLess(ten_more_revisions, one_revision)
+
+    def test_repeated_items_scrub_under_their_own_schema(self) -> None:
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        scrubber = _Scrubber()
+        with patch("control_plane.stored_record_snapshot.id", create=True, return_value=0):
+            for retained in (True, False, True):
+                item_schema = {"properties": {"kind": {"enum": ["code-word"]}}} if retained else {}
+                schema = {"items": item_schema}
+                scrubbed = scrubber.scrub([{"kind": "code-word"}], schema, schema)
+                self.assertEqual(scrubbed[0]["kind"] == "code-word", retained)
+
+    def test_repeated_item_cache_retains_at_most_one_row_bound(self) -> None:
+        import gc
+        import tracemalloc
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        row_bound = 64 * 1024
+        gc.collect()
+        already_tracing = tracemalloc.is_tracing()
+        if not already_tracing:
+            tracemalloc.start()
+        try:
+            baseline = tracemalloc.get_traced_memory()[0]
+            scrubber = _Scrubber()
+            with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", row_bound):
+                for index in range(64):
+                    scrubber.scrub([{f"key-{index}-{field}": True for field in range(256)}], {}, {})
+            gc.collect()
+            retained = tracemalloc.get_traced_memory()[0] - baseline
+            self.assertLess(retained, row_bound * 8)
         finally:
             if not already_tracing:
                 tracemalloc.stop()

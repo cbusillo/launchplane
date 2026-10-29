@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -10,21 +10,30 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
-from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.ingress_route_audit_record import (
-    IngressRouteAuditRecord,
     TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
+    IngressRouteAuditRecord,
 )
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     RouteBindingDomain,
+    RouteBindingExternalIngress,
     RouteBindingIngress,
     RouteBindingProviderTarget,
     RouteBindingSource,
     RouteBindingTls,
     route_binding_record_sha256,
 )
+from control_plane.contracts.testing_route_refresh import (
+    TestingRouteRefreshSources,
+    is_native_testing_binding,
+)
+from control_plane.contracts.text_fields import require_text
+from control_plane.split_ingress import split_ingress_monitoring_policy
 
+NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER = "native_testing_route_requires_controller"
 
 _EVIDENCE_SCAN_LIMIT = 1000
 _EVIDENCE_FRESHNESS_WINDOW = timedelta(hours=24)
@@ -114,18 +123,20 @@ class RouteBindingReconcileRequest(BaseModel):
     )
     source_label: str = "operator-reconcile"
     evaluated_at: str
+    external_ingress: RouteBindingExternalIngress | None = None
+    allow_authority_change: bool = False
 
     @model_validator(mode="after")
     def _validate_request(self) -> "RouteBindingReconcileRequest":
         if self.schema_version != 1:
             raise ValueError("Unsupported route binding reconcile schema version")
-        self.product = _required_text(self.product, "route binding reconcile requires product")
-        self.context = _required_text(self.context, "route binding reconcile requires context")
-        self.instance = _required_text(self.instance, "route binding reconcile requires instance")
-        self.source_label = _required_text(
+        self.product = require_text(self.product, "route binding reconcile requires product")
+        self.context = require_text(self.context, "route binding reconcile requires context")
+        self.instance = require_text(self.instance, "route binding reconcile requires instance")
+        self.source_label = require_text(
             self.source_label, "route binding reconcile requires source_label"
         )
-        self.evaluated_at = _required_text(
+        self.evaluated_at = require_text(
             self.evaluated_at, "route binding reconcile requires evaluated_at"
         )
         _parse_utc_timestamp(self.evaluated_at)
@@ -146,6 +157,7 @@ class RouteBindingReviewSources(BaseModel):
     dokploy_target_id: DokployTargetIdRecord
     edge_endpoint: EdgeEndpointRecord
     ingress_audit: IngressRouteAuditRecord
+    product_profile: LaunchplaneProductProfileRecord | None = None
 
 
 class RouteBindingReconcilePlan(BaseModel):
@@ -156,6 +168,7 @@ class RouteBindingReconcilePlan(BaseModel):
     findings: tuple[RouteBindingReconcileFinding, ...] = ()
     review_target_id: str = Field(default="", exclude=True)
     review_sources: RouteBindingReviewSources | None = Field(default=None, exclude=True)
+    native_review_sources: TestingRouteRefreshSources | None = Field(default=None, exclude=True)
     current_record_sha256: str = ""
     candidate_record_sha256: str = ""
     current_record: EnvironmentRouteBindingRecord | None = Field(default=None, exclude=True)
@@ -204,6 +217,25 @@ def plan_route_binding_reconcile(
             current_record_sha256=current_record_sha256,
         )
 
+    if current_record is not None and is_native_testing_binding(current_record):
+        return _blocked_plan(
+            findings=(
+                RouteBindingReconcileFinding(
+                    code=NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER,
+                    detail="The Odoo testing route refresh controller owns this published binding; run that controller to observe and renew its route.",
+                ),
+            ),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
+
+    if (
+        current_record is not None
+        and current_record.external_ingress
+        and request.external_ingress is None
+        and not request.allow_authority_change
+    ):
+        request = request.model_copy(update={"external_ingress": current_record.external_ingress})
     candidate = build_route_binding_candidate(
         record_store=record_store,
         request=request,
@@ -256,6 +288,32 @@ def plan_route_binding_reconcile(
     if route_binding_authority_projection(current_record) != (
         route_binding_authority_projection(record)
     ):
+        if (
+            request.allow_authority_change
+            and (current_record.external_ingress or record.external_ingress)
+            and route_binding_authority_projection(
+                current_record.model_copy(update={"external_ingress": None})
+            )
+            == route_binding_authority_projection(
+                record.model_copy(update={"external_ingress": None})
+            )
+        ):
+            return RouteBindingReconcilePlan(
+                status="ready",
+                operation="refresh",
+                review_target_id=review_target_id,
+                review_sources=candidate.review_sources,
+                current_record=current_record,
+                record=record,
+                current_record_sha256=current_record_sha256,
+                candidate_record_sha256=candidate_record_sha256,
+                findings=(
+                    RouteBindingReconcileFinding(
+                        code="split_ingress_authority_change",
+                        detail="The signed-in decision replaces the shown custody using the exact managed evidence for all remaining hosts.",
+                    ),
+                ),
+            )
         return _conflict_plan(
             code="route_binding_authority_conflict",
             detail=(
@@ -291,6 +349,61 @@ def plan_route_binding_reconcile(
         current_record=current_record,
         record=current_record,
     )
+
+
+def is_evidence_only_route_binding_refresh(plan: RouteBindingReconcilePlan) -> bool:
+    return (
+        plan.status in {"ready", "unchanged"}
+        and plan.operation in {"refresh", "none"}
+        and not plan.findings
+        and plan.review_sources is not None
+        and plan.current_record is not None
+        and plan.record is not None
+        and plan.current_record.source.source_kind in {"backfill", "service"}
+        and plan.current_record.external_ingress == plan.record.external_ingress
+        and route_binding_authority_projection(plan.current_record)
+        == route_binding_authority_projection(plan.record)
+    )
+
+
+def read_unchanged_route_binding_evidence(
+    record_store: object, record: EnvironmentRouteBindingRecord, evaluated_at: str
+) -> RouteBindingSource | None:
+    if not all(
+        callable(getattr(record_store, method, None))
+        for method in (
+            "read_provider_target_record",
+            "read_dokploy_target_record",
+            "read_dokploy_target_id_record",
+            "list_private_health_endpoint_records",
+            "list_edge_endpoint_records",
+            "list_ingress_route_audit_records",
+            "read_route_binding_record",
+            "read_product_profile_record",
+        )
+    ):
+        return None
+    plan = plan_route_binding_reconcile(
+        record_store=cast(RouteBindingReconcileStore, record_store),
+        request=RouteBindingReconcileRequest(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+            expected_current=RouteBindingExpectedCurrent(
+                state="present", record_sha256=route_binding_record_sha256(record)
+            ),
+            source_label=record.source.source_label,
+            evaluated_at=evaluated_at,
+        ),
+    )
+    if (
+        is_evidence_only_route_binding_refresh(plan)
+        and plan.record is not None
+        and _route_binding_evidence_projection(record)
+        == _route_binding_evidence_projection(plan.record)
+    ):
+        return plan.record.source
+    return None
 
 
 def build_route_binding_candidate(
@@ -360,6 +473,98 @@ def build_route_binding_candidate(
             current_record_sha256=current_record_sha256,
         )
 
+    managed_domains = domains
+    split_profile = None
+    external_ingress = request.external_ingress
+    if external_ingress is not None:
+        previous = current_record.external_ingress if current_record else None
+        attested_at = (
+            previous.attested_at
+            if previous is not None
+            and previous.model_dump(exclude={"attested_at"})
+            == external_ingress.model_dump(exclude={"attested_at"})
+            else request.evaluated_at
+        )
+        external_ingress = external_ingress.model_copy(update={"attested_at": attested_at})
+        if not request.allow_authority_change and (
+            previous is None or external_ingress != previous
+        ):
+            return _blocked_plan(
+                findings=(
+                    RouteBindingReconcileFinding(
+                        code="split_ingress_authority_change_requires_review",
+                        detail="Split ingress custody changes require the signed-in administrator's review.",
+                    ),
+                ),
+                current_record=current_record,
+                current_record_sha256=current_record_sha256,
+            )
+        external_names = set(external_ingress.domains)
+        if not external_names < set(domains):
+            return _blocked_plan(
+                findings=(
+                    RouteBindingReconcileFinding(
+                        code="external_domain_scope_invalid",
+                        detail="External domains must be a proper subset of the tracked provider hosts.",
+                    ),
+                ),
+                current_record=current_record,
+                current_record_sha256=current_record_sha256,
+            )
+        managed_domains = tuple(domain for domain in domains if domain not in external_names)
+        read_profile = getattr(record_store, "read_product_profile_record", None)
+        try:
+            split_profile = read_profile(request.product) if callable(read_profile) else None
+        except FileNotFoundError:
+            split_profile = None
+        lane = (
+            next(
+                (
+                    lane
+                    for lane in split_profile.lanes
+                    if (lane.context, lane.instance) == (request.context, request.instance)
+                ),
+                None,
+            )
+            if split_profile
+            else None
+        )
+        if (
+            lane is None
+            or lane.health_monitoring.monitoring_intent != "public"
+            or split_profile is None
+            or split_profile.public_website == "none"
+            or split_profile.driver_id not in {"generic-web", "generic-web-service"}
+            or any(
+                (urlsplit(url).hostname or "") not in domains
+                for url in (lane.base_url, lane.health_url)
+                if url
+            )
+        ):
+            return _blocked_plan(
+                findings=(
+                    RouteBindingReconcileFinding(
+                        code="split_ingress_public_monitoring_required",
+                        detail="Split ingress requires an owned public generic-web lane with URLs within its tracked hosts; every host gains a strict runtime-identity check.",
+                    ),
+                ),
+                current_record=current_record,
+                current_record_sha256=current_record_sha256,
+            )
+
+        for host in domains:
+            policy = split_ingress_monitoring_policy(split_profile, lane, domains, host)
+            if policy.conflict:
+                return _blocked_plan(
+                    findings=(
+                        RouteBindingReconcileFinding(
+                            code="split_ingress_monitoring_policy_conflict", detail=policy.conflict
+                        ),
+                    ),
+                    current_record=current_record,
+                    current_record_sha256=current_record_sha256,
+                )
+
     if any(
         endpoint.status == "active"
         and endpoint.instance == "testing"
@@ -380,13 +585,13 @@ def build_route_binding_candidate(
         audit_record = _resolve_ingress_audit(
             record_store=record_store,
             request=request,
-            domains=domains,
+            domains=managed_domains,
             findings=findings,
         )
     elif (
         audit_record.product != request.product
         or audit_record.context != request.context
-        or audit_record.requested_domains != domains
+        or audit_record.requested_domains != managed_domains
         or audit_record.mode != "apply"
         or audit_record.status not in {"applied", "unchanged"}
     ):
@@ -433,8 +638,19 @@ def build_route_binding_candidate(
             current_record=current_record,
             current_record_sha256=current_record_sha256,
         )
+    if external_ingress and audit_record.tls_owner in {"none", "external"}:
+        return _blocked_plan(
+            findings=(
+                RouteBindingReconcileFinding(
+                    code="managed_tls_ownership_required",
+                    detail="Split ingress requires managed TLS evidence for the recovery aliases.",
+                ),
+            ),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
 
-    source_record_ids = (
+    source_record_ids: tuple[str, ...] = (
         f"provider-target:{request.context}:{request.instance}",
         f"dokploy-target:{request.context}:{request.instance}",
         f"dokploy-target-id:{request.context}:{request.instance}",
@@ -457,7 +673,6 @@ def build_route_binding_candidate(
             current_record=current_record,
             current_record_sha256=current_record_sha256,
         )
-
     record = EnvironmentRouteBindingRecord(
         product=request.product,
         context=request.context,
@@ -494,6 +709,7 @@ def build_route_binding_candidate(
                 else {}
             ),
         ),
+        external_ingress=external_ingress,
         status="active",
         source=RouteBindingSource(
             source_kind="service",
@@ -520,7 +736,24 @@ def build_route_binding_candidate(
             dokploy_target_id=dokploy_target_id,
             edge_endpoint=edge_endpoint,
             ingress_audit=audit_record,
+            product_profile=split_profile,
         ),
+    )
+
+
+def route_binding_monitoring_projection(
+    profile: LaunchplaneProductProfileRecord, context: str, instance: str
+) -> tuple[object, ...]:
+    lane = next(
+        (lane for lane in profile.lanes if (lane.context, lane.instance) == (context, instance)),
+        None,
+    )
+    return (
+        profile.is_active,
+        profile.driver_id,
+        profile.public_website,
+        profile.health_path,
+        *((lane.base_url, lane.health_url, lane.health_monitoring) if lane else (None,)),
     )
 
 
@@ -821,6 +1054,11 @@ def route_binding_authority_projection(
         tuple(sorted((domain.role, domain.domain_name) for domain in record.domains)),
         record.tls.owner,
         record.status,
+        *(
+            (record.external_ingress.model_dump(mode="json", exclude={"attested_at"}),)
+            if record.external_ingress
+            else ()
+        ),
     )
 
 
@@ -828,6 +1066,7 @@ def _route_binding_evidence_projection(
     record: EnvironmentRouteBindingRecord,
 ) -> tuple[object, ...]:
     return (
+        record.external_ingress.attested_at if record.external_ingress else "",
         tuple(sorted(record.provider_target.provider_evidence.items())),
         tuple(sorted(record.ingress.provider_evidence.items())),
         tuple(sorted(record.tls.provider_evidence.items())),
@@ -924,10 +1163,3 @@ def _normalized_domains(
         if domain not in domains:
             domains.append(domain)
     return tuple(domains), None
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

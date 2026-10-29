@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, publicObservationGap } from "../src/product-environment-signal.ts";
+import { environmentReleaseHealthy, environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, operationalAttentionReasons, operationalWarningReasons, publicObservationGap } from "../src/product-environment-signal.ts";
+import { sidebarStatus } from "../src/sidebar-status.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 Object.defineProperty(globalThis, "window", { configurable: true, value: { location: { search: "" } } });
@@ -34,6 +35,163 @@ function environment() {
 
 test("a fresh identity and health verification makes a monitored lane green", () =>
   assert.equal(environmentOperationalTone(environment()), "verified"));
+
+test("recovery failures stay yellow while business failures stay red", () => {
+  const lane = environment();
+  lane.environment = "prod";
+  lane.health_monitoring.open_incidents = [];
+  const business = lane.topology.provider_recorded.domains[0].domain_name;
+  const recoveryHost = "recovery.example.test";
+  lane.topology.provider_recorded.external_ingress = { domains: [business], custodian: "Office", evidence_url: "https://example.test/evidence" };
+  lane.topology.provider_recorded.domains.push({ domain_name: recoveryHost, role: "alias", tls_expected: true });
+  const recovery = { ...structuredClone(lane.health_monitoring.checks[0]), name: "Recovery path", advisory: true };
+  lane.health_monitoring.checks.push(recovery);
+  for (const state of ["fail", "missing", "stale"]) {
+    Object.assign(recovery, { status: state === "stale" ? "pass" : state, trust_state: state === "stale" ? "stale" : "verified" });
+    assert.equal(environmentOperationalTone(lane), "warning");
+    assert.equal(sidebarStatus(lane, "Production").tone, "warning");
+    assert.equal(operationalAttentionReasons(lane).length, 0);
+    assert.ok(operationalWarningReasons(lane).length);
+  }
+  Object.assign(recovery, { status: "pass", trust_state: "verified" });
+  const tls = { ...structuredClone(lane.topology.observed.tls_domains[0]), domain_name: recoveryHost, advisory: true, status: "expired" };
+  lane.topology.observed.tls_domains.push(tls);
+  assert.equal(environmentOperationalTone(lane), "warning");
+  Object.assign(tls, { status: "valid", trust_state: "stale", provenance: { ...tls.provenance, stale_after: new Date(0).toISOString() } });
+  assert.equal(sidebarStatus(lane, "Production").tone, "warning");
+  assert.equal(expireEnvironmentEvidence(lane).provenance.freshness_status, "verified");
+  tls.status = "expired";
+  tls.domain_name = business;
+  tls.advisory = false;
+  assert.equal(environmentOperationalTone(lane), "danger");
+  lane.topology.observed.tls_domains.pop();
+  lane.health_monitoring.checks[0].status = "fail";
+  assert.equal(environmentOperationalTone(lane), "danger");
+  assert.equal(sidebarStatus(lane, "Production").tone, "danger");
+});
+
+test("recovery and delivery warnings stay yellow together", () => {
+  const lane = environment();
+  lane.environment = "prod";
+  const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
+  Object.assign(incident, { severity: "warning", check_kind: "provider", check_name: "production-delivery-example", failure_layer: "provider" });
+  lane.health_monitoring.open_incidents = [incident];
+  const recovery = { ...structuredClone(lane.topology.observed.tls_domains[0]), domain_name: "recovery.example.test", advisory: true };
+  lane.topology.observed.tls_domains.push(recovery);
+  lane.topology.warnings = [{ code: "public_ingress_failure", severity: "warning", scope: "observation", domain_name: recovery.domain_name, detail: "Recovery route unavailable" }];
+  for (const status of ["expired", "unknown", "valid"]) {
+    recovery.status = status;
+    recovery.trust_state = status === "valid" ? "stale" : "verified";
+    assert.equal(environmentOperationalTone(lane), "warning");
+    assert.equal(sidebarStatus(lane, "Production").tone, "warning");
+    assert.deepEqual(operationalAttentionReasons(lane), []);
+    assert.equal(environmentReleaseHealthy(lane), true);
+  }
+  const noPublicCheck = structuredClone(lane);
+  noPublicCheck.health_monitoring.checks[0].kind = "private_http";
+  noPublicCheck.topology.warnings.push({ code: "public_website_check_missing", severity: "warning", scope: "observation", domain_name: "", detail: "Public probe missing" });
+  assert.equal(environmentReleaseHealthy(noPublicCheck), false);
+  const businessTls = lane.topology.observed.tls_domains[0];
+  businessTls.provenance.stale_after = new Date(0).toISOString();
+  assert.equal(environmentReleaseHealthy(lane), false);
+  businessTls.provenance.stale_after = lane.provenance.stale_after;
+  lane.topology.observed.trust_state = "missing";
+  lane.topology.observed.tls_domains.shift();
+  assert.equal(environmentReleaseHealthy(lane), false);
+  lane.health_monitoring.checks[0].status = "fail";
+  assert.equal(environmentOperationalTone(lane), "danger");
+  lane.environment = "testing";
+  lane.health_monitoring.checks = [];
+  lane.health_monitoring.open_incidents = [];
+  lane.provenance.freshness_status = "missing";
+  recovery.status = "expired";
+  assert.equal(environmentOperationalTone(lane), "missing");
+});
+
+test("monitored production cannot hide unknown runtime behind an empty incident list", () => {
+  const updates = [
+    lane => { lane.topology.observed.placement.runtime_identity_status = "unchecked"; },
+    lane => { lane.topology.observed.placement.trust_state = "missing"; },
+    lane => { lane.health_monitoring.checks = []; },
+    lane => { lane.health_monitoring.checks[0].probe_effective = false; },
+    lane => { lane.health_monitoring.checks[0].status = "missing"; },
+    lane => { lane.health_monitoring.checks[0].provenance.stale_after = new Date(0).toISOString(); },
+    lane => { lane.provenance.freshness_status = "missing"; },
+  ];
+  for (const update of updates) {
+    const lane = environment();
+    lane.environment = "prod";
+    lane.health_monitoring.monitoring_intent = "public";
+    lane.health_monitoring.open_incidents = [];
+    update(lane);
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.ok(operationalAttentionReasons(lane).length);
+    for (const reason of operationalAttentionReasons(lane)) assert.ok(sidebarStatus(lane, "Production").description.includes(reason));
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    lane.health_monitoring.monitoring_intent = "prelaunch";
+    assert.notEqual(environmentOperationalTone(lane), "danger");
+    lane.health_monitoring.monitoring_intent = "private";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    lane.environment = "testing";
+    assert.notEqual(environmentOperationalTone(lane), "danger");
+  }
+});
+
+test("unmonitored private-only testing and prelaunch lanes retain recorded state", () => {
+  for (const name of ["testing", "prod"]) {
+    const lane = environment();
+    lane.environment = name;
+    lane.topology.desired.public_website = "none";
+    lane.health_monitoring.monitoring_intent = "prelaunch";
+    lane.health_monitoring.checks = [];
+    for (const freshness of ["verified", "recorded"]) {
+      lane.provenance.freshness_status = freshness;
+      assert.equal(environmentOperationalTone(lane), "recorded");
+    }
+  }
+});
+
+test("failed production delivery warns only while the running release is verified", () => {
+  for (const failure_code of ["production_delivery_failed", "deploy_fence_held"]) {
+    const lane = environment();
+    lane.environment = "prod";
+    const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
+    Object.assign(incident, { severity: "warning", check_kind: "provider", check_name: "production-delivery-example", failure_layer: "provider", failure_code });
+    lane.health_monitoring.open_incidents = [incident];
+    assert.equal(environmentOperationalTone(lane), "warning");
+    assert.deepEqual(operationalAttentionReasons(lane), []);
+    assert.equal(lane.health_monitoring.open_incidents[0], incident);
+    const critical = { ...incident, severity: "critical", failure_code: "monitor_run_missed" };
+    lane.health_monitoring.open_incidents.push(critical);
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    lane.health_monitoring.open_incidents.pop();
+    lane.health_monitoring.checks[0].incident_status = "open";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    assert.ok(operationalAttentionReasons(lane).length > 1);
+    lane.health_monitoring.checks[0].incident_status = "";
+    const extraDomain = { ...lane.topology.observed.tls_domains[0], domain_name: "retained.example.test", status: "expired" };
+    lane.topology.observed.tls_domains.push(extraDomain);
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    assert.ok(operationalAttentionReasons(lane).length > 1);
+    lane.topology.observed.tls_domains.pop();
+    lane.health_monitoring.checks[0].status = "fail";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    lane.health_monitoring.checks[0].status = "pass";
+    for (const status of ["mismatch", "malformed", "missing", "unchecked", "unverifiable"]) {
+      lane.topology.observed.placement.runtime_identity_status = status;
+      assert.equal(environmentOperationalTone(lane), "danger");
+    }
+    lane.topology.observed.placement.runtime_identity_status = "match";
+    assert.equal(environmentOperationalTone(lane, Date.parse(lane.provenance.stale_after) + 1), "danger");
+    incident.severity = "critical";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    lane.health_monitoring.open_incidents = [];
+    assert.equal(environmentOperationalTone(lane), "verified");
+  }
+});
 
 test("a canonical generated occurrence blocks green independently of declared checks", () => {
   const lane = environment();
@@ -279,3 +437,43 @@ test("expired negative TLS observations remain failures", () => {
   lane.topology.desired.domains = [];
   assert.ok(publicObservationGap(lane.topology));
  });
+
+test("a red lane names every cause that turns it red, and only a red lane has causes", () => {
+  const lane = environment();
+  const agrees = () => assert.equal(operationalAttentionReasons(lane).length > 0, environmentOperationalTone(lane) === "danger");
+  assert.deepEqual(operationalAttentionReasons(lane), []);
+  agrees();
+  // An open incident on a lane whose health check passes must explain the red, not the pass.
+  const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
+  incident.severity = "warning";
+  incident.failure_code = "testing_delivery_failed";
+  lane.health_monitoring.open_incidents = [incident];
+  assert.match(operationalAttentionReasons(lane).join("\n"), /warning.*testing delivery failed/i);
+  agrees();
+  lane.health_monitoring.open_incidents = [];
+  const check = lane.health_monitoring.checks[0];
+  check.status = "fail";
+  check.summary = "Private health check failed: destination outside the allowed network scope.";
+  assert.ok(operationalAttentionReasons(lane).includes(check.summary));
+  agrees();
+  check.status = "pass";
+  check.incident_status = "open";
+  assert.equal(operationalAttentionReasons(lane).length, 1);
+  agrees();
+  check.incident_status = "";
+  lane.topology.observed.placement.runtime_identity_status = "mismatch";
+  assert.match(operationalAttentionReasons(lane).join("\n"), /runtime identity.*mismatch/i);
+  agrees();
+  lane.topology.observed.placement.runtime_identity_status = "match";
+  lane.topology.warnings = [{ code: "custom_health_warning", severity: "error", scope: "ingress", detail: "Health warning detail", domain_name: "" }];
+  assert.ok(operationalAttentionReasons(lane).includes("Health warning detail"));
+  agrees();
+  lane.topology.warnings = [{ code: "stale_route_authority", severity: "error", scope: "authority", detail: "Stale authority", domain_name: "" }];
+  assert.deepEqual(operationalAttentionReasons(lane), []);
+  agrees();
+  lane.topology.warnings = [];
+  const domain = lane.topology.observed.tls_domains[0];
+  domain.status = "self_signed";
+  assert.match(operationalAttentionReasons(lane).join("\n"), new RegExp(`${domain.domain_name}.*self signed`, "i"));
+  agrees();
+});

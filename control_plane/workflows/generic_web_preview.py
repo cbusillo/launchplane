@@ -12,7 +12,7 @@ import json
 from ipaddress import ip_address
 import time
 from pathlib import Path
-from typing import Iterator, Literal, Protocol, runtime_checkable
+from typing import Iterator, Literal, Protocol, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -52,10 +52,16 @@ from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
+from control_plane.preview_namespaces import (
+    effective_preview_app_name_prefix as effective_preview_app_name_prefix,
+    preview_product_operation_key,
+)
 from control_plane import runtime_platform_credentials
+from control_plane.dokploy import memory_capacity
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
-from control_plane.dokploy.api import JsonObject, JsonValue
+from control_plane.dokploy.application_endpoint import application_endpoint_spec
+from control_plane.dokploy.api import JsonObject
 
 
 _PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
@@ -275,7 +281,6 @@ class GenericWebPreviewTransportSummary(BaseModel):
     data_transport_mode: str
     copied_env_keys: tuple[str, ...]
     omitted_env_keys: tuple[str, ...]
-    override_env_keys: tuple[str, ...]
     preview_url_env_keys: tuple[str, ...]
     preview_domain_env_keys: tuple[str, ...]
     compatibility_status: Literal["supported", "unsupported_saved_intent"] = "supported"
@@ -438,10 +443,6 @@ def _destroy_request_with_resolved_preview_slug(
     )
 
 
-def effective_preview_app_name_prefix(*, profile: LaunchplaneProductProfileRecord) -> str:
-    return profile.preview.app_name_prefix.strip() or f"{profile.product}-preview"
-
-
 def preview_application_name(
     *, app_name_prefix: str, preview_slug: str, app_name_suffix: str = ""
 ) -> str:
@@ -508,6 +509,7 @@ def _ensure_application(
     app_name: str,
     description: str,
     template_application: JsonObject,
+    record_store: GenericWebPreviewProfileStore | None = None,
 ) -> tuple[JsonObject, bool]:
     existing = _find_application_by_name(host=host, token=token, application_name=application_name)
     if existing is not None:
@@ -532,6 +534,9 @@ def _ensure_application(
     }
     if server_id:
         application_payload["serverId"] = server_id
+    memory_capacity.require_preview_host_memory_capacity(
+        host=host, token=token, server_id=server_id, record_store=record_store
+    )
     created = dokploy_api.dokploy_request(
         host=host,
         token=token,
@@ -546,10 +551,6 @@ def _ensure_application(
             f"Dokploy did not return an applicationId for preview app {application_name!r}."
         )
     return _fetch_application(host=host, token=token, application_id=created_application_id), True
-
-
-def _preview_endpoint_spec_swarm(template_application: JsonObject) -> JsonValue:
-    return template_application.get("endpointSpecSwarm") or {"Mode": "dnsrr"}
 
 
 def _configure_application(
@@ -580,7 +581,7 @@ def _configure_application(
             "sourceType": "docker",
             "autoDeploy": True,
             "replicas": template_application.get("replicas"),
-            "endpointSpecSwarm": _preview_endpoint_spec_swarm(template_application),
+            "endpointSpecSwarm": application_endpoint_spec(template_application),
             "createEnvFile": template_application.get("createEnvFile"),
             "triggerType": template_application.get("triggerType"),
             "enabled": template_application.get("enabled"),
@@ -639,6 +640,7 @@ def _ensure_domain(
     preview_host: str,
     runtime_port: int,
     certificate_type: Literal["none", "letsencrypt"],
+    https: bool | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     raw_domains = dokploy_api.dokploy_request(
         host=host,
@@ -665,7 +667,7 @@ def _ensure_domain(
         "path": "/",
         "internalPath": "/",
         "port": runtime_port,
-        "https": certificate_type == "letsencrypt",
+        "https": certificate_type == "letsencrypt" if https is None else https,
         "applicationId": application_id,
         "certificateType": certificate_type,
         "customCertResolver": None,
@@ -818,7 +820,6 @@ def _transport_summary(
         ),
         copied_env_keys=profile.preview.copied_env_keys,
         omitted_env_keys=profile.preview.omitted_env_keys,
-        override_env_keys=tuple(sorted(profile.preview.override_env)),
         preview_url_env_keys=profile.preview.preview_url_env_keys,
         preview_domain_env_keys=profile.preview.preview_domain_env_keys,
         compatibility_status=(
@@ -968,6 +969,7 @@ def _render_preview_env_text(
     template_application: JsonObject,
     preview_url: str,
     runtime_identity: RuntimeIdentity | None = None,
+    preview_environment: control_plane_runtime_environments.SiteRuntimeEnvironment | None = None,
 ) -> str:
     template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
     preview_host = _preview_host(preview_url)
@@ -982,12 +984,15 @@ def _render_preview_env_text(
         target=preview_target,
         source="the template application env (preview copied_env_keys)",
     )
+    if preview_environment is not None:
+        updates.update(preview_environment.values)
+        for key in preview_environment.retired_keys:
+            updates.pop(key, None)
     runtime_platform_credentials.refuse_platform_credentials(
-        profile.preview.override_env,
+        updates,
         target=preview_target,
-        source="the product profile preview override_env",
+        source="managed preview runtime settings",
     )
-    updates.update(profile.preview.override_env)
     for key in profile.preview.preview_url_env_keys:
         updates[key] = preview_url
     for key in profile.preview.preview_domain_env_keys:
@@ -1007,9 +1012,22 @@ def _enforce_preview_copied_runtime_key_safety(
     template_lane: ProductLaneProfile,
     template_application: JsonObject,
     preview_slug: str,
+    preview_environment: control_plane_runtime_environments.SiteRuntimeEnvironment | None = None,
+    check_credential_values: bool = False,
 ) -> None:
     template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
-    copied_values = {key: template_env.get(key, "") for key in profile.preview.copied_env_keys}
+    overridden = (
+        preview_environment.setting_keys
+        | preview_environment.secret_keys
+        | preview_environment.retired_keys
+        if preview_environment is not None
+        else frozenset()
+    )
+    copied_values = {
+        key: template_env.get(key, "")
+        for key in profile.preview.copied_env_keys
+        if key not in overridden
+    }
     template_bindings = (
         preview_template_runtime_bindings(
             record_store=record_store,
@@ -1023,6 +1041,8 @@ def _enforce_preview_copied_runtime_key_safety(
         key
         for key, value in copied_values.items()
         if is_preview_copied_credential(key, value, template_bindings=template_bindings)
+        or check_credential_values
+        and runtime_platform_credentials.plain_setting_looks_like_credential("", value)
     )
     if not required_binding_keys:
         return
@@ -1063,7 +1083,7 @@ def _wait_for_preview_health(
     health_path: str,
     timeout_seconds: int,
     expected_runtime_identity: RuntimeIdentity | None = None,
-) -> None:
+) -> RuntimeIdentity | None:
     parsed = urlparse(preview_url.rstrip("/"))
     health_url = parsed._replace(path=health_path, params="", query="", fragment="").geturl()
     deadline = timeout_seconds
@@ -1085,32 +1105,32 @@ def _wait_for_preview_health(
             if 200 <= response.status < 400:
                 if not body.strip():
                     if expected_runtime_identity is None:
-                        return
+                        return None
                     last_detail = "health endpoint returned an empty response"
                 else:
                     try:
                         payload = json.loads(body)
                     except json.JSONDecodeError:
                         if expected_runtime_identity is None:
-                            return
+                            return None
                         last_detail = "health endpoint did not return parseable JSON"
                     else:
                         if not isinstance(payload, dict):
                             if expected_runtime_identity is None:
-                                return
+                                return None
                             last_detail = "health endpoint returned non-object JSON"
                         elif payload.get("ok") is False:
                             last_detail = "health endpoint reported ok=false"
                         elif expected_runtime_identity is None:
-                            return
+                            return None
                         else:
-                            status, detail, _observed = health_payload_runtime_identity_status(
+                            status, detail, observed = health_payload_runtime_identity_status(
                                 expected=expected_runtime_identity,
                                 payload=payload,
                                 json_parse_failed=False,
                             )
-                            if status == "match":
-                                return
+                            if status == "match" and observed is not None:
+                                return observed
                             if status == "mismatch":
                                 if _preview_runtime_identity_mismatch_is_converging(detail):
                                     last_detail = detail
@@ -1363,7 +1383,7 @@ def serialize_generic_web_product_operation(
     serialize = getattr(record_store, "serialize_preview_refresh", None)
     if callable(serialize):
         with serialize(
-            preview_id=f"product-retirement:{product}", dedicated=True, shared=not exclusive
+            preview_id=preview_product_operation_key(product), dedicated=True, shared=not exclusive
         ):
             yield
     else:
@@ -1528,12 +1548,22 @@ def _execute_generic_web_preview_refresh_unserialized(
             raise click.ClickException(
                 target_error or "Generic web preview template payload is unavailable."
             )
+        preview_environment = (
+            control_plane_runtime_environments.resolve_preview_runtime_environment_from_store(
+                record_store=cast(
+                    control_plane_runtime_environments.SiteRuntimeEnvironmentStore, record_store
+                ),
+                context_name=resolved_profile.preview.context,
+                template_values={},
+            )
+        )
         _enforce_preview_copied_runtime_key_safety(
             record_store=record_store,
             profile=resolved_profile,
             template_lane=template_lane,
             template_application=template_application,
             preview_slug=request.preview_slug,
+            preview_environment=preview_environment,
         )
         preview_runtime_identity = _build_preview_runtime_identity(
             profile=resolved_profile,
@@ -1546,8 +1576,10 @@ def _execute_generic_web_preview_refresh_unserialized(
             template_application=template_application,
             preview_url=preview_url,
             runtime_identity=preview_runtime_identity,
+            preview_environment=preview_environment,
         )
         application, created_application = _ensure_application(
+            record_store=record_store,
             host=host,
             token=token,
             application_name=application_name,
@@ -1888,6 +1920,9 @@ def _execute_generic_web_preview_destroy_unserialized(
             ),
         )
     destroy_result = destroy_dokploy_preview_resource(
+        record_store=record_store,
+        context=resolved_profile.preview.context,
+        instance=request.preview_slug,
         host=host,
         token=token,
         resource_type="application",

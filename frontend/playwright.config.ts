@@ -1,19 +1,13 @@
 import { defineConfig, devices } from "@playwright/test";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { smokeArtifact } from "./browser-smoke-paths.mjs";
 import { browserDeadlines } from "./playwright-deadlines.mjs";
-
-const frontendRoot = dirname(fileURLToPath(import.meta.url));
-const artifactRoot = resolve(frontendRoot, "../tmp/browser-smoke");
 
 export default defineConfig({
   testDir: "./tests/browser",
   testMatch: "**/*.spec.ts",
-  outputDir: resolve(artifactRoot, "test-results"),
-  // Tests mock their own API reads in fresh contexts. CI runners can share a
-  // host, so keep browser fan-out bounded independently of its CPU count.
+  outputDir: smokeArtifact("test-results"),
   fullyParallel: true,
-  workers: process.env.CI ? 4 : undefined,
+  workers: process.env.CI ? 4 : 2,
   retries: 0,
   forbidOnly: Boolean(process.env.CI),
   timeout: browserDeadlines.test,
@@ -48,14 +42,20 @@ export default defineConfig({
         viewport: { width: 390, height: 844 },
       },
     },
+    {
+      name: "mobile-safari",
+      grep: /@webkit\b/,
+      use: { ...devices["iPhone 13"] },
+    },
   ],
   webServer: {
-    command: "pnpm exec vite --host 127.0.0.1 --port 0 --strictPort",
+    command: "pnpm exec vite --mode browser-smoke --host 127.0.0.1 --port 0 --strictPort",
     env: { FORCE_COLOR: "0", NO_COLOR: "1" },
     // Each runner owns its OS-assigned listener; Playwright passes the captured
     // origin to worker processes before they load this configuration.
     wait: { stdout: /Local:\s+(?<browser_smoke_url>http:\/\/127\.0\.0\.1:\d+)\/ui\// },
     reuseExistingServer: false,
+    gracefulShutdown: { signal: "SIGTERM", timeout: browserDeadlines.assertion },
     timeout: browserDeadlines.server,
   },
 });

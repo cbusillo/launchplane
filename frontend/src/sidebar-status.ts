@@ -1,5 +1,5 @@
 import type { ProductEnvironmentSummary } from "./generated/openapi.ts";
-import { environmentOperationalTone, negativeTlsStates, failedRuntimeIdentityStates, expireEnvironmentEvidence, publicObservationGap } from "./product-environment-signal";
+import { environmentOperationalTone, negativeTlsStates, failedRuntimeIdentityStates, expireEnvironmentEvidence, publicObservationGap, operationalWarningReasons, operationalAttentionReasons } from "./product-environment-signal";
 
 // Labels describe returned diagnostic layers; they do not infer a failing proxy
 // or app from a generic connection/HTTP failure.
@@ -19,10 +19,10 @@ export function sidebarStatus(environment: ProductEnvironmentSummary | null, lab
   const tone = environmentOperationalTone(environment);
   const evidenceStale = environment && (environment.provenance.freshness_status === "stale" ||
     environment.topology.observed.placement.trust_state === "stale" ||
-    environment.health_monitoring.checks.some(check => check.probe_effective && check.trust_state === "stale") ||
+    environment.health_monitoring.checks.some(check => check.probe_effective && !check.advisory && check.trust_state === "stale") ||
     environment.topology.desired.public_website !== "none" && (
       environment.topology.observed.ingress.trust_state === "stale" ||
-      environment.topology.observed.tls_domains.some(domain => domain.trust_state === "stale")));
+      environment.topology.observed.tls_domains.some(domain => !domain.advisory && domain.trust_state === "stale")));
   if (tone === "stale" || tone === "warning" && evidenceStale) {
     return { tone: "stale" as const, description: `${label}: Stale evidence; awaiting current observations` };
   }
@@ -51,7 +51,9 @@ export function sidebarStatus(environment: ProductEnvironmentSummary | null, lab
     }
   }
   const reasons = new Set<string>();
+  if (tone === "danger") operationalAttentionReasons(environment).forEach(reason => reasons.add(reason));
   if (tone === "warning" && environment) {
+    operationalWarningReasons(environment).forEach(reason => reasons.add(reason));
     const gap = publicObservationGap(environment.topology);
     if (gap) reasons.add(gap);
     if (environment.topology.observed.placement.runtime_identity_status !== "match") reasons.add("Runtime identity unverified");

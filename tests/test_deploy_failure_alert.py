@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import requests
+from control_plane.contracts.service_deploy_drain import operation_reference
 
 from control_plane.deploy_failure_alert import (
     health_results,
@@ -48,6 +49,7 @@ class DeployFailureAlertTests(unittest.TestCase):
     ) -> None:
         with TemporaryDirectory() as directory:
             response = Path(directory) / "response.json"
+            reference = operation_reference("private-key")
             response.write_text(
                 json.dumps(
                     {
@@ -55,7 +57,17 @@ class DeployFailureAlertTests(unittest.TestCase):
                             "code": "self_deploy_drain_timeout",
                             "message": "private-coordinates",
                             "blocking": ["private-key"],
-                        }
+                        },
+                        "records": {
+                            "blocking_operation_refs": json.dumps(
+                                [
+                                    reference,
+                                    "private-key",
+                                    "@everyone",
+                                    reference,
+                                ]
+                            )
+                        },
                     }
                 )
             )
@@ -75,8 +87,14 @@ class DeployFailureAlertTests(unittest.TestCase):
                 patch("control_plane.deploy_failure_alert.post_discord_webhook") as sender,
             ):
                 self.assertTrue(send_failure_alert())
+            sender.assert_called_once()
             payload = sender.call_args.args[1]
             self.assertNotIn("private-", json.dumps(payload))
+            self.assertNotIn("@everyone", json.dumps(payload))
+            self.assertEqual(
+                [field["value"] for field in payload["embeds"][0]["fields"]].count(reference),
+                1,
+            )
             recovery_link = next(
                 field["value"]
                 for field in payload["embeds"][0]["fields"]

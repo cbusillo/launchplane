@@ -6,6 +6,12 @@ title: Launchplane UI Experience
 
 Launchplane admin work is API-first. The Client's browser path is the release
 review page described in [release-review.md](release-review.md).
+Product overview pages link to **Release review** after the existing review
+access read confirms access, for admins and the product's recorded Client. A Client
+session gets a focused product page with that link, without operational data
+or controls. Other viewers see no link; release-page permissions are unchanged.
+`GET /v1/release-review/access` reuses the release page's profile-access check
+without compiling a checklist or calling the source-control provider.
 The current React context picker and product-config layout remain transitional.
 Do not refine those transitional layouts except to correct secret-safety
 regressions.
@@ -22,6 +28,20 @@ The rebuilt UI should be a product-delivery and operations surface, not a raw
 record browser. The first screen should show products, their stable
 environments, release and exact-change state, current operational state, and the
 next safe action.
+
+Environment summaries and details warn when configured managed credentials
+for a known integration are stored for that exact non-production lane without
+that integration's allowance. Context-scoped and global credentials are outside
+this lane inventory. The warning uses binding metadata and target policy only;
+it does not prove runtime delivery or connectivity, and shows no credential
+values. Disabled bindings and production lanes do not produce this warning.
+Runtime key families share the credential-safety marker catalog, so mail and
+payment provider names count too. Each matching custom policy marker is checked
+independently and produces the same generic classification advisory unless its
+normalized name has an allowance. A marker that cannot name an allowance stays
+unmatched. This advisory does not block operations or grant access.
+Launchplane's own testing-state, diagnostic and walkthrough
+credentials are not external integration credentials.
 
 ## Primary User And Job
 
@@ -64,6 +84,26 @@ returning from sign-in checks the human session with the service and loads fresh
 evidence. A `403` remains an authorization failure, and an ordinary `503` or
 transport failure retains visibly stale cached evidence. No mutation is retried
 by this transition.
+
+The Product Ops index includes a read-only **Service operation attention**
+section for signed-in admins, including when the product inventory is empty,
+loading, or unavailable. It preserves original scopes after removal and labels
+unproved ownership explicitly. A known running operation is recorded work, not
+a claim of a stuck failure. Fresh individual lane facts remain independent.
+Loading, denied, unavailable, stale, unknown-origin and partial service evidence
+qualifies the incident overview so healthy lanes cannot hide retained work.
+Missing service authority is unavailable evidence, not zero operations.
+
+The panel keeps only one bounded page. **Next operation page** replaces that
+page; **Refresh operation attention** and the shell refresh return to the first
+page. A continuation never establishes global absence, even when empty.
+Background reads use existing cancellation, polling and evidence deadlines.
+Logout/session loss removes the panel and its cache; a service `401` or `403`
+clears sensitive attention rows. Transient failures may retain explicitly stale
+evidence. Demo mode never sends this service request. The panel offers no
+recovery mutation, retry, release or clear control. See
+[service attention](operations.md) for the
+retained-operation read and its proof limits.
 
 ## Representative Admin Journeys
 
@@ -228,6 +268,13 @@ unknown even when a count is recorded; zero recorded is not verified empty.
 Recorded counts remain labelled recorded, stale and unsupported evidence retain
 their uncertainty, and only verified inventory uses active or empty wording.
 
+An observed preview without a successful lifecycle record may still have a
+retained provider operation. The overview reads that operation's recovery status
+under the existing product preview-read permission before suggesting cleanup.
+Missing original proof is shown as a resource-retention hold, not missing status.
+These warnings neither settle the operation nor establish safe disposal, and
+the recorded/observed mismatch remains visible until recovery actually completes.
+
 Product Ops labels combined lane evidence (route records and runtime observations)
 separately from operational health. A product profile's edit date is labelled as
 a profile update, never presented as the age of its lanes' verification.
@@ -242,6 +289,8 @@ Topology reasons name the contributing configuration, route or runtime evidence;
 private-only lanes without route bindings use placement and runtime evidence.
 These explanations wrap fully rather than hiding behind a badge
 or ellipsis. A stale topology explanation does not relabel passing health.
+A testing lane under a testing hold says its deploys are held and for which
+purpose, in the directory and the workspace; the hold does not change its tone.
 Shared evidence badges wrap their full state label within the available width,
 including each lane's column in the narrow product directory.
 Combined lane and product evidence expire when their topology expires, even if
@@ -657,6 +706,14 @@ fingerprint survive navigation/reload; a pre-dispatch failure or explicit client
 refusal remains definitive. A retry that began uncertain still requires evidence
 that the original operation settled before its identity can be discarded.
 
+Unreadable API responses show a plain-language failure and HTTP status instead
+of browser JSON parser text or the response body. This includes a gateway page
+during a service restart and a failed session refresh before dispatch. A fresh
+route-record review can be requested after the service recovers. An unreadable
+apply response is never proof of a refusal or completion, even with a 2xx or 4xx
+status; original-request recovery retains its key. Structured service errors
+still show their specific reason and trace.
+
 The environment Managed secrets form can also select a credential supplied by the
 named Client. The Client receives the focused `/ui/owner-secrets` page, containing
 only profile-declared input requests. It exposes no existing values or admin
@@ -761,6 +818,25 @@ bodies, and worker hostnames before response serialization.
 
 ## UI Rebuild
 
+### Host network capacity
+
+The existing environment overview's **Placement and runtime** panel shows free
+and total bridge-network slots for its current Dokploy host, the admission need
+and spare margin, and the observation time. Its **Refresh host capacity** control
+replaces the snapshot. Short capacity is visibly warned; unavailable or denied
+reads carry no invented count and never retain a prior successful count as new
+evidence. This snapshot does not change the lane's runtime identity or health
+status, reserve capacity, or authorize cleanup.
+
+The normal environment read stays record-backed and advertises capacity-read
+availability. The panel reads separately through the same authorized
+`GET /v1/products/{product}/environments/{environment}` with
+`include_host_network_capacity=true`. Authorization precedes provider reads.
+The service resolves the selected host from that lane's stored target and fresh
+provider placement, then uses the shared bounded capacity reader. Changed target
+or host placement during observation returns unavailable. No fleet inventory,
+new grant, provider mutation, host configuration or cleanup is involved.
+
 When the API contract is ready, rebuild the UI around:
 
 - product list and product overview
@@ -782,6 +858,23 @@ backend contracts should replace request/response types; handwritten frontend
 types remain only for UI state and view models.
 
 ### Browser Route Contract
+
+The signed-in Route binding review can record separate external business-domain
+custody and managed recovery ingress. Expand **Separate externally managed
+domains**, name the custodian and configuration report, and review the complete
+hostname set. The remaining managed hosts still need their exact applied audit
+and active edge join. A blocked plan offers no Apply. A ready decision shows
+both custodians and binds their exact evidence; it changes no live route.
+Review a changed custodian or configuration report in the same card. Current
+health, runtime identity and TLS checks qualify every hostname without monthly
+re-attestation. Unchanged stored managed sources are rechecked on reads.
+Saving also enables strict runtime-identity HTTP checks and TLS checks for
+every hostname. The lane stays unverified until those observations are current.
+Evidence refreshes reload untouched custody fields. If saved custody changes
+while fields are edited, choose the saved custody or keep the edits before
+reviewing again. An uncertain Apply retains its original request and key across
+refreshes and reloads. Removing external custody is shown explicitly and needs
+managed evidence for every hostname.
 
 The light/dark switch saves only an explicit choice in browser local storage,
 scoped to the browser profile and Launchplane origin. The saved choice applies
@@ -811,10 +904,7 @@ The clean-slate shell uses URL-owned product selection under the service-owned
 - Delivery Governance remains separate from product environment navigation. It
   may show exact-change identity, Client acceptance, independent engineering
   evidence, dependency health, admission, and landing outcomes.
-- Existing `/ui/engineering/work-graph`, `/ui/engineering/issue-inbox`, and
-  `/ui/engineering/every-code` routes belong to designs
-  [DIRECTION.md](../DIRECTION.md) retires (work graphs and Every Code). They
-  receive no investment and are scheduled for deletion.
+- The unused Work graph and Issue inbox routes are removed.
 - Existing `/ui/engineering/merge-train` behavior remains in scope only where
   it presents or executes guarded admission and truthful landing evidence from
   DB-backed policy. It must not infer a planning queue or make forge projections
@@ -913,8 +1003,14 @@ check for healthy, triangle for warning, clock for stale data or evidence,
 x for an alert or failure, question
 mark for unverified evidence, and minus for absent or unsupported lanes. Hover
 labels and the accessible status name identify the lane, state and known
-diagnostic layers. An alert can include an open warning-severity incident;
-its tone follows the shared operational health calculation. Colors are tuned separately for light and dark themes;
+diagnostic layers. A warning-severity production delivery failure or deploy fence
+shows yellow when the current production release has fresh passing health,
+matching runtime identity and the required public DNS/TLS observations. The
+incident and its inspection link remain visible. On production lanes with public
+or private monitoring, missing or stale runtime proof is red even when no incident
+is open. Prelaunch and testing lanes retain their unverified-evidence states.
+Failed health, wrong identity and other active incidents retain their existing
+alert treatment. Colors are tuned separately for light and dark themes;
 fresh sidebar signals use the same operational health calculation as the product view.
 Amber hover labels explain missing runtime identity, incomplete public DNS/TLS
 observations, or returned warning details. Route authority diagnostics alone

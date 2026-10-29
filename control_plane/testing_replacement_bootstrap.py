@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
+from control_plane.contracts.public_hosts import retained_hostname_identity
 
 import click
 from pydantic import BaseModel, ConfigDict, Field
@@ -156,6 +157,7 @@ def bootstrap_request_sha256(request: TestingReplacementResourcesRequest) -> str
 
 
 class TestingReplacementBootstrapRequest(TestingReplacementResourcesRequest):
+    # Resource helpers consume lane intent, never this endpoint's dispatch mode.
     mode: Literal["dry-run", "apply", "readback"] = "dry-run"
     operation_id: str = Field(min_length=1)
     domain_host: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
@@ -199,6 +201,9 @@ def bootstrap_copy_prerequisites(
     generation: FreshOdooTestingGeneration | None,
     source_mode: Literal["ssh", "container-export"],
 ) -> tuple[tuple[str, ...], str]:
+    from control_plane.clean_testing_snapshot import snapshot_storage_budget
+
+    snapshot_storage_budget(profile, context)
     require_testing_restore_policy(profile, context)
     omitted = testing_credential_omissions(store, context, generation)
     require_testing_credential_safety(store, context, omitted)
@@ -337,14 +342,18 @@ def bootstrap_plan(
         or generation.request_sha256 != bootstrap_request_sha256(request)
     ):
         raise ValueError("Bootstrap request differs from its recorded generation.")
-    old_hosts = {urlsplit(value).hostname for value in (lane.base_url, lane.health_url)}
-    old_hosts.update(target.domains)
+    requested_host = retained_hostname_identity(request.domain_host)
+    old_hosts = {
+        retained_hostname_identity(value)
+        for value in (lane.base_url, lane.health_url, *target.domains)
+    }
     # The retained hostname is never moved or independently duplicated.
     if (
-        request.domain_host in store.retained_disposable_hostnames()
-        or (generation is None and request.domain_host in old_hosts)
+        requested_host
+        in {retained_hostname_identity(host) for host in store.retained_disposable_hostnames()}
+        or (generation is None and requested_host in old_hosts)
         or any(
-            request.domain_host in {*other.domains, *other.public_hosts}
+            requested_host in other.hostname_claims
             and (
                 generation is None
                 or (other.context, other.instance) != (request.context, "testing")
@@ -352,8 +361,11 @@ def bootstrap_plan(
             for other in store.list_dokploy_target_records()
         )
         or any(
-            request.domain_host
-            in {urlsplit(candidate.base_url).hostname, urlsplit(candidate.health_url).hostname}
+            requested_host
+            in {
+                retained_hostname_identity(value)
+                for value in (candidate.base_url, candidate.health_url)
+            }
             and not (
                 generation is not None
                 and other.product == product
@@ -464,7 +476,7 @@ class TestingReplacementBootstrapAdapter:
             raise ValueError("The independent testing route differs from its reviewed binding.")
         return tuple(dict(item) for item in domains)
 
-    def readback(self) -> dict[str, object]:
+    def readback_generation(self) -> FreshOdooTestingGeneration:
         generation = self.store.read_fresh_odoo_testing_generation(
             self.product, self.request.context
         )
@@ -495,7 +507,6 @@ class TestingReplacementBootstrapAdapter:
         if (
             not generation_snapshot_matches(current, generation)
             or not generation.reconcile_requested_at
-            or not self._domains(generation)
         ):
             raise ValueError("The independent testing route or queue is unverified.")
         if self.request.initial_generation:
@@ -512,6 +523,11 @@ class TestingReplacementBootstrapAdapter:
                 or operation.disposable_supersession.replacement_target_id != generation.target_id
             ):
                 raise ValueError("Testing bootstrap supersession is incomplete.")
+        return generation
+
+    def readback(self) -> dict[str, object]:
+        generation = self.readback_generation()
+        self._require_domains(generation)
         return bootstrap_plan_payload(
             TestingReplacementBootstrapPlan(
                 product=self.product,
@@ -601,6 +617,8 @@ class TestingReplacementBootstrapAdapter:
                 check()
                 self._publish_safety(existing_generation, allocation.retained_target_id)
                 return existing_generation, operation, plan
+            from control_plane.clean_testing_snapshot import snapshot_storage_budget
+
             generation = existing_generation or FreshOdooTestingGeneration(
                 product=self.product,
                 context=self.request.context,
@@ -615,6 +633,8 @@ class TestingReplacementBootstrapAdapter:
                 source_mode=plan.source_mode,
                 source_binding_sha256=plan.source_binding_sha256,
                 omitted_runtime_keys=plan.omitted_runtime_keys,
+                clean_snapshot_enabled=profile.preview.clean_testing_snapshot,
+                drill_storage_budget=snapshot_storage_budget(profile, self.request.context),
                 prepared_at=utc_now_timestamp(),
             )
             if existing_generation is None:

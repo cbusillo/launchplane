@@ -9,8 +9,17 @@ landing and the engineering governance view.
 Current readiness checks the required technical checks at the exact candidate
 SHA, advisory engineering-review observations, current policy fingerprints,
 candidate and rolling-base provenance, and the controller lease plus expected
-effect SHA. Missing evidence stays unknown;
+effect SHA. Technical checks use the
+[shared required-check evaluation](merge-train-policy.md#candidate-validation):
+a missing named check is pending, while unavailable policy or evidence cannot
+qualify a pass. Other missing authoritative evidence stays unknown;
 contradictory evidence blocks the attempt. Each landing re-reads these inputs.
+
+A single-entry candidate can reuse current passing PR-head checks when the
+head, tree, base and candidate identities match its stored reuse binding.
+Both exact candidates and structurally proven collapsed-stack roots qualify;
+recorded rolling provenance does not discard that binding. Unproven stack
+composition, changed identities and lost check evidence still refuse landing.
 
 Retired Client acceptance and change-impact policies do not participate. Live
 results have no Client facets or impact fingerprint. Optional legacy fields remain

@@ -1,18 +1,35 @@
-FROM mirror.gcr.io/library/node:22-bookworm-slim AS frontend-build
+FROM mirror.gcr.io/library/python:3.14-slim AS python-base
+
+FROM mirror.gcr.io/library/node:22-bookworm-slim AS frontend-node
+
+FROM python-base AS frontend-build
+
+COPY --from=frontend-node /usr/local/bin/node /usr/local/bin/node
+COPY --from=frontend-node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
+    && pip install --no-cache-dir uv
 
 WORKDIR /app
 
-RUN corepack enable \
-    && corepack prepare pnpm@10.10.0 --activate
-
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml /app/frontend/
+COPY frontend/package.json /app/frontend/
 WORKDIR /app/frontend
+RUN corepack enable \
+    && corepack install
+
+COPY frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml /app/frontend/
 RUN pnpm install --frozen-lockfile
 
+COPY pyproject.toml uv.lock README.md /app/
+RUN uv sync --frozen --no-dev --no-install-project
+ENV UV_FROZEN=1
+COPY control_plane /app/control_plane
 COPY frontend /app/frontend
 RUN pnpm build
 
-FROM mirror.gcr.io/library/golang:1.26.9-bookworm AS github-cli-build
+FROM mirror.gcr.io/library/golang:1.26.10-bookworm AS github-cli-build
 
 ARG GITHUB_CLI_VERSION=v2.98.0
 ARG GITHUB_CLI_GRPC_VERSION=v1.83.2
@@ -41,9 +58,27 @@ RUN github_cli_x_mod_version=v0.41.0 \
     && go version -m /go/bin/gh | grep -F "golang.org/x/text" | grep -F "${GITHUB_CLI_X_TEXT_VERSION}" \
     && go version -m /go/bin/gh | grep -F "golang.org/x/net" | grep -F "${GITHUB_CLI_X_NET_VERSION}"
 
-FROM ghcr.io/aquasecurity/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222 AS artifact-scanner
+FROM mirror.gcr.io/library/golang:1.27.3-bookworm AS artifact-scanner
 
-FROM mirror.gcr.io/library/python:3.14-slim AS runtime
+ARG TRIVY_VERSION=v0.76.0
+ARG TRIVY_GO_JOSE_VERSION=v4.1.6
+
+ENV CGO_ENABLED=0 \
+    GOTOOLCHAIN=local
+
+RUN mkdir -p /tmp/artifact-scanner-build \
+    && cd /tmp/artifact-scanner-build \
+    && go mod init launchplane.local/artifact-scanner-build \
+    && go get "github.com/aquasecurity/trivy/cmd/trivy@${TRIVY_VERSION}" \
+    && go get "github.com/go-jose/go-jose/v4@${TRIVY_GO_JOSE_VERSION}" \
+    && go build -trimpath -o /go/bin/trivy \
+        -ldflags="-s -w -extldflags=-static -X github.com/aquasecurity/trivy/pkg/version/app.ver=${TRIVY_VERSION#v}" \
+        github.com/aquasecurity/trivy/cmd/trivy \
+    && go version -m /go/bin/trivy | grep -F "github.com/aquasecurity/trivy" | grep -F "${TRIVY_VERSION}" \
+    && go version -m /go/bin/trivy | grep -F "github.com/go-jose/go-jose/v4" | grep -F "${TRIVY_GO_JOSE_VERSION}" \
+    && /go/bin/trivy --version
+
+FROM python-base AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/cbusillo/launchplane"
 
@@ -75,7 +110,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=github-cli-build /go/bin/gh /usr/local/bin/gh
-COPY --from=artifact-scanner /usr/local/bin/trivy /usr/bin/trivy
+COPY --from=artifact-scanner /go/bin/trivy /usr/bin/trivy
 
 RUN pip install --no-cache-dir uv \
     && python -m pip uninstall --yes pip setuptools

@@ -22,14 +22,20 @@ from control_plane.local_consumer_delivery import (
     prepare_delivery,
     verify_delivery,
 )
-from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    GitHubHumanIdentity,
+    LaunchplaneIdentity,
+    LocalOperatorIdentity,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 
 
 @dataclass(frozen=True)
 class LocalConsumerDependencies:
     common: ReadRouteDependencies
-    read_human_mutation_identity: Callable[..., GitHubHumanIdentity]
+    read_mutation_identity: Callable[..., LaunchplaneIdentity]
+    public_origin: str | None
 
 
 def register_local_consumer_delivery_routes(
@@ -41,17 +47,23 @@ def register_local_consumer_delivery_routes(
         envelope: ConsumerDeliveryEnvelope,
         request: Request,
         response: Response,
-        identity: Annotated[
-            GitHubHumanIdentity, Depends(dependencies.read_human_mutation_identity)
-        ],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_mutation_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> ConsumerDeliveryResponse:
         response.headers["Cache-Control"] = "no-store"
         trace_id = common.next_trace_id()
         target = envelope.request
         if (
-            identity.role != "admin"
-            or request.headers.get("origin") != target.service_origin
+            not dependencies.public_origin
+            or target.service_origin != dependencies.public_origin
+            or not isinstance(identity, (GitHubHumanIdentity, LocalOperatorIdentity))
+            or (
+                isinstance(identity, GitHubHumanIdentity)
+                and (
+                    identity.role != "admin"
+                    or request.headers.get("origin") != target.service_origin
+                )
+            )
             or not common.authorization_allows(
                 identity=identity,
                 action="product_config.plan"
@@ -67,7 +79,7 @@ def register_local_consumer_delivery_routes(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Local delivery requires the existing signed-in testing administrator.",
+                message="Local delivery requires an administrator or agent authorized for this testing lane.",
             )
         if not isinstance(record_store, PostgresRecordStore):
             raise common.http_error(
@@ -77,7 +89,12 @@ def register_local_consumer_delivery_routes(
                 message="Local delivery requires database custody and receipts.",
             )
         try:
-            actor = f"github-human:{identity.github_id}"
+            if isinstance(identity, GitHubHumanIdentity):
+                actor = f"github-human:{identity.github_id}"
+            elif isinstance(identity, LocalOperatorIdentity):
+                actor = f"local-operator:{identity.subject}:{identity.token_label}"
+            else:
+                raise ValueError("Unsupported testing delivery caller.")
             package = None
             if envelope.mode == "dry-run":
                 plan = prepare_delivery(record_store, target, actor=actor, trace_id=trace_id)

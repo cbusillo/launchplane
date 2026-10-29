@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import hashlib
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import hashlib
-import json
-import math
 from typing import Any, Literal, Protocol, cast
 
-from control_plane import secrets as control_plane_secrets
 from control_plane import authz_grant_service
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.authz_policy_write_transition import (
     AUTHZ_POLICY_SCHEMA_V3_TRANSITION_DENIED,
     AuthzPolicySchemaV3TransitionDeniedError,
     AuthzPolicySchemaV3WriteEvidence,
 )
+from control_plane.contracts.backup_policy_proposal import (
+    BackupPolicyExecutionEvidence,
+    BackupPolicyProposalInput,
+)
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.durable_operation_authorization import (
     DurableOperationAuthorization,
     DurableOperationCallerIdentity,
@@ -69,8 +73,9 @@ from control_plane.contracts.privileged_operation_worker_heartbeat import (
     privileged_operation_worker_identity_sha256,
 )
 from control_plane.durable_operation_authorization import (
-    managed_github_id_explicit_action_rule_allows,
+    durable_operation_administrator_grant_allows,
     managed_github_id_action_allows,
+    managed_github_id_explicit_action_rule_allows,
     managed_github_id_rule_allows,
     read_active_authz_policy_record,
 )
@@ -81,11 +86,6 @@ from control_plane.privileged_operation_service import (
 )
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
-from control_plane.contracts.backup_policy_proposal import (
-    BackupPolicyProposalInput,
-    BackupPolicyExecutionEvidence,
-)
-
 
 PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS = 300
 
@@ -260,9 +260,7 @@ def _timestamp(value: datetime) -> str:
 
 
 def _digest(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def privileged_operation_execution_token(operation_id: str) -> str:
@@ -354,6 +352,7 @@ def _construct_approver_authorization(
         instances=(backup_policy.instance,) if backup_policy else ("global",),
         managed_set_id=approval.managed_set_id,
         managed_rule_id=approval.managed_rule_id,
+        grant=approval.grant,
         policy_record_id=policy_record.record_id,
         policy_revision=policy_record.revision,
         policy_schema_version=policy_schema_version,
@@ -364,7 +363,7 @@ def _construct_approver_authorization(
             identity_type="github_human",
             login=approval.approver.login,
             github_id=approval.approver.github_id,
-            role="read_only",
+            role="admin" if approval.grant == "policy_administrator" else "read_only",
         ),
     )
 
@@ -374,6 +373,10 @@ def _approver_is_still_authorized(
     authorization: DurableOperationAuthorization,
     policy_record: LaunchplaneAuthzPolicyRecord,
 ) -> bool:
+    if authorization.grant == "policy_administrator":
+        return durable_operation_administrator_grant_allows(
+            authorization=authorization, policy_record=policy_record
+        )
     authorization_reader = (
         managed_github_id_explicit_action_rule_allows
         if authorization.action.startswith("ordinary_agent_delivery_activation.")
@@ -407,7 +410,11 @@ def _authorize_approved_operation(
         authorization=authorization,
         policy_record=policy_record,
     ):
-        raise ValueError("approval_managed_rule_drift")
+        raise ValueError(
+            "approval_policy_admin_drift"
+            if approval.grant == "policy_administrator"
+            else "approval_managed_rule_drift"
+        )
     if record.descriptor_id == "managed-authz-policy-set" and not (
         managed_github_id_action_allows(
             policy=policy_record.policy,

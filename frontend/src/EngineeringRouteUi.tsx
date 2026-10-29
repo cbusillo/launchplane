@@ -19,14 +19,13 @@ import {
 import type { EngineeringResourceState } from "./engineering-resource";
 
 const ENGINEERING_VIEWS: Exclude<EngineeringView, "hub">[] = [
-  "work-graph",
-  "issue-inbox",
-  "every-code",
   "merge-train",
   "tenant-admission",
   "governance-projection",
   "github-delivery",
+  "preview-lifecycle",
   "privileged-operations",
+  "runtime-setting-removal",
 ];
 
 export function EngineeringRouteFrame({

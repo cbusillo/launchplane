@@ -1,3 +1,5 @@
+from tests.support.runtime_environments import _parse_runtime_environment_definition
+from tests.support.runtime_environments import build_runtime_environment_records_from_definition
 import os
 import json
 import tomllib
@@ -12,7 +14,6 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane import cli as control_plane_cli
-from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_generation_record import (
@@ -378,10 +379,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
     try:
-        for (
-            record
-        ) in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
-            control_plane_runtime_environments._parse_runtime_environment_definition(
+        for record in build_runtime_environment_records_from_definition(
+            _parse_runtime_environment_definition(
                 tomllib.loads(payload),
                 source_file=control_plane_root / "config" / "runtime-environments.toml",
             ),
@@ -1141,21 +1140,11 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("Tenant environment", rendered_html)
             self.assertIn("Testing lane", rendered_html)
             self.assertIn("Prod lane", rendered_html)
-            self.assertIn("Main feeds testing.", rendered_html)
-            self.assertIn(
-                "Testing is carrying a newer artifact than prod and is the current promotion candidate.",
-                rendered_html,
-            )
-            self.assertIn("Testing is ready to promote into prod.", rendered_html)
             self.assertIn("Rebuild long-lived lanes", rendered_html)
             self.assertEqual(_tenant_action_sections(rendered_html), 2)
             self.assertIn("Re-ship current testing artifact", rendered_html)
             self.assertIn("ship resolve -&gt; ship execute", rendered_html)
             self.assertIn("Promotion candidate", rendered_html)
-            self.assertIn(
-                "Latest prod backup gate backup-opw-prod-20260414T111500Z passed and can authorize promotion.",
-                rendered_html,
-            )
             self.assertIn("promote resolve", rendered_html)
             self.assertIn("promote execute", rendered_html)
             self.assertIn("--local-rehearsal", rendered_html)

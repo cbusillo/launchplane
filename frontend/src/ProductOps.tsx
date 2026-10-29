@@ -13,7 +13,10 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { LaunchplaneApiError, readProduct } from "./api";
+import { ProviderHoldAttention, useProviderHoldAttention } from "./ProviderHoldAttention";
+import { providerAttentionQualifier } from "./provider-hold-attention";
+
+import { isLaunchplaneHttpError, readProduct } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductGenericWebTransitionPanel } from "./ProductGenericWebTransitionPanel";
@@ -23,10 +26,11 @@ import { ProductRetirementPanel } from "./ProductRetirementPanel";
 import { ProductWebsiteCleanupPanel } from "./ProductWebsiteCleanupPanel";
 import { ProductSetupPanel } from "./ProductSetupPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
+import { ProductReleaseReviewLink } from "./ProductReleaseReviewLink";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { environmentEvidenceDeadlines, environmentOperationalTone, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, environmentReleaseHealthy, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -66,12 +70,17 @@ interface InspectionStep {
 export function ProductIndexRoute({
   resource,
   onRetry,
+  admin, fixtureMode, refreshToken,
 }: {
+  admin: boolean; fixtureMode: DevFixtureMode; refreshToken: number;
   resource: ResourceState<ProductSiteOverview[]>;
   onRetry: () => void;
 }) {
+  const attention = useProviderHoldAttention(admin, fixtureMode, refreshToken);
+  const serviceAttentionQualifier = fixtureMode ? "Demo mode. Service operation attention is not loaded." : !admin ? "Service operation attention is unavailable for this session; only authorized lane incidents are shown." : providerAttentionQualifier(attention.resource);
+  const attentionPanel = <ProviderHoldAttention admin={admin} fixtureMode={fixtureMode} resource={attention.resource} onNext={attention.next} onRefresh={attention.refresh} />;
   const products = (resource.data ?? []).map(product => expireProductEvidence(product));
-  useEvidenceExpiry(products.flatMap(product => product.environments), products.map(product => product.preview.provenance.stale_after));
+  useEvidenceExpiry(products.flatMap(product => product.environments), [...products.map(product => product.preview.provenance.stale_after), attention.resource.data?.stale_after ?? ""]);
   const loading = resource.status === "idle" || resource.status === "loading";
   const viewState =
     loading && !products.length
@@ -89,23 +98,23 @@ export function ProductIndexRoute({
   }, [viewState]);
 
   if (loading && !products.length) {
-    return <ProductIndexSkeleton />;
+    return <><ProductIndexSkeleton />{attentionPanel}</>;
   }
   if (resource.status === "error" && !products.length) {
     const accessDenied = resource.statusCode === 401 || resource.statusCode === 403;
     return (
-      <RouteError
+      <><RouteError
         eyebrow="Product Ops"
         message={resource.error}
         onRetry={accessDenied ? undefined : onRetry}
         returnTo={accessDenied ? null : undefined}
         title={accessDenied ? "Product inventory access denied" : "Product inventory unavailable"}
         traceId={resource.traceId}
-      />
+      />{attentionPanel}</>
     );
   }
   if (resource.status === "ready" && !products.length) {
-    return <NoProducts onRetry={onRetry} />;
+    return <><NoProducts onRetry={onRetry} />{attentionPanel}</>;
   }
 
   return (
@@ -134,7 +143,8 @@ export function ProductIndexRoute({
         />
       ) : null}
 
-      <ProductIncidentOverview products={products} />
+      <ProductIncidentOverview products={products} serviceAttentionQualifier={serviceAttentionQualifier} />
+      {attentionPanel}
 
       <div className="directory-head" aria-hidden="true">
         <span>Product</span>
@@ -230,8 +240,8 @@ export function ProductWorkspaceRoute({
             error instanceof Error
               ? error.message
               : "Launchplane could not load this product workspace.",
-          traceId: error instanceof LaunchplaneApiError ? error.traceId : "",
-          statusCode: error instanceof LaunchplaneApiError ? error.statusCode : 503,
+          traceId: isLaunchplaneHttpError(error) ? error.traceId : "",
+          statusCode: isLaunchplaneHttpError(error) ? error.statusCode : 503,
         }));
       });
     return () => {
@@ -365,13 +375,17 @@ function DirectoryLane({
 }) {
   const tone = environmentOperationalTone(environment);
   const headline = environment ? ingressHeadline(environment) : "Not recorded";
+  const reasons = operationalAttentionReasons(environment);
+  const hold = deployHoldNotice(environment);
   return (
     <span className="directory-lane" data-lane={lane} data-operational={tone}>
       <span className="lane-name">{lane === "prod" ? "Production" : "Testing"}</span>
       <strong>
-        {tone === "danger" ? "Issue · " : tone === "warning" ? "Warning · " : ""}
+        {tone === "warning" ? "Warning · " : ""}
         {headline}
       </strong>
+      {reasons.length ? <small className="directory-attention">{reasons.join(" · ")}</small> : null}
+      {hold ? <small className="directory-hold">{hold}</small> : null}
       <EvidenceBadge compact state={environment?.topology.trust_state ?? "missing"} qualifier="Topology evidence" />
       <small className="directory-evidence-detail">
         {environment ? topologyEvidenceDetail(environment) : "This product has no recorded lane for this environment."}
@@ -440,7 +454,8 @@ function ProductWorkspace({
     environments.length === 0 ||
     environments.some(
       (environment) =>
-        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)),
+        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)) &&
+        !environmentReleaseHealthy(environment),
     );
 
   useEffect(() => {
@@ -489,6 +504,7 @@ function ProductWorkspace({
       </header>
 
       <ProductWorkspaceNav product={product} route={route} />
+      <ProductReleaseReviewLink key={`release-review:${product.product}`} product={product.product} admin={admin} fixtureMode={fixtureMode} />
       {admin && !fixtureMode ? <a className="button" href="#product-setup-title">Environment setup</a> : null}
 
       <a className="mobile-next-inspection" href={`#${inspection.targetId}`}>
@@ -526,6 +542,7 @@ function ProductWorkspace({
           label="Production"
           state={production?.trust_state ?? "missing"}
           value={signalHeadline(production)}
+          detail={environmentReleaseHealthy(production) ? "Current release is healthy" : undefined}
         />
         <SignalTile
           label="Previews"
@@ -618,9 +635,11 @@ interface ActiveProductIncident {
 function ProductIncidentOverview({
   compact = false,
   products,
+  serviceAttentionQualifier,
 }: {
   compact?: boolean;
   products: ProductSiteOverview[];
+  serviceAttentionQualifier?: string;
 }) {
   const incidents = products.flatMap((product) =>
     product.environments.flatMap((environment) =>
@@ -667,6 +686,7 @@ function ProductIncidentOverview({
           </p>
         </div>
       </div>
+      {serviceAttentionQualifier ? <p>{serviceAttentionQualifier}</p> : null}
       {incidents.length ? (
         <ul className="product-incident-list">
           {incidents.map((incident) => (
@@ -724,6 +744,7 @@ function EnvironmentRow({
     (candidate) => candidate.role === "primary",
   ) ?? environment.topology.observed.tls_domains[0];
   const topologyWarnings = environment.topology.warnings;
+  const attentionReasons = operationalAttentionReasons(environment);
 
   return (
     <article
@@ -756,7 +777,13 @@ function EnvironmentRow({
               environment.topology.desired.public_website === "none" ? "Not applicable" : domain
             )}
           </dd>
-          <small>{ingressHeadline(environment)}</small>
+          {attentionReasons.length ? (
+            <>
+              <small className="environment-attention">{attentionReasons.join(" · ")}</small>
+              {recordedPublicObservation(environment) ? <small>{recordedPublicObservation(environment)}</small> : null}
+            </>
+          ) : <small>{ingressHeadline(environment)}</small>}
+          {deployHoldNotice(environment) ? <small>{deployHoldNotice(environment)}</small> : null}
         </div>
         <div>
           <dt>TLS evidence</dt>
@@ -933,7 +960,7 @@ function ProductDiagnostics({ product }: { product: ProductSiteOverview }) {
               </div>
               <div>
                 <dt>Ingress path</dt>
-                <dd>{environment.topology.provider_recorded.ingress.path}</dd>
+                <dd>{environment.topology.provider_recorded.external_ingress ? "Separate business and recovery paths" : environment.topology.provider_recorded.ingress.path}</dd>
               </div>
             </dl>
           </section>
@@ -1052,9 +1079,7 @@ function NoProducts({ onRetry }: { onRetry: () => void }) {
         No products are owned by Launchplane yet
       </h1>
       <p>
-        Use the supported Product Onboarding workflow to record a product profile,
-        stable lanes, runtime target authority, and required grants. This browser
-        does not invent a sample product or infer provider state.
+        Use Product Onboarding to record the product, its lanes and runtime targets.
       </p>
       <ol className="onboarding-checklist">
         <li>Record the product profile and display name.</li>
@@ -1248,13 +1273,26 @@ function compareEnvironments(
   );
 }
 
+// A no-website lane may retain an older public observation; it is history, not current health.
+function recordedPublicObservation(environment: ProductEnvironmentSummary): string | null {
+  if (environment.topology.desired.public_website !== "none" || !environment.public_ingress.observed_at) return null;
+  return `Recorded public observation: ${environment.public_ingress.summary || humanize(environment.public_ingress.status)}`;
+}
+
 function ingressHeadline(environment: ProductEnvironmentSummary): string {
+  // No summary, current or retained, may stand as the headline of a red lane.
+  if (environmentOperationalTone(environment) === "danger") {
+    return "Needs attention";
+  }
+  const warnings = operationalWarningReasons(environment);
+  if (warnings.length) return warnings.join(" · ");
+  const retained = recordedPublicObservation(environment);
+  if (retained) {
+    return retained;
+  }
   if (environment.topology.desired.public_website === "none") {
-    if (environment.public_ingress.observed_at) {
-      return `Recorded public observation: ${environment.public_ingress.summary || humanize(environment.public_ingress.status)}`;
-    }
     const tone = environmentOperationalTone(environment);
-    return tone === "verified" ? "Private checks passed" : tone === "danger" ? "Monitoring needs attention" : "Verification incomplete";
+    return tone === "verified" ? "Private checks passed" : "Verification incomplete";
   }
   const summary = environment.public_ingress.summary.trim();
   if (summary) {

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane.contracts.data_provenance import FreshnessStatus
+from control_plane.contracts.text_fields import require_text
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 RouteBindingStatus = Literal["active", "disabled"]
@@ -38,14 +42,14 @@ class RouteBindingProviderTarget(BaseModel):
 
     @model_validator(mode="after")
     def _validate_target(self) -> "RouteBindingProviderTarget":
-        self.provider_id = _required_text(
+        self.provider_id = require_text(
             self.provider_id, "route binding provider target requires provider_id"
         ).lower()
-        self.target_category = _required_text(
+        self.target_category = require_text(
             self.target_category, "route binding provider target requires target_category"
         ).lower()
         self.provider_target_type = self.provider_target_type.strip().lower()
-        self.target_name = _required_text(
+        self.target_name = require_text(
             self.target_name, "route binding provider target requires target_name"
         )
         self.provider_evidence = _normalized_provider_evidence(self.provider_evidence)
@@ -62,7 +66,7 @@ class RouteBindingIngress(BaseModel):
 
     @model_validator(mode="after")
     def _validate_ingress(self) -> "RouteBindingIngress":
-        self.provider = _required_text(
+        self.provider = require_text(
             self.provider, "route binding ingress requires provider"
         ).lower()
         self.endpoint_key = self.endpoint_key.strip()
@@ -113,6 +117,41 @@ class RouteBindingTls(BaseModel):
         return self
 
 
+class RouteBindingExternalIngress(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    domains: tuple[str, ...]
+    custodian: str = Field(min_length=1, max_length=200)
+    evidence_url: str = Field(min_length=1, max_length=2000)
+    attested_at: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+    @model_validator(mode="after")
+    def _validate_custody(self) -> "RouteBindingExternalIngress":
+        self.domains = tuple(sorted(_normalized_domain(domain) for domain in self.domains))
+        if not self.domains or len(set(self.domains)) != len(self.domains):
+            raise ValueError("External ingress requires unique domains")
+        self.custodian = require_text(self.custodian, "External ingress requires its custodian")
+        self.evidence_url = self.evidence_url.strip()
+        parsed = urlsplit(self.evidence_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+        ):
+            raise ValueError("External ingress evidence requires a credential-free HTTPS URL")
+        if self.attested_at:
+            timestamp = datetime.fromisoformat(self.attested_at.replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                raise ValueError("External ingress attestation requires a timezone")
+        return self
+
+
 class RouteBindingProviderTargetReadModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -149,10 +188,10 @@ class RouteBindingSource(BaseModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> "RouteBindingSource":
-        self.source_label = _required_text(
+        self.source_label = require_text(
             self.source_label, "route binding source requires source_label"
         )
-        self.refreshed_at = _required_text(
+        self.refreshed_at = require_text(
             self.refreshed_at, "route binding source requires refreshed_at"
         )
         self.stale_after = self.stale_after.strip()
@@ -190,6 +229,11 @@ class EnvironmentRouteBindingRecord(BaseModel):
     ingress: RouteBindingIngress
     domains: tuple[RouteBindingDomain, ...]
     tls: RouteBindingTls
+    external_ingress: RouteBindingExternalIngress | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     status: RouteBindingStatus = "active"
     source: RouteBindingSource
     updated_at: str
@@ -197,7 +241,7 @@ class EnvironmentRouteBindingRecord(BaseModel):
     @field_validator("product", "context", "instance", "updated_at", mode="after")
     @classmethod
     def _validate_required_text(cls, value: str) -> str:
-        return _required_text(value, "route binding record requires non-empty text fields")
+        return require_text(value, "route binding record requires non-empty text fields")
 
     @model_validator(mode="after")
     def _validate_record(self) -> "EnvironmentRouteBindingRecord":
@@ -219,7 +263,40 @@ class EnvironmentRouteBindingRecord(BaseModel):
             raise ValueError("route binding requires exactly one primary domain")
         if self.tls.owner == "launchplane" and self.ingress.provider == "none":
             raise ValueError("Launchplane-owned TLS requires an ingress provider")
+        if self.external_ingress is not None:
+            if not self.external_ingress.attested_at:
+                raise ValueError("Recorded external ingress requires its attestation time")
+            if not set(self.external_ingress.domains) < seen_domains:
+                raise ValueError(
+                    "Split ingress requires external and managed subsets of recorded domains"
+                )
+            if self.ingress.provider in {"none", "external"} or self.tls.owner in {
+                "none",
+                "external",
+            }:
+                raise ValueError("Split ingress requires independently managed ingress and TLS")
         return self
+
+    def ingress_for_domain(self, domain_name: str) -> RouteBindingIngress:
+        if domain_name not in {domain.domain_name for domain in self.domains}:
+            raise ValueError("Domain is absent from route authority")
+        if self.external_ingress is not None and domain_name in self.external_ingress.domains:
+            return RouteBindingIngress(
+                provider="external", endpoint_key=f"external:{domain_name}", termination_kind="edge"
+            )
+        return self.ingress
+
+    def tls_for_domain(self, domain_name: str) -> RouteBindingTls:
+        if self.ingress_for_domain(domain_name).provider == "external" and self.external_ingress:
+            return RouteBindingTls(owner="external")
+        return self.tls
+
+    def external_custody_sha256(self, domain_name: str) -> str:
+        if self.external_ingress is None or domain_name not in self.external_ingress.domains:
+            return ""
+        return nonvalidating_compact_sorted_json_sha256(
+            self.external_ingress.model_dump(mode="json")
+        )
 
     @property
     def binding_key(self) -> str:
@@ -241,6 +318,11 @@ class EnvironmentRouteBindingReadModel(BaseModel):
     ingress: RouteBindingIngressReadModel
     domains: tuple[RouteBindingDomain, ...]
     tls: RouteBindingTlsReadModel
+    external_ingress: RouteBindingExternalIngress | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     status: RouteBindingStatus
     source: RouteBindingSource
     updated_at: str
@@ -250,9 +332,9 @@ class EnvironmentRouteBindingReadModel(BaseModel):
 def build_route_binding_key(*, product: str, context: str, instance: str) -> str:
     return json.dumps(
         [
-            _required_text(product, "route binding key requires product"),
-            _required_text(context, "route binding key requires context"),
-            _required_text(instance, "route binding key requires instance"),
+            require_text(product, "route binding key requires product"),
+            require_text(context, "route binding key requires context"),
+            require_text(instance, "route binding key requires instance"),
         ],
         ensure_ascii=False,
         separators=(",", ":"),
@@ -282,6 +364,7 @@ def redacted_route_binding_record(
         tls=RouteBindingTlsReadModel(
             owner=record.tls.owner,
         ),
+        external_ingress=record.external_ingress,
         status=record.status,
         source=record.source,
         updated_at=record.updated_at,
@@ -297,13 +380,6 @@ def route_binding_record_sha256(record: EnvironmentRouteBindingRecord) -> str:
         sort_keys=True,
     )
     return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value
 
 
 def _normalized_domain(value: str) -> str:

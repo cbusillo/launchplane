@@ -44,6 +44,37 @@ def write_github_check_projection(
     installation_token: GitHubAppInstallationToken,
     api_request: GitHubApiRequest = github_api_request,
 ) -> AdvisoryCheckProjectionResult:
+    result = _write_github_check_projection(
+        projection=projection,
+        installation_token=installation_token,
+        api_request=api_request,
+        existing_only=False,
+    )
+    assert result is not None
+    return result
+
+
+def update_existing_advisory_check_projection(
+    *,
+    projection: AdvisoryCheckProjection,
+    installation_token: GitHubAppInstallationToken,
+    api_request: GitHubApiRequest = github_api_request,
+) -> AdvisoryCheckProjectionResult | None:
+    return _write_github_check_projection(
+        projection=projection,
+        installation_token=installation_token,
+        api_request=api_request,
+        existing_only=True,
+    )
+
+
+def _write_github_check_projection(
+    *,
+    projection: GitHubCheckProjection,
+    installation_token: GitHubAppInstallationToken,
+    api_request: GitHubApiRequest,
+    existing_only: bool,
+) -> AdvisoryCheckProjectionResult | None:
     if installation_token.repository_id != int(projection.repository_id):
         raise AdvisoryCheckProjectionError(
             "GitHub App installation token does not match projection repository id."
@@ -91,7 +122,10 @@ def write_github_check_projection(
         and isinstance(item.get("head_sha"), str)
         and item["head_sha"].lower() == projection.head_sha
         and _app_id(item.get("app")) == installation_token.app_id
+        and (not existing_only or item.get("external_id") == projection.external_id)
     )
+    if existing_only and not matching_runs:
+        return None
     pending = next((run for run in matching_runs if run.get("status") == "in_progress"), None)
     # A completed historical match must not strand a newer pending projection.
     completing_pending = projection.check_status == "completed" and pending is not None
@@ -131,6 +165,8 @@ def write_github_check_projection(
         and projection.check_status == "in_progress"
     )
     if current is None or recreate_incomplete:
+        if existing_only:
+            return None
         if recreate_incomplete:
             logger.info(
                 "Creating a fresh in-progress advisory check after GitHub completed the prior run.",

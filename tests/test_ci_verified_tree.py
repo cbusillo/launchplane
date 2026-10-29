@@ -53,7 +53,13 @@ class VerifiedTreeWorkflowTests(unittest.TestCase):
             "check_suite": {"id": 17},
         }
 
-    def proof(self, *, event: str = "push", ref: str = "refs/heads/launchplane/train/test") -> bool:
+    def proof(
+        self,
+        *,
+        event: str = "push",
+        ref: str = "refs/heads/launchplane/train/test",
+        expected_source: str | None = None,
+    ) -> bool:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             responses = root / "responses.json"
@@ -101,17 +107,21 @@ class VerifiedTreeWorkflowTests(unittest.TestCase):
                 check=True,
                 timeout=10,
             )
-            value = output.read_text().strip()
-            self.assertIn(value, ("verified=true", "verified=false"))
-            return value == "verified=true"
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            self.assertIn(values["verified"], ("true", "false"))
+            if expected_source is not None:
+                self.assertEqual(values["source_sha"], expected_source)
+            if values["verified"] != "true":
+                self.assertNotIn("source_sha", values)
+            return values["verified"] == "true"
 
     def test_main_reuses_an_up_to_date_pr_tree_but_new_candidates_run_full_ci(self) -> None:
-        self.assertTrue(self.proof(ref="refs/heads/main"))
+        self.assertTrue(self.proof(ref="refs/heads/main", expected_source=self.head))
         self.assertFalse(self.proof())
 
     def test_base_creation_reset_and_all_no_op_can_reuse_the_tested_commit(self) -> None:
         self.responses[self.current_checks] = {"check_runs": [self.gate()]}
-        self.assertTrue(self.proof())
+        self.assertTrue(self.proof(expected_source=self.candidate))
 
     def test_pr_or_fork_check_cannot_stand_in_for_main_commit_proof(self) -> None:
         self.responses[self.current_checks] = {"check_runs": [self.gate()]}

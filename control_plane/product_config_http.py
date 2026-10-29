@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane import provider_key_adoption
 from control_plane.product_secret_copy import ProductSecretCopyFrom
+from control_plane.product_config import ProductConfigSecretBindingDisableInput
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentScope,
     ScalarValue,
@@ -33,6 +34,10 @@ from control_plane.runtime_key_safety import (
 )
 
 
+from control_plane.contracts.odoo_business_hours import (
+    OdooBusinessHoursConfigRequest,
+    OdooBusinessHoursConfigResult,
+)
 from control_plane.contracts.public_hosts import normalize_public_hosts
 
 ProductConfigMode = Literal["dry-run", "apply"]
@@ -102,6 +107,7 @@ class ProductEnvironmentManagedSecretInput(BaseModel):
     integration: str
     value: str = Field(default="", repr=False)
     owner_submission_version_id: str = ""
+    secret_class: Literal["testing"] | None = None
 
     @model_validator(mode="after")
     def _validate_secret(self) -> "ProductEnvironmentManagedSecretInput":
@@ -220,7 +226,7 @@ class ProductConfigRuntimeKeySafetyResult(BaseModel):
 class ProductConfigSecretResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["created", "rotated", "unchanged"]
+    action: Literal["created", "rotated", "unchanged", "disabled"]
     scope: SecretScope
     integration: str
     name: str
@@ -336,6 +342,11 @@ class ProductConfigApplyResult(BaseModel):
     )
     summary: ProductConfigApplySummary
     next_actions: list[ProductConfigLiveTargetRuntimeNextAction] = Field(default_factory=list)
+    odoo_business_hours: OdooBusinessHoursConfigResult | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     public_hosts: ProductConfigPublicHostsResult | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -380,7 +391,12 @@ class ProductConfigApplyEnvelope(BaseModel):
         union_mode="left_to_right",
     )
     secrets: list[ProductConfigSecretInput] = Field(default_factory=list)
+    disable_secret_bindings: list[ProductConfigSecretBindingDisableInput] = Field(
+        default_factory=list
+    )
     public_hosts: tuple[str, ...] | None = None
+    odoo_business_hours: OdooBusinessHoursConfigRequest | None = None
+    reviewed_plan_sha256: str = ""
 
     @field_validator("public_hosts", mode="before")
     @classmethod
@@ -407,6 +423,26 @@ class ProductConfigApplyEnvelope(BaseModel):
             raise ValueError("Product config apply requires product.")
         if self.public_hosts is not None and (self.instance != "prod" or not self.context):
             raise ValueError("Public hosts require an exact prod lane.")
+        if self.odoo_business_hours is not None:
+            if self.instance != "prod" or not self.context or not self.reason:
+                raise ValueError("Calendar policy requires an exact prod lane and reason.")
+            if (
+                self.runtime_env is not None
+                or self.runtime_environment is not None
+                or self.secrets
+                or self.disable_secret_bindings
+                or self.public_hosts is not None
+            ):
+                raise ValueError("Calendar policy must be a standalone configuration request.")
+            if self.mode == "apply" and (
+                self.odoo_business_hours.operation == "inspect"
+                or re.fullmatch(r"[0-9a-f]{64}", self.reviewed_plan_sha256) is None
+            ):
+                raise ValueError("Calendar apply requires a reviewed set or clear plan digest.")
+            if self.mode == "dry-run" and self.reviewed_plan_sha256:
+                raise ValueError("Dry run cannot supply a reviewed plan digest.")
+        elif self.reviewed_plan_sha256:
+            raise ValueError("Reviewed calendar digest requires a calendar request.")
         return self
 
     def adopts_provider_keys(self) -> bool:
@@ -420,7 +456,11 @@ class ProductConfigApplyEnvelope(BaseModel):
         return any(secret.adopt_from_provider for secret in self.secrets)
 
     def reads_lane_provider_env(self) -> bool:
-        return self.adopts_provider_keys() or self.adopts_provider_secrets()
+        return (
+            self.adopts_provider_keys()
+            or self.adopts_provider_secrets()
+            or bool(self.disable_secret_bindings)
+        )
 
     def product_config_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -436,6 +476,14 @@ class ProductConfigApplyEnvelope(BaseModel):
             payload["runtime_environment"] = _runtime_input_payload(self.runtime_environment)
         if self.public_hosts is not None:
             payload["public_hosts"] = list(self.public_hosts)
+        if self.odoo_business_hours is not None:
+            payload["odoo_business_hours"] = self.odoo_business_hours.model_dump(
+                mode="json", exclude_none=True, exclude_defaults=True
+            )
+        if self.disable_secret_bindings:
+            payload["disable_secret_bindings"] = [
+                item.model_dump() for item in self.disable_secret_bindings
+            ]
         return payload
 
 
@@ -555,6 +603,7 @@ def product_environment_config_apply_request(
                 lane=lane,
                 value=value,
                 integration_key_markers=integration_key_markers,
+                secret_class=secret.secret_class,
             )
         )
     runtime_env = None
@@ -596,20 +645,30 @@ def _product_config_secret_input(
     lane: ProductLaneProfile,
     value: str,
     integration_key_markers: tuple[str, ...] | None,
+    secret_class: RuntimeSecretClass | None = None,
 ) -> ProductConfigSecretInput:
+    if (
+        secret_class is not None
+        and runtime_key_safety_environment_class(lane.instance) != "testing"
+    ):
+        raise ValueError("An explicit testing credential requires a testing lane.")
     # This surface accepts a freshly supplied value for this lane, never a copy
     # from another lane. Testing stores its own credentials under the same names
     # as production; the declaration applies only to this exact binding.
-    secret_class: RuntimeSecretClass | None = None
     if (
-        requirement.integration == "runtime_environment"
-        and runtime_key_safety_environment_class(lane.instance) == "testing"
+        secret_class is None
+        and requirement.integration == "runtime_environment"
+        and runtime_key_safety_environment_class(lane.instance) in {"testing", "preview"}
         and integration_key_markers is not None
         and not is_integration_runtime_key(
             requirement.binding_key, extra_markers=integration_key_markers
         )
     ):
-        secret_class = "testing"
+        secret_class = (
+            "preview"
+            if runtime_key_safety_environment_class(lane.instance) == "preview"
+            else "testing"
+        )
     return ProductConfigSecretInput(
         scope="context_instance",
         context=lane.context,

@@ -33,6 +33,7 @@ from control_plane.dokploy.connection_isolation import (
     run_connection_isolation,
 )
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
+from control_plane.dokploy.native_copy_stream import NativeProgramFailed
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     fresh_testing_override_record,
@@ -257,6 +258,7 @@ def execute_odoo_post_deploy(
     fresh_native_source: NativeOdooTestingSource | None = None,
     artifact_id: str = "",
     release_website_settings: OdooWebsiteSettingsIntent | None = None,
+    restore_release_website_settings: bool = False,
     release_operation: bool = False,
     rollback: bool = False,
 ) -> OdooPostDeployResult:
@@ -348,6 +350,12 @@ def execute_odoo_post_deploy(
     )
     if fresh_testing_generation is not None:
         rendering_record = fresh_testing_override_record(rendering_record, fresh_testing_generation)
+    if request.instance == "testing":
+        from control_plane.testing_address_storage import amended_testing_maintenance_overrides
+
+        rendering_record = amended_testing_maintenance_overrides(
+            record_store, request.context, rendering_record
+        )
 
     try:
         accepted_settings: OdooWebsiteSettingsIntent | None = None
@@ -380,7 +388,11 @@ def execute_odoo_post_deploy(
                             "Website settings differ from the operation artifact."
                         )
                     accepted_settings = release_website_settings
-                    if rollback and accepted_settings is None:
+                    if (
+                        rollback
+                        and accepted_settings is None
+                        and not restore_release_website_settings
+                    ):
                         applied = rendering_record.last_apply.website_settings
                         if (
                             rendering_record.last_apply.website_settings_verified
@@ -502,6 +514,16 @@ def execute_odoo_post_deploy(
                         spec=spec,
                         before_mutation=before_provider_effect,
                     )
+                except NativeProgramFailed as error:
+                    if not error.has_diagnostic:
+                        raise click.ClickException(
+                            "Native testing copy integrity or recovery is unverified; retain the original generation and capture receipt."
+                        ) from None
+                    raise click.ClickException(
+                        "Native testing copy predicate "
+                        + error.code
+                        + "; integrity or recovery is unverified; retain the original generation and capture receipt."
+                    ) from None
                 except ValueError:
                     raise click.ClickException(
                         "Native testing copy integrity or recovery is unverified; retain the original generation and capture receipt."
@@ -524,6 +546,7 @@ def execute_odoo_post_deploy(
                 fresh_testing_generation=fresh_testing_generation,
                 fresh_restore_source_environment=fresh_restore_source_environment,
                 prepare_native_source=native_preparer,
+                database_url=getattr(record_store, "database_url", None),
             )
             or {}
         )
@@ -555,6 +578,8 @@ def execute_odoo_post_deploy(
 
             remove_completed_native_capture_cache(native_capture)
     except (click.ClickException, OSError) as error:
+        from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
+
         determinate_failure = isinstance(
             error,
             (
@@ -565,7 +590,8 @@ def execute_odoo_post_deploy(
             ),
         ) or (
             isinstance(error, dokploy_api.DokployScheduleExecutionFailed)
-            and error.cause in {"remote_command_exit", "trigger_rejected"}
+            and error.cause
+            in {"remote_command_exit", "trigger_rejected", "trigger_baseline_unavailable"}
         )
         uncertain = hold_uncertain_effects and provider_effect_started and not determinate_failure
         if isinstance(error, OSError) and not uncertain:
@@ -587,7 +613,12 @@ def execute_odoo_post_deploy(
                 else None,
             )
         if isinstance(
-            error, (OdooProviderSafetyRefusedError, DurableOperationAuthorizationDeniedError)
+            error,
+            (
+                OdooProviderSafetyRefusedError,
+                DurableOperationAuthorizationDeniedError,
+                ScheduleMaterializationTooLarge,
+            ),
         ):
             raise
         if uncertain:

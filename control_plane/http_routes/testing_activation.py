@@ -2,14 +2,17 @@
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import click
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from fastapi import Depends, Header, Path as PathParameter
 
 from control_plane.contracts.testing_activation import (
     TestingActivationRequest,
     TestingActivationResult,
+    TestingActivationRefusedResult,
     TestingActivationRefusal,
     TestingActivationRefusalCode,
 )
@@ -26,7 +29,8 @@ from control_plane.http_routes.support import (
 )
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.testing_activation import ROUTE, TestingActivationAdapter, plan
+from control_plane.testing_activation import ROUTE, activation_adapter, plan
+from control_plane.testing_external_capabilities import ExternalCapabilityReadRefusal
 
 
 def register_testing_activation_routes(
@@ -61,10 +65,51 @@ def register_testing_activation_routes(
                 message="Testing activation requires service-owned records.",
             )
         scope = idempotency_scope(identity)
-        adapter = TestingActivationAdapter(
+        adapter = activation_adapter(
             root, record_store, product, body, actor(identity), scope, trace
         )
+        if body.application is not None:
+            from control_plane.testing_application_activation import ApplicationActivationAdapter
+            from control_plane.http_routes.testing_local_credentials import (
+                authorize_discord_profiles,
+            )
+
+            assert isinstance(adapter, ApplicationActivationAdapter)
+            adapter.authorize_external = lambda: authorize_discord_profiles(
+                dependencies, record_store, identity
+            )
         try:
+            if body.mode == "refuse" and body.application is None:
+                raise TestingActivationRefusal(
+                    "Refusal requires an original application operation."
+                )
+            if body.mode == "inspect":
+                from control_plane.testing_activation_inspection import (
+                    inspect_application_activation,
+                )
+                from control_plane.testing_application_inspection import (
+                    inspect_application_candidate,
+                )
+
+                observed = await run_in_worker_thread(
+                    lambda: inspect_application_activation(
+                        root=root,
+                        store=record_store,
+                        product=product,
+                        request=body,
+                        actor=actor(identity),
+                        scope=scope,
+                        idempotency_key=idempotency_key.strip(),
+                        trace_id=trace,
+                        observe_original=adapter.observe,
+                        inspect_candidate=lambda record, key: inspect_application_candidate(
+                            cast("ApplicationActivationAdapter", adapter), record, key
+                        ),
+                    )
+                )
+                return accepted_evidence_response(
+                    trace_id=trace, records={}, result=observed.model_dump(mode="json")
+                )
             if body.mode == "receipt":
                 row = record_store.read_idempotency_record(
                     scope=scope,
@@ -76,7 +121,12 @@ def register_testing_activation_routes(
                         "The original activation has no completed receipt.",
                         code=TestingActivationRefusalCode.RECEIPT_UNAVAILABLE,
                     )
-                result = TestingActivationResult.model_validate(row.response_payload.get("result"))
+                payload = row.response_payload.get("result")
+                result = (
+                    TestingActivationRefusedResult.model_validate(payload)
+                    if isinstance(payload, dict) and payload.get("outcome") == "refused"
+                    else TestingActivationResult.model_validate(payload)
+                )
                 if (result.product, result.context) != (product, body.context):
                     raise TestingActivationRefusal(
                         "The receipt belongs to another lane.",
@@ -88,11 +138,18 @@ def register_testing_activation_routes(
                     result=result.model_dump(mode="json"),
                 )
             if body.mode == "dry-run":
-                result_payload = await run_in_worker_thread(lambda: plan(adapter.current()))
+
+                def current_plan() -> dict[str, object]:
+                    current = adapter.current()
+                    return adapter.result(current) if current.failure is not None else plan(current)
+
+                result_payload = await run_in_worker_thread(current_plan)
             elif body.mode == "readback":
 
                 def readback() -> dict[str, object]:
                     record = adapter.current()
+                    if record.failure is not None:
+                        return adapter.result(record)
                     adapter.require_unchanged(record)
                     if not record.published:
                         # Diagnose the caller's persisted configuration without
@@ -126,19 +183,80 @@ def register_testing_activation_routes(
                         code="review_required",
                         message="Apply requires the original key and reviewed plan.",
                     )
+                original_intent = None
+                fingerprint_body = body
+                if body.mode == "refuse":
+                    fingerprint_body = body.model_copy(update={"mode": "apply"})
+                if body.application is not None:
+
+                    def captured_intent() -> dict[str, object]:
+                        original = record_store.read_testing_application_activation_operation(
+                            product, body.context, scope, body.preparation_key
+                        )
+                        if body.mode == "refuse":
+                            if original is None:
+                                raise TestingActivationRefusal(
+                                    "Refusal requires the original application operation."
+                                )
+                            if adapter.current().published:
+                                raise TestingActivationRefusal(
+                                    "A published activation cannot be refused."
+                                )
+                        fresh = None
+                        if original is None:
+                            fresh = adapter.current().model_dump(mode="json")
+                            # The other request may have reserved while current()
+                            # read provider inputs. Its immutable intent wins.
+                            original = record_store.read_testing_application_activation_operation(
+                                product, body.context, scope, body.preparation_key
+                            )
+                        if (
+                            original is not None
+                            and original.idempotency_key != idempotency_key.strip()
+                        ):
+                            raise TestingActivationRefusal(
+                                "Continue this generation using its original activation key."
+                            )
+                        return (
+                            record_store.read_original_mutation_intent(original)
+                            if original is not None
+                            else {"testing_activation": fresh}
+                        )
+
+                    original_intent = await run_in_worker_thread(captured_intent)
                 return await run_provider_mutation(
                     record_store=record_store,
                     identity=identity,
                     route_path=ROUTE.format(product=product),
                     idempotency_key=idempotency_key.strip(),
                     request_fingerprint=request_fingerprint(
-                        {"product": product, **body.model_dump(mode="json")}
+                        {"product": product, **fingerprint_body.model_dump(mode="json")}
                     ),
                     trace_id=trace,
                     adapter=adapter,
                     in_progress_message="Testing activation is running under its original key.",
                     reconcile_message="Testing activation outcome is unknown; preserve original placement, holds and fences.",
+                    **({"original_intent": original_intent} if original_intent is not None else {}),
                 )
+        except BridgeNetworkCapacityRefused as error:
+            raise dependencies.http_error(
+                status_code=409, trace_id=trace, code=error.code, message=str(error)
+            ) from None
+        except NativeSourceAuthorizationDenied:
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="The provider denied the read.",
+            ) from None
+        except ExternalCapabilityReadRefusal as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code=error.public_code,
+                message="Testing external capability remains unproved; retain the provider backoff evidence.",
+                records={"discord_identity": error.result.model_dump_json()},
+            ) from None
         except TestingActivationRefusal as error:
             raise dependencies.http_error(
                 status_code=409,

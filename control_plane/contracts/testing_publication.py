@@ -16,7 +16,11 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.prepared_public_site import FrozenRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    RouteBindingDomain,
+)
+from control_plane.contracts.testing_route_refresh import testing_route_domains
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 from control_plane.dokploy.testing_route import TestingLaneRoute
@@ -134,7 +138,6 @@ class TestingPublicationPlan(FrozenRecord):
             or after.target.domains
             or after.target.public_hosts
             or after.target.pending_public_host_effects
-            or after.target.policies.staff_testing_hold
         ):
             raise ValueError(
                 "The candidate cannot acquire generation-owned routing or inline secrets."
@@ -145,7 +148,11 @@ class TestingPublicationPlan(FrozenRecord):
             or after.binding.source.source_kind != "service"
             or after.binding.source.source_versions.get("testing_publication") != self.key
             or after.binding.source.source_versions.get("testing_route") != self.route.digest
-            or tuple(d.domain_name for d in after.binding.domains) != (self.route.host,)
+            or after.binding.domains
+            not in (
+                (RouteBindingDomain(domain_name=self.route.host),),
+                testing_route_domains(self.route),
+            )
         ):
             raise ValueError("Serving routing needs the exact lane-owned publication provenance.")
         if self.before.binding is not None and (

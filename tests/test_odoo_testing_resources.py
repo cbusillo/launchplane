@@ -1,17 +1,14 @@
-import base64
 from contextlib import redirect_stdout
 import io
 import json
 from pathlib import Path
 import subprocess
-import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
 from control_plane.odoo_testing_resources import (
-    ODOO_TESTING_RESOURCE_PROGRAM,
     TESTING_RESOURCES_INCOMPLETE_MARKER,
     OdooTestingResources,
     resource_readback_passes,
@@ -76,16 +73,18 @@ class TestingResourceProgramTests(unittest.TestCase):
             "mode": mode,
             "compose_project": project or self.resources.namespace,
         }
-        encoded = base64.b64encode(json.dumps(spec).encode()).decode()
         output = io.StringIO()
         status = 0
         with (
-            patch.object(sys, "argv", ["resource-program", encoded]),
+            patch.object(Path, "home", return_value=self.root),
             patch("subprocess.run", side_effect=self.docker),
             redirect_stdout(output),
         ):
             try:
-                exec(compile(ODOO_TESTING_RESOURCE_PROGRAM, "<testing-resources>", "exec"), {})
+                from control_plane.host_package import host_schedule
+                from tests.support.host_package import execute_host_schedule
+
+                execute_host_schedule(host_schedule("resources", spec))
             except SystemExit as error:
                 status = error.code if isinstance(error.code, int) else 1
         return status, dict(line.split("=", 1) for line in output.getvalue().splitlines())

@@ -250,21 +250,50 @@ class StableRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         replay = await self._request("apply", now="2026-08-06T01:00:00Z")
         self.assertEqual(replay.json()["result"], response.json()["result"])
         self.assertEqual(_binding(self.store, external=True), after)
+        revoked = await self._request(
+            "apply", now="2026-08-06T01:00:00Z", policy=_policy(external=False)
+        )
+        self.assertEqual(revoked.status_code, 403, revoked.text)
+        self.assertEqual(_binding(self.store, external=True), after)
+        receipt = self.store.read_idempotency_record(
+            scope=idempotency_scope(_identity()), route_path=ROUTE, idempotency_key="refresh"
+        )
+        with patch.object(self.store, "read_route_binding_record", side_effect=FileNotFoundError):
+            missing = await self._request("apply", now="2026-08-06T01:00:00Z")
+        self.assertEqual(missing.status_code, 409, missing.text)
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=idempotency_scope(_identity()), route_path=ROUTE, idempotency_key="refresh"
+            ),
+            receipt,
+        )
+        self.assertEqual(_binding(self.store, external=True), after)
 
-    async def test_denied_external_target_prevents_all_writes_and_reservations(self) -> None:
+    async def test_controller_denial_prevents_writes_and_ungranted_external_is_excluded(
+        self,
+    ) -> None:
         before = _binding(self.store)
-        for policy in [_policy(external=False), _policy(controller=False)]:
-            response = await self._request("apply", now="2026-08-06T00:00:00Z", policy=policy)
-            self.assertEqual(response.status_code, 403)
-            self.assertEqual(response.json()["error"]["code"], "authorization_denied")
-            self.assertEqual(_binding(self.store), before)
-            self.assertIsNone(
-                self.store.read_idempotency_record(
-                    scope=idempotency_scope(_identity()),
-                    route_path=ROUTE,
-                    idempotency_key="refresh",
-                )
+        external = _binding(self.store, external=True)
+        response = await self._request(
+            "apply", now="2026-08-06T00:00:00Z", policy=_policy(controller=False)
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(_binding(self.store), before)
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=idempotency_scope(_identity()), route_path=ROUTE, idempotency_key="refresh"
             )
+        )
+        scoped = await self._request(
+            "apply", now="2026-08-06T00:00:00Z", policy=_policy(external=False)
+        )
+        self.assertEqual(scoped.status_code, 202, scoped.text)
+        self.assertEqual(scoped.json()["result"]["refreshed_count"], 1)
+        self.assertEqual(
+            [outcome["product"] for outcome in scoped.json()["result"]["outcomes"]],
+            [before.product],
+        )
+        self.assertEqual(_binding(self.store, external=True), external)
 
     async def test_missing_external_store_capability_is_an_explicit_prerequisite(self) -> None:
         before = _binding(self.store)
@@ -300,13 +329,6 @@ class StableRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             response = await self._request("apply", now="2026-08-06T00:00:00Z")
         self.assertEqual(response.status_code, 500)
         managed = _binding(self.store)
-        retry = await self._request("apply", now="2026-08-06T00:00:00Z")
-        self.assertEqual(retry.status_code, 409)
-        reservation = self.store.read_idempotency_record(
-            scope=idempotency_scope(_identity()), route_path=ROUTE, idempotency_key="refresh"
-        )
-        assert reservation is not None
-        self.store.release_mutation_reservation(reservation=reservation)
         resumed = await self._request("apply", now="2026-08-06T00:00:00Z")
         self.assertEqual(resumed.status_code, 202, resumed.text)
         self.assertEqual(resumed.json()["result"]["unchanged_count"], 1)
@@ -316,6 +338,12 @@ class StableRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_discovery_refuses_overflow_and_mismatched_identity(self) -> None:
         with self.assertRaises(RouteBindingRefreshTargetLimitExceeded):
             discover_remaining_odoo_stable_route_bindings(self.store, target_limit=1)
+        scoped = discover_remaining_odoo_stable_route_bindings(
+            self.store,
+            target_limit=1,
+            include_record=lambda record: record.product == "example-product",
+        )
+        self.assertEqual([target.record for target in scoped], [_binding(self.store)])
         wrong = _binding(self.store).model_copy(update={"product": "wrong-product"})
         with patch.object(self.store, "read_route_binding_record", return_value=wrong):
             with self.assertRaises(RouteBindingRefreshTargetInvariantError):

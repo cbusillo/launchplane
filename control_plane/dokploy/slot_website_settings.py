@@ -45,17 +45,9 @@ def _verify_startup_containers(
     readback: StartupSettingsReadback,
     execute: Callable[[tuple[str, ...], str | None], str],
 ) -> None:
-    expected = {
-        (slot.slot_id, writer.writer_id) for slot in (plan.old, plan.new) for writer in plan.writers
-    }
-    targets = readback.containers
-    if (
-        {(item.slot_id, item.writer.writer_id) for item in targets} != expected
-        or len(targets) != len(expected)
-        or len({item.container for item in targets}) != len(targets)
-    ):
-        raise ValueError("startup readback requires every writer in both slots")
-    for target in targets:
+    from control_plane.dokploy.slot_writers import physical_writer_targets
+
+    for target in physical_writer_targets(plan, readback.containers):
         slot = plan.old if target.slot_id == plan.old.slot_id else plan.new
         observed = json.loads(execute(("docker", "inspect", target.container), None))
         if (

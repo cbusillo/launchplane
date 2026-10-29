@@ -174,6 +174,8 @@ def _provider_evidence(
 
 def _stack_member_record(
     fixture: _HistoricalCompletionFixture,
+    *,
+    child_number: int = 1,
 ) -> MergeTrainStackCollapsePlanRecord:
     plan = MergeTrainStackCollapsePlan(
         collapse_id="member-collapse",
@@ -193,7 +195,7 @@ def _stack_member_record(
                 base_ref=BASE_BRANCH,
             ),
             MergeTrainStackCollapseEntry(
-                pull_request_number=1,
+                pull_request_number=child_number,
                 position=2,
                 head_sha="b" * 40,
                 head_ref="refs/heads/member-child",
@@ -202,7 +204,7 @@ def _stack_member_record(
         ),
         mutations=(
             MergeTrainStackCollapseMutation(
-                child_pull_request_number=1,
+                child_pull_request_number=child_number,
                 parent_pull_request_number=900,
                 child_head_sha="b" * 40,
                 expected_parent_head_sha="a" * 40,
@@ -891,9 +893,60 @@ class NativeHistoricalDispositionPostgresTests(unittest.TestCase):
             with self.assertRaisesRegex(HistoricalDispositionError, "stack"):
                 store.read_merge_train_historical_completion_snapshot(request, authority)
 
+    def test_unrelated_legacy_bound_stack_fences_portable_and_native_completion(self) -> None:
+        for surface in ("portable", "native"):
+            with self.subTest(surface=surface), _prepared_store() as (store, fixture):
+                stack = _stack_member_record(fixture, child_number=901)
+                store.write_merge_train_stack_collapse_plan_record(stack)
+                with store._session_factory() as session, session.begin():
+                    row = session.get(LaunchplaneMergeTrainStackCollapsePlanRow, stack.record_id)
+                    assert row is not None
+                    row.repository = row.repository.swapcase()
+                    row.payload = row.payload | {
+                        "plan": {**row.payload["plan"], "repository": row.repository},
+                        "ordinary_job_binding": {
+                            "request_id": "unrelated-bound-request",
+                            "scope_sha256": "a" * 64,
+                            "binding_revision": 1,
+                        },
+                    }
+                if surface == "portable":
+                    transport = _ReadOnlyTransport(responses=_provider_responses())
+                    result = assess_merge_train_historical_completion(
+                        store=store,
+                        repository=REPOSITORY,
+                        base_branch=BASE_BRANCH,
+                        selector=fixture.selector,
+                        generated_at=OBSERVED_AT,
+                        github_client=GitHubMergeTrainClient(transport=transport),
+                    )
+                    self.assertEqual(
+                        (result.status, result.reason_code),
+                        ("unsupported", "ordinary_target_unsupported"),
+                    )
+                    self.assertEqual(transport.requests, [])
+                else:
+                    request = _request(fixture)
+                    authority = store.authorize_merge_train_historical_completion(request)
+                    with self.assertRaisesRegex(
+                        HistoricalDispositionError, "ordinary_target_unsupported"
+                    ):
+                        store.read_merge_train_historical_completion_snapshot(request, authority)
+
     def test_active_stack_member_and_malformed_progress_fail_closed(self) -> None:
         with _prepared_store() as (store, fixture):
-            store.write_merge_train_stack_collapse_plan_record(_stack_member_record(fixture))
+            stack = _stack_member_record(fixture)
+            store.write_merge_train_stack_collapse_plan_record(stack)
+            with store._session_factory() as session, session.begin():
+                row = session.get(LaunchplaneMergeTrainStackCollapsePlanRow, stack.record_id)
+                assert row is not None
+                row.repository = row.repository.swapcase()
+                row.payload = row.payload | {
+                    "plan": {
+                        **row.payload["plan"],
+                        "repository": row.repository,
+                    }
+                }
             request = _request(fixture)
             authority = store.authorize_merge_train_historical_completion(request)
             with self.assertRaisesRegex(HistoricalDispositionError, "stack"):

@@ -1,8 +1,5 @@
 """Provision new local Docker volumes without adopting or changing existing data."""
 
-import base64
-import json
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,23 +32,22 @@ class OdooTestingResources(BaseModel):
     def binding_sha256(self) -> str:
         return canonical_json_sha256(self.model_dump(mode="json"))
 
-    def script(self, mode: Literal["prepare", "readback"], *, compose_project: str = "") -> str:
+    def host_spec(
+        self, mode: Literal["prepare", "readback"], *, compose_project: str = ""
+    ) -> dict[str, object]:
         if mode not in {"prepare", "readback"}:
             raise ValueError("Unsupported replacement resource mode.")
-        spec = {
+        return {
             **self.model_dump(mode="json"),
             "volumes": self.volumes,
             "mode": mode,
             "compose_project": compose_project or self.namespace,
         }
-        encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
-        return (
-            "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
-            + encoded
-            + " <<'LP_TESTING_RESOURCES'\n"
-            + ODOO_TESTING_RESOURCE_PROGRAM
-            + "\nLP_TESTING_RESOURCES\n"
-        )
+
+    def script(self, mode: Literal["prepare", "readback"], *, compose_project: str = "") -> str:
+        from control_plane.host_package import host_schedule
+
+        return host_schedule("resources", self.host_spec(mode, compose_project=compose_project))
 
 
 class GenericWebTestingResources(OdooTestingResources):
@@ -65,6 +61,19 @@ class GenericWebTestingResources(OdooTestingResources):
             "database": f"{self.namespace}-db",
             "config": f"{self.namespace}-config",
         }
+
+
+class ApplicationTestingResources(OdooTestingResources):
+    """Only the state actually requested for a fresh application recipient."""
+
+    resource_kind: Literal["application"] = "application"
+    state_kind: Literal["none", "volume"]
+
+    @property
+    def volumes(self) -> dict[str, str]:
+        if self.state_kind == "none":
+            return {}
+        return {"state": f"{self.namespace}-state"}
 
 
 class OdooRehearsalResources(BaseModel):
@@ -98,14 +107,9 @@ class OdooRehearsalResources(BaseModel):
             "mode": mode,
             "compose_project": self.namespace,
         }
-        encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
-        return (
-            "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
-            + encoded
-            + " <<'LP_TESTING_RESOURCES'\n"
-            + ODOO_TESTING_RESOURCE_PROGRAM
-            + "\nLP_TESTING_RESOURCES\n"
-        )
+        from control_plane.host_package import host_schedule
+
+        return host_schedule("resources", spec)
 
 
 def resource_readback_passes(evidence: dict[str, str], resources: OdooTestingResources) -> bool:
@@ -113,11 +117,6 @@ def resource_readback_passes(evidence: dict[str, str], resources: OdooTestingRes
         evidence.get("testing_resources_ok") == "true"
         and evidence.get("testing_resources_binding_sha256") == resources.binding_sha256
     )
-
-
-def validate_resource_namespace(namespace: str) -> None:
-    if not re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace):
-        raise ValueError("Replacement requires its service-allocated resource namespace.")
 
 
 # The program runs on the selected Docker host, outside every application
@@ -172,6 +171,14 @@ def main():
             "database": namespace + "-db",
             "config": namespace + "-config",
         }
+    elif spec.get("resource_kind") == "application":
+        kind = spec.get("state_kind")
+        if kind == "none":
+            volumes = {}
+        elif kind == "volume":
+            volumes = {"state": namespace + "-state"}
+        else:
+            raise RuntimeError("Unsupported application state kind")
     elif "resource_kind" in spec and not rehearsal:
         raise RuntimeError("Unsupported testing resource kind")
     if spec["volumes"] != volumes:

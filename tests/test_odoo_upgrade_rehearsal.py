@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 import hashlib
 import os
-import re
 from pathlib import Path
 from typing import Any, cast
 from collections.abc import Callable
@@ -38,24 +37,692 @@ from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBu
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 
 
-def python_heredoc(script: str) -> str:
-    match = re.search(r"python3\s+-\s*<<'(?P<delimiter>\w+)'\s*\n", script)
-    if match is None:
-        raise AssertionError("Host delivery must put its Python program on stdin")
-    body, delimiter, _ = script[match.end() :].partition("\n" + match["delimiter"] + "\n")
-    if not delimiter:
-        raise AssertionError("Host Python heredoc is unterminated")
-    return body
+def with_passing_business_validation(
+    record: OdooUpgradeRehearsalRecord,
+) -> OdooUpgradeRehearsalRecord:
+    from tests.test_odoo_rehearsal_business_validation import identity, receipt
+    from control_plane.contracts.odoo_rehearsal_business_validation import BusinessValidationReceipt
+
+    validation = BusinessValidationReceipt.model_validate(receipt(identity(record)))
+    return record.model_copy(update={"business_validations": (validation,)})
+
+
+def validated_final_copy(
+    record: OdooUpgradeRehearsalRecord, final: RehearsalCopyReceipt
+) -> RehearsalCopyReceipt:
+    from control_plane._odoo_rehearsal_business_validation import business_validation_history
+    from control_plane.contracts.canonical_json import canonical_json_sha256
+
+    return final.model_copy(
+        update={
+            "business_validation_sha256": canonical_json_sha256(
+                business_validation_history(record.model_dump(mode="json"))
+            )
+        }
+    )
 
 
 class RehearsalScenario(unittest.TestCase):
     database_url = ""
 
+    def test_deploy_checkpoints_exact_remote_execute_and_worker_resumes_without_replay(
+        self,
+    ) -> None:
+        from control_plane.rehearsal_deploy_resume import resume_rehearsals
+        from control_plane.service_deploy_drain import confirm_startup
+        from tests.test_client_release_redeploy import _prepare, _replacement_env
+
+        prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
+        adapter = self.adapter("execute")
+
+        def remote_apply(operation_key: str, lease: Any) -> Any:
+            lease.checkpoint_effect("execute")
+            _, blockers, dispatch = _prepare(self.store)
+            self.assertTrue(blockers)
+            self.assertFalse(dispatch)
+            adapter.checkpoint_remote_job("original-schedule", "original-job")
+            self.fail("A draining execute must hand off its independently running job")
+
+        with patch.object(adapter, "apply", side_effect=remote_apply) as effect:
+            paused = self.run_operation(adapter, "checkpoint-execute")
+        self.assertEqual(paused.status, "checkpointed")
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        from control_plane.http_routes.mutation_support import AcceptedEvidenceResponse
+
+        client = RehearsalClientTests()
+        checkpoint = AcceptedEvidenceResponse.model_validate(paused.response_payload).model_dump(
+            mode="json"
+        )
+        code, pending, post = client.call(
+            "apply",
+            action="execute",
+            response=checkpoint,
+            request=adapter.request,
+            product=self.product,
+        )
+        self.assertNotEqual(code, 0)
+        self.assertEqual(pending["status"], "checkpointed")
+        self.assertEqual(pending["trace_id"], paused.response_payload["trace_id"])
+        self.assertEqual(
+            pending["operation_id"],
+            cast(dict[str, object], paused.response_payload["records"])["operation"],
+        )
+        self.assertTrue(pending["original_key_required"])
+        self.assertNotIn("completed", pending)
+        post.assert_called_once()
+        assert paused.record is not None
+        self.assertEqual(paused.record.state, "reconcile_required")
+        self.assertEqual(effect.call_count, 1)
+        _, blockers, dispatch = _prepare(self.store)
+        self.assertFalse(blockers)
+        self.assertTrue(dispatch)
+        # The old instance cannot take the continuation before matching startup.
+        with patch.object(OdooRehearsalAdapter, "observe") as observe:
+            self.assertEqual(resume_rehearsals(self.store, self.root), ())
+            observe.assert_not_called()
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        replacement = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(replacement.close)
+        completed = {
+            "completed": True,
+            "state": "upgraded",
+            "copies": [],
+            "elapsed_seconds": {"execute": 1.0},
+        }
+        from control_plane.provider_operations import build_provider_operation_key
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        reservation = paused.record
+        completed["phase_timing"] = {
+            "action": "execute",
+            "attempt_sha256": canonical_json_sha256(
+                {
+                    "operation_key": build_provider_operation_key(
+                        scope=reservation.scope,
+                        route_path=reservation.route_path,
+                        idempotency_key=reservation.idempotency_key,
+                        request_fingerprint=reservation.request_fingerprint,
+                        reconciliation_key=reservation.reconciliation_key,
+                    )
+                }
+            ),
+            "observed": {"source_captured": prepared.updated_at.isoformat()},
+        }
+        with (
+            patch.dict(os.environ, _replacement_env()),
+            patch(
+                "control_plane.rehearsal_deploy_resume.remote_job_status", return_value="running"
+            ),
+            patch("control_plane.odoo_upgrade_rehearsal.require_unaliased_rehearsal"),
+            patch.object(OdooRehearsalAdapter, "host", return_value=completed) as observe,
+            patch.object(OdooRehearsalAdapter, "apply") as replay,
+        ):
+            confirm_startup(replacement)
+            with patch.dict(os.environ, {"LAUNCHPLANE_DEPLOYMENT_MARKER": "old-marker"}):
+                self.assertEqual(resume_rehearsals(replacement, self.root), ())
+            self.assertEqual(resume_rehearsals(replacement, self.root), ())
+            observe.assert_not_called()
+            with patch(
+                "control_plane.rehearsal_deploy_resume.remote_job_status", return_value="terminal"
+            ):
+                # The native result can publish just before a process is lost.
+                # Restart must settle the same operation even across this boundary.
+                with patch.object(
+                    replacement, "adopt_reconciled_mutation", side_effect=RuntimeError("restart")
+                ):
+                    self.assertEqual(resume_rehearsals(replacement, self.root), ())
+                published = replacement.read_odoo_upgrade_rehearsal(self.identifier)
+                assert published is not None
+                self.assertEqual(published.state, "upgraded")
+                self.assertEqual(
+                    resume_rehearsals(replacement, self.root), (paused.record.record_id,)
+                )
+                self.assertEqual(resume_rehearsals(replacement, self.root), ())
+            replay.assert_not_called()
+            self.assertTrue(all(call.args[1] == "observe" for call in observe.call_args_list))
+        settled = self.store.read_idempotency_record(
+            scope=paused.record.scope,
+            route_path=paused.record.route_path,
+            idempotency_key=paused.record.idempotency_key,
+        )
+        assert settled is not None
+        self.assertEqual(settled.state, "completed")
+        self.assertEqual(settled.record_id, paused.record.record_id)
+        completed = AcceptedEvidenceResponse.model_validate(settled.response_payload).model_dump(
+            mode="json"
+        )
+        code, receipt, post = client.call(
+            "apply",
+            action="execute",
+            response=completed,
+            request=adapter.request,
+            product=self.product,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(receipt["status"], "verified")
+        self.assertEqual(receipt["rehearsal_id"], self.identifier)
+        post.assert_called_once()
+
+    def test_rehearsal_checkpoint_preserves_live_executor_and_original_binding(self) -> None:
+        from control_plane.rehearsal_deploy_resume import resume_rehearsals
+        from control_plane.service_deploy_drain import confirm_startup
+        from tests.test_client_release_redeploy import _prepare, _replacement_env
+
+        prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
+        adapter = self.adapter("execute")
+        # Normal traffic never detaches, and an unbound job is never checkpointed.
+        adapter.checkpoint_remote_job("original-schedule", "original-job")
+
+        def remote_apply(operation_key: str, lease: Any) -> Any:
+            lease.checkpoint_effect("execute")
+            _prepare(self.store)
+            adapter.checkpoint_remote_job("original-schedule", "original-job")
+
+        with patch.object(adapter, "apply", side_effect=remote_apply):
+            paused = self.run_operation(adapter, "checkpoint-bound")
+        assert paused.record is not None
+        _prepare(self.store)
+        with (
+            patch.dict(os.environ, _replacement_env()),
+            patch(
+                "control_plane.rehearsal_deploy_resume.remote_job_status", return_value="terminal"
+            ),
+            patch.object(OdooRehearsalAdapter, "observe") as observe,
+        ):
+            confirm_startup(self.store)
+            # A live original executor still excludes continuation on another instance.
+            with self.store.testing_replacement_execution_lock(self.identifier) as check:
+                assert check is not None
+                self.assertEqual(resume_rehearsals(self.store, self.root), ())
+                observe.assert_not_called()
+            # Changed intent cannot borrow the checkpoint's authority.
+            changed = prepared.model_copy(update={"compose_id": "different-compose"})
+            self.store.compare_and_write_odoo_upgrade_rehearsal(prepared, changed)
+            self.assertEqual(resume_rehearsals(self.store, self.root), ())
+            observe.assert_not_called()
+
+    def test_expired_drain_observation_unknown_parks_once_for_original_recovery(self) -> None:
+        from datetime import timedelta
+        from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+        from control_plane.provider_operations import ProviderObservation
+        from control_plane.rehearsal_deploy_resume import resume_rehearsals
+        from control_plane.service_deploy_drain import read_status
+        from tests.test_client_release_redeploy import _prepare
+
+        prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
+        adapter = self.adapter("execute")
+
+        def remote_apply(operation_key: str, lease: Any) -> Any:
+            lease.checkpoint_effect("execute")
+            _prepare(self.store)
+            adapter.checkpoint_remote_job("original-schedule", "original-job")
+
+        with patch.object(adapter, "apply", side_effect=remote_apply):
+            paused = self.run_operation(adapter, "checkpoint-unavailable")
+        assert paused.record is not None
+        expiry = parse_launchplane_mutation_timestamp(
+            str(read_status(self.store)["expires_at"]), field_name="expires_at"
+        ) + timedelta(seconds=1)
+        with (
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=expiry.isoformat()
+            ),
+            patch(
+                "control_plane.rehearsal_deploy_resume.remote_job_status", return_value="terminal"
+            ) as job,
+            patch.object(
+                OdooRehearsalAdapter, "observe", return_value=ProviderObservation("unknown")
+            ) as observe,
+        ):
+            self.assertEqual(resume_rehearsals(self.store, self.root), ())
+            self.assertEqual(resume_rehearsals(self.store, self.root), ())
+            job.assert_called_once()
+            observe.assert_called_once()
+            self.assertEqual(
+                read_status(self.store)["rehearsal_checkpoints"],
+                ({"operation_id": paused.record.record_id, "state": "recovery_required"},),
+            )
+        # Supported original-key recovery settles the same journal independently
+        # of the stopped automatic observer. Runtime must stop asking for recovery.
+        recovered = self.store.adopt_reconciled_mutation(
+            reservation=paused.record,
+            response_status_code=202,
+            response_trace_id="original-recovery",
+            response_payload={"status": "accepted", "result": {"completed": True}},
+        )
+        self.assertEqual(recovered.status, "adopted")
+        self.assertEqual(read_status(self.store)["rehearsal_checkpoints"], ())
+
+    def test_checkpoint_admission_rechecks_original_owner_and_lease(self) -> None:
+        from control_plane.rehearsal_deploy_resume import persist_checkpoint
+        from control_plane.service_deploy_drain import read_status
+        from tests.test_client_release_redeploy import _prepare
+
+        for change in ("owner", "expired"):
+            with self.subTest(change=change):
+                fixture = RehearsalScenario()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                prepared = fixture.record.model_copy(
+                    update={"state": "prepared", "compose_id": "own-compose"}
+                )
+                fixture.store.compare_and_write_odoo_upgrade_rehearsal(fixture.record, prepared)
+                adapter = fixture.adapter("execute")
+
+                def remote_apply(operation_key: str, lease: Any) -> Any:
+                    lease.checkpoint_effect("execute")
+                    _prepare(fixture.store)
+                    adapter.checkpoint_remote_job("original-schedule", "original-job")
+
+                def race(adapter: Any, reservation: Any, schedule: str, deployment: str) -> Any:
+                    if change == "owner":
+                        fixture.store.write_idempotency_record(
+                            reservation.model_copy(update={"lease_owner": "replacement-owner"})
+                        )
+                        with self.assertRaises(ValueError):
+                            persist_checkpoint(adapter, reservation, schedule, deployment)
+                    else:
+                        with (
+                            patch.object(
+                                fixture.store,
+                                "_database_mutation_timestamp",
+                                return_value=reservation.lease_expires_at,
+                            ),
+                            self.assertRaises(ValueError),
+                        ):
+                            persist_checkpoint(adapter, reservation, schedule, deployment)
+                    raise RuntimeError("checkpoint admission refused")
+
+                with (
+                    patch.object(adapter, "apply", side_effect=remote_apply),
+                    patch(
+                        "control_plane.rehearsal_deploy_resume.persist_checkpoint", side_effect=race
+                    ),
+                ):
+                    held = fixture.run_operation(adapter, "checkpoint-race")
+                self.assertEqual(held.status, "reconcile_required")
+                self.assertEqual(read_status(fixture.store)["rehearsal_checkpoints"], ())
+                self.assertEqual(
+                    fixture.store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared
+                )
+
+    def test_failed_checkpoint_storage_keeps_original_journal_recoverable(self) -> None:
+        from control_plane.service_deploy_drain import read_status
+        from tests.test_client_release_redeploy import _prepare
+        from control_plane.rehearsal_deploy_resume import REHEARSAL_CHECKPOINT_PREFIX
+        from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
+        from sqlalchemy.orm import Session
+
+        prepared = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, prepared)
+        adapter = self.adapter("execute")
+
+        def remote_apply(operation_key: str, lease: Any) -> Any:
+            lease.checkpoint_effect("execute")
+            _prepare(self.store)
+            adapter.checkpoint_remote_job("original-schedule", "original-job")
+
+        commit = Session.commit
+
+        def interrupt_checkpoint(session: Session) -> None:
+            if any(
+                isinstance(row, LaunchplaneServiceDeployDrainRow)
+                and row.record_id.startswith(REHEARSAL_CHECKPOINT_PREFIX)
+                for row in session.new
+            ):
+                raise RuntimeError("Checkpoint storage interrupted before commit")
+            commit(session)
+
+        with (
+            patch.object(adapter, "apply", side_effect=remote_apply),
+            patch.object(Session, "commit", autospec=True, side_effect=interrupt_checkpoint),
+        ):
+            held = self.run_operation(adapter, "checkpoint-refused")
+        self.assertEqual(held.status, "reconcile_required")
+        assert held.record is not None
+        self.assertEqual(held.record.state, "reconcile_required")
+        self.assertTrue(held.record.provider_effect_started_at)
+        self.assertEqual(read_status(self.store)["rehearsal_checkpoints"], ())
+        with self.store._session_factory() as session:
+            session.add(
+                LaunchplaneServiceDeployDrainRow(
+                    record_id=REHEARSAL_CHECKPOINT_PREFIX + held.record.record_id,
+                    payload={"newer-format": "unreadable"},
+                )
+            )
+            session.commit()
+        self.assertEqual(
+            read_status(self.store)["rehearsal_checkpoints"],
+            ({"operation_id": held.record.record_id, "state": "unreadable"},),
+        )
+
+    def test_network_capacity_refusal_precedes_credentials_and_provider_creation(self) -> None:
+        from control_plane.dokploy import network_capacity
+        from control_plane.provider_operations import (
+            ProviderMutationRejectedError,
+            ProviderOperationLease,
+        )
+
+        before = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+        for free in (0, network_capacity.BRIDGE_NETWORK_CAPACITY_MARGIN):
+            with (
+                self.subTest(free=free),
+                patch(
+                    "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                    wraps=network_capacity.require_bridge_network_capacity,
+                ),
+                patch("control_plane.dokploy.native_copy_stream._read_remote") as read,
+                patch("control_plane.dokploy.api.dokploy_request", return_value={}) as create,
+                patch(
+                    "control_plane.dokploy.sandbox_placement.created_placement",
+                    return_value=("", "", ""),
+                ),
+                patch(
+                    "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
+                ) as credentials,
+                self.assertRaises(ProviderMutationRejectedError) as refused,
+            ):
+                read.side_effect = lambda **kwargs: kwargs["receive"](
+                    {"type": "complete", "result": {"total_slots": 4, "free_slots": free}}
+                )
+                lease = Mock(spec=ProviderOperationLease)
+                self.adapter("prepare").apply("original-operation", lease)
+            cause = refused.exception.cause
+            assert isinstance(cause, network_capacity.BridgeNetworkCapacityRefused)
+            self.assertEqual(cause.code, "host_bridge_network_capacity_short")
+            create.assert_not_called()
+            credentials.assert_not_called()
+            lease.checkpoint_effect.assert_not_called()
+            self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), before)
+
+    def test_capacity_read_failure_releases_fresh_operation_without_effects(self) -> None:
+        from control_plane.dokploy import network_capacity
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+        from control_plane.odoo_upgrade_rehearsal import RehearsalPreparationReadRefused
+
+        for failure in (ValueError("incomplete read"), NativeSourceAuthorizationDenied("refused")):
+            with (
+                self.subTest(failure=type(failure).__name__),
+                patch(
+                    "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                    wraps=network_capacity.require_bridge_network_capacity,
+                ),
+                patch(
+                    "control_plane.dokploy.native_copy_stream._read_remote", side_effect=failure
+                ) as read,
+                patch("control_plane.dokploy.api.dokploy_request") as create,
+                patch(
+                    "control_plane.dokploy.sandbox_placement.created_placement",
+                    return_value=("", "", ""),
+                ),
+                patch(
+                    "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
+                ) as credentials,
+            ):
+                expected = (
+                    RehearsalPreparationReadRefused
+                    if isinstance(failure, NativeSourceAuthorizationDenied)
+                    else network_capacity.BridgeNetworkCapacityRefused
+                )
+                for _ in range(2):
+                    # A clean refusal releases the fresh durable reservation;
+                    # repeating the same key reads again rather than holding it.
+                    with self.assertRaises(expected):
+                        self.run_operation(self.adapter("prepare"), "capacity-read-failure")
+                self.assertEqual(read.call_count, 2)
+                create.assert_not_called()
+                credentials.assert_not_called()
+
+    def test_missing_config_is_clean_but_existing_placement_requires_recovery(self) -> None:
+        from control_plane.dokploy.sandbox_placement import IsolatedPlacementObservationRequired
+        from control_plane.provider_operations import (
+            ProviderMutationRejectedError,
+            ProviderOperationLease,
+        )
+
+        with patch(
+            "control_plane.dokploy.source.read_dokploy_config",
+            side_effect=FileNotFoundError("private config path"),
+        ):
+            for _ in range(2):
+                with self.assertRaises(RehearsalRefused) as refused:
+                    self.run_operation(self.adapter("prepare"), "missing-capacity-config")
+                self.assertEqual(
+                    refused.exception.prerequisite, RehearsalPrerequisite.PLACEMENT_UNAVAILABLE
+                )
+                self.assertNotIn("private", str(refused.exception))
+        adapter = self.adapter("prepare")
+        with (
+            patch.object(adapter, "inputs", return_value=(self.record, self.source, self.shape)),
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                side_effect=ValueError("private malformed config"),
+            ),
+        ):
+            for _ in range(2):
+                with self.assertRaises(RehearsalRefused) as refused:
+                    self.run_operation(adapter, "capacity-config-changed")
+                self.assertEqual(
+                    refused.exception.prerequisite, RehearsalPrerequisite.PLACEMENT_UNAVAILABLE
+                )
+        for ambiguity in (False, True):
+            with (
+                self.subTest(ambiguity=ambiguity),
+                patch(
+                    "control_plane.dokploy.sandbox_placement.created_placement",
+                    return_value=("existing-project", "", ""),
+                    side_effect=IsolatedPlacementObservationRequired("ambiguous")
+                    if ambiguity
+                    else None,
+                ),
+                patch(
+                    "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                    side_effect=AssertionError("Recovery takes precedence"),
+                ) as capacity,
+                self.assertRaises(ProviderMutationRejectedError) as rejected,
+            ):
+                self.adapter("prepare").apply(
+                    "original-operation", Mock(spec=ProviderOperationLease)
+                )
+            cause = rejected.exception.cause
+            assert isinstance(cause, RehearsalRefused)
+            self.assertEqual(cause.prerequisite, RehearsalPrerequisite.RECOVERY_REQUIRED)
+            capacity.assert_not_called()
+
+    def test_initial_target_read_refusal_releases_fresh_operation(self) -> None:
+        from control_plane.dokploy import api
+        from control_plane.odoo_upgrade_rehearsal import RehearsalPreparationReadRefused
+
+        adapter = self.adapter("prepare")
+        for status in (403, 503):
+            with (
+                self.subTest(status=status),
+                patch.object(
+                    api,
+                    "fetch_dokploy_target_payload",
+                    side_effect=api.DokployRequestFailed(
+                        method="GET", path="/api/compose.one", status_code=status, detail="private"
+                    ),
+                ) as read,
+                patch(
+                    "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
+                ) as credentials,
+            ):
+                for _ in range(2):
+                    with self.assertRaises(RehearsalPreparationReadRefused) as refused:
+                        self.run_operation(adapter, "target-read-" + str(status))
+                    self.assertEqual(refused.exception.status_code, status)
+                    self.assertNotIn("private", str(refused.exception))
+                self.assertEqual(read.call_count, 2)
+                credentials.assert_not_called()
+
+    def test_legacy_host_diagnostics_withhold_content_and_preserve_binding_and_custody(
+        self,
+    ) -> None:
+        import json
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        record = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        operation = "original-operation"
+        text = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
+        child = {
+            "intent_sha256": record.intent_sha256,
+            "record_binding_sha256": record.binding_sha256,
+            "attempt_sha256": canonical_json_sha256({"operation_key": operation}),
+            "step": "copy_runner",
+            "exit_status": 7,
+            "error_text": text,
+        }
+        for with_child in (False, True):
+            result: dict[str, Any] = {
+                "intent_sha256": record.intent_sha256,
+                "state": record.state,
+                "copies": [self.copy("source").model_dump(mode="json")],
+                "elapsed_seconds": {},
+                "completed": False,
+                "resources_preserved": True,
+                "public_route": False,
+                "business_host_frozen": False,
+                "custody": {
+                    "effect_started": True,
+                    "raw_filestore_extracted": True,
+                    "capture_receipt_present": True,
+                    "capture_pending_present": False,
+                    "source_snapshot_directory_present": True,
+                },
+                "retained_upgrade_logs": {
+                    "files": [
+                        {
+                            "file": f"odoo.log.{index}",
+                            "bytes": len(text.encode()),
+                            "modified_at": datetime.now(timezone.utc).isoformat(),
+                            "tail": text,
+                        }
+                        for index in range(2)
+                    ],
+                    "runtime": [
+                        {"service": role, "available": True, "tail": text}
+                        for role in ("script-runner", "database")
+                    ],
+                    "since": datetime.now(timezone.utc).isoformat(),
+                    "truncated": False,
+                },
+                **({"child_failure": child} if with_child else {}),
+            }
+            markers = {"rehearsal_result": json.dumps(result).encode().hex()}
+            adapter = self.adapter("execute")
+            with patch.object(adapter, "run_script", return_value=markers):
+                read = cast(
+                    dict[str, Any],
+                    adapter.host(
+                        record,
+                        "observe",
+                        lambda: None,
+                        operation_key=operation,
+                        inspect_capture=True,
+                    ),
+                )
+            self.assertEqual(read["custody"]["effect_started"], result["custody"]["effect_started"])
+            self.assertEqual(
+                read.get("child_failure"), {**child, "error_text": ""} if with_child else None
+            )
+            self.assertTrue(read["retained_upgrade_logs"]["truncated"])
+            self.assertEqual(read["retained_upgrade_logs"]["files"], [])
+            self.assertEqual(read["retained_upgrade_logs"]["runtime"], [])
+            self.assertNotIn(text, str(read))
+            self.assertIn(text, json.dumps(result))
+            if with_child:
+                child["attempt_sha256"] = canonical_json_sha256({"operation_key": "other"})
+                with (
+                    patch.object(
+                        adapter,
+                        "run_script",
+                        return_value={"rehearsal_result": json.dumps(result).encode().hex()},
+                    ),
+                    self.assertRaises(RehearsalRefused),
+                ):
+                    adapter.host(
+                        record,
+                        "observe",
+                        lambda: None,
+                        operation_key=operation,
+                        inspect_capture=True,
+                    )
+
+    def test_host_accepts_only_content_free_mismatch_evidence_for_its_exact_operation(self) -> None:
+        import json
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        record = self.record.model_copy(update={"state": "prepared", "compose_id": "own-compose"})
+        adapter = self.adapter("execute")
+        operation = "original-provider-operation"
+        evidence: dict[str, Any] = {
+            "intent_sha256": record.intent_sha256,
+            "record_binding_sha256": record.binding_sha256,
+            "attempt_sha256": canonical_json_sha256({"operation_key": operation}),
+            "attachment": RehearsalHostSafetyTests.attachment_mismatch_fixture(),
+        }
+        result = {
+            "intent_sha256": record.intent_sha256,
+            "state": record.state,
+            "copies": [],
+            "elapsed_seconds": {},
+            "resources_preserved": True,
+            "public_route": False,
+            "business_host_frozen": False,
+            "completed": False,
+            "capture_attachment_validation": evidence["attachment"]["reason"],
+            "attachment_mismatch": evidence,
+        }
+        with patch.object(
+            adapter,
+            "run_script",
+            side_effect=lambda *a: {"rehearsal_result": json.dumps(result).encode().hex()},
+        ):
+            read = adapter.host(
+                record, "observe", lambda: None, operation_key=operation, inspect_capture=True
+            )
+            self.assertEqual(read["attachment_mismatch"], evidence)
+            for key in ("intent_sha256", "record_binding_sha256", "attempt_sha256"):
+                original = evidence[key]
+                evidence[key] = hashlib.sha256(key.encode()).hexdigest()
+                with self.subTest(binding=key), self.assertRaises(RehearsalRefused):
+                    adapter.host(
+                        record,
+                        "observe",
+                        lambda: None,
+                        operation_key=operation,
+                        inspect_capture=True,
+                    )
+                evidence[key] = original
+            for field in ("content", "datas", "db_datas", "raw"):
+                evidence["attachment"][field] = "private contents"
+                with self.subTest(content=field), self.assertRaises(RehearsalRefused):
+                    adapter.host(
+                        record,
+                        "observe",
+                        lambda: None,
+                        operation_key=operation,
+                        inspect_capture=True,
+                    )
+                del evidence["attachment"][field]
+            result["completed"] = True
+            with self.assertRaises(RehearsalRefused):
+                adapter.host(
+                    record, "observe", lambda: None, operation_key=operation, inspect_capture=True
+                )
+
     def setUp(self) -> None:
-        fixture = resources.TestingReplacementResourceHttpTests()
-        fixture.database_url = self.database_url
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
+        self.enterContext(patch.object(OdooRehearsalAdapter, "check_business_entrypoint"))
+        fixture = resources.TestingReplacementResourceFixture(self, database_url=self.database_url)
+        self.enterContext(
+            patch("control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity")
+        )
         self.store = fixture.store
         self.app = fixture.app
         self.root = fixture.root
@@ -212,7 +879,7 @@ class RehearsalScenario(unittest.TestCase):
     def adapter(self, action: str) -> OdooRehearsalAdapter:
         record = self.store.read_odoo_upgrade_rehearsal(self.identifier)
         assert record is not None
-        return OdooRehearsalAdapter(
+        adapter = OdooRehearsalAdapter(
             self.root,
             self.store,
             self.product,
@@ -226,6 +893,12 @@ class RehearsalScenario(unittest.TestCase):
             self.principal,
             "fixture-trace",
         )
+
+        if action == "rebuild-final":
+            adapter.request = adapter.request.model_copy(
+                update={"reviewed_plan_sha256": adapter.reviewed_binding(record)}
+            )
+        return adapter
 
     def test_new_record_and_source_inputs_leave_canonical_lane_authority_unchanged(self) -> None:
         before = self.authority()
@@ -247,6 +920,83 @@ class RehearsalScenario(unittest.TestCase):
         self.assertEqual(
             cast(dict[str, str], spec["environment"])["ODOO_WORKERS"], self.shape["ODOO_WORKERS"]
         )
+        from control_plane.dokploy import post_deploy
+
+        comparison_limit = cast(int, spec["capture_comparison_timeout_seconds"])
+        self.assertGreater(comparison_limit, 0)
+        self.assertLess(
+            comparison_limit, post_deploy.DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS
+        )
+
+    def test_rendered_rehearsal_services_resolve_product_settings_from_the_shared_environment(
+        self,
+    ) -> None:
+        import yaml
+        from pydantic import BaseModel, Field, SecretStr
+        from control_plane.testing_activation_compose import interpolate
+
+        class ProductSettings(BaseModel):
+            database_host: str = Field(alias="ODOO_DB_HOST")
+            database_name: str = Field(alias="ODOO_DB_NAME")
+            database_user: str = Field(alias="ODOO_DB_USER")
+            database_password: SecretStr = Field(alias="ODOO_DB_PASSWORD")
+            platform_instance: str = Field(alias="PLATFORM_INSTANCE")
+            filestore_path: Path = Field(alias="ODOO_FILESTORE_PATH")
+
+        spec = rehearsal_host_spec(
+            self.record.model_copy(update={"compose_id": "own-compose"}),
+            "validate-business",
+            "apply",
+            self.source,
+            self.shape,
+            {"ODOO_DB_PASSWORD": "fixture-password", "ODOO_MASTER_PASSWORD": "fixture-master"},
+        )
+        database = self.identifier.replace("-", "_") + "_final_upgrade"
+        supplied = {
+            **cast(dict[str, str], spec["environment"]),
+            "ODOO_DB_NAME": database,
+            "ODOO_VERSION": self.record.target_artifact.build_flags.values["odoo_version"],
+            "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": "{}",
+        }
+        helper = RehearsalHostSafetyTests()
+        helper.setUp()
+        self.addCleanup(helper.doCleanups)
+        executions: list[dict[str, str]] = []
+
+        def docker(*arguments: str, **kwargs: Any) -> bytes:
+            executions.append(dict(item.split("=", 1) for item in arguments if "=" in item))
+            return b"testing_copy_sanitized=true\ntesting_copy_pre_registry_sanitized=true\nodoo_module_update_completed=true\nodoo_module_update_modules_configured=true\n"
+
+        helper.host["docker"] = docker
+        for sanitize in (True, False):
+            helper.host["copy_runner"](
+                spec,
+                {"script-runner": ("runner", {})},
+                database,
+                fresh=sanitize,
+                sanitize_only=sanitize,
+            )
+        for compose in cast(dict[str, str], spec["compose"]).values():
+            services = yaml.safe_load(compose)["services"]
+            for name, service in services.items():
+                if name == "database":
+                    continue
+                environment = interpolate(service["environment"], supplied)
+                with self.subTest(service=name):
+                    settings = ProductSettings.model_validate(environment)
+                    self.assertIn(settings.database_host, services)
+                    self.assertEqual(settings.database_name, database)
+                    self.assertEqual(settings.platform_instance, supplied["PLATFORM_INSTANCE"])
+                    data_mount = next(
+                        volume.split(":")[1]
+                        for volume in service["volumes"]
+                        if volume.split(":")[0] == "odoo_data"
+                    )
+                    self.assertTrue(settings.filestore_path.is_relative_to(data_mount))
+                    for execution in executions:
+                        self.assertEqual(
+                            Path(execution["ODOO_FILESTORE_PATH"]), settings.filestore_path
+                        )
 
     def test_artifact_from_another_product_cannot_receive_copied_data(self) -> None:
         assert self.manifests[1].source_build is not None
@@ -377,7 +1127,6 @@ class RehearsalScenario(unittest.TestCase):
         def scheduler(
             record: OdooUpgradeRehearsalRecord, script: str, check: Callable[[], None]
         ) -> dict[str, str]:
-            program = python_heredoc(script)
             output = io.StringIO()
             with (
                 patch.object(sys, "argv", ["host"]),
@@ -391,7 +1140,9 @@ class RehearsalScenario(unittest.TestCase):
                 ),
                 redirect_stdout(output),
             ):
-                exec(compile(program, "<actual-host>", "exec"), {})
+                from tests.support.host_package import execute_host_schedule
+
+                execute_host_schedule(script)
             # This is the parser used by run_manual_data_schedule, including
             # its value lowercasing and allowlist.
             return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
@@ -462,7 +1213,6 @@ class RehearsalScenario(unittest.TestCase):
             validate_dokploy_schedule_script({"script": script, "appName": record.rehearsal_id})
             encoded = base64.b64encode(script.encode()).decode()
             materialized = base64.b64decode(encoded, validate=True).decode()
-            body = python_heredoc(materialized)
             output = io.StringIO()
             with (
                 patch.object(sys, "argv", ["host"]),
@@ -474,7 +1224,9 @@ class RehearsalScenario(unittest.TestCase):
                 ),
                 redirect_stdout(output),
             ):
-                exec(compile(body, "<provider-host>", "exec"), {})
+                from tests.support.host_package import execute_host_schedule
+
+                execute_host_schedule(materialized)
             return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
 
         with patch.object(adapter, "run_script", side_effect=scheduler):
@@ -485,7 +1237,6 @@ class RehearsalScenario(unittest.TestCase):
         prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
         apply_script = adapter.host_script(record, "apply", operation_key="fixture-operation")
         validate_dokploy_schedule_script({"script": apply_script, "appName": record.rehearsal_id})
-        compile(python_heredoc(apply_script), "<apply-transport>", "exec")
 
     def test_oversize_host_script_is_refused_before_dispatch_checks(self) -> None:
         import click
@@ -549,10 +1300,16 @@ class RehearsalScenario(unittest.TestCase):
                     adapter.host(record, "apply", lambda: None)
 
     def test_missing_creation_receipt_requires_recovery_without_starting_a_copy(self) -> None:
+        from control_plane.dokploy import network_capacity
         from control_plane.provider_operations import ProviderOperationLease
 
         before = self.authority()
         with (
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                wraps=network_capacity.require_bridge_network_capacity,
+            ),
+            patch("control_plane.dokploy.native_copy_stream._read_remote") as read,
             patch(
                 "control_plane.dokploy.sandbox_placement.created_placement",
                 return_value=("", "", ""),
@@ -561,13 +1318,25 @@ class RehearsalScenario(unittest.TestCase):
             patch.object(OdooRehearsalAdapter, "run_script") as storage,
             self.assertRaises(RehearsalRefused) as refused,
         ):
+            read.side_effect = lambda **kwargs: kwargs["receive"](
+                {
+                    "type": "complete",
+                    "result": {
+                        "total_slots": 16,
+                        "free_slots": 1 + network_capacity.BRIDGE_NETWORK_CAPACITY_MARGIN,
+                    },
+                }
+            )
             self.adapter("prepare").apply("original-operation", Mock(spec=ProviderOperationLease))
         self.assertEqual(refused.exception.code, RehearsalPrerequisite.RECOVERY_REQUIRED)
+        self.assertEqual(read.call_args.kwargs["server_id"], self.record.server_id)
         create.assert_called_once()
         storage.assert_not_called()
         self.assertEqual(self.authority(), before)
 
     def test_lifecycle_preserves_both_recovery_states_and_all_original_lanes(self) -> None:
+        from tests.test_odoo_rehearsal_business_validation import identity, receipt
+
         before = self.authority()
         copies = []
         creates = iter(
@@ -604,11 +1373,12 @@ class RehearsalScenario(unittest.TestCase):
             if action == "simulate-final":
                 copies.append(self.copy("final_source"))
             if action == "verify":
-                copies.append(self.copy("final_upgrade"))
+                copies.append(validated_final_copy(record, self.copy("final_upgrade")))
             state = {
                 "prepare": "prepared",
                 "execute": "upgraded",
                 "simulate-final": "switched",
+                "validate-business": "switched",
                 "verify": "verified",
                 "retire": "retired",
             }[action]
@@ -620,6 +1390,11 @@ class RehearsalScenario(unittest.TestCase):
                 "resources_preserved": True,
                 "public_route": False,
                 "business_host_frozen": False,
+                **(
+                    {"business_validation": receipt(identity(record))}
+                    if action == "validate-business"
+                    else {}
+                ),
             }
 
         with (
@@ -634,7 +1409,14 @@ class RehearsalScenario(unittest.TestCase):
             patch.object(OdooRehearsalAdapter, "run_script", side_effect=schedule),
             patch.object(OdooRehearsalAdapter, "host", autospec=True, side_effect=host),
         ):
-            for action in ("prepare", "execute", "simulate-final", "verify", "retire"):
+            for action in (
+                "prepare",
+                "execute",
+                "simulate-final",
+                "validate-business",
+                "verify",
+                "retire",
+            ):
                 from control_plane.provider_operations import ProviderOperationLease
 
                 result = self.adapter(action).apply(
@@ -756,10 +1538,131 @@ class RehearsalScenario(unittest.TestCase):
             changed.operation_readback(prepared, "original-execute")
         with self.assertRaises(RehearsalRefused):
             adapter.operation_readback(
-                prepared.model_copy(update={"state": "upgraded"}), "original-execute"
+                prepared.model_copy(update={"rehearsal_id": "lp-rehearsal-" + "f" * 32}),
+                "original-execute",
             )
         self.assertEqual(self.store.list_held_provider_target_reservations(), before)
         self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), prepared)
+
+    def test_capture_inspection_preserves_the_reviewed_action(self) -> None:
+        from control_plane.host_package import host_invocation
+
+        adapter = self.adapter("validate-business")
+        script = adapter.host_script(
+            self.record.model_copy(update={"compose_id": "own-compose"}),
+            "observe",
+            inspect_capture=True,
+        )
+        invocation = host_invocation(script)
+        assert invocation is not None
+        self.assertEqual(invocation.spec["action"], adapter.request.action)
+        self.assertTrue(invocation.spec["inspect_capture"])
+
+    def test_failure_events_include_nested_host_frames(self) -> None:
+        from control_plane.dokploy import api
+        from control_plane.odoo_upgrade_rehearsal import REHEARSAL_HOST_FILENAME
+
+        record = self.record.model_copy(update={"compose_id": "own-compose"})
+        checkpoint = datetime.now(timezone.utc).isoformat()
+        log = [f'  File "{REHEARSAL_HOST_FILENAME}", line 3, in inner', "RuntimeError: failed"]
+        with (
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={"serverId": record.server_id, "appName": record.rehearsal_id},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", record.server_id, "", record.server_id),
+            ),
+            patch.object(
+                api, "find_matching_dokploy_schedule", return_value={"scheduleId": "owned"}
+            ),
+            patch.object(
+                api,
+                "dokploy_request",
+                return_value=[
+                    {"deploymentId": "nested-failure", "createdAt": checkpoint, "status": "error"}
+                ],
+            ),
+            patch.object(api, "fetch_dokploy_deployment_logs", return_value=log),
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.rehearsal_host_program",
+                return_value="def outer():\n    def inner():\n        raise RuntimeError('failed')\n    inner()\n",
+            ),
+        ):
+            events, complete = self.adapter("execute").failure_events(record, checkpoint)
+        self.assertTrue(complete)
+        self.assertEqual(events[0]["failure_locations"], [{"function": "inner", "line": 3}])
+        self.assertEqual(events[0]["failure_frames"], ["inner"])
+
+    def test_published_actions_read_the_original_request_without_replaying_effects(self) -> None:
+        from dataclasses import replace
+
+        prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
+        previous = self.record
+        for action, initial, final in (
+            ("execute", "prepared", "upgraded"),
+            ("simulate-final", "upgraded", "switched"),
+            ("verify", "switched", "verified"),
+            ("retire", "verified", "retired"),
+        ):
+            with self.subTest(action=action):
+                record = previous.model_copy(update={"state": initial, "compose_id": "own-compose"})
+                if action == "verify":
+                    record = with_passing_business_validation(record)
+                self.store.compare_and_write_odoo_upgrade_rehearsal(previous, record)
+                adapter = self.adapter(action)
+
+                def apply(key: str, lease: Any) -> Any:
+                    from control_plane.provider_operations import ProviderMutationOutcome
+                    from control_plane.provider_operations import (
+                        provider_operation_response_payload,
+                    )
+
+                    lease.checkpoint_effect(action)
+                    public = adapter.publish(
+                        record,
+                        {
+                            "completed": True,
+                            "state": final,
+                            "copies": [
+                                copy.model_dump(mode="json")
+                                for copy in (
+                                    (validated_final_copy(record, self.copy("final_upgrade")),)
+                                    if action == "verify"
+                                    else record.copies
+                                )
+                            ],
+                            "elapsed_seconds": {action: 1.0},
+                        },
+                    )
+                    return ProviderMutationOutcome(
+                        202,
+                        provider_operation_response_payload(
+                            trace_id=adapter.trace,
+                            records={"rehearsal": self.identifier},
+                            result=public,
+                        ),
+                    )
+
+                with patch.object(adapter, "apply", side_effect=apply) as effect:
+                    outcome = self.run_operation(adapter, "original-" + action)
+                    self.assertEqual(outcome.status, "completed")
+                    published = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+                    assert published is not None
+                    self.assertNotEqual(published.binding_sha256, record.binding_sha256)
+                    observed = adapter.operation_readback(published, "original-" + action)
+                    self.assertEqual(observed["operation_state"], "completed")
+                    with self.assertRaises(RehearsalRefused):
+                        adapter.operation_readback(published, "unrelated-key")
+                    changed = replace(
+                        adapter, request=adapter.request.model_copy(update={"reason": "changed"})
+                    )
+                    with self.assertRaises(RehearsalRefused):
+                        changed.operation_readback(published, "original-" + action)
+                    effect.assert_called_once()
+                previous = published
 
     def test_failure_events_keep_process_deaths_and_project_actual_host_tracebacks(
         self,
@@ -770,20 +1673,20 @@ class RehearsalScenario(unittest.TestCase):
         checkpoint = datetime.now(timezone.utc)
         current = {"deploymentId": "failed-source-event", "createdAt": checkpoint.isoformat()}
         older = {"deploymentId": "older-event", "createdAt": "2000-01-01T00:00:00Z"}
-        import io
+        import sys
         import traceback
+        import json
+        from control_plane.contracts.canonical_json import canonical_json_sha256
 
         host_fixture = RehearsalHostSafetyTests()
         host_fixture.setUp()
         self.addCleanup(host_fixture.doCleanups)
-        process = Mock(stdout=io.BytesIO(b"fixture capture"))
-        process.wait.return_value = 1
-        process.poll.return_value = 0
         try:
-            with patch("subprocess.Popen", return_value=process):
-                host_fixture.host["bounded_capture"](
-                    ["fixture-command"], host_fixture.fixture.root / "partial.dump", 100
-                )
+            host_fixture.host["bounded_capture"](
+                [sys.executable, "-c", "import sys;print('fixture capture');sys.exit(1)"],
+                host_fixture.fixture.root / "partial.dump",
+                100,
+            )
         except RuntimeError as error:
             log = traceback.format_exc().splitlines()
             from control_plane.odoo_upgrade_rehearsal import REHEARSAL_HOST_FILENAME
@@ -796,6 +1699,20 @@ class RehearsalScenario(unittest.TestCase):
         else:
             self.fail("An incomplete source process must refuse capture")
         log += ["PRIVATE_VALUE=do-not-export"]
+        operation = "original-operation"
+        child = {
+            "intent_sha256": record.intent_sha256,
+            "record_binding_sha256": record.binding_sha256,
+            "attempt_sha256": canonical_json_sha256({"operation_key": operation}),
+            "step": "bounded_capture",
+            "exit_status": 1,
+            "error_text": "capture child failed",
+        }
+        log += ["rehearsal_child_failure=" + json.dumps(child).encode().hex()]
+        invalid = []
+        for field in ("intent_sha256", "record_binding_sha256", "attempt_sha256"):
+            changed = {**child, field: hashlib.sha256(field.encode()).hexdigest()}
+            invalid.append(["rehearsal_child_failure=" + json.dumps(changed).encode().hex()])
         try:
             host_fixture.host["inspect_copy_runtime"](
                 host_fixture.spec, expected_instance="invalid"
@@ -826,18 +1743,30 @@ class RehearsalScenario(unittest.TestCase):
                 api, "find_matching_dokploy_schedule", return_value={"scheduleId": "owned"}
             ),
             patch.object(
-                api, "dokploy_request", return_value=[older] * 40 + [current, killed, library]
+                api,
+                "dokploy_request",
+                return_value=[older] * 40
+                + [current, killed, library]
+                + [
+                    {**current, "deploymentId": f"unbound-{index}"} for index in range(len(invalid))
+                ],
             ),
             patch.object(
-                api, "fetch_dokploy_deployment_logs", side_effect=[log, ["Killed"], library_log]
+                api,
+                "fetch_dokploy_deployment_logs",
+                side_effect=[log, ["Killed"], library_log] + invalid,
             ) as logs,
         ):
             events, complete = self.adapter("execute").failure_events(
-                record, checkpoint.isoformat()
+                record, checkpoint.isoformat(), operation_key=operation
             )
         self.assertTrue(complete)
         self.assertEqual(logs.call_count, len(events))
         self.assertEqual(events[0]["deployment_id"], current["deploymentId"])
+        self.assertEqual(events[0]["child_failure"], {**child, "error_text": ""})
+        self.assertTrue(events[0]["diagnostics_private"])
+        for event in events[3:]:
+            self.assertNotIn("child_failure", event)
         frames = events[0]["failure_frames"]
         assert isinstance(frames, list)
         self.assertIn(host_fixture.host["bounded_capture"].__name__, frames)
@@ -909,7 +1838,11 @@ class RehearsalScenario(unittest.TestCase):
             "_provider_operation_key": "private-key",
             "_stored_refusal_code": "",
         }
-        event = {"deployment_id": "original", "provider_status": "running"}
+        event = {
+            "deployment_id": "original",
+            "provider_status": "error",
+            "child_failure": {"error_text": "private fallback error"},
+        }
         with (
             patch.object(OdooRehearsalAdapter, "operation_readback", return_value=dict(journal)),
             patch.object(OdooRehearsalAdapter, "failure_events", return_value=([event], True)),
@@ -925,6 +1858,7 @@ class RehearsalScenario(unittest.TestCase):
         ):
             result = adapter.native_readback(self.record, "original", lambda: None)
         self.assertEqual(result["failure_events_after_checkpoint"], [event])
+        self.assertTrue(result["diagnostics_private"])
         self.assertEqual(result["operation_state"], journal["operation_state"])
         self.assertTrue(result["host_observation_unavailable"])
         self.assertTrue(result["original_key_required"])
@@ -945,6 +1879,27 @@ class RehearsalScenario(unittest.TestCase):
             self.assertRaises(RuntimeError),
         ):
             adapter.native_readback(self.record, "original", lost)
+
+    def test_running_original_readback_keeps_diagnostics_without_settling_or_replay(self) -> None:
+        adapter = self.adapter("execute")
+        journal = {
+            "operation_state": "running",
+            "provider_effect_phase": "execute",
+            "provider_effect_started_at": self.record.updated_at.isoformat(),
+            "_provider_operation_key": "original-provider-operation",
+            "_stored_refusal_code": "",
+        }
+        event = {"provider_status": "done", "traceback_present": True}
+        with (
+            patch.object(OdooRehearsalAdapter, "operation_readback", return_value=journal),
+            patch.object(OdooRehearsalAdapter, "failure_events", return_value=([event], True)),
+            patch.object(OdooRehearsalAdapter, "host", return_value={"completed": False}) as host,
+        ):
+            result = adapter.native_readback(self.record, "original", lambda: None)
+        self.assertEqual(result["failure_events_after_checkpoint"], [event])
+        self.assertTrue(host.call_args.kwargs["inspect_capture"])
+        self.assertEqual(result["operation_state"], "running")
+        self.assertTrue(result["original_key_required"])
 
     def test_prepare_qualification_availability_preserves_evidence_but_integrity_refuses(
         self,
@@ -1092,6 +2047,122 @@ class RehearsalScenario(unittest.TestCase):
             adapter=adapter,
         )
 
+    def test_credential_only_prepare_recovers_original_after_store_reopen(self) -> None:
+        from control_plane.dokploy import api
+        from control_plane.dokploy.sandbox_placement import IsolatedPlacementObservationRequired
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        before = self.authority()
+        adapter = self.adapter("prepare")
+        allocations: list[str] = []
+
+        def create(root: Path, **kwargs: Any) -> None:
+            kwargs["checkpoint"]()
+            for field in ("project_id", "environment_id", "compose_id"):
+                kwargs["before_create"](field)
+                allocations.append(field)
+                kwargs["record_identity"](field, "own-" + field)
+
+        with (
+            patch(
+                "control_plane.dokploy.sandbox_placement.created_placement",
+                return_value=("", "", ""),
+            ) as placement,
+            patch(
+                "control_plane.dokploy.sandbox_placement.create_isolated_placement",
+                side_effect=SystemExit,
+            ) as create_placement,
+            patch.object(api, "find_matching_dokploy_schedule", return_value=None),
+            patch.object(OdooRehearsalAdapter, "host") as host,
+        ):
+            with self.assertRaises(SystemExit):
+                self.run_operation(adapter, "credential-only")
+            database_url = self.store.database_url
+            self.store.close()
+            self.store = PostgresRecordStore(database_url=database_url)
+            self.addCleanup(self.store.close)
+            partial = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+            assert partial is not None
+            self.assertTrue(partial.credential_bindings_sha256)
+            self.assertFalse(any((partial.project_id, partial.environment_id, partial.compose_id)))
+            credentials = self.store.list_secret_records(context_name=self.identifier, limit=None)
+            bindings = self.store.list_secret_bindings(context_name=self.identifier, limit=None)
+            adapter = OdooRehearsalAdapter(
+                self.root, self.store, self.product, adapter.request, self.principal, "restart"
+            )
+            journals = self.store.list_held_provider_target_reservations()
+            readback = adapter.prepare_readback(partial, "credential-only")
+            self.assertEqual(readback["recovery_disposition"], "continue_original_prepare")
+            self.assertFalse(readback["provider_effect_phase"])
+            self.assertFalse(readback["completed"])
+            self.assertEqual(self.store.list_held_provider_target_reservations(), journals)
+            self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), partial)
+            with self.assertRaises(RehearsalRefused):
+                adapter.prepare_readback(partial, "replacement-key")
+            self.assertEqual(self.run_operation(adapter, "replacement-key").status, "target_busy")
+            create_placement.reset_mock()
+            for observation in (
+                ("unexpected-project", "", ""),
+                IsolatedPlacementObservationRequired("ambiguous inventory"),
+                api.DokployRequestFailed(
+                    method="GET", path="/api/project.all", detail="unavailable", status_code=503
+                ),
+            ):
+                with self.subTest(observation=type(observation).__name__):
+                    placement.side_effect = (
+                        observation if isinstance(observation, Exception) else None
+                    )
+                    placement.return_value = observation
+                    self.assertEqual(
+                        adapter.prepare_readback(partial, "credential-only")[
+                            "recovery_disposition"
+                        ],
+                        "hold_unknown",
+                    )
+                    self.assertEqual(
+                        self.run_operation(adapter, "credential-only").status, "reconcile_required"
+                    )
+            placement.side_effect = None
+            placement.return_value = ("", "", "")
+            with patch(
+                "control_plane.odoo_upgrade_rehearsal.rehearsal_credential_bindings",
+                return_value="f" * 64,
+            ):
+                self.assertEqual(
+                    adapter.prepare_readback(partial, "credential-only")["recovery_disposition"],
+                    "hold_unknown",
+                )
+                self.assertEqual(
+                    self.run_operation(adapter, "credential-only").status, "reconcile_required"
+                )
+            create_placement.assert_not_called()
+            host.assert_not_called()
+            create_placement.side_effect = create
+            host.return_value = {"state": "prepared", "copies": [], "elapsed_seconds": {}}
+            with patch.object(
+                OdooRehearsalAdapter,
+                "run_script",
+                side_effect=lambda record, *_: {
+                    "testing_resources_ok": "true",
+                    "testing_resources_binding_sha256": rehearsal_resource(record).binding_sha256,
+                },
+            ):
+                result = self.run_operation(adapter, "credential-only")
+                self.assertEqual(result.status, "completed")
+                self.assertEqual(self.run_operation(adapter, "credential-only").status, "replayed")
+            self.assertEqual(allocations, ["project_id", "environment_id", "compose_id"])
+            self.assertEqual(
+                self.store.list_secret_records(context_name=self.identifier, limit=None),
+                credentials,
+            )
+            self.assertEqual(
+                self.store.list_secret_bindings(context_name=self.identifier, limit=None), bindings
+            )
+            self.assertEqual(self.authority(), before)
+            prepared = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+            assert prepared is not None
+            self.assertEqual(prepared.state, "prepared")
+
     def test_prepare_partial_project_continues_only_original_effect_without_duplicate_create(
         self,
     ) -> None:
@@ -1146,6 +2217,9 @@ class RehearsalScenario(unittest.TestCase):
 
         adapter = self.adapter("prepare")
         with (
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity"
+            ) as capacity,
             patch.object(api, "fetch_dokploy_projects", side_effect=lambda **_: tuple(projects)),
             patch.object(api, "dokploy_request", side_effect=provider),
             patch.object(
@@ -1264,6 +2338,7 @@ class RehearsalScenario(unittest.TestCase):
             prepared = self.store.read_odoo_upgrade_rehearsal(self.identifier)
             assert prepared is not None
             self.assertEqual(prepared.state, "prepared")
+            capacity.assert_called_once()
 
     def test_terminal_refusal_releases_the_operation_target_for_a_new_key(self) -> None:
         retained = self.record.model_copy(
@@ -1273,6 +2348,7 @@ class RehearsalScenario(unittest.TestCase):
                 "copies": (self.copy("source"), self.copy("final_source")),
             }
         )
+        retained = with_passing_business_validation(retained)
         self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, retained)
         adapter = self.adapter("verify")
         refused: dict[str, object] = {
@@ -1282,7 +2358,7 @@ class RehearsalScenario(unittest.TestCase):
         completed: dict[str, object] = {
             "state": "verified",
             "copies": [copy.model_dump(mode="json") for copy in retained.copies]
-            + [self.copy("final_upgrade").model_dump(mode="json")],
+            + [validated_final_copy(retained, self.copy("final_upgrade")).model_dump(mode="json")],
             "elapsed_seconds": {"verify": 0.1},
         }
         with (
@@ -1509,6 +2585,7 @@ class RehearsalScenario(unittest.TestCase):
 
     def test_lost_refusal_response_reconciles_only_the_same_operation_key(self) -> None:
         retained = self.record.model_copy(update={"state": "switched", "compose_id": "own-compose"})
+        retained = with_passing_business_validation(retained)
         self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, retained)
         adapter = self.adapter("verify")
         original = ""
@@ -1545,13 +2622,945 @@ class RehearsalScenario(unittest.TestCase):
 
 
 class RehearsalHostSafetyTests(unittest.TestCase):
+    def test_copy_runner_delegates_logging_and_failures_to_its_artifact(self) -> None:
+        import ast
+        import subprocess
+        from control_plane.odoo_testing_restore import rehearsal_copy_runner
+
+        class ArtifactRunner:
+            @staticmethod
+            def run_command(command: str) -> str:
+                if "--fail" in command.split():
+                    raise subprocess.CalledProcessError(7, command)
+                return command
+
+            @staticmethod
+            def _odoo_shell_command() -> list[str]:
+                return ["artifact-native-shell"]
+
+            @staticmethod
+            def _run_odoo_shell(script: str, label: str) -> tuple[str, str]:
+                return script, label
+
+        runner = next(
+            node
+            for node in ast.parse(rehearsal_copy_runner(sanitize_source_only=False)).body
+            if isinstance(node, ast.ClassDef) and node.name == "CopyRunner"
+        )
+        namespace: dict[str, Any] = {
+            "OdooDataWorkflowRunner": ArtifactRunner,
+            "expected_copy_instance": "rehearsal",
+        }
+        exec(
+            compile(ast.Module(body=[runner], type_ignores=[]), "<artifact-runner>", "exec"),
+            namespace,
+        )
+        copy = namespace["CopyRunner"]()
+        command = "/odoo/odoo-bin --stop-after-init --update all"
+        self.assertEqual(copy.run_command(command), ArtifactRunner.run_command(command))
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            copy.run_command(command + " --fail")
+        self.assertEqual(failure.exception.returncode, 7)
+        self.assertEqual(copy._odoo_shell_command(), ArtifactRunner._odoo_shell_command())
+        self.assertEqual(
+            copy._run_odoo_shell("fixture-script", "fixture-step"),
+            ArtifactRunner._run_odoo_shell("fixture-script", "fixture-step"),
+        )
+
+    def test_bound_failure_writer_withholds_text_and_extra_child_fields(self) -> None:
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        copied = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
+        self.host["retain_command_failure"](
+            spec,
+            root,
+            {
+                "step": "clone",
+                "exit_status": 7,
+                "error_text": copied,
+                "unexpected": copied,
+            },
+        )
+        self.assertNotIn(
+            copied.encode(), self.host["command_failure_path"](spec, root).read_bytes()
+        )
+        failure = self.host["read_command_failure"](spec, root)
+        self.assertEqual(failure["step"], "clone")
+        self.assertEqual(failure["exit_status"], 7)
+        self.assertEqual(failure["attempt_sha256"], spec["attempt_sha256"])
+
+    def test_child_receipts_withhold_arbitrary_copied_values(self) -> None:
+        import sys
+
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        (root / "verify.started").touch()
+        copied = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
+        with self.assertRaises(self.host["RehearsalCommandFailure"]):
+            with self.host["command_failure_scope"](spec, root):
+                self.host["command"](
+                    [
+                        sys.executable,
+                        "-c",
+                        f"import sys;print({copied!r});print({copied!r},file=sys.stderr);sys.exit(7)",
+                    ]
+                )
+        self.assertNotIn(
+            copied.encode(), self.host["command_failure_path"](spec, root).read_bytes()
+        )
+        failure = self.host["read_command_failure"](spec, root)
+        self.assertNotIn(copied, str(failure))
+        self.assertEqual(failure["exit_status"], 7)
+        self.assertEqual(
+            failure["step"], self.test_child_receipts_withhold_arbitrary_copied_values.__name__
+        )
+        self.assertEqual(failure["attempt_sha256"], spec["attempt_sha256"])
+        self.assertEqual(failure["record_binding_sha256"], spec["record_binding_sha256"])
+
+    def test_legacy_child_and_log_content_is_withheld_before_transport(self) -> None:
+        import io
+        import json
+        from contextlib import redirect_stdout
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+
+        copied = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.host["emit_rehearsal_result"](
+                {
+                    "child_failure": {"step": "clone", "exit_status": 7, "error_text": copied},
+                    "retained_upgrade_logs": {
+                        "files": [{"file": copied + ".log", "tail": copied}],
+                        "runtime": [{"service": "database", "tail": copied}],
+                    },
+                }
+            )
+        marker = extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
+        result = json.loads(bytes.fromhex(marker["rehearsal_result"]))
+        self.assertNotIn(copied, str(result))
+        self.assertEqual(result["child_failure"]["step"], "clone")
+        self.assertEqual(result["child_failure"]["exit_status"], 7)
+        self.assertNotIn("retained_upgrade_logs", result)
+        self.assertTrue(result["retained_upgrade_logs_unavailable"])
+
+    def test_persistence_refusals_keep_bound_child_in_existing_job_output(self) -> None:
+        import errno
+        import io
+        import subprocess
+        import json
+        from contextlib import redirect_stdout
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        (root / "verify.started").touch()
+        for error in (OSError(errno.ENOSPC, "full storage"), FileExistsError("pending custody")):
+            output = io.StringIO()
+            with (
+                patch.dict(self.host, save=Mock(side_effect=error)),
+                patch.object(
+                    self.host["subprocess"],
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        [], 7, b"", b"upgrade error PASSWORD=private-value"
+                    ),
+                ),
+                redirect_stdout(output),
+                self.assertRaises(self.host["RehearsalCommandFailure"]) as failure,
+            ):
+                with self.host["command_failure_scope"](spec, root):
+                    self.host["command"](["fixture-child"])
+            self.assertEqual(failure.exception.diagnostic["exit_status"], 7)
+            markers = extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
+            fallback = json.loads(bytes.fromhex(markers["rehearsal_child_failure"]))
+            self.assertEqual(fallback["attempt_sha256"], spec["attempt_sha256"])
+            self.assertEqual(fallback["record_binding_sha256"], spec["record_binding_sha256"])
+            self.assertEqual(fallback["exit_status"], 7)
+            self.assertEqual(fallback["error_text"], "")
+            self.assertNotIn("private-value", str(fallback))
+            self.assertIsNone(self.host["read_command_failure"](spec, root))
+
+    def test_failed_child_preserves_exit_and_binding_without_content_for_readback(self) -> None:
+        import subprocess
+
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        (root / "verify.started").touch()
+        (root / ".execution.lock").touch()
+        error_text = "psycopg2.errors.UndefinedColumn: column legacy_code does not exist"
+        secret = "fixture-password-do-not-export"
+        for cleanup in (
+            subprocess.CompletedProcess([], 9, b"", b"cleanup also failed"),
+            RuntimeError("Candidate stop inventory is unverified"),
+        ):
+            self.host["command_failure_path"](spec, root).unlink(missing_ok=True)
+            with (
+                self.subTest(cleanup=type(cleanup).__name__),
+                patch.object(
+                    self.host["subprocess"],
+                    "run",
+                    side_effect=[
+                        subprocess.CompletedProcess([], 1, b"", b"transient startup error"),
+                        subprocess.CompletedProcess(
+                            [],
+                            7,
+                            b"initialization stopped",
+                            (error_text + "\nPASSWORD=" + secret).encode(),
+                        ),
+                        cleanup,
+                    ],
+                ),
+            ):
+                expected_error = (
+                    RuntimeError
+                    if isinstance(cleanup, RuntimeError)
+                    else self.host["RehearsalCommandFailure"]
+                )
+                with self.assertRaises(expected_error):
+                    with self.host["command_failure_scope"](spec, root):
+                        try:
+                            self.host["command"](["transient-child"])
+                        except self.host["RehearsalCommandFailure"]:
+                            pass
+                        try:
+                            self.host["command"](["fixture-child"])
+                        finally:
+                            self.host["command"](["cleanup-child"])
+                self.assertEqual(self.host["read_command_failure"](spec, root)["exit_status"], 7)
+        diagnostic = self.host["read_command_failure"](spec, root)
+        self.assertEqual(
+            diagnostic["step"],
+            self.test_failed_child_preserves_exit_and_binding_without_content_for_readback.__name__,
+        )
+        self.assertEqual(diagnostic["exit_status"], 7)
+        self.assertEqual(diagnostic["error_text"], "")
+        self.assertNotIn("transient startup error", diagnostic["error_text"])
+        self.assertNotIn(secret, str(diagnostic))
+        spec.update(mode="observe", inspect_capture=True)
+        observed = self.run_host(spec)
+        self.assertEqual(observed["child_failure"]["exit_status"], diagnostic["exit_status"])
+        self.assertEqual(observed["child_failure"]["error_text"], diagnostic["error_text"])
+        self.assertEqual(observed["child_failure"]["attempt_sha256"], spec["attempt_sha256"])
+        self.assertFalse(observed["completed"])
+        original = spec["attempt_sha256"]
+        spec["attempt_sha256"] = hashlib.sha256(b"another operation").hexdigest()
+        with self.assertRaises(RuntimeError):
+            self.run_host(spec)
+        spec["attempt_sha256"] = original
+        path = self.host["command_failure_path"](spec, root)
+        path.rename(root / "aliased-diagnostic")
+        path.symlink_to(root / "aliased-diagnostic")
+        with self.assertRaises(OSError):
+            self.run_host(spec)
+
+    def test_legacy_child_readback_withholds_content_without_rewriting_custody(self) -> None:
+        import json
+        import os
+
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        spec.update(mode="observe", action="execute", inspect_capture=True)
+        spec["record"]["state"] = "prepared"
+        (root / "execute.started").touch()
+        (root / ".execution.lock").touch()
+        source = self.host["database_names"](spec)["source"]
+        (root / source).mkdir()
+        (root / source / "receipt.json").write_text(json.dumps({"database": source}))
+        self.host["validate_snapshots"] = Mock()
+        copied = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
+        path = self.host["command_failure_path"](spec, root)
+        path.write_text(
+            json.dumps(
+                {
+                    "intent_sha256": spec["record"]["intent_sha256"],
+                    "attempt_sha256": spec["attempt_sha256"],
+                    "record_binding_sha256": spec["record_binding_sha256"],
+                    "step": "clone",
+                    "exit_status": 1,
+                    "error_text": copied,
+                }
+            )
+        )
+        os.chmod(path, 0o600)
+        original = path.read_bytes()
+        observed = self.run_host(spec)
+        self.assertNotIn(copied, str(observed))
+        self.assertEqual(observed["child_failure"]["step"], "clone")
+        self.assertEqual(observed["child_failure"]["exit_status"], 1)
+        self.assertTrue(observed["custody"]["effect_started"])
+        self.assertFalse(observed["completed"])
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_empty_warning_only_filestore_capture_is_not_an_archive(self) -> None:
+        import sys
+
+        _, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        warning = b"tar: .: file changed as we read it\n"
+        self.assertTrue(self.host["filestore_tar_warning_only"](1, warning, False))
+        with self.assertRaises(RuntimeError):
+            self.host["bounded_capture"](
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys;sys.stderr.write(" + repr(warning.decode()) + ");sys.exit(1)",
+                ],
+                root / "empty.tar",
+                1024,
+                filestore=True,
+            )
+
+    def test_capture_failure_discards_output_and_preserves_exit_status(self) -> None:
+        import sys
+        from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TAIL_LIMIT
+
+        spec, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        for name, output in (("verbose", "private capture bytes"), ("quiet", "")):
+            with self.subTest(name=name):
+                capture_root = root / name
+                capture_root.mkdir()
+                (capture_root / "verify.started").touch()
+                with self.assertRaises(self.host["RehearsalCommandFailure"]):
+                    with self.host["command_failure_scope"](spec, capture_root):
+                        self.host["bounded_capture"](
+                            [
+                                sys.executable,
+                                "-c",
+                                f"import sys;sys.stdout.write({output!r});sys.stderr.buffer.write(b'x'*{REHEARSAL_DIAGNOSTIC_TAIL_LIMIT * 3});sys.stderr.write('\\ncapture child error');sys.exit(7)",
+                            ],
+                            capture_root / "partial.dump",
+                            1024,
+                        )
+                diagnostic = self.host["read_command_failure"](spec, capture_root)
+                self.assertEqual(diagnostic["exit_status"], 7)
+                self.assertEqual(diagnostic["error_text"], "")
+                self.assertNotIn("private capture bytes", str(diagnostic))
+
+    @staticmethod
+    def attachment_mismatch_fixture() -> dict[str, Any]:
+        checksum = hashlib.sha1(b"expected attachment").hexdigest()
+        return {
+            "reason": "attachment_size_mismatch",
+            "store_fname": checksum[:2] + "/" + checksum,
+            "name": "Service invoice.pdf",
+            "res_model": "account.move",
+            "res_id": 42,
+            "mimetype": "application/pdf",
+            "database_size": len(b"expected attachment"),
+            "database_checksum": checksum,
+            "file_size": len(b"private contents"),
+            "file_checksum": hashlib.sha1(b"private contents").hexdigest(),
+            "file_status": "measured",
+            "truncated_fields": [],
+        }
+
+    def test_failing_capture_names_its_attachment_without_content_or_another_scan(self) -> None:
+        from control_plane._odoo_rehearsal_attachment_validation import (
+            ATTACHMENT_METADATA_LIMITS,
+            ATTACHMENT_MISMATCH_RECEIPT_NAME,
+        )
+        import io
+        import json
+        import tarfile
+
+        spec, root, containers = self.storage_fixture(
+            {
+                "database_bytes": 4096,
+                "filestore_bytes": 20480,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        spec.update(
+            action="execute",
+            source={"ODOO_UPSTREAM_DB_USER": "fixture", "ODOO_UPSTREAM_DB_NAME": "fixture"},
+        )
+        spec["record"].update(
+            state="prepared",
+            source_odoo_version="18.0",
+            source_binding_sha256=hashlib.sha256(b"source").hexdigest(),
+        )
+        self.host["rehearsal_source_reader"] = Mock(return_value=([], "fixture", "/fixture"))
+        self.host["sanitize_capture"] = Mock()
+        self.host["sql"] = Mock(return_value="18.0")
+        self.host["docker"] = Mock()
+        mismatch = self.attachment_mismatch_fixture()
+        for field, limit in ATTACHMENT_METADATA_LIMITS.items():
+            mismatch[field] = "\U0001f680" * limit
+
+        def capture_file(arguments: list[str], path: Path, bound: int, **_kwargs: Any) -> None:
+            if path.suffix == ".dump":
+                path.write_bytes(b"private database contents")
+            else:
+                with tarfile.open(path, "w") as archive:
+                    member = tarfile.TarInfo(mismatch["store_fname"])
+                    member.size = len(b"private contents")
+                    archive.addfile(member, io.BytesIO(b"private contents"))
+
+        self.host["bounded_capture"] = capture_file
+        table = (
+            "COPY public.ir_attachment (store_fname, checksum, file_size) FROM stdin;\n"
+            f"{mismatch['store_fname']}\t{mismatch['database_checksum']}\t{mismatch['database_size']}\n"
+            f"{mismatch['store_fname']}\t{mismatch['database_checksum']}\t{mismatch['database_size'] + 1}\n\\.\n"
+        ).encode()
+        self.host["captured_attachment_table_chunks"] = lambda *_: (chunk for chunk in [table])
+        probe = Mock(return_value={"reason": mismatch["reason"], "mismatch": mismatch})
+        self.host["attachment_validation_payload"] = probe
+        (root / "execute.started").touch(mode=0o600)
+        (root / ".execution.lock").touch(mode=0o600)
+        with self.assertRaises(RuntimeError):
+            self.host["capture"](spec, root, containers, self.fixture.database)
+        saved = root / ATTACHMENT_MISMATCH_RECEIPT_NAME
+        evidence = json.loads(saved.read_text())
+        self.assertEqual(evidence["attachment"], mismatch)
+        self.assertEqual(evidence["attempt_sha256"], spec["attempt_sha256"])
+        self.assertEqual(evidence["record_binding_sha256"], spec["record_binding_sha256"])
+        self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("private contents", saved.read_text())
+        self.assertNotIn("private database contents", saved.read_text())
+        probe.assert_called_once()
+        spec.update(mode="observe", inspect_capture=True)
+        self.host["capture_attachment_observation"] = Mock(side_effect=AssertionError("extra scan"))
+        self.host["inspection"] = Mock(side_effect=AssertionError("runtime lookup"))
+        saved_before_readback = saved.read_bytes()
+        observed = self.run_host(spec)
+        self.assertEqual(observed["attachment_mismatch"], evidence)
+        self.assertFalse(observed["completed"])
+        self.assertEqual(observed["copies"], [])
+        self.assertEqual(saved.read_bytes(), saved_before_readback)
+        for field in ("attempt_sha256", "record_binding_sha256"):
+            with self.subTest(binding=field):
+                changed = {**spec, field: hashlib.sha256(field.encode()).hexdigest()}
+                with self.assertRaises(RuntimeError):
+                    self.run_host(changed)
+        clean_root = root / "clean-fixture"
+        clean_root.mkdir()
+        probe.return_value = {"reason": "verified"}
+        self.assertEqual(
+            self.host["capture"](spec, clean_root, containers, self.fixture.database),
+            clean_root / "raw-source",
+        )
+        self.assertFalse((clean_root / ATTACHMENT_MISMATCH_RECEIPT_NAME).exists())
+        self.assertTrue((clean_root / "capture.json").is_file())
+        self.assertEqual(
+            (clean_root / "raw-source/filestore" / mismatch["store_fname"]).read_bytes(),
+            b"private contents",
+        )
+
+    def test_validator_reports_compared_facts_for_size_and_checksum_mismatches(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalAttachmentFacts
+        from contextlib import nullcontext, redirect_stdout
+        import io
+        import json
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        from control_plane._odoo_rehearsal_attachment_validation import (
+            ATTACHMENT_METADATA_LIMITS,
+            ATTACHMENT_VALIDATION_PROGRAM,
+        )
+
+        program: dict[str, Any] = {"__name__": "fixture"}
+        exec(compile(ATTACHMENT_VALIDATION_PROGRAM, "fixture", "exec"), program)
+        expected = self.attachment_mismatch_fixture()
+        root = self.fixture.root / "attachment-evidence"
+        path = root / expected["store_fname"]
+        path.parent.mkdir(parents=True)
+        row = (
+            expected["store_fname"],
+            expected["database_checksum"],
+            expected["database_size"],
+            expected["name"],
+            expected["res_model"],
+            expected["res_id"],
+            expected["mimetype"],
+        )
+        for content, reason in (
+            (b"private contents", "attachment_size_mismatch"),
+            (b"x" * expected["database_size"], "attachment_hash_mismatch"),
+        ):
+            with self.subTest(reason=reason):
+                path.write_bytes(content)
+                mismatch: dict[str, Any] = {}
+                self.assertEqual(
+                    program["validate_attachment_files"]([row], root, None, mismatch=mismatch),
+                    reason,
+                )
+                self.assertEqual(
+                    mismatch,
+                    {
+                        **expected,
+                        "reason": reason,
+                        "file_size": len(content),
+                        "file_checksum": hashlib.sha1(content).hexdigest(),
+                    },
+                )
+                self.assertNotIn(content.decode(), json.dumps(mismatch))
+                self.assertEqual(path.read_bytes(), content)
+        path.write_bytes(b"expected attachment")
+        clean: dict[str, Any] = {}
+        self.assertEqual(
+            program["validate_attachment_files"]([row], root, None, mismatch=clean), "verified"
+        )
+        self.assertEqual(clean, {})
+        path.write_bytes(b"private contents")
+        for record_id in (-7, None):
+            mismatch = {}
+            signed_row = (*row[:5], record_id, row[6])
+            self.assertEqual(
+                program["validate_attachment_files"]([signed_row], root, None, mismatch=mismatch),
+                expected["reason"],
+            )
+            self.assertEqual(mismatch["res_id"], record_id)
+            self.assertEqual(
+                RehearsalAttachmentFacts.model_validate(mismatch).model_dump(), mismatch
+            )
+        for field in ("name", "res_model", "mimetype"):
+            long_value = "\U0001f680" * (ATTACHMENT_METADATA_LIMITS[field] + 1)
+            details = {**expected, field: long_value}
+            long_row = (
+                details["store_fname"],
+                details["database_checksum"],
+                details["database_size"],
+                details["name"],
+                details["res_model"],
+                details["res_id"],
+                details["mimetype"],
+            )
+            path.write_bytes(b"private contents")
+            mismatch = {}
+            self.assertEqual(
+                program["validate_attachment_files"]([long_row], root, None, mismatch=mismatch),
+                expected["reason"],
+            )
+            self.assertTrue(long_value.startswith(mismatch[field]))
+            self.assertLess(len(mismatch[field]), len(long_value))
+            self.assertEqual(mismatch["truncated_fields"], [field])
+            self.assertEqual(
+                RehearsalAttachmentFacts.model_validate(mismatch).model_dump(), mismatch
+            )
+        metadata = path.stat()
+        changed = SimpleNamespace(
+            st_size=metadata.st_size,
+            st_mtime_ns=metadata.st_mtime_ns,
+            st_ctime_ns=metadata.st_ctime_ns + 1,
+        )
+        real_fstat = program["os"].fstat
+        for status in ("changed", "unreadable"):
+            mismatch = {}
+            reads = 0
+
+            def observed_metadata(descriptor: int) -> Any:
+                nonlocal reads
+                actual = real_fstat(descriptor)
+                if actual.st_ino != metadata.st_ino:
+                    return actual
+                reads += 1
+                return metadata if reads == 1 else changed
+
+            with (
+                patch.object(
+                    program["os"],
+                    "fstat",
+                    side_effect=observed_metadata if status == "changed" else real_fstat,
+                ),
+                patch.object(
+                    program["os"], "fdopen", side_effect=OSError("private filesystem error")
+                )
+                if status == "unreadable"
+                else nullcontext(),
+            ):
+                self.assertEqual(
+                    program["validate_attachment_files"]([row], root, None, mismatch=mismatch),
+                    expected["reason"],
+                )
+            self.assertEqual(mismatch["file_status"], status)
+            self.assertIsNone(mismatch["file_checksum"])
+            self.assertEqual(mismatch["name"], expected["name"])
+            self.assertEqual(
+                RehearsalAttachmentFacts.model_validate(mismatch).model_dump(), mismatch
+            )
+        # Exercise the emitted CLI too: its normal validate call must carry
+        # the failed row into the payload, not only the lower-level helper.
+        path.write_bytes(b"private contents")
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value.__iter__.side_effect = lambda: iter(
+            [row]
+        )
+        output = io.StringIO()
+        with (
+            patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=lambda **_: connection)}),
+            patch.dict(
+                os.environ,
+                {
+                    "ODOO_DB_NAME": root.name,
+                    "ODOO_DB_USER": "fixture",
+                    "ODOO_DB_PASSWORD": "private login",
+                },
+            ),
+            patch.object(sys, "argv", ["validator", "validate"]),
+            patch("pathlib.Path", side_effect=lambda _: root.parent),
+            redirect_stdout(output),
+        ):
+            exec(
+                compile(ATTACHMENT_VALIDATION_PROGRAM, "fixture-cli", "exec"),
+                {"__name__": "__main__"},
+            )
+        payload = json.loads(bytes.fromhex(output.getvalue().strip().split("=", 1)[1]))
+        self.assertEqual(payload, {"reason": expected["reason"], "mismatch": expected})
+        self.assertNotIn("private contents", str(payload))
+        self.assertNotIn("private login", str(payload))
+        self.assertTrue(connection.set_session.call_args.kwargs["readonly"])
+        self.assertEqual(
+            sum(bool(call.kwargs.get("name")) for call in connection.cursor.call_args_list), 1
+        )
+
+    def test_captured_table_decoder_bounds_output_and_closes_its_process(self) -> None:
+        import subprocess
+        import sys
+        import time
+
+        spec, root, _ = self.storage_fixture(
+            {
+                "database_bytes": 4096,
+                "filestore_bytes": 10240,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        dump = root / "database.dump"
+        dump.write_bytes(b"fixture stdin")
+        original_popen = subprocess.Popen
+        processes = []
+        output = b"COPY fixture\nrow\n"
+        exit_code = 0
+        stall = False
+        output_fixture = root / "decoder-output-fixture"
+
+        def decoder_process(arguments: list[str], **kwargs: Any) -> Any:
+            self.assertFalse(any(arg.startswith(("-d", "--dbname")) for arg in arguments))
+            output_fixture.write_bytes(output)
+            program = (
+                "import sys,time; from pathlib import Path; assert sys.stdin.buffer.read()==b'fixture stdin'; "
+                f"sys.stdout.buffer.write(Path({str(output_fixture)!r}).read_bytes()); "
+                f"time.sleep(5 if {stall!r} else 0); sys.exit({exit_code})"
+            )
+            process = original_popen([sys.executable, "-c", program], **kwargs)
+            processes.append(process)
+            return process
+
+        decode = self.host["captured_attachment_table_chunks"]
+        with patch.object(self.host["subprocess"], "Popen", side_effect=decoder_process):
+            with dump.open("rb") as stream:
+                self.assertEqual(
+                    b"".join(decode(stream, self.inspect(), time.monotonic() + 10, len(output))),
+                    output,
+                )
+            with dump.open("rb") as stream, self.assertRaises(ValueError):
+                list(decode(stream, self.inspect(), time.monotonic() + 10, len(output) - 1))
+            exit_code = 1
+            with dump.open("rb") as stream, self.assertRaises(ValueError):
+                list(decode(stream, self.inspect(), time.monotonic() + 10, len(output)))
+            exit_code = 124  # GNU timeout reports its expired child this way.
+            with dump.open("rb") as stream, self.assertRaises(TimeoutError):
+                list(decode(stream, self.inspect(), time.monotonic() + 10, len(output)))
+            with dump.open("rb") as stream, self.assertRaises(TimeoutError):
+                list(decode(stream, self.inspect(), time.monotonic() - 1, len(output)))
+            exit_code = 137  # An unexplained hard kill is not proof of timeout.
+            with dump.open("rb") as stream, self.assertRaises(ValueError):
+                list(decode(stream, self.inspect(), time.monotonic() + 10, len(output)))
+            stall = True
+            with dump.open("rb") as stream, self.assertRaises(TimeoutError):
+                list(decode(stream, self.inspect(), time.monotonic() + 0.1, len(output)))
+            stall = False
+            exit_code = 0
+            checksum = hashlib.sha1(b"attachment fixture").hexdigest()
+            name = checksum[:2] + "/" + checksum
+            reference = {"name": name, "checksum": checksum, "size": 19}
+            output = (
+                b"COPY public.ir_attachment (name, store_fname, checksum, file_size) FROM stdin;\n"
+                + b"x" * (2 * 1024**2)
+                + b"\t\\N\t\\N\t0\n"
+                + ("target\t" + name + "\t" + checksum + "\t19\n\\.\n").encode()
+            )
+            with dump.open("rb") as stream:
+                self.assertTrue(
+                    self.host["captured_attachment_reference_present"](
+                        decode(stream, self.inspect(), time.monotonic() + 10, len(output)),
+                        reference,
+                    )
+                )
+        self.assertTrue(all(process.poll() is not None for process in processes))
+        self.assertEqual(dump.read_bytes(), b"fixture stdin")
+
+    def test_captured_attachment_reference_requires_verified_original_dump(self) -> None:
+        import json
+
+        spec, root, _ = self.storage_fixture(
+            {
+                "database_bytes": 4096,
+                "filestore_bytes": 10240,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        binding = hashlib.sha256(b"source fixture").hexdigest()
+        spec["record"]["source_binding_sha256"] = binding
+        raw = root / "raw-source"
+        raw.mkdir()
+        dump = raw / "database.dump"
+        dump.write_bytes(b"custom dump fixture")
+        checksum = hashlib.sha1(b"original attachment").hexdigest()
+        name = checksum[:2] + "/" + checksum
+        reference = {
+            "name": name,
+            "checksum": checksum,
+            "size": 19,
+            "copied_size": 3,
+            "copied_sha1": hashlib.sha1(b"bad").hexdigest(),
+        }
+        receipt = {
+            "source_binding_sha256": binding,
+            "database_sha256": hashlib.sha256(dump.read_bytes()).hexdigest(),
+            "filestore_sha256": hashlib.sha256(b"tar fixture").hexdigest(),
+        }
+        (root / "capture.json").write_text(json.dumps(receipt))
+        header = (
+            b"COPY public.ir_attachment (id, name, file_size, checksum, store_fname) FROM stdin;\n"
+        )
+        row = ("42\tprivate\\tfixture\\nname\t19\t" + checksum + "\t" + name + "\n").encode()
+        lines = [b"-- dump fixture\n", header, row, b"\\.\n"]
+        decoder = Mock(return_value=iter(lines))
+        compare = self.host["compare_captured_database_reference"]
+        before = {p: p.read_bytes() for p in (root / "capture.json", dump)}
+        with patch.dict(self.host, {"captured_attachment_table_chunks": decoder}):
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "reference_present")
+            decoder.return_value = iter([header, row.replace(b"\t19\t", b"\t20\t"), b"\\.\n"])
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "reference_not_found")
+            large_row = b"41\t" + b"x" * (2 * 1024**2) + b"\t0\t\\N\t\\N\n"
+            sql_output = header + large_row + row + b"\\.\n"
+            self.assertTrue(
+                self.host["captured_attachment_reference_present"](
+                    (sql_output[i : i + 65536] for i in range(0, len(sql_output), 65536)), reference
+                )
+            )
+            self.assertTrue(
+                self.host["captured_attachment_reference_present"](
+                    (bytes([value]) for value in header + row + b"\\.\n"), reference
+                )
+            )
+            decoder.return_value = iter([header, row])
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "unavailable")
+            decoder.return_value = iter([header, b"too\tfew\n", b"\\.\n"])
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "unavailable")
+            decoder.side_effect = TimeoutError("private reference must not escape")
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "incomplete")
+            decoder.side_effect = OSError("private transport detail")
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "unavailable")
+            decoder.reset_mock(side_effect=True)
+            dump.write_bytes(b"changed dump")
+            self.assertEqual(compare(spec, root, self.inspect(), reference), "unavailable")
+            decoder.assert_not_called()
+        dump.write_bytes(before[dump])
+        self.assertEqual({p: p.read_bytes() for p in before}, before)
+
+    def test_retained_archive_comparison_preserves_custody_and_requires_its_receipt(self) -> None:
+        import io
+        import json
+        import tarfile
+
+        spec, root, _ = self.storage_fixture(
+            {
+                "database_bytes": 40,
+                "filestore_bytes": 102400,
+                "staging_bytes": 20,
+                "reserve_bytes": 10,
+            }
+        )
+        binding = hashlib.sha256(b"source fixture").hexdigest()
+        spec["record"]["source_binding_sha256"] = binding
+        raw = root / "raw-source"
+        raw.mkdir()
+        content = b"original attachment fixture"
+        checksum = hashlib.sha1(content).hexdigest()
+        name = checksum[:2] + "/" + checksum
+        reference = {
+            "name": name,
+            "checksum": checksum,
+            "size": len(content),
+            "copied_size": 3,
+            "copied_sha1": hashlib.sha1(b"bad").hexdigest(),
+        }
+
+        def archive(rows: list[tuple[str, bytes]], *, extended: bool = False) -> None:
+            with tarfile.open(
+                raw / "filestore.tar",
+                "w",
+                format=tarfile.PAX_FORMAT if extended else tarfile.USTAR_FORMAT,
+            ) as output:
+                for member_name, data in rows:
+                    member = tarfile.TarInfo(member_name)
+                    member.size = len(data)
+                    if extended:
+                        member.pax_headers = {"comment": "fixture metadata"}
+                    output.addfile(member, io.BytesIO(data))
+            (root / "capture.json").write_text(
+                json.dumps(
+                    {
+                        "source_binding_sha256": binding,
+                        "database_sha256": hashlib.sha256(b"dump fixture").hexdigest(),
+                        "filestore_sha256": hashlib.sha256(
+                            (raw / "filestore.tar").read_bytes()
+                        ).hexdigest(),
+                    }
+                )
+            )
+
+        compare = self.host["compare_retained_attachment"]
+        limit = spec["capture_comparison_timeout_seconds"]
+        budget = self.host["capture_comparison_budget"]
+        self.assertGreater(budget(100 * 1024**3, 10**9), budget(1024, 10**9))
+        self.assertLessEqual(budget(100 * 1024**3, limit), limit)
+        for data, expected in (
+            (content, "capture_attachment_matches_reference_copy_differs"),
+            (b"bad", "capture_attachment_matches_copy_reference_differs"),
+            (b"different damaged bytes", "capture_attachment_differs_from_copy_and_reference"),
+        ):
+            archive([("./" + name, data)])
+            before = {p: p.read_bytes() for p in (root / "capture.json", raw / "filestore.tar")}
+            self.assertEqual(compare(spec, root, reference), expected)
+            self.assertEqual({p: p.read_bytes() for p in before}, before)
+        archive([("./" + name, content)])
+        archive([("./" + name, content)], extended=True)
+        self.assertEqual(
+            compare(spec, root, reference), "capture_attachment_matches_reference_copy_differs"
+        )
+        archive([(name, content)])
+        truncated = (raw / "filestore.tar").read_bytes()[: tarfile.BLOCKSIZE * 3]
+        (raw / "filestore.tar").write_bytes(truncated)
+        receipt_value = json.loads((root / "capture.json").read_text())
+        receipt_value["filestore_sha256"] = hashlib.sha256(truncated).hexdigest()
+        (root / "capture.json").write_text(json.dumps(receipt_value))
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([(name, content)])
+        stale = {**reference, "size": len(content) + 1}
+        self.assertEqual(
+            compare(spec, root, stale), "capture_attachment_checksum_matches_size_metadata_differs"
+        )
+        archive([("./" + name, content), (name, content)])
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([("../" + name, content)])
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([("unrelated", b"fixture")])
+        self.assertEqual(compare(spec, root, reference), "capture_attachment_not_present")
+        first_archive = (raw / "filestore.tar").read_bytes()
+        archive([(name, content)])
+        concatenated = first_archive + (raw / "filestore.tar").read_bytes()
+        (raw / "filestore.tar").write_bytes(concatenated)
+        concatenated_receipt = json.loads((root / "capture.json").read_text())
+        concatenated_receipt["filestore_sha256"] = hashlib.sha256(concatenated).hexdigest()
+        (root / "capture.json").write_text(json.dumps(concatenated_receipt))
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([(name, content)])
+        (raw / "filestore.tar").write_bytes((raw / "filestore.tar").read_bytes() + b"changed")
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([(name, content)])
+        tampered_archive = bytearray((raw / "filestore.tar").read_bytes())
+        tampered_archive[tampered_archive.index(content)] ^= 1
+        (raw / "filestore.tar").write_bytes(tampered_archive)
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        archive([(name, content)])
+        expired = budget((raw / "filestore.tar").stat().st_size, limit) + 1
+        ticks = iter([0])
+        with patch.object(self.host["time"], "monotonic", side_effect=lambda: next(ticks, expired)):
+            self.assertEqual(compare(spec, root, reference), "capture_comparison_incomplete")
+        receipt = root / "capture.json"
+        receipt.rename(root / "saved-capture.json")
+        receipt.symlink_to(root / "saved-capture.json")
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+        receipt.unlink()
+        (root / "saved-capture.json").rename(receipt)
+        with self.assertRaises(ValueError):
+            with self.host["capture_comparison_file"](raw / "filestore.tar") as (_, metadata):
+                os.utime(raw / "filestore.tar", ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1))
+        archive([(name, content)])
+        # Exercise the real private runner-result parser and original-bound
+        # observe path: no attachment reference may reach public host output.
+        containers = self.inspect()
+        containers["web"][1]["State"]["Running"] = False
+        spec.update(mode="observe", action="execute", inspect_capture=True)
+        spec["record"]["state"] = "prepared"
+        spec["source_image"] = self.spec["image_reference"]
+        self.host["inspection"] = Mock(return_value=containers)
+        private = {"reason": "attachment_size_and_hash_mismatch", "reference": reference}
+        self.host["docker"] = Mock(
+            return_value=("attachment_validation=" + json.dumps(private).encode().hex()).encode()
+        )
+        (raw / "database.dump").write_bytes(b"dump fixture")
+        (raw / "filestore").mkdir()
+        (root / "execute.started").touch()
+        (root / ".execution.lock").touch()
+        observed = self.run_host(spec)
+        from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalHostResult
+
+        RehearsalHostResult.model_validate(observed)
+        self.assertEqual(
+            observed["capture_attachment_validation"],
+            "capture_attachment_matches_reference_copy_differs",
+        )
+        self.assertFalse(observed["completed"])
+        self.assertTrue(observed["raw_source_retained"])
+        for value in (name, checksum, reference["copied_sha1"]):
+            self.assertNotIn(value, json.dumps(observed))
+        archive([(name, b"bad")])
+        dump_before = (raw / "database.dump").read_bytes()
+        table = [
+            b"COPY public.ir_attachment (store_fname, checksum, file_size) FROM stdin;\n",
+            (name + "\t" + checksum + "\t" + str(reference["size"]) + "\n").encode(),
+            b"\\.\n",
+        ]
+        with patch.dict(
+            self.host, {"captured_attachment_table_chunks": Mock(return_value=iter(table))}
+        ):
+            observed = self.run_host(spec)
+        RehearsalHostResult.model_validate(observed)
+        self.assertEqual(
+            observed["capture_attachment_validation"],
+            "capture_attachment_matches_copy_reference_differs",
+        )
+        self.assertEqual(observed["capture_database_reference_validation"], "reference_present")
+        self.assertFalse(observed["completed"])
+        self.assertEqual((raw / "database.dump").read_bytes(), dump_before)
+        for value in (name, checksum, reference["copied_sha1"]):
+            self.assertNotIn(value, json.dumps(observed))
+        private["reference"] = {**reference, "name": "../private-fixture"}
+        self.host["docker"].return_value = (
+            "attachment_validation=" + json.dumps(private).encode().hex()
+        ).encode()
+        archive_comparison = Mock(wraps=compare)
+        with patch.dict(self.host, {"compare_retained_attachment": archive_comparison}):
+            with self.assertRaises(RuntimeError):
+                self.run_host(spec)
+        archive_comparison.assert_not_called()
+        archive([(name, content)])
+        spec["record"]["source_binding_sha256"] = hashlib.sha256(b"other fixture").hexdigest()
+        self.assertEqual(compare(spec, root, reference), "capture_comparison_unavailable")
+
     def test_capture_attachment_probe_refuses_a_running_writer_before_exec(self) -> None:
         import json
         from control_plane._odoo_rehearsal_attachment_validation import (
             ATTACHMENT_VALIDATION_PROGRAM,
         )
 
-        spec, _, containers = self.storage_fixture(
+        spec, root, containers = self.storage_fixture(
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
         )
         spec["source_image"] = self.spec["image_reference"]
@@ -1563,10 +3572,12 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             ).encode()
         )
         containers["web"][1]["State"]["Running"] = True
-        self.assertEqual(self.host["capture_attachment_observation"](spec), "writer_active")
+        self.assertEqual(self.host["capture_attachment_observation"](spec, root), "writer_active")
         self.host["docker"].assert_not_called()
         containers["web"][1]["State"]["Running"] = False
-        self.assertEqual(self.host["capture_attachment_observation"](spec), "database_unavailable")
+        self.assertEqual(
+            self.host["capture_attachment_observation"](spec, root), "database_unavailable"
+        )
         self.assertEqual(
             self.host["docker"].call_args.kwargs["stdin"], ATTACHMENT_VALIDATION_PROGRAM.encode()
         )
@@ -1678,6 +3689,16 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                 self.assertEqual(
                     program["attachment_validation_main"](), "attachment_size_mismatch"
                 )
+            path.write_bytes(b"bad")
+            private_row: dict[str, object] = {}
+            with patch.object(sys, "argv", ["validator", "compare"]):
+                self.assertEqual(
+                    program["attachment_validation_main"](failure_reference=private_row),
+                    "attachment_size_and_hash_mismatch",
+                )
+            self.assertEqual(private_row["name"], name)
+            self.assertEqual(private_row["copied_sha1"], hashlib.sha1(b"bad").hexdigest())
+            path.write_bytes(content)
             rows[0] = (name, checksum, len(content))
             missing = hashlib.sha1(b"missing fixture").hexdigest()
             rows.append((missing[:2] + "/" + missing, missing, 1))
@@ -1720,9 +3741,20 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             )
         self.assertEqual(path.read_bytes(), content)
         path.write_bytes(b"damaged copy fixture")
+        private_reference: dict[str, object] = {}
         self.assertEqual(
-            validate(mismatch, root, None, classify_size=True),
+            validate(mismatch, root, None, classify_size=True, failure_reference=private_reference),
             "attachment_size_and_hash_mismatch",
+        )
+        self.assertEqual(
+            private_reference,
+            {
+                "name": name,
+                "checksum": checksum,
+                "size": len(content) + 1,
+                "copied_size": len(b"damaged copy fixture"),
+                "copied_sha1": hashlib.sha1(b"damaged copy fixture").hexdigest(),
+            },
         )
         self.assertEqual(path.read_bytes(), b"damaged copy fixture")
         path.write_bytes(content)
@@ -1802,6 +3834,8 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         from control_plane.odoo_upgrade_rehearsal import REHEARSAL_HOST_FILENAME
 
         exec(compile(tree, REHEARSAL_HOST_FILENAME, "exec"), self.host)
+        self.native_docker = self.host["docker"]
+        self.native_private_health = self.host["private_health"]
 
         def docker(*arguments: str, stdin: bytes | None = None) -> bytes:
             if arguments[:2] == ("inspect", "testing-data"):
@@ -1833,6 +3867,19 @@ class RehearsalHostSafetyTests(unittest.TestCase):
     def storage_fixture(
         self, budget: dict[str, int]
     ) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+        from tests.test_odoo_rehearsal_business_validation import receipt
+
+        artifact = {"artifact_id": "fixture-candidate", "source_commit": "b" * 40}
+        validation = receipt(
+            {
+                "product": "fixture",
+                "rehearsal_id": self.identifier,
+                "artifact_id": artifact["artifact_id"],
+                "source_commit": artifact["source_commit"],
+                "database": self.identifier.replace("-", "_") + "_final_upgrade",
+                "attempt_sha256": "c" * 64,
+            }
+        )
         root = self.fixture.root / ".local/state/launchplane-rehearsals" / self.identifier
         root.mkdir(parents=True)
         containers = self.inspect()
@@ -1843,6 +3890,9 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         spec = {
             "record": {
                 "rehearsal_id": self.identifier,
+                "product": "fixture",
+                "target_artifact": artifact,
+                "business_validations": [validation],
                 "storage": budget,
                 "state": "switched",
                 "intent_sha256": hashlib.sha256(b"fixture").hexdigest(),
@@ -1853,6 +3903,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             "record_binding_sha256": hashlib.sha256(b"fixture-record").hexdigest(),
             "mode": "apply",
             "action": "verify",
+            "capture_comparison_timeout_seconds": 1200,
             "target_image": self.spec["image_reference"],
         }
         return spec, root, containers
@@ -1875,6 +3926,32 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         return cast(
             dict[str, Any], json.loads(bytes.fromhex(output.getvalue().strip().split("=", 1)[1]))
         )
+
+    def test_capture_refuses_root_equivalent_filestores_before_source_commands(self) -> None:
+        ssh = self.fixture.root / "synthetic-ssh"
+        ssh.mkdir()
+        (ssh / "id_ed25519").write_text("synthetic reader identity")
+        (ssh / "known_hosts").write_text("synthetic pinned trust")
+        source = {
+            "ODOO_UPSTREAM_HOST": "source.invalid",
+            "ODOO_UPSTREAM_USER": "reader",
+            "ODOO_UPSTREAM_DB_USER": "fixture_db_reader",
+            "ODOO_UPSTREAM_DB_NAME": "fixture_db",
+            "DATA_WORKFLOW_SSH_DIR": str(ssh),
+        }
+        source_command = Mock(side_effect=AssertionError("Root source must not be captured"))
+        self.host["bounded_capture"] = source_command
+        for index, filestore in enumerate(("/", "//", "/.", "/./", "///././")):
+            with self.subTest(filestore=filestore):
+                root = self.fixture.root / f"root-source-{index}"
+                root.mkdir()
+                spec = {
+                    "source": {**source, "ODOO_UPSTREAM_FILESTORE_PATH": filestore},
+                    "record": {"storage": {"database_bytes": 1, "filestore_bytes": 1}},
+                }
+                with self.assertRaises(RuntimeError):
+                    self.host["capture"](spec, root, {}, "fixture_db")
+        source_command.assert_not_called()
 
     def test_partial_prepare_and_capture_report_custody_without_replaying(self) -> None:
         spec, root, _ = self.storage_fixture(
@@ -1940,11 +4017,11 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.host["capture_attachment_observation"].assert_not_called()
         spec.update(action="execute")
         spec["record"]["state"] = "prepared"
-        from types import SimpleNamespace
+        from subprocess import CompletedProcess
 
         with (
             patch.object(
-                self.host["subprocess"], "run", return_value=SimpleNamespace(returncode=1)
+                self.host["subprocess"], "run", return_value=CompletedProcess([], 1, b"", b"")
             ),
             self.assertRaises(RuntimeError) as failure,
         ):
@@ -2004,6 +4081,13 @@ class RehearsalHostSafetyTests(unittest.TestCase):
 
     def test_capacity_groups_devices_and_reserves_nonroot_available_bytes_once(self) -> None:
         from types import SimpleNamespace
+
+        real_read = Path.read_text
+
+        def read(path: Path, *args: Any, **kwargs: Any) -> str:
+            return "" if path == Path("/proc/self/mountinfo") else real_read(path, *args, **kwargs)
+
+        self.enterContext(patch.object(Path, "read_text", read))
 
         spec, root, containers = self.storage_fixture(
             {
@@ -2081,6 +4165,26 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "staging backing is unavailable"):
                         self.host["rehearsal_storage_capacity"](spec, root, containers, phase)
                     containers[role][1]["GraphDriver"] = driver
+
+    def test_host_verify_refuses_missing_business_proof_before_stopping_or_snapshotting(
+        self,
+    ) -> None:
+        spec, root, containers = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        spec["record"]["business_validations"] = []
+        self.host["inspection"] = Mock(return_value=containers)
+        self.host["validate_snapshots"] = Mock()
+        self.host["private_health"] = Mock()
+        self.host["snapshot"] = Mock()
+        self.host["docker"] = Mock()
+        result = self.run_host(spec)
+        self.assertFalse(result["completed"])
+        self.assertEqual(result["refusal_code"], "rehearsal_precheck_refused")
+        self.host["private_health"].assert_not_called()
+        self.host["snapshot"].assert_not_called()
+        self.host["docker"].assert_not_called()
+        self.assertFalse((root / "verify.started").exists())
 
     def test_capacity_refusal_is_terminal_per_attempt_and_new_attempt_can_start(self) -> None:
         from types import SimpleNamespace
@@ -2211,8 +4315,11 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         qualified = self.inspect()
         self.assertEqual(set(qualified), set(self.fixture.containers))
         self.fixture.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"] = {}
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(self.host["CopyReadbackRefused"]) as raised:
             self.inspect()
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.NETWORK_REACH)
 
     def test_another_container_on_the_private_network_is_refused(self) -> None:
         original = self.host["one_inspection"]
@@ -2266,8 +4373,11 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.host["one_inspection"] = lambda name: __import__("json").loads(
             network("inspect", name)
         )[0]
-        with self.assertRaisesRegex(RuntimeError, "state is exposed"):
+        with self.assertRaises(self.host["CopyReadbackRefused"]) as raised:
             self.inspect()
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.assertEqual(raised.exception.predicate, ReadbackPredicate.PRIVATE_STATE)
 
     def test_host_bind_and_published_ports_refuse_before_data_work(self) -> None:
         web = self.fixture.containers["web"]
@@ -2501,10 +4611,319 @@ class RehearsalHostSafetyTests(unittest.TestCase):
 
 
 class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_keyed_readback_requires_the_original_review_before_observation(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from tests.support.http import request
+
+        app = self.read_only_app()
+        with patch.object(OdooRehearsalAdapter, "host") as host:
+            for action in (
+                "prepare",
+                "execute",
+                "simulate-final",
+                "verify",
+                "retire",
+                "retire-incomplete",
+            ):
+                response = await request(
+                    app,
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.request.model_copy(
+                        update={"mode": "readback", "action": action}
+                    ).model_dump(mode="json"),
+                    headers={"Idempotency-Key": "original-key"},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    response.json()["detail"]["error"]["code"], "original_review_required"
+                )
+            host.assert_not_called()
+
     def setUp(self) -> None:
         self.fixture = RehearsalScenario()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+
+    async def test_deploy_drain_has_a_typed_retry_refusal_without_releasing_custody(self) -> None:
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from control_plane.service_deploy_drain import ServiceDeployDraining
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from control_plane.storage.postgres import PostgresRecordStore
+        from tests.support.http import request
+
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import configured_local_operator_identity
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        identity = configured_local_operator_identity(
+            _local_operator_bearer_config(token_label="local-owner-write")
+        )
+        assert identity is not None
+        updated = self.fixture.record.model_copy(update={"principal": idempotency_scope(identity)})
+        self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(self.fixture.record, updated)
+        self.fixture.record = updated
+
+        self.fixture.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="fixture-drain-policy",
+                source="test",
+                updated_at=self.fixture.record.updated_at.isoformat(),
+                policy=LaunchplaneAuthzPolicy(schema_version=2),
+            )
+        )
+        for action in ("prepare", "execute", "retire-incomplete"):
+            with (
+                self.subTest(action=action),
+                patch.object(
+                    PostgresRecordStore,
+                    "database_dialect_name",
+                    new_callable=PropertyMock,
+                    return_value="postgresql",
+                ),
+                patch(
+                    "control_plane.http_app.run_durable_provider_operation",
+                    side_effect=ServiceDeployDraining("private detail"),
+                ),
+            ):
+                response = await request(
+                    self.fixture.app,
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.request.model_copy(
+                        update={
+                            "mode": "apply",
+                            "action": action,
+                            "reviewed_plan_sha256": self.fixture.record.binding_sha256,
+                        }
+                    ).model_dump(mode="json"),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "original-execute",
+                    },
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], "service_deploy_draining")
+                self.assertIn("Retry-After", response.headers)
+                self.assertNotIn("X-Launchplane-Mutation-Reservation", response.headers)
+                self.assertNotIn("private detail", response.text)
+
+    async def test_client_only_treats_provider_read_refusal_as_clean_after_real_release(
+        self,
+    ) -> None:
+        from control_plane.dokploy import api
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+        from control_plane.contracts.odoo_upgrade_rehearsal import (
+            ODOO_UPGRADE_REHEARSAL_ROUTE,
+            REHEARSAL_RELEASED_RESERVATION_HEADERS,
+        )
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import (
+            configured_local_operator_identity,
+            LaunchplaneAuthzPolicy,
+        )
+        from control_plane.storage.postgres import PostgresRecordStore
+        from tests.http_app_test_support import _local_operator_bearer_config
+        from tests.support.http import request
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        identity = configured_local_operator_identity(
+            _local_operator_bearer_config(token_label="local-owner-write")
+        )
+        assert identity is not None
+        self.fixture.principal = idempotency_scope(identity)
+        updated = self.fixture.record.model_copy(update={"principal": self.fixture.principal})
+        self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(self.fixture.record, updated)
+        self.fixture.record = updated
+        self.fixture.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="fixture-read-release-policy",
+                source="test",
+                updated_at=updated.updated_at.isoformat(),
+                policy=LaunchplaneAuthzPolicy(schema_version=2),
+            )
+        )
+        payload = self.fixture.adapter("prepare").request.model_dump(mode="json")
+        route = ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product)
+        client = RehearsalClientTests()
+        self.addCleanup(client.doCleanups)
+
+        def sqlite_runner(**kwargs: Any) -> DurableProviderOperationResult:
+            # Only bypass the HTTP PostgreSQL admission. Real SQLite runner
+            # release/hold behavior is exercised; no PostgreSQL-locking claim.
+            with patch.object(
+                PostgresRecordStore,
+                "database_dialect_name",
+                new_callable=PropertyMock,
+                return_value="sqlite",
+            ):
+                return run_durable_provider_operation(**kwargs)
+
+        with (
+            patch.object(
+                PostgresRecordStore,
+                "database_dialect_name",
+                new_callable=PropertyMock,
+                return_value="postgresql",
+            ),
+            patch(
+                "control_plane.http_app.run_durable_provider_operation", side_effect=sqlite_runner
+            ),
+        ):
+            for status, boundary in ((403, "capacity"), (503, "placement")):
+                key = "fresh-read-" + boundary
+                failure = (
+                    NativeSourceAuthorizationDenied("private denied detail")
+                    if status == 403
+                    else api.DokployRequestFailed(
+                        method="GET",
+                        path="/api/project.all",
+                        status_code=503,
+                        detail="private provider detail",
+                    )
+                )
+                with (
+                    self.subTest(status=status),
+                    patch(
+                        "control_plane.dokploy.sandbox_placement.created_placement",
+                        **(
+                            {"return_value": ("", "", "")}
+                            if boundary == "capacity"
+                            else {"side_effect": failure}
+                        ),
+                    ),
+                    patch(
+                        "control_plane.odoo_upgrade_rehearsal.require_bridge_network_capacity",
+                        side_effect=failure,
+                    ),
+                    patch(
+                        "control_plane.testing_local_credentials.prepare_rehearsal_local_credentials"
+                    ) as credentials,
+                ):
+                    for _ in range(2):
+                        response = await request(
+                            self.fixture.app,
+                            "POST",
+                            route,
+                            payload=payload,
+                            headers={
+                                "Authorization": "Bearer local-operator-token",
+                                "Idempotency-Key": key,
+                            },
+                        )
+                        self.assertEqual(response.status_code, status, response.text)
+                        for name, value in REHEARSAL_RELEASED_RESERVATION_HEADERS.items():
+                            self.assertEqual(response.headers.get(name), value)
+                        self.assertNotIn("private", response.text)
+                        _, result, _ = client.call(
+                            "apply",
+                            failure=(status, response.json()),
+                            failure_headers=dict(response.headers),
+                        )
+                        self.assertFalse(result["original_key_required"])
+                        self.assertEqual(result["status"], "unavailable")
+                    credentials.assert_not_called()
+
+            def denied_after_effect(key: str, lease: Any) -> None:
+                lease.checkpoint_effect("fixture_effect")
+                raise NativeSourceAuthorizationDenied("private post-effect denial")
+
+            with patch.object(OdooRehearsalAdapter, "apply", side_effect=denied_after_effect):
+                response = await request(
+                    self.fixture.app,
+                    "POST",
+                    route,
+                    payload=payload,
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "post-effect",
+                    },
+                )
+            self.assertEqual(response.status_code, 403, response.text)
+            for name in REHEARSAL_RELEASED_RESERVATION_HEADERS:
+                self.assertNotIn(name, response.headers)
+            _, result, _ = client.call(
+                "apply",
+                failure=(response.status_code, response.json()),
+                failure_headers=dict(response.headers),
+            )
+            self.assertTrue(result["original_key_required"])
+            self.assertEqual(result["status"], "reconciliation_required")
+        held = self.fixture.store.read_idempotency_record(
+            scope=self.fixture.principal, route_path=route, idempotency_key="post-effect"
+        )
+        assert held is not None
+        self.assertEqual(held.state, "reconcile_required")
+
+    async def test_capacity_refusal_remains_typed_through_http_and_operator_client(self) -> None:
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+        from control_plane.contracts.host_network_capacity import (
+            HOST_BRIDGE_NETWORK_FAILURE_MESSAGES,
+        )
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+        from control_plane.storage.postgres import PostgresRecordStore
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.support.http import request
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        client = RehearsalClientTests()
+        self.addCleanup(client.doCleanups)
+        self.fixture.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="fixture-capacity-policy",
+                source="test",
+                updated_at=self.fixture.record.updated_at.isoformat(),
+                policy=LaunchplaneAuthzPolicy(schema_version=2),
+            )
+        )
+        for code in (
+            "host_bridge_network_capacity_short",
+            "host_bridge_network_capacity_unavailable",
+        ):
+            with (
+                self.subTest(code=code),
+                patch.object(
+                    PostgresRecordStore,
+                    "database_dialect_name",
+                    new_callable=PropertyMock,
+                    return_value="postgresql",
+                ),
+                patch(
+                    "control_plane.http_app.run_durable_provider_operation",
+                    side_effect=BridgeNetworkCapacityRefused(code),
+                ),
+            ):
+                response = await request(
+                    self.fixture.app,
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.request.model_copy(
+                        update={
+                            "mode": "apply",
+                            "rehearsal_id": "",
+                            "reviewed_plan_sha256": self.fixture.record.binding_sha256,
+                        }
+                    ).model_dump(mode="json"),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": code,
+                    },
+                )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["error"]["code"], code)
+            self.assertEqual(
+                response.json()["error"]["message"], HOST_BRIDGE_NETWORK_FAILURE_MESSAGES[code]
+            )
+            status, result, post = client.call(
+                "apply", failure=(response.status_code, response.json())
+            )
+            self.assertNotEqual(status, 0)
+            self.assertFalse(result["original_key_required"])
+            self.assertEqual(result["status"], "unavailable")
+            post.assert_called_once()
 
     async def test_terminal_http_outcomes_preserve_fixed_refusal_codes_through_the_client(
         self,
@@ -2536,6 +4955,7 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 "compose_id": "own-compose",
             }
         )
+        retained = with_passing_business_validation(retained)
         self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(self.fixture.record, retained)
         self.fixture.store.seed_authz_policy_if_absent(
             LaunchplaneAuthzPolicyRecord(
@@ -2625,6 +5045,7 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_execute_readback_merges_only_original_journal_and_keeps_unavailable_logs_unknown(
         self,
     ) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
         from control_plane.dokploy import api
         from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
         from tests.support.http import request
@@ -2652,18 +5073,52 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             "raw_source_retained": True,
             "custody": custody,
             "capture_attachment_validation": "verified",
+            "child_failure": {
+                "intent_sha256": prepared.intent_sha256,
+                "record_binding_sha256": prepared.binding_sha256,
+                "attempt_sha256": canonical_json_sha256({"operation_key": "fixture-operation"}),
+                "step": "copy_runner",
+                "exit_status": 7,
+                "error_text": "",
+            },
+            "retained_upgrade_logs": {
+                "files": [],
+                "runtime": [],
+                "since": datetime.now(timezone.utc).isoformat(),
+                "truncated": False,
+            },
+        }
+        evidence: dict[str, Any] = {
+            "intent_sha256": prepared.intent_sha256,
+            "record_binding_sha256": prepared.binding_sha256,
+            "attempt_sha256": canonical_json_sha256({"operation_key": "fixture-operation"}),
+            "attachment": RehearsalHostSafetyTests.attachment_mismatch_fixture(),
         }
         payload = fixture.request.model_copy(
-            update={"mode": "readback", "action": "execute"}
+            update={
+                "mode": "readback",
+                "action": "execute",
+                "reviewed_plan_sha256": prepared.binding_sha256,
+            }
         ).model_dump(mode="json")
         for status, attachment_reason in (
             (None, "verified"),
+            (None, "attachment_size_mismatch"),
             (503, "attachment_content_matches_checksum_size_mismatch"),
             (None, "attachment_size_and_hash_mismatch"),
+            (None, "capture_attachment_matches_reference_copy_differs"),
+            (None, "capture_attachment_matches_copy_reference_differs"),
+            (None, "capture_comparison_incomplete"),
             (403, "verified"),
         ):
-            with self.subTest(log_status=status):
+            with self.subTest(log_status=status, attachment_reason=attachment_reason):
                 observed["capture_attachment_validation"] = attachment_reason
+                observed.pop("attachment_mismatch", None)
+                if attachment_reason == evidence["attachment"]["reason"]:
+                    observed["attachment_mismatch"] = evidence
+                observed.pop("capture_database_reference_validation", None)
+                if attachment_reason == "capture_attachment_matches_copy_reference_differs":
+                    observed["capture_database_reference_validation"] = "reference_present"
                 error = api.DokployRequestFailed(
                     method="GET",
                     path="/api/deployment.allByType",
@@ -2695,6 +5150,9 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                     continue
                 result = response.json()["result"]
                 self.assertEqual(result["custody"], custody)
+                self.assertEqual(result["child_failure"], observed["child_failure"])
+                self.assertTrue(result["diagnostics_private"])
+                self.assertEqual(result["retained_upgrade_logs"], observed["retained_upgrade_logs"])
                 self.assertEqual(result["operation_state"], before[0].state)
                 self.assertEqual(result["provider_effect_phase"], before[0].provider_effect_phase)
                 self.assertEqual(result.get("failure_events_unavailable", False), status == 503)
@@ -2703,6 +5161,29 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(host.call_args.kwargs["operation_key"])
                 self.assertTrue(host.call_args.kwargs["inspect_capture"])
                 self.assertEqual(result["capture_attachment_validation"], attachment_reason)
+                self.assertEqual(
+                    result.get("attachment_mismatch"), observed.get("attachment_mismatch")
+                )
+                if "attachment_mismatch" in result:
+                    from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+                    client = RehearsalClientTests()
+                    self.addCleanup(client.doCleanups)
+                    client_result_input = {
+                        key: value
+                        for key, value in result.items()
+                        if key not in {"product", "rehearsal_id"}
+                    }
+                    code, client_result, _ = client.call(
+                        "readback", action="execute", response_result=client_result_input
+                    )
+                    self.assertEqual(code, 1)
+                    self.assertEqual(client_result["attachment_mismatch"], evidence)
+                    self.assertNotIn("private contents", str(client_result))
+                self.assertEqual(
+                    result.get("capture_database_reference_validation"),
+                    observed.get("capture_database_reference_validation"),
+                )
                 self.assertEqual(result["recovery_disposition"], "hold_unknown")
         with patch.object(OdooRehearsalAdapter, "host", return_value=observed) as host:
             response = await request(
@@ -2836,6 +5317,41 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         return app
 
+    async def test_client_accepts_actual_dry_run_and_readback_http_responses(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from tests.support.http import request
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        client = RehearsalClientTests()
+        for mode in ("dry-run", "readback"):
+            with (
+                self.subTest(mode=mode),
+                patch.object(
+                    OdooRehearsalAdapter, "prepare_readback", return_value={"completed": True}
+                ),
+            ):
+                response = await request(
+                    self.read_only_app(),
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.adapter("prepare")
+                    .request.model_copy(update={"mode": mode})
+                    .model_dump(mode="json"),
+                    headers={"Idempotency-Key": "fixture-key"},
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                code, receipt, post = client.call(
+                    mode,
+                    response=response.json(),
+                    request=self.fixture.request,
+                    product=self.fixture.product,
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(receipt["status"], "verified")
+                self.assertEqual(receipt["rehearsal_id"], self.fixture.identifier)
+                self.assertEqual(receipt["trace_id"], response.json()["trace_id"])
+                post.assert_called_once()
+
     async def test_read_role_can_plan_without_changing_any_lane_and_cannot_apply(self) -> None:
         from tests.support.http import request
         from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
@@ -2887,9 +5403,12 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 app,
                 "POST",
                 ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
-                    mode="json"
-                ),
+                payload=self.fixture.request.model_copy(
+                    update={
+                        "mode": "readback",
+                        "reviewed_plan_sha256": self.fixture.record.binding_sha256,
+                    }
+                ).model_dump(mode="json"),
                 headers={"Idempotency-Key": "original-prepare"},
             )
             self.assertEqual(read.status_code, 202)
@@ -2947,9 +5466,12 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                     app,
                     "POST",
                     ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                    payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
-                        mode="json"
-                    ),
+                    payload=self.fixture.request.model_copy(
+                        update={
+                            "mode": "readback",
+                            "reviewed_plan_sha256": self.fixture.record.binding_sha256,
+                        }
+                    ).model_dump(mode="json"),
                     headers={"Idempotency-Key": "original-prepare"},
                 )
             self.assertEqual(read.status_code, 202)
@@ -2977,9 +5499,14 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                     app,
                     "POST",
                     ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                    payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
-                        mode="json"
-                    ),
+                    payload=self.fixture.request.model_copy(
+                        update={
+                            "mode": "readback",
+                            "reviewed_plan_sha256": OdooRehearsalAdapter.initial_prepare_binding(
+                                placed
+                            ),
+                        }
+                    ).model_dump(mode="json"),
                     headers={"Idempotency-Key": key} if key else {},
                 )
             self.assertEqual(read.status_code, 202)

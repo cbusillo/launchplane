@@ -167,17 +167,20 @@ class ServiceCutoverBindingTests(unittest.TestCase):
         bound.website_settings_preflight(plan)
         preflight.assert_called_once_with(plan)
         with (
+            patch.object(writers, "fence_candidate") as fence,
             patch(
                 "control_plane.dokploy.service_cutover.run_planned_slot_maintenance"
             ) as maintenance,
             patch("control_plane.dokploy.service_cutover.run_slot_website_settings") as settings,
             patch.object(writers, "handoff", return_value=()) as handoff,
         ):
+            assert bound.maintenance is not None
             bound.maintenance(plan)
             runner.return_value = "recreated-runner"
             assert plan.rollback_website_settings is not None
             bound.website_settings(plan, plan.old, plan.rollback_website_settings)
             bound.handoff_writers(plan, plan.old)
+        fence.assert_called_once()
         self.assertIs(maintenance.call_args.kwargs["writers"], writers)
         self.assertIs(settings.call_args.kwargs["writers"], writers)
         self.assertIs(settings.call_args.kwargs["configure_startup"], startup)

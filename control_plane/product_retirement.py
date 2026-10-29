@@ -28,6 +28,7 @@ from control_plane.contracts.product_retirement import (
     product_retirement_secret_authority,
     preview_inclusive_retirement_confirmation,
 )
+from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
@@ -45,10 +46,12 @@ from control_plane.provider_operations import (
     ProviderOperationLease,
     build_provider_operation_key,
 )
+from control_plane.retained_volume_capture import capture_retained_volumes
 
 
 _ACTIVE_PREVIEW_STATES = frozenset({"pending", "active", "failed", "paused", "teardown_pending"})
 _NO_DEPLOYMENT_HISTORY_STATUS = "no_history"
+_RETAINED_GUEST_CAPTURE_PREFIX = "retained_guest_capture:"
 _RETIRABLE_APPLICATION_STATES = frozenset(
     {"completed", "done", "exited", "idle", "ready", "running", "stopped", "success"}
 )
@@ -175,6 +178,7 @@ class BoundProductRetirement:
         runtime_records: tuple[RuntimeEnvironmentRecord, ...],
         secret_records: tuple[SecretRecord, ...],
         previews: tuple[PreviewRecord, ...] = (),
+        guest_capture_secret_ids: frozenset[str] = frozenset(),
     ) -> None:
         self.profile = profile
         self.context = context
@@ -183,6 +187,7 @@ class BoundProductRetirement:
         self.dokploy_target_id = dokploy_target_id
         self.runtime_records = runtime_records
         self.secret_records = secret_records
+        self.guest_capture_secret_ids = guest_capture_secret_ids
         self.previews = previews
 
 
@@ -293,6 +298,7 @@ def bind_product_retirement_authority(
         dokploy_target_id=dokploy_target_id,
         runtime_records=runtime_records,
         secret_records=secret_records,
+        guest_capture_secret_ids=_guest_capture_secret_ids(record_store),
     )
 
 
@@ -301,6 +307,7 @@ def observe_tracked_dokploy_application(
     control_plane_root: Path,
     target_id: str,
     observed_at: str,
+    capture_volume_custody: bool = True,
 ) -> ProductRetirementProviderObservation:
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     try:
@@ -331,6 +338,29 @@ def observe_tracked_dokploy_application(
         target_type="application",
         target_id=target_id,
     )
+    try:
+        retained_volumes, retained_volume_inventory_complete = (
+            capture_retained_volumes(host=host, token=token, payload=payload)
+            if capture_volume_custody
+            else ((), False)
+        )
+    except (
+        ValueError,
+        OSError,
+        TypeError,
+        click.ClickException,
+        dokploy_api.DokployRequestFailed,
+    ):
+        retained_volumes, retained_volume_inventory_complete = (), False
+    if retained_volume_inventory_complete:
+        after = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="application",
+            target_id=target_id,
+        )
+        if after != payload:
+            raise ProductRetirementBlockedError("Application changed during volume inspection.")
     return build_provider_observation(
         target_id=target_id,
         payload=payload,
@@ -338,6 +368,8 @@ def observe_tracked_dokploy_application(
         latest_deployment=deployment_history.latest_deployment,
         deployment_history_state=deployment_history.state,
         observed_at=observed_at,
+        retained_volumes=retained_volumes,
+        retained_volume_inventory_complete=retained_volume_inventory_complete,
     )
 
 
@@ -371,6 +403,8 @@ def build_provider_observation(
     latest_deployment: Mapping[str, object] | None,
     deployment_history_state: dokploy_api.DeploymentHistoryState = "present",
     observed_at: str,
+    retained_volumes: tuple[RetainedVolumeBinding, ...] = (),
+    retained_volume_inventory_complete: bool = False,
 ) -> ProductRetirementProviderObservation:
     observed_target_id = _application_id(payload)
     if observed_target_id != target_id.strip():
@@ -456,12 +490,19 @@ def build_provider_observation(
         domain_hosts=tuple(item[1] for item in domain_evidence),
         deployment_status=deployment_status,
         retirable=retirable,
+        retained_volumes=retained_volumes,
+        retained_volume_inventory_complete=retained_volume_inventory_complete,
+        mounts_sha256=canonical_sha256(payload["mounts"])
+        if isinstance(payload.get("mounts"), list)
+        else "",
     )
 
 
 def authority_snapshot(bound: BoundProductRetirement) -> ProductRetirementAuthoritySnapshot:
     runtime_refs = tuple(_runtime_ref(record) for record in bound.runtime_records)
-    secret_refs, secret_sha256 = _secret_snapshot(bound.secret_records)
+    secret_refs, secret_sha256 = _secret_snapshot(
+        bound.secret_records, protected=bound.guest_capture_secret_ids
+    )
     return ProductRetirementAuthoritySnapshot(
         context=bound.context,
         profile_sha256=canonical_sha256(bound.profile.model_dump(mode="json")),
@@ -556,6 +597,7 @@ def build_product_retirement_plan_record(
         provider_observation=observation,
         authority_snapshot=snapshot,
         preview_plans=preview_plans,
+        retained_volume_production_use=bound.profile.production_use,
         profile_record=bound.profile if request.include_previews else None,
         application_name=observation.application_name or bound.dokploy_target.target_name,
     )
@@ -639,6 +681,7 @@ class DokployProductRetirementAdapter:
                 control_plane_root=self._control_plane_root,
                 target_id=self._plan.provider_observation.target_id,
                 observed_at=self._requested_at,
+                capture_volume_custody=False,
             )
         except (click.ClickException, OSError, TimeoutError, ValueError):
             return ProviderObservation(outcome="unknown")
@@ -691,6 +734,7 @@ class DokployProductRetirementAdapter:
                 control_plane_root=self._control_plane_root,
                 target_id=self._plan.provider_observation.target_id,
                 observed_at=self._requested_at,
+                capture_volume_custody=False,
             )
             if self._finalization_record is not None:
                 if current_observation.state != "absent":
@@ -852,6 +896,7 @@ class DokployProductRetirementAdapter:
                 control_plane_root=self._control_plane_root,
                 target_id=current_observation.target_id,
                 observed_at=self._requested_at,
+                capture_volume_custody=False,
             )
         except (click.ClickException, OSError, TimeoutError, ValueError) as error:
             raise self._unknown_provider_error(error) from error
@@ -1140,7 +1185,9 @@ class DokployProductRetirementAdapter:
             context_name=self._plan.context,
             instance_name=self._plan.instance,
         )
-        if _secret_snapshot(current_secrets) != (
+        if _secret_snapshot(
+            current_secrets, protected=_guest_capture_secret_ids(self._record_store)
+        ) != (
             self._plan.authority_snapshot.secret_record_refs,
             self._plan.authority_snapshot.secret_record_sha256,
         ):
@@ -1192,7 +1239,9 @@ class DokployProductRetirementAdapter:
             current_secrets = self._record_store.list_secret_records(
                 context_name=self._plan.context, instance_name=self._plan.instance
             )
-            if _secret_snapshot(current_secrets) != (
+            if _secret_snapshot(
+                current_secrets, protected=_guest_capture_secret_ids(self._record_store)
+            ) != (
                 self._plan.authority_snapshot.secret_record_refs,
                 self._plan.authority_snapshot.secret_record_sha256,
             ):
@@ -1295,7 +1344,12 @@ class DokployProductRetirementAdapter:
             self._deleted_authority_refs.append(reference)
 
     def _disable_managed_secrets(self, records: tuple[SecretRecord, ...]) -> None:
-        for record in records:
+        for record in product_retirement_secret_records(self._record_store, records):
+            bindings = self._record_store.list_secret_bindings(
+                integration=record.integration,
+                context_name=record.context,
+                instance_name=record.instance,
+            )
             if record.status != "disabled":
                 if not self._record_store.disable_product_retirement_secret(
                     expected_record=record,
@@ -1305,11 +1359,7 @@ class DokployProductRetirementAdapter:
                     raise ProductRetirementBlockedError(
                         "Managed secret authority changed while retiring."
                     )
-            for binding in self._record_store.list_secret_bindings(
-                integration=record.integration,
-                context_name=record.context,
-                instance_name=record.instance,
-            ):
+            for binding in bindings:
                 if binding.secret_id == record.secret_id and binding.status != "disabled":
                     self._record_store.write_secret_binding(
                         binding.model_copy(
@@ -1418,6 +1468,7 @@ class DokployProductRetirementAdapter:
             provider_observation=self._plan.provider_observation,
             authority_snapshot=self._plan.authority_snapshot,
             preview_plans=self._plan.preview_plans,
+            retained_volume_production_use=self._plan.retained_volume_production_use,
             profile_record=self._plan.profile_record,
             application_name=self._plan.application_name,
             mutation_evidence=ProductRetirementMutationEvidence(
@@ -1479,6 +1530,7 @@ def build_started_product_retirement_record(
         provider_observation=plan.provider_observation,
         authority_snapshot=plan.authority_snapshot,
         preview_plans=plan.preview_plans,
+        retained_volume_production_use=plan.retained_volume_production_use,
         profile_record=plan.profile_record,
         application_name=plan.application_name,
         mutation_evidence=ProductRetirementMutationEvidence(
@@ -1519,6 +1571,11 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
             "no_target": record.provider_observation.no_target,
             "closed_preview_ids": list(evidence.closed_preview_ids),
             "planned_preview_ids": list(record.authority_snapshot.preview_record_refs),
+            "retained_guest_capture_credentials": [
+                reference.removeprefix(_RETAINED_GUEST_CAPTURE_PREFIX)
+                for reference in record.authority_snapshot.secret_record_refs
+                if reference.startswith(_RETAINED_GUEST_CAPTURE_PREFIX)
+            ],
             **(
                 {
                     "confirmation": preview_inclusive_retirement_confirmation(record.product)
@@ -1565,9 +1622,21 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
                             f"dokploy_target:{record.context}:{record.instance}",
                             f"dokploy_target_id:{record.context}:{record.instance}",
                             *record.authority_snapshot.runtime_record_refs,
-                            *record.authority_snapshot.secret_record_refs,
+                            *(
+                                reference
+                                for reference in record.authority_snapshot.secret_record_refs
+                                if not reference.startswith(_RETAINED_GUEST_CAPTURE_PREFIX)
+                            ),
                         ],
-                        "ownership": f"Exclusive context {record.context}; all three tracked target records agree. Provider target has no other product or lane owner.",
+                        "ownership": f"Exclusive context {record.context}; all three tracked target records agree. Provider target has no other product or lane owner."
+                        + (
+                            " Guest capture credentials stay enabled because they belong to the guest."
+                            if any(
+                                reference.startswith(_RETAINED_GUEST_CAPTURE_PREFIX)
+                                for reference in record.authority_snapshot.secret_record_refs
+                            )
+                            else ""
+                        ),
                     },
                 }
                 if record.profile_record is not None
@@ -1646,6 +1715,7 @@ def _observation_allows_reconciliation(
             planned.source_fingerprint_sha256
             and current.source_fingerprint_sha256 != planned.source_fingerprint_sha256
         )
+        or (planned.mounts_sha256 and current.mounts_sha256 != planned.mounts_sha256)
     ):
         return False
     planned_domains = dict(zip(planned.domain_id_sha256, planned.domain_host_sha256, strict=True))
@@ -1672,6 +1742,9 @@ def _same_planned_observation(
             "application_app_name": current.application_app_name
             if planned.application_app_name
             else "",
+            "retained_volumes": planned.retained_volumes,
+            "retained_volume_inventory_complete": planned.retained_volume_inventory_complete,
+            "mounts_sha256": current.mounts_sha256 if planned.mounts_sha256 else "",
         }
     )
     return planned.model_copy(update={"observed_at": current.observed_at}) == normalized
@@ -1689,12 +1762,25 @@ def _runtime_ref(record: RuntimeEnvironmentRecord) -> str:
     return f"runtime_environment:{record.scope}:{record.context}:{record.instance}"
 
 
+def product_retirement_secret_records(
+    store: object, records: tuple[SecretRecord, ...]
+) -> tuple[SecretRecord, ...]:
+    protected = _guest_capture_secret_ids(store)
+    return tuple(record for record in records if record.secret_id not in protected)
+
+
+def _guest_capture_secret_ids(store: object) -> frozenset[str]:
+    reader = getattr(store, "guest_capture_secret_ids", None)
+    return cast(frozenset[str], reader()) if callable(reader) else frozenset()
+
+
 def _secret_snapshot(
-    records: tuple[SecretRecord, ...],
+    records: tuple[SecretRecord, ...], *, protected: frozenset[str] = frozenset()
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     pairs = sorted(
         (
-            provider_identifier_sha256(record.secret_id),
+            (_RETAINED_GUEST_CAPTURE_PREFIX if record.secret_id in protected else "")
+            + provider_identifier_sha256(record.secret_id),
             canonical_sha256(product_retirement_secret_authority(record)),
         )
         for record in records

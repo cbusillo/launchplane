@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-import hashlib
-import json
 import re
 from typing import Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
+from control_plane.contracts.record_fields import SHA256_PATTERN
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 EVERY_CODE_FEEDBACK_RESUME_REQUEST_ACTION: Final[Literal["every_code_feedback_resume.request"]] = (
@@ -19,7 +19,6 @@ EVERY_CODE_FEEDBACK_RESUME_EXECUTE_ACTION: Final[Literal["every_code_feedback_re
 EVERY_CODE_FEEDBACK_MAX_AGE = timedelta(hours=24)
 EVERY_CODE_FEEDBACK_MAX_FUTURE_SKEW = timedelta(minutes=5)
 
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _POLICY_IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._:/-]{0,255}$")
 _REPOSITORY = re.compile(r"^[^/\s]+/[^/\s]+$")
@@ -79,15 +78,13 @@ def _uuid4(value: str, field_name: str) -> str:
 
 
 def _digest(value: str, field_name: str) -> str:
-    if _SHA256.fullmatch(value) is None:
+    if SHA256_PATTERN.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
     return value
 
 
 def _canonical_digest(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def validate_every_code_feedback_revision_time(
@@ -354,67 +351,6 @@ class EveryCodeFeedbackLaunchBinding(_StrictFrozenModel):
         for name in ("request_id", "host", "launch_nonce"):
             _token(getattr(self, name), name)
         _uuid4(self.lifecycle_id, "lifecycle_id")
-        return self
-
-
-class EveryCodeFeedbackProcessBindingRecord(_StrictFrozenModel):
-    binding: EveryCodeFeedbackLaunchBinding
-    session_name: str
-    process_id: StrictInt = Field(gt=0)
-    process_group_id: StrictInt = Field(gt=0)
-    process_start_marker: str
-    registered_at: str
-    process_binding_sha256: str = ""
-
-    @model_validator(mode="after")
-    def validate_process_binding(self) -> EveryCodeFeedbackProcessBindingRecord:
-        for name in ("session_name", "process_start_marker"):
-            _token(getattr(self, name), name)
-        _timestamp(self.registered_at, "registered_at")
-        expected = _canonical_digest(
-            self.model_dump(mode="json", exclude={"process_binding_sha256"})
-        )
-        if self.process_binding_sha256 and self.process_binding_sha256 != expected:
-            raise ValueError("process_binding_sha256 does not match the exact process binding")
-        object.__setattr__(self, "process_binding_sha256", expected)
-        return self
-
-
-class EveryCodeFeedbackLaunchObservationRecord(_StrictFrozenModel):
-    binding: EveryCodeFeedbackLaunchBinding
-    evidence_status: Literal["exact_match", "proven_absent", "mismatch", "unavailable"]
-    observed_process_binding: EveryCodeFeedbackProcessBindingRecord | None = None
-    inspected_at: str
-    evidence_sha256: str
-
-    @model_validator(mode="after")
-    def validate_observation(self) -> EveryCodeFeedbackLaunchObservationRecord:
-        _timestamp(self.inspected_at, "inspected_at")
-        _digest(self.evidence_sha256, "evidence_sha256")
-        if self.evidence_status == "exact_match":
-            if self.observed_process_binding is None:
-                raise ValueError("exact-match observation requires a process binding")
-            if self.observed_process_binding.binding != self.binding:
-                raise ValueError("observed process binding does not match launch binding")
-        elif self.observed_process_binding is not None:
-            raise ValueError("non-matching observations cannot claim an exact process binding")
-        return self
-
-
-class EveryCodeFeedbackCancellationInstructionRecord(_StrictFrozenModel):
-    operation_id: str
-    process_binding: EveryCodeFeedbackProcessBindingRecord
-    requested_at: str
-    instruction_sha256: str = ""
-
-    @model_validator(mode="after")
-    def validate_instruction(self) -> EveryCodeFeedbackCancellationInstructionRecord:
-        _token(self.operation_id, "operation_id")
-        _timestamp(self.requested_at, "requested_at")
-        expected = _canonical_digest(self.model_dump(mode="json", exclude={"instruction_sha256"}))
-        if self.instruction_sha256 and self.instruction_sha256 != expected:
-            raise ValueError("instruction_sha256 does not match cancellation instruction")
-        object.__setattr__(self, "instruction_sha256", expected)
         return self
 
 

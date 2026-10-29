@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_bot_policy
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -301,6 +302,9 @@ async def _controller(
                     "created_at": state.created_at,
                     "mergeable": state.mergeable,
                     "required_checks_status": state.checks,
+                    "required_checks_observation_error": "actions_read_not_granted"
+                    if state.checks == "fail"
+                    else "",
                 }
             )
             if state.landed:
@@ -338,7 +342,7 @@ def _dependency_policy_record() -> MergeTrainPolicyRecord:
         update={
             "enqueue": repository_policy.enqueue.model_copy(
                 update={
-                    "dependency_update_github_user_ids": (42,),
+                    "dependency_update_bots": (dependency_bot_policy(42),),
                     "trusted_automation_github_user_ids": (42,),
                 }
             ),

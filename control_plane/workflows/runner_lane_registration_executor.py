@@ -18,6 +18,7 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationRequest
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationTokenRecord
 from control_plane.contracts.runner_lane_registration import plan_runner_lane_registration
+from control_plane.contracts.text_fields import require_text
 from control_plane.github_payload import repository_full_name
 from control_plane.runner_lane_github import GitHubRunnerLaneRegistrationTokenFetcher
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
@@ -51,16 +52,16 @@ class RunnerLaneRegistrationExecutorRequest(BaseModel):
     @model_validator(mode="after")
     def _normalize_request(self) -> "RunnerLaneRegistrationExecutorRequest":
         self.repository = repository_full_name(self.repository)
-        self.host_name = _required_text(
+        self.host_name = require_text(
             self.host_name, "runner lane registration executor requires host_name"
         ).lower()
-        self.execution_lane = _required_text(
+        self.execution_lane = require_text(
             self.execution_lane, "runner lane registration executor requires execution_lane"
         ).lower()
-        self.service_user = _required_text(
+        self.service_user = require_text(
             self.service_user, "runner lane registration executor requires service_user"
         )
-        self.lane_name = _required_text(
+        self.lane_name = require_text(
             self.lane_name, "runner lane registration executor requires lane_name"
         ).lower()
         _validate_slug(
@@ -75,7 +76,7 @@ class RunnerLaneRegistrationExecutorRequest(BaseModel):
             self.lane_name,
             "runner lane registration executor lane_name must use letters, numbers, dots, underscores, or hyphens",
         )
-        self.registration_root = _required_text(
+        self.registration_root = require_text(
             self.registration_root,
             "runner lane registration executor requires registration_root",
         )
@@ -86,7 +87,7 @@ class RunnerLaneRegistrationExecutorRequest(BaseModel):
         )
         if not self.labels:
             raise ValueError("runner lane registration executor requires labels")
-        self.audit_record_key = _required_text(
+        self.audit_record_key = require_text(
             self.audit_record_key,
             "runner lane registration executor requires audit_record_key",
         )
@@ -152,14 +153,17 @@ def execute_runner_lane_registration_executor(
     post_inventory: RunnerLaneInventory | None = None
     try:
         _validate_runner_package_url_for_create(request)
+        _verify_registration_target(request=request, remote_runner=remote_runner)
         token, token_record = token_fetcher.fetch_registration_token(repository=request.repository)
         _prepare_runner_directory(request=request, remote_runner=remote_runner)
         _configure_runner(request=request, token=token, remote_runner=remote_runner)
+        _verify_prepared_runner_directory(request=request, remote_runner=remote_runner)
         _start_supervised_runner(request=request, remote_runner=remote_runner)
         post_inventory = _read_verified_post_inventory(
             request=request,
             inventory_reader=inventory_reader,
         )
+        _verify_prepared_runner_directory(request=request, remote_runner=remote_runner)
     except Exception as error:  # noqa: BLE001 - convert any adapter failure into audit evidence.
         failure_message = _failure_message(error)
         terminal_audit = RunnerLaneRegistrationAuditRecord(
@@ -237,31 +241,104 @@ class RunnerLaneRegistrationCommandError(ValueError):
     pass
 
 
+def _registration_root_identity_checks() -> tuple[str, ...]:
+    return (
+        'registration_root="$RUNNER_REGISTRATION_ROOT"',
+        'test -d "$registration_root"',
+        'test ! -L "$registration_root"',
+        'test "$(realpath -e "$registration_root")" = "$registration_root"',
+        'test "$(stat -c %U "$registration_root")" = "$RUNNER_SERVICE_USER"',
+    )
+
+
+def runner_directory_identity_checks() -> tuple[str, ...]:
+    return (
+        *_registration_root_identity_checks(),
+        'runner_dir="$RUNNER_DIRECTORY"',
+        'test -d "$runner_dir"',
+        'test ! -L "$runner_dir"',
+        'case "$runner_dir" in "$registration_root"/*) ;; *) exit 1 ;; esac',
+        'test "$(realpath -e "$runner_dir")" = "$runner_dir"',
+        'test "$(stat -c %U "$runner_dir")" = "$RUNNER_SERVICE_USER"',
+    )
+
+
+def _registration_target_checks() -> tuple[str, ...]:
+    return (
+        'runner_dir="$RUNNER_DIRECTORY"',
+        'registration_root="$RUNNER_REGISTRATION_ROOT"',
+        'if [ -e "$runner_dir" ] || [ -L "$runner_dir" ]; then',
+        '  echo "runner directory already exists" >&2',
+        "  exit 1",
+        "fi",
+        'existing_ancestor="$registration_root"',
+        'while [ ! -e "$existing_ancestor" ]; do',
+        '  test ! -L "$existing_ancestor"',
+        '  existing_ancestor="${existing_ancestor%/*}"',
+        '  if [ -z "$existing_ancestor" ]; then existing_ancestor=/; fi',
+        "done",
+        'test -d "$existing_ancestor"',
+        'test ! -L "$existing_ancestor"',
+        'test "$(realpath -e "$existing_ancestor")" = "$existing_ancestor"',
+        'if [ -e "$registration_root" ]; then',
+        *_registration_root_identity_checks(),
+        "fi",
+    )
+
+
+def _verify_registration_target(
+    *,
+    request: RunnerLaneRegistrationExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> None:
+    _run_registration_command(
+        step="verify registration target",
+        command=("sh", "-eu", "-c", "\n".join(_registration_target_checks())),
+        request=request,
+        remote_runner=remote_runner,
+    )
+
+
+def _verify_prepared_runner_directory(
+    *,
+    request: RunnerLaneRegistrationExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> None:
+    _run_registration_command(
+        step="verify prepared runner directory",
+        command=("sh", "-eu", "-c", "\n".join(runner_directory_identity_checks())),
+        request=request,
+        remote_runner=remote_runner,
+    )
+
+
 def _prepare_runner_directory(
     *,
     request: RunnerLaneRegistrationExecutorRequest,
     remote_runner: RemoteCommandRunner,
 ) -> None:
-    runner_directory = _runner_directory(request)
     command = (
         "sh",
         "-eu",
         "-c",
         "\n".join(
             (
-                f"runner_dir={quote(runner_directory)}",
                 f"runner_package_url={quote(request.runner_package_url)}",
-                f"registration_root={quote(request.registration_root)}",
-                'mkdir -p "$registration_root"',
-                'if [ -e "$runner_dir" ]; then',
-                '  echo "runner directory already exists" >&2',
-                "  exit 1",
-                "fi",
+                *_registration_target_checks(),
+                'if [ ! -e "$registration_root" ]; then mkdir -p "$registration_root"; fi',
+                *_registration_root_identity_checks(),
                 'mkdir "$runner_dir"',
+                *runner_directory_identity_checks(),
                 'temp_dir="$(mktemp -d)"',
                 "trap 'rm -rf \"$temp_dir\"' EXIT",
                 'curl --fail --silent --show-error --location "$runner_package_url" --output "$temp_dir/actions-runner.tar.gz"',
-                'tar -xzf "$temp_dir/actions-runner.tar.gz" -C "$runner_dir"',
+                *runner_directory_identity_checks(),
+                "(",
+                '  cd "$runner_dir"',
+                '  test "$(pwd -P)" = "$runner_dir"',
+                '  tar -xzf "$temp_dir/actions-runner.tar.gz" -C .',
+                ")",
+                *runner_directory_identity_checks(),
                 'test -x "$runner_dir/config.sh"',
             )
         ),
@@ -286,7 +363,9 @@ def _configure_runner(
         "-c",
         "\n".join(
             (
+                *runner_directory_identity_checks(),
                 'cd "$RUNNER_DIRECTORY"',
+                'test "$(pwd -P)" = "$RUNNER_DIRECTORY"',
                 './config.sh --unattended --url "$RUNNER_REPOSITORY_URL" --token "$RUNNER_REGISTRATION_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS"',
             )
         ),
@@ -388,6 +467,8 @@ def _run_registration_command(
         request.timeout_seconds,
         {
             "RUNNER_DIRECTORY": _runner_directory(request),
+            "RUNNER_REGISTRATION_ROOT": request.registration_root,
+            "RUNNER_SERVICE_USER": request.service_user,
             "RUNNER_LABELS": ",".join(request.labels),
             "RUNNER_NAME": request.lane_name,
             "RUNNER_REPOSITORY_URL": f"https://github.com/{request.repository}",
@@ -397,6 +478,9 @@ def _run_registration_command(
     if result.returncode != 0:
         message = f"runner lane registration command failed during {step}: exit {result.returncode}"
         stderr = result.stderr.strip()
+        token = (extra_env or {}).get("RUNNER_REGISTRATION_TOKEN", "")
+        if token:
+            stderr = stderr.replace(token, "[redacted]")
         if stderr:
             message = f"{message}: {_redacted_command_output(stderr)}"
         raise RunnerLaneRegistrationCommandError(message)
@@ -561,13 +645,6 @@ def _audit_route_payload(audit: RunnerLaneRegistrationAuditRecord) -> dict[str, 
         "product": "launchplane",
         "audit": audit.model_dump(mode="json"),
     }
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value
 
 
 def _validate_slug(value: str, message: str) -> None:

@@ -4,6 +4,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, NoReturn
 from uuid import uuid4
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
+
 import click
 
 from fastapi import Depends, Header, Path as PathParameter
@@ -28,6 +30,7 @@ from control_plane.testing_replacement_resources import (
     TestingReplacementResourceAdapter,
     TestingReplacementResourcesRequest,
     TestingResourcePreparationRefused,
+    NativeTestingRebuildRequired,
     resource_plan,
     resource_wire_payload,
 )
@@ -113,7 +116,7 @@ def register_testing_replacement_resource_routes(
                     "authorization_denied",
                     "The provider refused the Odoo testing usage read. Preserve the trace and original request.",
                 )
-            except TestingBootstrapPrerequisiteError as error:
+            except (TestingBootstrapPrerequisiteError, NativeTestingRebuildRequired) as error:
                 refuse(409, error.code, str(error))
             except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
                 refuse(
@@ -170,6 +173,10 @@ def register_testing_replacement_resource_routes(
                     in_progress_message="Testing resource preparation is running with the original key.",
                     reconcile_message="The original preparation has an unknown outcome; do not create another target.",
                 )
+            except BridgeNetworkCapacityRefused as error:
+                refuse(409, error.code, str(error))
+            except NativeTestingRebuildRequired as error:
+                refuse(409, error.code, str(error))
             except DurableOperationAuthorizationDeniedError:
                 refuse(
                     403,
@@ -192,6 +199,8 @@ def register_testing_replacement_resource_routes(
             adapter = TestingReplacementResourceAdapter(root, record_store, product, body, trace)
             try:
                 result = await run_in_worker_thread(adapter.readback)
+            except NativeTestingRebuildRequired as error:
+                refuse(409, error.code, str(error))
             except DurableOperationAuthorizationDeniedError:
                 refuse(
                     403,
@@ -244,6 +253,8 @@ def register_testing_replacement_resource_routes(
                         ),
                     )
             result = resource_plan(record_store, product=product, request=body)
+        except NativeTestingRebuildRequired as error:
+            refuse(409, error.code, str(error))
         except FileNotFoundError:
             refuse(404, "not_found", "The requested testing resource record is unavailable.")
         except ValueError:

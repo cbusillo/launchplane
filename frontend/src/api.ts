@@ -1,4 +1,33 @@
+import { validateRemovalResponse } from "./runtime-setting-removal";
+import type { ApplyIntegrationAllowancesData, ApplyIntegrationAllowancesResponse, ReadIntegrationAllowancesData, ReadIntegrationAllowancesResponse } from "./generated/openapi.ts";
+
+export function readIntegrationAllowances(query: NonNullable<ReadIntegrationAllowancesData["query"]>, signal?: AbortSignal): Promise<ReadIntegrationAllowancesResponse> {
+  return requestJson(`/v1/product-config/integration-allowances?${new URLSearchParams(query as Record<string, string>)}`, "GET", undefined, signal);
+}
+
+export function applyIntegrationAllowances(body: ApplyIntegrationAllowancesData["body"], options: BrowserOperationOptions): Promise<ApplyIntegrationAllowancesResponse> {
+  const request: ApplyIntegrationAllowancesData = { url: BROWSER_WRITE_ROUTES.integrationAllowances, body,
+    headers: { "Idempotency-Key": options.idempotencyKey } };
+  return requestGeneratedPost(request, options.signal, options.onDispatch);
+}
 import type { BackupCredentialBindingRequest, AcceptedEvidenceResponse, QualifyProductionBackupPreflightData } from "./generated/openapi.ts";
+import type { DiscussionTopicsResponse } from "./generated/openapi.ts";
+import type { ApplyTestingHoldData, ApplyTestingHoldResponse, ReadTestingHoldData, ReadTestingHoldResponse } from "./generated/openapi.ts";
+
+export function readDiscussionTopics(product: string, signal?: AbortSignal): Promise<DiscussionTopicsResponse> {
+  return requestJson<DiscussionTopicsResponse>(`/v1/products/${encodeURIComponent(product)}/discussion-topics`, "GET", undefined, signal);
+}
+
+export function readTestingHold(query: NonNullable<ReadTestingHoldData["query"]>, signal?: AbortSignal): Promise<ReadTestingHoldResponse> {
+  return requestJson(`/v1/product-config/testing-hold?${new URLSearchParams(query as Record<string, string>)}`, "GET", undefined, signal);
+}
+
+export function applyTestingHold(body: ApplyTestingHoldData["body"], options: BrowserOperationOptions): Promise<ApplyTestingHoldResponse> {
+  const request: ApplyTestingHoldData = { url: BROWSER_WRITE_ROUTES.testingHoldApply, body,
+    headers: { "Idempotency-Key": options.idempotencyKey } };
+  return requestGeneratedPost(request, options.signal, options.onDispatch);
+}
+import type { ReconcileOdooSecretReferencesData, SecretReferenceResponse } from "./generated/openapi.ts";
 import type {
   ApiErrorPayload,
   AuthSessionPayload,
@@ -6,6 +35,7 @@ import type {
   ProductListPayload,
 } from "./types";
 import type { InspectTestingRebuildData, InspectTestingRebuildResponse, ReadTestingRebuildResponse, SubmitTestingRebuildData, SubmitTestingRebuildResponse, LookupTestingRebuildData, LookupTestingRebuildResponse, ResumeTestingRebuildData, ResumeTestingRebuildResponse } from "./generated/openapi.ts";
+import type { SettleTestingRebuildData, SettleTestingRebuildResponse } from "./generated/openapi.ts";
 import type {
   ApplyProductionBackupAuthorityData,
   ApplyProductionBackupAuthorityResponse,
@@ -41,7 +71,6 @@ import type {
   EnqueueOdooProdRollbackResponse,
   EnqueueProductionBackupGateData,
   EnqueueProductionBackupGateResponse,
-  EveryCodeSummaryResponse,
   GovernanceProjectionResponse,
   ListHumanPrivilegedOperationsData,
   ListHumanPrivilegedOperationsResponse,
@@ -71,8 +100,6 @@ import type {
   ReadHumanPrivilegedOperationResponse,
   ReadHumanPrivilegedOperationReviewData,
   ReadHumanPrivilegedOperationReviewResponse,
-  RankWorkGraphSnapshotData,
-  RankWorkGraphSnapshotResponse,
   ReadProductOperationalReadinessData,
   ReadProductProfileData,
   ReadProductProfileResponse,
@@ -82,17 +109,15 @@ import type {
   RevokeHumanPrivilegedOperationData,
   RevokeHumanPrivilegedOperationResponse,
   TenantAdmissionEvaluationReadResponse,
-  WorkGraphIssueInboxResponse,
-  WorkGraphSnapshot,
-  WorkGraphSnapshotResponse,
   ProductReviewResponse,
   OwnerSecretInputResponse,
   SubmitOwnerSecretInputData,
   WriteProductReviewDecisionData,
   RetryProductReviewFeedbackData,
   ReleaseReviewResponse,
+  ReleaseReviewAccessResponse,
   ReleaseReviewDecisionEnvelope,
-  UrgentReleaseReviewEnvelope,
+  ReleaseRequestEnvelope,
   ReadProductionBackupGateOperationData,
   ReadProductionBackupGateOperationResponse,
   ReadOdooProdPromotionOperationData,
@@ -120,6 +145,25 @@ export class LaunchplaneApiError extends Error {
     this.statusCode = statusCode;
     this.traceId = traceId;
   }
+}
+
+export class LaunchplaneResponseError extends Error {
+  code = "unreadable_response";
+  traceId = "";
+  statusCode: number;
+
+  constructor(statusCode: number) {
+    const reason = statusCode >= 500
+      ? "Launchplane is temporarily unavailable"
+      : "Launchplane returned an unreadable response";
+    super(`${reason} (HTTP ${statusCode}).`);
+    this.name = "LaunchplaneResponseError";
+    this.statusCode = statusCode;
+  }
+}
+
+export function isLaunchplaneHttpError(error: unknown): error is LaunchplaneApiError | LaunchplaneResponseError {
+  return error instanceof LaunchplaneApiError || error instanceof LaunchplaneResponseError;
 }
 
 let browserMutationQueue: Promise<void> = Promise.resolve();
@@ -199,7 +243,16 @@ async function performJsonRequest<T>(
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
   });
-  const payload = (await response.json()) as T | ApiErrorPayload;
+  let payload: T | ApiErrorPayload;
+  try {
+    payload = await response.json() as T | ApiErrorPayload;
+  } catch (error) {
+    if (signal?.aborted || error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new LaunchplaneResponseError(response.status);
+  }
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new LaunchplaneResponseError(response.status);
+  }
   if (!response.ok) {
     const errorPayload = payload as ApiErrorPayload;
     const errorMessage =
@@ -372,9 +425,10 @@ export function readProductEnvironment(
   product: string,
   environment: string,
   signal?: AbortSignal,
+  includeHostNetworkCapacity = false,
 ): Promise<ProductEnvironmentResponse> {
   return requestJson<ProductEnvironmentResponse>(
-    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}`,
+    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}${includeHostNetworkCapacity ? "?include_host_network_capacity=true" : ""}`,
     "GET",
     undefined,
     signal,
@@ -470,29 +524,6 @@ export function readProductPromotionWorkflowDelivery(
   );
 }
 
-export function readEveryCodeSummary(
-  limit = 12,
-  signal?: AbortSignal,
-): Promise<EveryCodeSummaryResponse> {
-  return requestJson<EveryCodeSummaryResponse>(
-    `/v1/every-code/summary?limit=${encodeURIComponent(String(limit))}`,
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
-export function readWorkGraphSnapshot(
-  signal?: AbortSignal,
-): Promise<WorkGraphSnapshotResponse> {
-  return requestJson<WorkGraphSnapshotResponse>(
-    "/v1/work-graph/snapshot",
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
 export function readTenantAdmissionEvaluation(
   request: Pick<ReadTenantAdmissionEvaluationData, "query">,
   signal?: AbortSignal,
@@ -510,32 +541,6 @@ export function readTenantAdmissionEvaluation(
   });
   return requestJson<TenantAdmissionEvaluationReadResponse>(
     `/v1/work-graph/tenant-admission/evaluation?${params.toString()}`,
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
-export function rankWorkGraphSnapshot(
-  snapshot: WorkGraphSnapshot,
-  limit = 12,
-  signal?: AbortSignal,
-): Promise<RankWorkGraphSnapshotResponse> {
-  const request: RankWorkGraphSnapshotData = {
-    url: BROWSER_WRITE_ROUTES.workGraphRank,
-    body: {
-      snapshot,
-      limit,
-    },
-  };
-  return requestGeneratedPost<RankWorkGraphSnapshotResponse>(request, signal);
-}
-
-export function readGitHubIssueInbox(
-  signal?: AbortSignal,
-): Promise<WorkGraphIssueInboxResponse> {
-  return requestJson<WorkGraphIssueInboxResponse>(
-    "/v1/work-graph/github/issues",
     "GET",
     undefined,
     signal,
@@ -592,6 +597,17 @@ export function applyProductEnvironmentConfig(
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
   );
+}
+
+export function readOdooReferenceMetadata(product: string, environment: string, signal?: AbortSignal): Promise<SecretReferenceResponse> {
+  return requestJson(`/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/odoo-secret-references/reconcile`, "GET", undefined, signal);
+}
+
+export function reconcileOdooReferenceMetadata(
+  product: string, environment: string, body: ReconcileOdooSecretReferencesData["body"], options: BrowserOperationOptions,
+): Promise<SecretReferenceResponse> {
+  const route = BROWSER_WRITE_ROUTES.odooSecretReferences.replace("{product}", encodeURIComponent(product)).replace("{environment}", encodeURIComponent(environment));
+  return requestJson(route, "POST", body, options.signal, options.idempotencyKey, options.onDispatch);
 }
 
 export function applyProductHealthMonitoring(
@@ -873,6 +889,11 @@ export function lookupTestingRebuild(product: string, payload: LookupTestingRebu
     options.signal, options.idempotencyKey);
 }
 
+export function settleTestingRebuild(product: string, payload: SettleTestingRebuildData["body"], options: BrowserOperationOptions): Promise<SettleTestingRebuildResponse> {
+  const path = BROWSER_WRITE_ROUTES.testingRebuildSettle.replace("{product}", encodeURIComponent(product));
+  return requestJson(path, "POST", payload, options.signal, options.idempotencyKey);
+}
+
 export function resumeTestingRebuild(product: string, operationId: string, payload: ResumeTestingRebuildData["body"], options: BrowserOperationOptions): Promise<ResumeTestingRebuildResponse> {
   const path = BROWSER_WRITE_ROUTES.testingRebuildResume.replace("{product}", encodeURIComponent(product)).replace("{operation_id}", encodeURIComponent(operationId));
   return requestJson(path, "POST", payload, options.signal, options.idempotencyKey, options.onDispatch);
@@ -950,12 +971,16 @@ export function readReleaseReview(product: string, signal?: AbortSignal): Promis
   return requestJson<ReleaseReviewResponse>(`/v1/release-review?${new URLSearchParams({ product })}`, "GET", undefined, signal);
 }
 
+export function readReleaseReviewAccess(product: string, signal?: AbortSignal): Promise<ReleaseReviewAccessResponse> {
+  return requestJson<ReleaseReviewAccessResponse>(`/v1/release-review/access?${new URLSearchParams({ product })}`, "GET", undefined, signal);
+}
+
 export function writeReleaseReviewDecision(payload: ReleaseReviewDecisionEnvelope): Promise<ReleaseReviewResponse> {
   return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewDecision, "POST", payload);
 }
 
-export function openUrgentReleaseReview(payload: UrgentReleaseReviewEnvelope): Promise<ReleaseReviewResponse> {
-  return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewUrgentOpening, "POST", payload);
+export function requestReleaseReview(payload: ReleaseRequestEnvelope): Promise<ReleaseReviewResponse> {
+  return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewRequest, "POST", payload);
 }
 
 export function writeProductReviewDecision(
@@ -1213,4 +1238,60 @@ export function decideBackupPolicyProposal(payload: { operationId: string; decis
   return requestJson(BROWSER_WRITE_ROUTES.backupPolicyDecision.replace("{operation_id}", encodeURIComponent(payload.operationId)), "POST", {
     decision: payload.decision, source_event_id: `ui:${payload.decision}:${payload.operationId}`,
   }, options.signal, options.idempotencyKey, options.onDispatch);
+}
+
+export const PROVIDER_HOLD_ATTENTION_ROUTE = "/v1/operations/provider-hold-attention";
+
+export function readProviderHoldAttention(
+  page: { limit?: number; cursor?: string | null } = {}, signal?: AbortSignal,
+): Promise<import("./generated/openapi.ts").ProviderHoldAttentionResponse> {
+  const query = new URLSearchParams();
+  if (page.limit !== undefined) query.set("limit", String(page.limit));
+  if (page.cursor) query.set("cursor", page.cursor);
+  return requestJson(`${PROVIDER_HOLD_ATTENTION_ROUTE}${query.size ? `?${query}` : ""}`, "GET", undefined, signal);
+}
+
+export async function removeRuntimeSettings(
+  payload: import("./generated/openapi.ts").RuntimeSettingRemovalRequest,
+  options: import("./browser-operation").BrowserOperationOptions,
+): Promise<import("./runtime-setting-removal").RemovalResponse> {
+  const response = await requestJson<import("./generated/openapi.ts").RuntimeSettingRemovalResponse>(
+    BROWSER_WRITE_ROUTES.runtimeSettingRemoval, "POST", payload, options.signal, options.idempotencyKey, options.onDispatch,
+  );
+  return validateRemovalResponse(response, payload);
+}
+
+export interface PromotionRecoveryTarget {
+  product: string;
+  decisionRecordId: string;
+  attempt: 1 | 2;
+  step: "promote" | "rollback";
+}
+
+function promotionRecoveryPath(target: PromotionRecoveryTarget, path = "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}"): string {
+  return path.replace("{product}", encodeURIComponent(target.product)).replace("{decision_record_id}", encodeURIComponent(target.decisionRecordId));
+}
+
+function promotionRecoveryQuery(target: PromotionRecoveryTarget): string {
+  return `?${new URLSearchParams({ attempt: String(target.attempt), step: target.step })}`;
+}
+
+export function readPromotionRecovery(target: PromotionRecoveryTarget): Promise<import("./generated/openapi.ts").PromotionRecoveryPlan> {
+  return requestJson(promotionRecoveryPath(target) + promotionRecoveryQuery(target));
+}
+
+export function reviewPromotionRecovery(target: PromotionRecoveryTarget, reason: string): Promise<import("./generated/openapi.ts").PromotionRecoveryPlan> {
+  return requestJson(promotionRecoveryPath(target, BROWSER_WRITE_ROUTES.promotionRecoveryReview) + promotionRecoveryQuery(target), "POST", { reason });
+}
+
+export function applyPromotionRecovery(target: PromotionRecoveryTarget, body: import("./generated/openapi.ts").PromotionRecoveryApply): Promise<import("./generated/openapi.ts").PromotionRecoveryApplied> {
+  return requestJson(promotionRecoveryPath(target, BROWSER_WRITE_ROUTES.promotionRecoveryApply) + promotionRecoveryQuery(target), "POST", body);
+}
+
+export function sweepPreviewLifecycle(
+  body: import("./generated/openapi.ts").ApplyPreviewLifecycleSweepData["body"],
+  options: BrowserOperationOptions,
+): Promise<AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.previewLifecycleSweep, "POST", body,
+    options.signal, options.idempotencyKey, options.onDispatch);
 }

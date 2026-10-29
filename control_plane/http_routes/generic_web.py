@@ -11,6 +11,9 @@ from pathlib import Path as FilePath
 from typing import Annotated, Any, Protocol, cast
 
 import click
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from control_plane.generic_web_source_qualification import GenericWebPromotionAdmissionRefused
+from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
 from fastapi import Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
@@ -20,6 +23,7 @@ from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployRecoveryDryRunResponse,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.promotion_record import promotion_failure
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -27,11 +31,13 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.drivers import native_routes
+from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 from control_plane.release_review import (
     ProductionChangeRequiresPromotion,
     require_unchanged_production_artifact,
 )
 from control_plane.generic_web_deploy_http import (
+    director_agent_can_deploy_testing,
     GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
     GenericWebDeployEnvelope,
     GenericWebDeployProductMismatchError,
@@ -139,6 +145,9 @@ from control_plane.service_auth import (
 from control_plane.storage.postgres import OutboxWithIdempotencyRequest, PostgresRecordStore
 from control_plane.workflows.generic_web_deploy import (
     normalize_generic_web_artifact_id,
+)
+from control_plane.workflows.generic_web_application_snapshot import (
+    ApplicationLifecycleBaselineChanged,
 )
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebResolvedDeployTarget,
@@ -328,6 +337,17 @@ def build_generic_web_write_route_handlers(
                 code="promotion_intent_invalid",
                 message="Product-owned promotion intent does not match current evidence.",
             )
+
+    def promotion_admission_error(
+        error: GenericWebPromotionAdmissionRefused, trace_id: str
+    ) -> StarletteHTTPException:
+        _log_masked_promotion_error(error, trace_id=trace_id)
+        return dependencies.http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code=error.failure_code,
+            message=promotion_failure(error.failure_code).description,
+        )
 
     def require_product_promotion_target_snapshot(
         *,
@@ -1027,6 +1047,13 @@ def build_generic_web_write_route_handlers(
                         except asyncio.CancelledError:
                             continue
                     records, result = refresh_task.result()
+            except PreviewMemoryCapacityRefused as error:
+                raise dependencies.http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code=error.code,
+                    message=error.public_message(),
+                ) from None
             except (ValueError, click.ClickException) as error:
                 raise dependencies.http_error(
                     status_code=400,
@@ -1070,6 +1097,7 @@ def build_generic_web_write_route_handlers(
             profile = resolve_generic_web_preview_profile(
                 record_store=record_store,
                 product=destroy_request.product,
+                for_destroy=True,
             )
         except GenericWebPreviewRouteDependencyError:
             return dependencies.driver_dependency_response(
@@ -1222,14 +1250,18 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        if not native_routes._native_driver_route_authorization_allows(
+        explicitly_authorized = native_routes._native_driver_route_authorization_allows(
             endpoint=apply_generic_web_deploy,
             authorization_allows=dependencies.authorization_allows,
             identity=identity,
             product=profile.product,
             context=lane.context,
             instances=(lane.instance,),
-        ):
+        )
+        standing_testing_permission = (
+            not explicitly_authorized and director_agent_can_deploy_testing(identity, lane)
+        )
+        if not explicitly_authorized and not standing_testing_permission:
             raise dependencies.http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -1288,6 +1320,7 @@ def build_generic_web_write_route_handlers(
             profile=profile,
             lane=lane,
             trace_id=trace_id,
+            standing_testing_permission=standing_testing_permission,
         )
         try:
             return await dependencies.run_provider_mutation(
@@ -1304,6 +1337,28 @@ def build_generic_web_write_route_handlers(
                 ),
                 reconcile_message=("The generic web deploy requires reconciliation before retry."),
             )
+        except ApplicationLifecycleBaselineChanged as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_deploy_baseline_changed",
+                message=(
+                    "The unstarted original's captured testing baseline changed. Its saved baseline "
+                    "is preserved. Start a new deployment operation to capture the current "
+                    "baseline after reviewing the change."
+                ),
+            ) from error
+        except DisposableLaneSafetyUnknown as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_deploy_safety_unknown",
+                message=(
+                    "Testing deployment requires current lane safety facts. "
+                    "Inspect and collect disposable-lane observations; unresolved "
+                    "usage, data custody or production isolation needs its factual prerequisite."
+                ),
+            ) from error
         except FileNotFoundError as error:
             raise dependencies.http_error(
                 status_code=404,
@@ -1543,6 +1598,8 @@ def build_generic_web_write_route_handlers(
                     code="not_found",
                     message=f"No Launchplane route for {_GENERIC_WEB_PROD_PROMOTION_ROUTE}.",
                 ) from error
+            except GenericWebPromotionAdmissionRefused as error:
+                raise promotion_admission_error(error, trace_id) from error
             except (ValueError, click.ClickException) as error:
                 _log_masked_promotion_error(error, trace_id=trace_id)
                 raise dependencies.http_error(
@@ -1567,6 +1624,8 @@ def build_generic_web_write_route_handlers(
                 code="not_found",
                 message=f"No Launchplane route for {_GENERIC_WEB_PROD_PROMOTION_ROUTE}.",
             ) from error
+        except GenericWebPromotionAdmissionRefused as error:
+            raise promotion_admission_error(error, trace_id) from error
         except (ValueError, click.ClickException) as error:
             _log_masked_promotion_error(error, trace_id=trace_id)
             raise dependencies.http_error(

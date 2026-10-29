@@ -97,30 +97,34 @@ from control_plane.workflows.runner_host_hygiene_executor import (
 from control_plane.workflows.runner_host_hygiene_audit_spool import (
     RunnerHostHygieneAuditSpool,
 )
+from control_plane.workflows.runner_host_hygiene_qualification import (
+    runner_host_hygiene_qualify,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-def register_runner_lane_commands(work_graph: click.Group) -> None:
-    work_graph.add_command(runner_inventory, name="runner-inventory")
-    work_graph.add_command(runner_queue_wait, name="runner-queue-wait")
-    work_graph.add_command(runner_baseline_observe, name="runner-baseline-observe")
-    work_graph.add_command(runner_control_plan, name="runner-control-plan")
-    work_graph.add_command(runner_maintainer_plan, name="runner-maintainer-plan")
-    work_graph.add_command(
+def register_runner_lane_commands(main: click.Group) -> None:
+    main.add_command(runner_inventory, name="runner-inventory")
+    main.add_command(runner_queue_wait, name="runner-queue-wait")
+    main.add_command(runner_baseline_observe, name="runner-baseline-observe")
+    main.add_command(runner_control_plan, name="runner-control-plan")
+    main.add_command(runner_maintainer_plan, name="runner-maintainer-plan")
+    main.add_command(
         runner_lane_registration_executor,
         name="runner-lane-registration-executor",
     )
-    work_graph.add_command(
+    main.add_command(
         runner_lane_retirement_executor,
         name="runner-lane-retirement-executor",
     )
-    work_graph.add_command(runner_host_hygiene_report, name="runner-host-hygiene-report")
-    work_graph.add_command(runner_host_hygiene_apply_plan, name="runner-host-hygiene-apply-plan")
-    work_graph.add_command(
+    main.add_command(runner_host_hygiene_report, name="runner-host-hygiene-report")
+    main.add_command(runner_host_hygiene_qualify)
+    main.add_command(runner_host_hygiene_apply_plan, name="runner-host-hygiene-apply-plan")
+    main.add_command(
         runner_host_hygiene_adapter_boundary_plan,
         name="runner-host-hygiene-adapter-boundary-plan",
     )
-    work_graph.add_command(
+    main.add_command(
         runner_host_hygiene_executor,
         name="runner-host-hygiene-executor",
     )
@@ -1640,6 +1644,12 @@ def runner_host_hygiene_adapter_boundary_plan(
     help="Buildx builder policy allows cache pruning for. Repeat as needed.",
 )
 @click.option(
+    "--buildkit-cache-budget",
+    "buildkit_cache_budgets",
+    multiple=True,
+    help="Existing report-only cache budget as builder=bytes, or default=bytes. Grants no prune permission.",
+)
+@click.option(
     "--max-used-space-bytes",
     default=0,
     show_default=True,
@@ -1772,6 +1782,7 @@ def runner_host_hygiene_executor(
     target_buildkit_builder: str,
     allowed_buildkit_builders: tuple[str, ...],
     max_used_space_bytes: int,
+    buildkit_cache_budgets: tuple[str, ...],
     mutate: bool,
     minimum_free_disk_bytes: int,
     prune_until: str,
@@ -1811,6 +1822,12 @@ def runner_host_hygiene_executor(
                 "runner host hygiene GitHub idle evidence requires a populated token in "
                 f"{github_token_env_name}."
             )
+        report_budgets: dict[str, int] = {}
+        for value in buildkit_cache_budgets:
+            key, separator, raw_bytes = value.partition("=")
+            if not separator or key in report_budgets:
+                raise ValueError("report cache budgets require unique builder=bytes entries")
+            report_budgets[key] = int(raw_bytes)
         request = RunnerHostHygieneExecutorRequest(
             action=apply_action,
             host_name=host_name,
@@ -1824,6 +1841,7 @@ def runner_host_hygiene_executor(
             target_buildkit_builder=target_buildkit_builder,
             allowed_buildkit_builders=allowed_buildkit_builders,
             max_used_space_bytes=max_used_space_bytes,
+            buildkit_cache_budgets=report_budgets,
             target_buildkit_state_volumes=target_buildkit_state_volumes,
             allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
             mutate=mutate,

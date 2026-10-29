@@ -14,8 +14,8 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainHistoricalCompletionProofError,
     MergeTrainGitHubError,
-    RecordingMergeTrainGitHubTransport,
 )
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 
 
 def _branch(sha: str, tree_sha: str) -> dict[str, object]:

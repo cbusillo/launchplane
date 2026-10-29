@@ -29,7 +29,6 @@ from control_plane.trusted_maintenance import (
     plan_trusted_maintenance_policy_append,
     trusted_maintenance_current_authority,
     trusted_maintenance_path_result,
-    trusted_maintenance_path_result_from_store,
 )
 
 
@@ -418,7 +417,7 @@ class TrustedMaintenanceTests(unittest.TestCase):
             store.write_tenant_repository_classification_record(classification)
 
             with self.assertRaises(TrustedMaintenanceAuthorityError):
-                trusted_maintenance_path_result_from_store(
+                trusted_maintenance_current_authority(
                     store=store,
                     candidate=_candidate(),
                     evaluated_at=EVALUATED_AT,
@@ -446,26 +445,6 @@ class TrustedMaintenanceTests(unittest.TestCase):
                     candidate=_candidate(),
                     evaluated_at=EVALUATED_AT,
                 )
-
-    def test_store_read_path_returns_trusted_maintenance_result(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            store = FilesystemRecordStore(Path(temporary_directory_name))
-            classification = _classification()
-            policy = _policy()
-            evidence = _captured_evidence(classification=classification, policy=policy)
-            store.write_tenant_repository_classification_record(classification)
-            store.write_trusted_maintenance_policy_record(policy)
-            store.write_trusted_maintenance_evidence_record(evidence)
-
-            path_result = trusted_maintenance_path_result_from_store(
-                store=store,
-                candidate=_candidate(),
-                evaluated_at=EVALUATED_AT,
-            )
-
-        assert path_result is not None
-        self.assertEqual(path_result.path_kind, "trusted_maintenance")
-        self.assertEqual(path_result.state, "satisfied")
 
 
 def _policy(

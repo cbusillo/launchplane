@@ -1,23 +1,21 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-import hashlib
-import json
 from pathlib import PurePosixPath
 import re
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from control_plane.contracts.record_fields import GIT_SHA1_PATTERN, SHA256_PATTERN
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 ArtifactUvLockScope = Literal["support_runtime", "tenant"]
 ArtifactPythonPackageSourceKind = Literal["registry", "vcs"]
 ArtifactExternalDependencyFormat = Literal["pyproject_toml", "requirements_txt"]
 ArtifactExternalResolutionPosture = Literal["locked", "exact_source_unlocked"]
 
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SHA256_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
-_GIT_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _REPOSITORY_SLUG_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _REPOSITORY_IDENTITY_PATTERN = re.compile(r"^[\x21-\x7e]+$")
 _REPOSITORY_URL_PATH_PATTERN = re.compile(r"^/[A-Za-z0-9._/-]+$")
@@ -42,7 +40,7 @@ def canonical_python_package_name(value: str) -> str:
 
 def normalize_artifact_sha256(value: str, *, label: str) -> str:
     normalized = value.strip()
-    if not _SHA256_PATTERN.fullmatch(normalized):
+    if not SHA256_PATTERN.fullmatch(normalized):
         raise ValueError(f"{label} must be a lowercase 64-character SHA-256 value")
     return normalized
 
@@ -56,7 +54,7 @@ def normalize_artifact_sha256_digest(value: str, *, label: str) -> str:
 
 def normalize_artifact_git_commit(value: str, *, label: str) -> str:
     normalized = value.strip()
-    if not _GIT_COMMIT_PATTERN.fullmatch(normalized):
+    if not GIT_SHA1_PATTERN.fullmatch(normalized):
         raise ValueError(f"{label} must be an exact lowercase 40-character git commit")
     return normalized
 
@@ -244,13 +242,7 @@ def artifact_python_package_inventory_sha256(
     payload = [
         package.model_dump(mode="json") for package in sorted(packages, key=lambda item: item.name)
     ]
-    canonical_json = json.dumps(
-        payload,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 class ArtifactPythonEnvironmentProvenance(BaseModel):

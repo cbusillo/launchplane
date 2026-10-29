@@ -5,9 +5,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import (
-    cast,
-)
+from typing import Any, cast
 from unittest.mock import patch
 
 from control_plane import secrets as control_plane_secrets
@@ -28,6 +26,7 @@ from control_plane.http_app import (
 from control_plane.product_config_http import ProductConfigApplyResponse
 from control_plane.service_auth import (
     BearerIdentityConfig,
+    action_safety,
     LaunchplaneAuthzPolicy,
     LocalOperatorIdentity,
 )
@@ -50,7 +49,6 @@ from tests.http_app_test_support import (
     _asgi_request,
     _browser_mutation_headers,
     _ConcurrentProductConfigDryRunMarkerStore,
-    _every_code_notification_policy_record,
     _github_human_identity,
     _github_human_product_config_policy,
     _github_human_runtime_key_safety_policy_apply_policy,
@@ -69,7 +67,6 @@ from tests.http_app_test_support import (
     _runtime_key_safety_policy_apply_payload,
     _runtime_key_safety_policy_apply_policy,
     _seed_agent_write_intent_secret_binding,
-    _terminal_agent_write_intent_policy,
 )
 from tests.support.http import lifespan_client
 from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
@@ -123,6 +120,20 @@ class FastApiManagedAuthzReconcileTransportTests(unittest.IsolatedAsyncioTestCas
                 "Content-Type": "application/json",
             },
             raw_body=b"not-json",
+        )
+        from tests.test_reviewed_workflow_rule_retirement import (
+            retirement_policy,
+            retirement_proposal,
+        )
+
+        retirement_response = await _asgi_request(
+            github_app,
+            "POST",
+            "/v1/authz-policies/managed-rule-sets/reconcile",
+            headers={"Authorization": "Bearer valid-token"},
+            payload=retirement_proposal(retirement_policy())
+            .reconcile_request()
+            .model_dump(mode="json"),
         )
 
         terminal_policy = LaunchplaneAuthzPolicy.model_validate(
@@ -192,6 +203,10 @@ class FastApiManagedAuthzReconcileTransportTests(unittest.IsolatedAsyncioTestCas
 
         self.assertEqual(github_response.status_code, 400)
         self.assertEqual(github_response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(retirement_response.status_code, 400)
+        self.assertEqual(
+            retirement_response.json()["error"]["code"], "reviewed_policy_proposal_required"
+        )
         self.assertEqual(terminal_response.status_code, 403)
         self.assertEqual(terminal_response.json()["error"]["code"], "authorization_denied")
         self.assertEqual(local_response.status_code, 403)
@@ -503,210 +518,6 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["code"], "idempotency_key_reused")
 
-    async def test_every_code_notification_policy_apply_writes_db_policy(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(
-                Path(temporary_directory_name) / "launchplane.sqlite3"
-            )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=_notification_policy_apply_policy(
-                        action="every_code_notification_policy.apply",
-                        product="launchplane",
-                        context="launchplane",
-                    ),
-                    record_store_factory=lambda: store,
-                )
-                policy_record = _every_code_notification_policy_record()
-
-                response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/every-code/notification-policies/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "every-code-notification-policy-test",
-                    },
-                    payload={
-                        "schema_version": 1,
-                        "mode": "apply",
-                        "policy": policy_record.model_dump(mode="json"),
-                    },
-                )
-                records = store.list_every_code_notification_policy_records(
-                    repository="cbusillo/code", status="enabled"
-                )
-            finally:
-                store.close()
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        self.assertEqual(
-            payload["records"],
-            {"every_code_notification_policy_id": policy_record.policy_id},
-        )
-        self.assertEqual(payload["result"]["mode"], "apply")
-        self.assertEqual(records, (policy_record,))
-
-    async def test_every_code_notification_policy_dry_run_does_not_write(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(
-                Path(temporary_directory_name) / "launchplane.sqlite3"
-            )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=_notification_policy_apply_policy(
-                        action="every_code_notification_policy.apply",
-                        product="launchplane",
-                        context="launchplane",
-                    ),
-                    record_store_factory=lambda: store,
-                )
-
-                response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/every-code/notification-policies/apply",
-                    headers={"Authorization": "Bearer valid-token"},
-                    payload={
-                        "schema_version": 1,
-                        "mode": "dry-run",
-                        "policy": _every_code_notification_policy_record(
-                            policy_id="every-code-notification-launchplane-dry-run"
-                        ).model_dump(mode="json"),
-                    },
-                )
-                records = store.list_every_code_notification_policy_records()
-            finally:
-                store.close()
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        self.assertEqual(payload["result"]["mode"], "dry-run")
-        self.assertFalse(payload["result"]["changed"])
-        self.assertEqual(records, ())
-
-    async def test_every_code_notification_policy_replays_idempotent_response(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(
-                Path(temporary_directory_name) / "launchplane.sqlite3"
-            )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=_notification_policy_apply_policy(
-                        action="every_code_notification_policy.apply",
-                        product="launchplane",
-                        context="launchplane",
-                    ),
-                    record_store_factory=lambda: store,
-                )
-                payload = {
-                    "schema_version": 1,
-                    "mode": "apply",
-                    "policy": _every_code_notification_policy_record().model_dump(mode="json"),
-                }
-
-                async with lifespan_client(app) as client:
-                    first_response = await _asgi_request(
-                        client,
-                        "POST",
-                        "/v1/every-code/notification-policies/apply",
-                        headers={
-                            "Authorization": "Bearer valid-token",
-                            "Idempotency-Key": "every-code-notification-policy-replay",
-                        },
-                        payload=payload,
-                    )
-                    second_response = await _asgi_request(
-                        client,
-                        "POST",
-                        "/v1/every-code/notification-policies/apply",
-                        headers={
-                            "Authorization": "Bearer valid-token",
-                            "Idempotency-Key": "every-code-notification-policy-replay",
-                        },
-                        payload=payload,
-                    )
-            finally:
-                store.close()
-
-        self.assertEqual(first_response.status_code, 202)
-        self.assertEqual(second_response.status_code, 202)
-        first_payload = first_response.json()
-        second_payload = second_response.json()
-        self.assertEqual(second_payload["records"], first_payload["records"])
-        self.assertEqual(second_payload["result"], first_payload["result"])
-        self.assertTrue(second_payload["replayed"])
-        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
-
-    async def test_every_code_notification_policy_rejects_conflicting_idempotency_key(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(
-                Path(temporary_directory_name) / "launchplane.sqlite3"
-            )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=_notification_policy_apply_policy(
-                        action="every_code_notification_policy.apply",
-                        product="launchplane",
-                        context="launchplane",
-                    ),
-                    record_store_factory=lambda: store,
-                )
-                first_payload = {
-                    "schema_version": 1,
-                    "mode": "apply",
-                    "policy": _every_code_notification_policy_record().model_dump(mode="json"),
-                }
-                conflicting_payload = {
-                    "schema_version": 1,
-                    "mode": "apply",
-                    "policy": _every_code_notification_policy_record(
-                        policy_id="every-code-notification-launchplane-conflict"
-                    ).model_dump(mode="json"),
-                }
-
-                async with lifespan_client(app) as client:
-                    await _asgi_request(
-                        client,
-                        "POST",
-                        "/v1/every-code/notification-policies/apply",
-                        headers={
-                            "Authorization": "Bearer valid-token",
-                            "Idempotency-Key": "every-code-notification-policy-conflict",
-                        },
-                        payload=first_payload,
-                    )
-                    response = await _asgi_request(
-                        client,
-                        "POST",
-                        "/v1/every-code/notification-policies/apply",
-                        headers={
-                            "Authorization": "Bearer valid-token",
-                            "Idempotency-Key": "every-code-notification-policy-conflict",
-                        },
-                        payload=conflicting_payload,
-                    )
-            finally:
-                store.close()
-
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["error"]["code"], "idempotency_key_reused")
-
     async def test_public_ingress_notification_policy_rejects_mismatched_scope(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
@@ -739,43 +550,6 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 records = store.list_public_ingress_notification_policy_records()
-            finally:
-                store.close()
-
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
-        self.assertEqual(records, ())
-
-    async def test_every_code_notification_policy_rejects_mismatched_scope(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(
-                Path(temporary_directory_name) / "launchplane.sqlite3"
-            )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                app = create_launchplane_fastapi_app(
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=_notification_policy_apply_policy(
-                        action="every_code_notification_policy.apply",
-                        product="other-product",
-                        context="other-context",
-                    ),
-                    record_store_factory=lambda: store,
-                )
-
-                response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/every-code/notification-policies/apply",
-                    headers={"Authorization": "Bearer valid-token"},
-                    payload={
-                        "schema_version": 1,
-                        "mode": "apply",
-                        "policy": _every_code_notification_policy_record().model_dump(mode="json"),
-                    },
-                )
-                records = store.list_every_code_notification_policy_records()
             finally:
                 store.close()
 
@@ -1098,7 +872,6 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
                     authz_policy=_local_operator_policy(
                         actions=(
                             "public_ingress_notification_policy.apply",
-                            "every_code_notification_policy.apply",
                             "preview_pr_feedback_notification_policy.apply",
                         ),
                         products=("launchplane", "sellyouroutboard"),
@@ -1112,10 +885,6 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
                     (
                         "/v1/public-ingress/notification-policies/apply",
                         _public_ingress_notification_policy_record(),
-                    ),
-                    (
-                        "/v1/every-code/notification-policies/apply",
-                        _every_code_notification_policy_record(),
                     ),
                     (
                         "/v1/previews/pr-feedback/notification-policies/apply",
@@ -1234,7 +1003,6 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         paths = response.json()["paths"]
         self.assertIn("/v1/public-ingress/notification-policies/apply", paths)
-        self.assertIn("/v1/every-code/notification-policies/apply", paths)
         self.assertIn("/v1/previews/pr-feedback/notification-policies/apply", paths)
 
 
@@ -1560,10 +1328,9 @@ class FastApiRuntimeKeySafetyPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
-    async def test_evaluate_returns_allowed_dry_run_without_execution(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+    async def test_retired_intent_cannot_authorize_execution(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_agent_write_intent_policy(
@@ -1573,11 +1340,41 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 record_store_factory=lambda: store,
             )
+            for mode in ("dry_run", "apply"):
+                with self.subTest(mode=mode):
+                    response = await _post_agent_write_intent_evaluate(
+                        app,
+                        _agent_write_intent_payload(
+                            intent="every_code_rerun",
+                            mode=mode,
+                            product="launchplane",
+                            context="launchplane",
+                        ),
+                    )
+                    self.assertEqual(response.status_code, 202)
+                    intent = response.json()["result"]["intent"]
+                    self.assertEqual(intent["status"], "denied")
+                    self.assertFalse(intent["safe_to_execute"])
+                    self.assertEqual(intent["audit"]["decision"], "denied")
+
+    async def test_evaluate_returns_allowed_dry_run_without_execution(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_agent_write_intent_policy(
+                    actions=("preview_refresh.execute",),
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
 
             response = await _post_agent_write_intent_evaluate(
                 app,
                 _agent_write_intent_payload(
-                    intent="every_code_rerun",
+                    intent="preview_refresh",
                     mode="dry_run",
                     product="launchplane",
                     context="launchplane",
@@ -1593,13 +1390,15 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"], {})
         intent = payload["result"]["intent"]
         self.assertEqual(intent["status"], "allowed")
-        self.assertEqual(intent["authz_action"], "every_code_work_request.rerun")
+        self.assertEqual(intent["authz_action"], "preview_refresh.execute")
         self.assertFalse(intent["safe_to_execute"])
         self.assertEqual(intent["reason_code"], "authorized")
         self.assertEqual(intent["audit"]["decision"], "allowed")
-        self.assertEqual(intent["audit"]["subject"]["action_safety"], "safe_write")
+        self.assertEqual(
+            intent["audit"]["subject"]["action_safety"], action_safety("preview_refresh.execute")
+        )
         self.assertEqual(record.evaluation.status, "allowed")
-        self.assertEqual(record.evaluation.intent, "every_code_rerun")
+        self.assertEqual(record.evaluation.intent, "preview_refresh")
         self.assertEqual(record.idempotency_key, "agent-write-intent-rerun")
         self.assertEqual(record.request.source_url, _AGENT_WRITE_INTENT_SOURCE_URL)
         self.assertEqual(record.trace_id, payload["trace_id"])
@@ -1610,14 +1409,14 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_agent_write_intent_policy(
-                    actions=("every_code_work_request.rerun",),
+                    actions=("preview_refresh.execute",),
                     product="launchplane",
                     context="launchplane",
                 ),
                 record_store_factory=lambda: store,
             )
             payload = _agent_write_intent_payload(
-                intent="every_code_rerun",
+                intent="preview_refresh",
                 mode="dry_run",
                 product="launchplane",
                 context="launchplane",
@@ -1647,7 +1446,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_evaluate_replays_before_write_store_check(self) -> None:
         payload = _agent_write_intent_payload(
-            intent="every_code_rerun",
+            intent="preview_refresh",
             mode="dry_run",
             product="launchplane",
             context="launchplane",
@@ -1659,7 +1458,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
             authz_policy=_agent_write_intent_policy(
-                actions=("every_code_work_request.rerun",),
+                actions=("preview_refresh.execute",),
                 product="launchplane",
                 context="launchplane",
             ),
@@ -1683,7 +1482,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_agent_write_intent_policy(
-                    actions=("every_code_work_request.rerun",),
+                    actions=("preview_refresh.execute",),
                     product="launchplane",
                     context="launchplane",
                 ),
@@ -1693,7 +1492,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
             first_response = await _post_agent_write_intent_evaluate(
                 app,
                 _agent_write_intent_payload(
-                    intent="every_code_rerun",
+                    intent="preview_refresh",
                     mode="dry_run",
                     product="launchplane",
                     context="launchplane",
@@ -1703,7 +1502,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
             conflict_response = await _post_agent_write_intent_evaluate(
                 app,
                 _agent_write_intent_payload(
-                    intent="every_code_rerun",
+                    intent="preview_refresh",
                     mode="dry_run",
                     product="launchplane",
                     context="launchplane",
@@ -1722,7 +1521,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_agent_write_intent_policy(
-                    actions=("every_code_work_request.rerun",),
+                    actions=("preview_refresh.execute",),
                     product="launchplane",
                     context="launchplane",
                 ),
@@ -1782,38 +1581,6 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(intent["reason_code"], "dry_run_required")
         self.assertFalse(intent["safe_to_execute"])
         self.assertEqual(intent["audit"]["reason_code"], "dry_run_required")
-
-    async def test_terminal_agent_evaluate_checks_scoped_policy(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
-            app = create_launchplane_fastapi_app(
-                verifier=_RejectingVerifier(),
-                authz_policy=_terminal_agent_write_intent_policy(),
-                record_store_factory=lambda: store,
-                bearer_identity_config=BearerIdentityConfig(
-                    terminal_agent_token="terminal-read-token",
-                    terminal_agent_subject="local-owner-agent",
-                    terminal_agent_token_label="local-owner-read",
-                ),
-            )
-
-            response = await _post_agent_write_intent_evaluate(
-                app,
-                _agent_write_intent_payload(
-                    intent="every_code_rerun",
-                    mode="dry_run",
-                    product="launchplane",
-                    context="launchplane",
-                    reason="Check whether local agent can request a rerun.",
-                ),
-                authorization="Bearer terminal-read-token",
-            )
-
-        self.assertEqual(response.status_code, 202)
-        intent = response.json()["result"]["intent"]
-        self.assertEqual(intent["status"], "allowed")
-        self.assertEqual(intent["audit"]["subject"]["subject_type"], "terminal_agent")
-        self.assertFalse(intent["audit"]["subject"]["approval_capable"])
 
     async def test_evaluate_checks_secret_binding_policy_without_reveal(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1950,7 +1717,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
             authz_policy=_agent_write_intent_policy(
-                actions=("every_code_work_request.rerun",),
+                actions=("preview_refresh.execute",),
                 product="launchplane",
                 context="launchplane",
             ),
@@ -1960,7 +1727,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         response = await _post_agent_write_intent_evaluate(
             app,
             _agent_write_intent_payload(
-                intent="every_code_rerun",
+                intent="preview_refresh",
                 mode="dry_run",
                 product="launchplane",
                 context="launchplane",
@@ -1974,7 +1741,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
             authz_policy=_agent_write_intent_policy(
-                actions=("every_code_work_request.rerun",),
+                actions=("preview_refresh.execute",),
                 product="launchplane",
                 context="launchplane",
             ),
@@ -2000,75 +1767,90 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_onboarding_runtime_conflict_replays_matching_committed_request(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(
-                Path(temporary_directory_name) / "launchplane.sqlite3"
-            )
-            app_store = PostgresRecordStore(database_url=database_url)
-            app_store.ensure_schema()
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_product_config_policy(
-                    action="product_onboarding.apply",
-                    product="launchplane",
-                    context="launchplane",
-                ),
-                record_store_factory=lambda: app_store,
-            )
-            original_write = app_store.write_product_authority_bundle
+    async def test_onboarding_profile_conflict_replays_winner_or_returns_conflict(self) -> None:
+        for completed in (True, False):
+            with self.subTest(completed=completed):
+                with TemporaryDirectory() as temporary_directory_name:
+                    database_url = _sqlite_database_url(
+                        Path(temporary_directory_name) / "launchplane.sqlite3"
+                    )
+                    app_store = PostgresRecordStore(database_url=database_url)
+                    app_store.ensure_schema()
+                    app = create_launchplane_fastapi_app(
+                        verifier=_StubVerifier(_identity()),
+                        authz_policy=_product_config_policy(
+                            action="product_onboarding.apply",
+                            product="launchplane",
+                            context="launchplane",
+                        ),
+                        record_store_factory=lambda: app_store,
+                    )
+                    original_write = app_store.write_product_authority_bundle
 
-            def commit_matching_request_before_attempt(bundle: ProductAuthorityBundle) -> None:
-                original_write(bundle)
-                original_write(bundle)
+                    def commit_matching_request_before_attempt(
+                        bundle: ProductAuthorityBundle, **write_options: Any
+                    ) -> None:
+                        original_write(
+                            bundle
+                            if completed
+                            else bundle.model_copy(update={"idempotency_record": None}),
+                            **write_options,
+                        )
+                        original_write(bundle, **write_options)
 
-            with patch.object(
-                app_store,
-                "write_product_authority_bundle",
-                side_effect=commit_matching_request_before_attempt,
-            ):
-                response = await _asgi_request(
-                    app,
-                    "POST",
-                    "/v1/product-onboarding/apply",
-                    headers={
-                        "Authorization": "Bearer valid-token",
-                        "Idempotency-Key": "concurrent-onboarding",
-                    },
-                    payload={
-                        "product": "launchplane",
-                        "manifest": {
-                            "product": "example-site",
-                            "display_name": "Example site",
-                            "repository": "example/example-site",
-                            "image_repository": "ghcr.io/example/example-site",
-                            "lanes": [{"context": "example-site", "instance": "testing"}],
-                            "runtime_environments": [
-                                {
-                                    "scope": "instance",
-                                    "context": "example-site",
-                                    "instance": "testing",
-                                    "env": {"SITE_MODE": "concurrent-private-value"},
-                                }
-                            ],
-                        },
-                    },
-                )
-            runtime_records = app_store.list_runtime_environment_records()
-            completion = app_store.read_idempotency_record(
-                scope=idempotency_scope(_identity()),
-                route_path="/v1/product-onboarding/apply",
-                idempotency_key="concurrent-onboarding",
-            )
-            app_store.close()
+                    with patch.object(
+                        app_store,
+                        "write_product_authority_bundle",
+                        side_effect=commit_matching_request_before_attempt,
+                    ):
+                        response = await _asgi_request(
+                            app,
+                            "POST",
+                            "/v1/product-onboarding/apply",
+                            headers={
+                                "Authorization": "Bearer valid-token",
+                                "Idempotency-Key": "concurrent-onboarding",
+                            },
+                            payload={
+                                "product": "launchplane",
+                                "manifest": {
+                                    "product": "example-site",
+                                    "display_name": "Example site",
+                                    "repository": "example/example-site",
+                                    "image_repository": "ghcr.io/example/example-site",
+                                    "lanes": [{"context": "example-site", "instance": "testing"}],
+                                    "runtime_environments": [
+                                        {
+                                            "scope": "instance",
+                                            "context": "example-site",
+                                            "instance": "testing",
+                                            "env": {"SITE_MODE": "concurrent-private-value"},
+                                        }
+                                    ],
+                                },
+                            },
+                        )
+                    runtime_records = app_store.list_runtime_environment_records()
+                    completion = app_store.read_idempotency_record(
+                        scope=idempotency_scope(_identity()),
+                        route_path="/v1/product-onboarding/apply",
+                        idempotency_key="concurrent-onboarding",
+                    )
+                    app_store.close()
 
-        self.assertEqual(response.status_code, 202, msg=response.text)
-        self.assertTrue(response.json()["replayed"])
-        assert completion is not None
-        self.assertEqual(response.json()["original_trace_id"], completion.response_trace_id)
-        self.assertEqual(len(runtime_records), 1)
-        self.assertEqual(runtime_records[0].env, {"SITE_MODE": "concurrent-private-value"})
-        self.assertNotIn("concurrent-private-value", response.text)
+                if completed:
+                    self.assertEqual(response.status_code, 202, msg=response.text)
+                    self.assertTrue(response.json()["replayed"])
+                    assert completion is not None
+                    self.assertEqual(
+                        response.json()["original_trace_id"], completion.response_trace_id
+                    )
+                else:
+                    self.assertEqual(response.status_code, 409, msg=response.text)
+                    self.assertIsNone(completion)
+                self.assertEqual(len(runtime_records), 1)
+                self.assertEqual(runtime_records[0].env, {"SITE_MODE": "concurrent-private-value"})
+                self.assertNotIn("concurrent-private-value", response.text)
 
     async def test_stale_runtime_apply_returns_conflict_and_preserves_concurrent_update(
         self,
@@ -2108,9 +1890,11 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             )
             original_write = app_store.write_product_authority_bundle
 
-            def commit_intervening_update(bundle: ProductAuthorityBundle) -> None:
+            def commit_intervening_update(
+                bundle: ProductAuthorityBundle, **write_options: Any
+            ) -> None:
                 app_store.write_runtime_environment_record(competing_record)
-                original_write(bundle)
+                original_write(bundle, **write_options)
 
             with patch.object(
                 app_store,
@@ -2587,8 +2371,10 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             }
             original_write = app_store.write_product_authority_bundle
 
-            def commit_then_report_conflict(bundle: ProductAuthorityBundle) -> None:
-                original_write(bundle)
+            def commit_then_report_conflict(
+                bundle: ProductAuthorityBundle, **write_options: Any
+            ) -> None:
+                original_write(bundle, **write_options)
                 raise RuntimeEnvironmentConflictError("simulated concurrent runtime conflict")
 
             with patch.object(

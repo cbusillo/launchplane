@@ -5,13 +5,11 @@ Normal previews still receive no source settings or integration allowances.
 """
 
 from dataclasses import dataclass
-import hashlib
-import json
-from typing import Protocol
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, cast
 
-from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
+from control_plane.odoo_source_prerequisite_programs import FailureStage
 from control_plane.provider_key_adoption import looks_like_credential
-from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetRecord,
@@ -22,7 +20,6 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideValue,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord, ScalarValue
 from control_plane.product_secret_copy import (
     ProductSecretCopyError,
     ProductSecretCopyFrom,
@@ -33,19 +30,27 @@ from control_plane.product_secret_copy import (
 from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+
+if TYPE_CHECKING:
+    from control_plane.odoo_runtime_source_prerequisites import PrerequisiteStore
 
 
 FISHBOWL_CONNECTION_PARAMETERS = ("host", "user", "db", "port", "ssl_verify", "password")
 
 
 class PreviewImportSourceError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, *, failure_stage: FailureStage | None = None
+    ) -> None:
+        if failure_stage is not None:
+            message = f"{message} Failure stage: {failure_stage}."
         super().__init__(message)
         self.code = code
+        self.failure_stage = failure_stage
 
 
 PREVIEW_FISHBOWL_SOURCE_ENV_KEY = "LAUNCHPLANE_PREVIEW_FISHBOWL_SOURCE"
-FISHBOWL_OPTIONAL_DEFAULTS = {"port": "3306", "ssl_verify": "True"}
 
 
 def preview_fishbowl_clear_program() -> str:
@@ -74,10 +79,6 @@ class PreviewImportSourceStore(ProductSecretCopyStore, Protocol):
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetRecord: ...
-
-    def list_runtime_environment_records(
-        self, *, context_name: str = "", instance_name: str = ""
-    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,8 @@ def resolve_fishbowl_preview_source(
     preview_slug: str,
     copy_from: ProductSecretCopyFrom,
     include_secret_value: bool = False,
+    control_plane_root: Path,
+    database_url: str | None,
 ) -> FishbowlPreviewSource:
     if (
         copy_from.instance != "testing"
@@ -162,57 +165,50 @@ def resolve_fishbowl_preview_source(
         raise PreviewImportSourceError(
             "allowance_required", "Preview import source requires an existing read-only allowance."
         )
-    values: dict[str, ScalarValue] = {}
-    retired_keys: set[str] = set()
-    for scope in ("context", "instance"):
-        records = [
-            item
-            for item in store.list_runtime_environment_records(context_name=copy_from.context)
-            if item.scope == scope
-            and item.context == copy_from.context
-            and item.instance == (copy_from.instance if scope == "instance" else "")
-        ]
-        if len(records) > 1:
-            raise PreviewImportSourceError(
-                "ambiguous_settings", "Preview import source runtime authority is ambiguous."
-            )
-        for item in records:
-            values.update(item.env)
-            retired_keys.update(item.retired_provider_keys)
-    values.update(target.env)
-    values = {key: value for key, value in values.items() if key not in retired_keys}
-    bound_keys = {
-        binding.binding_key
-        for binding in store.list_secret_bindings(
-            integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-            context_name=copy_from.context,
-            limit=None,
+    from control_plane.odoo_runtime_source_prerequisites import read_source_consumers
+
+    qualified = read_source_consumers(
+        store=cast("PrerequisiteStore", store),
+        product=profile.product,
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+        mode="preview",
+        sources=("fishbowl",),
+    )
+    source = next((item for item in qualified.sources if item.source == "fishbowl"), None)
+    if qualified.runtime != "verified" or source is None or not source.parameters:
+        raise PreviewImportSourceError(
+            "source_unqualified",
+            "The testing import source requires current installed producer and payload agreement.",
+            failure_stage=qualified.failure_stage or (source.failure_stage if source else None),
         )
-        if binding.status == "configured"
-        and binding.context == copy_from.context
-        and binding.instance in {"", copy_from.instance}
-    }
+    current = resolve_copy_source(
+        store,
+        product=profile.product,
+        target_context=copy_from.context,
+        target_instance=copy_from.instance,
+        binding_key=key,
+        reference=copy_from,
+    )
+    if (
+        current != (_profile, binding, record, version)
+        or store.read_dokploy_target_record(
+            context_name=copy_from.context, instance_name=copy_from.instance
+        )
+        != target
+    ):
+        raise PreviewImportSourceError(
+            "source_changed", "The testing import source changed during qualification."
+        )
     parameters: list[OdooConfigParameterOverride] = []
     selected_values: dict[str, str] = {}
-    for name in FISHBOWL_CONNECTION_PARAMETERS:
-        if name == "password":
-            continue
+    for name, value in source.parameters.items():
         parameter_key = f"fishbowl.{name}"
-        runtime_key = config_parameter_runtime_key(parameter_key)
-        value = values.get(runtime_key)
-        if runtime_key in bound_keys or (
-            value is not None and looks_like_credential(runtime_key, str(value))
-        ):
+        if looks_like_credential(parameter_key, value):
             raise PreviewImportSourceError(
                 "secret_setting", "Preview import source requires non-secret connection settings."
             )
-        if value is None or not str(value).strip():
-            if name in {"host", "user", "db"}:
-                raise PreviewImportSourceError(
-                    "settings_incomplete", "Preview import source runtime settings are incomplete."
-                )
-            value = FISHBOWL_OPTIONAL_DEFAULTS[name]
-        selected_values[parameter_key] = str(value)
+        selected_values[parameter_key] = value
         parameters.append(
             OdooConfigParameterOverride(
                 key=parameter_key, value=OdooOverrideValue(source="literal", value=value)
@@ -225,14 +221,13 @@ def resolve_fishbowl_preview_source(
         )
     )
     authority = {
+        "qualification": qualified.evidence_sha256,
         "copy_from": copy_from.model_dump(mode="json"),
         "binding": binding.model_dump(mode="json"),
         "allowance": allowances[0].model_dump(mode="json"),
         "parameters": selected_values,
     }
-    digest = hashlib.sha256(
-        json.dumps(authority, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(authority)
     return FishbowlPreviewSource(
         context=profile.preview.context,
         instance=preview_slug,

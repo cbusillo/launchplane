@@ -15,7 +15,7 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan, ODOO_CUTOVER_TERMINAL_STEPS
 from control_plane.odoo_cutover_storage import DeploymentStore
 from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan, persisted_cutover
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
@@ -69,6 +69,7 @@ class OdooProdPromotionStore(OdooStableTargetReplacementStore, DeploymentStore, 
     def write_environment_inventory(self, record: EnvironmentInventory) -> object: ...
 
     def write_promotion_record(self, record: PromotionRecord) -> object: ...
+    def read_promotion_record(self, record_id: str) -> PromotionRecord: ...
 
     def write_release_tuple_record(self, record: ReleaseTupleRecord) -> object: ...
 
@@ -150,15 +151,21 @@ def execute_odoo_prod_promotion(
     cutover_plan: OdooCutoverPlan | None = None,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
     release_decision: ReleaseReviewDecisionRecord | None = None,
+    cutover_dispatch_guard: Callable[[], None] | None = None,
 ) -> OdooProdPromotionResult:
     del state_dir, database_url
     product = _resolve_product_profile_key(product=request.product, context=request.context)
-    current_decision = require_release_approval(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        product=product,
-        artifact_id=request.artifact_id,
-        source_commit=request.source_git_ref,
+    recovery = persisted_cutover(record_store, cutover_plan)
+    current_decision = (
+        release_decision
+        if recovery is not None
+        else require_release_approval(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            product=product,
+            artifact_id=request.artifact_id,
+            source_commit=request.source_git_ref,
+        )
     )
     release_decision = release_decision or current_decision
     if release_decision is not None and (
@@ -174,7 +181,6 @@ def execute_odoo_prod_promotion(
     backup_gate = None
     infrastructure_backup = None
     backup_checkpoint = None
-    recovery = None
     try:
         if cutover_plan is None:
             try:
@@ -194,7 +200,10 @@ def execute_odoo_prod_promotion(
             from control_plane.odoo_cutover_plan import decision_bound_cutover_plan
 
             try:
-                cutover_plan = decision_bound_cutover_plan(cutover_plan, release_decision)
+                admitted = persisted_cutover(record_store, cutover_plan)
+                cutover_plan = decision_bound_cutover_plan(
+                    cutover_plan, release_decision, stored=admitted is not None
+                )
                 # Preserve a completed/uncertain attempt's audit even when a
                 # newly unavailable host capability refuses the replay.
                 recovery = persisted_cutover(record_store, cutover_plan)
@@ -219,10 +228,14 @@ def execute_odoo_prod_promotion(
             cutover_recovery=recovery,
         )
         artifact_manifest = record_store.read_artifact_manifest(request.artifact_id)
-        source_tuple = _read_source_tuple(record_store=record_store, request=request)
+        source_tuple = _read_source_tuple(
+            record_store=record_store,
+            request=request,
+            admitted_plan=recovery.plan if recovery is not None else None,
+        )
         if any(
             item.odoo_cutover is not None
-            and item.odoo_cutover.step not in {"complete", "rolled_back"}
+            and item.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
             and (cutover_plan is None or item.odoo_cutover.plan != cutover_plan)
             for item in record_store.list_deployment_records(
                 context_name=request.context, instance_name=request.to_instance
@@ -294,6 +307,7 @@ def execute_odoo_prod_promotion(
                     context=request.context,
                     instance=request.to_instance,
                     checkpoint=cutover_checkpoint,
+                    dispatch_guard=cutover_dispatch_guard,
                 )
             else:
                 replacement_result = execute_odoo_stable_target_replacement_apply(
@@ -337,34 +351,24 @@ def execute_odoo_prod_promotion(
             post_deploy_status=replacement_result.post_deploy_status,
             destination_health_status=replacement_result.health_status,
         )
-        record_store.write_promotion_record(final_record)
-        release_tuple_id = ""
-        if deploy_status == "pass" and deployment_record is not None:
-            record_store.write_environment_inventory(
-                build_environment_inventory(
-                    deployment_record=deployment_record,
-                    updated_at=utc_now_timestamp(),
-                    promotion_record_id=final_record.record_id,
-                    promoted_from_instance=final_record.from_instance,
-                )
-            )
-            release_tuple_id = _write_promoted_release_tuple(
-                record_store=record_store,
-                source_tuple=source_tuple,
-                deployment_record=deployment_record,
-                promotion_record=final_record,
-            )
+        release_tuple_id = _persist_promotion_result(
+            record_store,
+            final_record,
+            deployment_record,
+            source_tuple,
+            (cutover_dispatch_guard if cutover_plan is not None else None) or (lambda: None),
+        )
         return _result_from_record(
             record=final_record,
             release_tuple_id=release_tuple_id,
             error_message=replacement_result.error_message,
         )
     except click.ClickException as error:
-        if recovery is not None and recovery.step in {"complete", "rolled_back"}:
+        if recovery is not None and recovery.step in ODOO_CUTOVER_TERMINAL_STEPS:
             # A stable release key owns its completed audit record. A refused
             # replay must not replace that history with a new failure record.
             raise
-        if recovery is not None and recovery.step not in {"complete", "rolled_back"}:
+        if recovery is not None and recovery.step not in ODOO_CUTOVER_TERMINAL_STEPS:
             raise RuntimeError("Cutover remains unfinished; retain its recovery hold.") from error
         from control_plane.lane_movement import LaneMovementRefused
 
@@ -386,6 +390,88 @@ def execute_odoo_prod_promotion(
             release_tuple_id="",
             error_message=str(error),
         )
+
+
+def _persist_promotion_result(
+    store: OdooProdPromotionStore,
+    record: PromotionRecord,
+    deployment: DeploymentRecord | None,
+    source_tuple: ReleaseTupleRecord | None,
+    guard: Callable[[], None],
+) -> str:
+    guard()
+    store.write_promotion_record(record)
+    if record.deploy.status != "pass" or deployment is None:
+        return ""
+    guard()
+    store.write_environment_inventory(
+        build_environment_inventory(
+            deployment_record=deployment,
+            updated_at=utc_now_timestamp(),
+            promotion_record_id=record.record_id,
+            promoted_from_instance=record.from_instance,
+        )
+    )
+    guard()
+    return _write_promoted_release_tuple(
+        record_store=store,
+        source_tuple=source_tuple,
+        deployment_record=deployment,
+        promotion_record=record,
+    )
+
+
+def complete_odoo_cutover_promotion_audit(
+    *,
+    store: OdooProdPromotionStore,
+    plan: OdooCutoverPlan,
+    provider: OdooCutoverProvider,
+    dispatch_guard: Callable[[], None],
+) -> OdooProdPromotionResult:
+    from control_plane.odoo_cutover_plan import cutover_record_id
+
+    record = persisted_cutover(store, plan)
+    promotion = store.read_promotion_record("promotion-cutover-" + cutover_record_id(plan))
+    if (
+        record is None
+        or record.step != "complete"
+        or (promotion.context, promotion.to_instance, promotion.artifact_identity.artifact_id)
+        != (
+            plan.new.runtime_identity.context,
+            plan.new.binding.environment_id,
+            plan.candidate.artifact_id,
+        )
+        or promotion.backup_gate.status != "pass"
+    ):
+        raise ValueError("completion audit lacks its original verified cutover and promotion")
+    execute_odoo_cutover_deployment(
+        plan=plan,
+        record_store=store,
+        provider=provider,
+        context=promotion.context,
+        instance=promotion.to_instance,
+        checkpoint=lambda _step: None,
+        dispatch_guard=dispatch_guard,
+    )
+    dispatch_guard()
+    deployment = store.read_deployment_record(plan.new.runtime_identity.deployment_record_id)
+    final = promotion.model_copy(
+        update={
+            "deployment_record_id": deployment.record_id,
+            "deploy": deployment.deploy,
+            "post_deploy_update": deployment.post_deploy_update,
+            "destination_health": deployment.destination_health,
+        }
+    )
+    source = control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
+        context_name=promotion.context,
+        channel_name=promotion.from_instance,
+        artifact_manifest=plan.candidate,
+        deployment_record_id="",
+        minted_at=record.began_at.isoformat(),
+    )
+    tuple_id = _persist_promotion_result(store, final, deployment, source, dispatch_guard)
+    return _result_from_record(record=final, release_tuple_id=tuple_id, error_message="")
 
 
 def _checkpoint_chain(
@@ -419,17 +505,34 @@ def _resolve_product_profile_key(*, product: str, context: str) -> str:
 
 
 def _read_source_tuple(
-    *, record_store: OdooProdPromotionStore, request: OdooProdPromotionRequest
+    *,
+    record_store: OdooProdPromotionStore,
+    request: OdooProdPromotionRequest,
+    admitted_plan: OdooCutoverPlan | None = None,
 ) -> ReleaseTupleRecord | None:
     if not control_plane_release_tuples.should_mint_release_tuple_for_channel(
         request.from_instance
     ):
         return None
+    if admitted_plan is not None:
+        if (
+            admitted_plan.candidate.artifact_id != request.artifact_id
+            or admitted_plan.new.runtime_identity.context != request.context
+        ):
+            raise click.ClickException("stored source differs from its admitted cutover")
+        return control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
+            context_name=request.context,
+            channel_name=request.from_instance,
+            artifact_manifest=admitted_plan.candidate,
+            deployment_record_id="",
+            minted_at=utc_now_timestamp(),
+        )
     source_tuple = record_store.read_release_tuple_record(
         context_name=request.context,
         channel_name=request.from_instance,
     )
     return control_plane_release_tuples.require_source_release_tuple_for_promotion(
+        record_store=record_store,
         source_tuple=source_tuple,
         artifact_id=request.artifact_id,
         context_name=request.context,

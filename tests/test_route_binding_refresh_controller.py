@@ -1,4 +1,5 @@
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -7,6 +8,11 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
     ProductLaneProfile,
+)
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
 )
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
@@ -27,10 +33,11 @@ from control_plane.route_binding_refresh_controller import (
 from control_plane.http_app import (
     create_launchplane_fastapi_app,
     idempotency_scope,
+    LaunchplaneAuthzPolicyRuntime,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
-from tests.http_app_test_support import _asgi_get, _asgi_request
+from tests.http_app_test_support import _asgi_get, _asgi_request, _local_operator_bearer_config
 from tests.support.auth import _StubVerifier, _identity
 from tests.test_route_binding_record import (
     _RouteBindingReconcileFakeStore,
@@ -70,6 +77,8 @@ def _controller_policy(
     *,
     mode: str,
     include_binding_authority: bool = True,
+    products: tuple[str, ...] = ("example-product",),
+    contexts: tuple[str, ...] = ("example-testing",),
 ) -> LaunchplaneAuthzPolicy:
     controller_action = f"route_binding.odoo_testing_refresh.{mode}"
     binding_action = "route_binding.apply" if mode == "apply" else "route_binding.read"
@@ -93,8 +102,8 @@ def _controller_policy(
                     "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
                 ],
                 "event_names": ["pull_request"],
-                "products": ["example-product"],
-                "contexts": ["example-testing"],
+                "products": list(products),
+                "contexts": list(contexts),
                 "instances": ["testing"],
                 "actions": [binding_action],
             }
@@ -276,18 +285,19 @@ class RouteBindingRefreshControllerTests(unittest.TestCase):
     def test_target_limit_fails_closed_before_planning(self) -> None:
         first = _service_binding()
         second = first.model_copy(update={"product": "second-product"})
-
+        store = _Store(
+            profiles=(_profile(), _profile(product="second-product")),
+            bindings=(first, second),
+        )
         with self.assertRaises(RouteBindingRefreshTargetLimitExceeded):
             discover_active_odoo_testing_route_bindings(
-                _Store(
-                    profiles=(
-                        _profile(),
-                        _profile(product="second-product"),
-                    ),
-                    bindings=(first, second),
-                ),
+                store,
                 target_limit=1,
             )
+        scoped = discover_active_odoo_testing_route_bindings(
+            store, target_limit=1, include_record=lambda record: record.product == first.product
+        )
+        self.assertEqual([target.record for target in scoped], [first])
 
     def test_discovery_rejects_store_identity_mismatch(self) -> None:
         mismatched = _service_binding().model_copy(update={"context": "other-testing"})
@@ -371,6 +381,129 @@ def _write_refresh_fixture(
 
 
 class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refresh_excludes_ungranted_lanes_before_planning(self) -> None:
+        directory = self.enterContext(TemporaryDirectory())
+        store = PostgresRecordStore(
+            database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+        )
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        _write_refresh_fixture(store)
+        excluded = _service_binding().model_copy(
+            update={"product": "excluded-product", "context": "excluded-testing"}
+        )
+        excluded = EnvironmentRouteBindingRecord.model_validate(
+            {
+                **excluded.model_dump(mode="json"),
+                "ingress": {**excluded.ingress.model_dump(mode="json"), "provider": "external"},
+            }
+        )
+        store.write_product_profile_record(
+            _profile(
+                product=excluded.product,
+                lanes=(ProductLaneProfile(instance="testing", context=excluded.context),),
+            )
+        )
+        store.write_route_binding_record(excluded)
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode):
+                policy = _controller_policy(mode="plan" if mode == "dry-run" else mode)
+                policy = LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        **policy.model_dump(mode="json"),
+                        "github_actions": [
+                            *policy.model_dump(mode="json")["github_actions"],
+                            {
+                                **policy.github_actions[-1].model_dump(mode="json"),
+                                "products": [excluded.product],
+                                "contexts": [excluded.context],
+                                "actions": [
+                                    "route_binding.external.plan",
+                                    "route_binding.external.apply",
+                                ],
+                            },
+                        ],
+                    }
+                )
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    record_store_factory=lambda: store,
+                )
+                with (
+                    patch(
+                        "control_plane.http_app.utc_now_timestamp",
+                        return_value="2026-07-20T12:00:00Z",
+                    ),
+                    patch(
+                        "control_plane.route_binding_refresh_controller.plan_route_binding_reconcile",
+                        wraps=plan_route_binding_reconcile,
+                    ) as planner,
+                ):
+                    response = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/route-bindings/odoo-testing/controller/run-once",
+                        headers={
+                            "Authorization": "Bearer valid-token",
+                            "Idempotency-Key": f"scoped-refresh-{mode}",
+                        },
+                        payload=_refresh_payload(mode=mode),
+                    )
+                self.assertEqual(response.status_code, 202, response.text)
+                result = response.json()["result"]
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(
+                    [outcome["product"] for outcome in result["outcomes"]], ["example-product"]
+                )
+                self.assertEqual(
+                    [call.kwargs["request"].product for call in planner.call_args_list],
+                    ["example-product"],
+                )
+                self.assertEqual(
+                    store.read_route_binding_record(
+                        product=excluded.product,
+                        context_name=excluded.context,
+                        instance_name=excluded.instance,
+                    ),
+                    excluded,
+                )
+                if mode == "apply":
+                    self.assertEqual(result["refreshed_count"], 1)
+
+    async def test_director_native_refresh_preserves_legacy_and_production_authority(self) -> None:
+        directory = self.enterContext(TemporaryDirectory())
+        store = PostgresRecordStore(
+            database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+        )
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        _write_refresh_fixture(store)
+        before = store.list_route_binding_records()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(schema_version=2),
+            bearer_identity_config=_local_operator_bearer_config(),
+            record_store_factory=lambda: store,
+        )
+        for controller, confirmation in (
+            ("odoo-testing", "APPLY ODOO TESTING ROUTE BINDING REFRESH"),
+            ("odoo-stable", "APPLY ODOO STABLE ROUTE BINDING REFRESH"),
+        ):
+            with self.subTest(controller=controller):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    f"/v1/route-bindings/{controller}/controller/run-once",
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": controller,
+                    },
+                    payload={**_refresh_payload(mode="apply"), "confirmation": confirmation},
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(store.list_route_binding_records(), before)
+
     async def test_dry_run_discovers_only_testing_records_and_does_not_write(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -515,7 +648,7 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied_replay.json()["error"]["code"], "authorization_denied")
         self.assertIsNotNone(parent_idempotency)
 
-    async def test_apply_requires_every_discovered_binding_authority(self) -> None:
+    async def test_apply_denies_when_no_discovered_binding_is_authorized(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(
@@ -529,11 +662,26 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
                 context_name="example-testing",
                 instance_name="testing",
             )
+            policy = _controller_policy(mode="apply", include_binding_authority=False)
+            record = store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id=build_authz_policy_record_id(
+                        revision=1, policy_sha256=authz_policy_sha256(policy)
+                    ),
+                    source="test:route-binding-refresh",
+                    updated_at=datetime.now(UTC).isoformat(),
+                    policy=policy,
+                )
+            )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
-                authz_policy=_controller_policy(
-                    mode="apply",
-                    include_binding_authority=False,
+                authz_policy=policy,
+                authz_policy_runtime=LaunchplaneAuthzPolicyRuntime(
+                    policy,
+                    policy_sha256=record.policy_sha256,
+                    source="db",
+                    record_id=record.record_id,
+                    revision=record.revision,
                 ),
                 record_store_factory=lambda: store,
             )
@@ -562,12 +710,23 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
                 route_path="/v1/route-bindings/odoo-testing/controller/run-once",
                 idempotency_key="odoo-testing-route-binding-refresh-denied",
             )
+            denial = store.read_authz_denial_record(
+                trace_id=response.json()["trace_id"], observed_at=datetime.now(UTC).isoformat()
+            )
             store.close()
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         self.assertEqual(testing_after, testing_before)
         self.assertIsNone(stored_idempotency)
+        self.assertIsNotNone(denial)
+        assert denial is not None
+        self.assertEqual(
+            (denial.product, denial.context), (testing_before.product, testing_before.context)
+        )
+        self.assertEqual(denial.action, "route_binding.apply")
+        self.assertEqual(denial.reason_code, "no_matching_grant")
+        self.assertEqual(denial.policy_sha256, record.policy_sha256)
 
     async def test_apply_records_blocked_outcome_without_binding_write(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -634,7 +793,7 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
         assert parent_idempotency is not None
         self.assertEqual(parent_idempotency.state, "completed")
 
-    async def test_parent_reservation_fences_retry_after_partial_completion(self) -> None:
+    async def test_failed_parent_completion_allows_retry_after_partial_completion(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(
@@ -677,27 +836,22 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
                 context_name="example-testing",
                 instance_name="testing",
             )
-            parent_reservation = store.read_idempotency_record(
-                scope=idempotency_scope(_identity()),
-                route_path="/v1/route-bindings/odoo-testing/controller/run-once",
-                idempotency_key="odoo-testing-route-binding-refresh-partial",
-            )
-            retry = await _asgi_request(
-                app,
-                "POST",
-                "/v1/route-bindings/odoo-testing/controller/run-once",
-                headers=headers,
-                payload=_refresh_payload(mode="apply"),
-            )
+            with patch(
+                "control_plane.http_app.utc_now_timestamp", return_value="2026-07-20T12:00:00Z"
+            ):
+                retry = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/route-bindings/odoo-testing/controller/run-once",
+                    headers=headers,
+                    payload=_refresh_payload(mode="apply"),
+                )
             store.close()
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(refreshed.source.refreshed_at, "2026-07-20T12:00:00Z")
-        self.assertIsNotNone(parent_reservation)
-        assert parent_reservation is not None
-        self.assertEqual(parent_reservation.state, "running")
-        self.assertEqual(retry.status_code, 409)
-        self.assertEqual(retry.json()["error"]["code"], "mutation_in_progress")
+        self.assertEqual(retry.status_code, 202, retry.text)
+        self.assertEqual(retry.json()["result"]["unchanged_count"], 1)
 
     async def test_openapi_includes_refresh_controller_contract(self) -> None:
         app = create_launchplane_fastapi_app(

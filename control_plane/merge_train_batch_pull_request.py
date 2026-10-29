@@ -37,12 +37,17 @@ from control_plane.merge_train_github import (
     _validated_model_update,
     _wait_for_branch_sha,
 )
-from control_plane.dependency_update_review import DEPENDENCY_UPDATE_NOTES, pure_dependabot_update
+from control_plane.dependency_update_review import (
+    DEPENDENCY_UPDATE_NOTES,
+    pure_dependency_update,
+)
 from control_plane.release_review_github import (
     missing_owner_test_notes,
     nest_owner_test_notes,
     owner_test_notes,
 )
+
+CLOSE_COMMENT_PAGE_LIMIT = 10
 
 
 def _candidate_branch(
@@ -84,7 +89,9 @@ def _validate_batch_pull_request(
 
 
 def _candidate_pull_requests(
-    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+    *,
+    client: GitHubMergeTrainClient,
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
 ) -> list[dict[str, object]]:
     branch = _candidate_branch(
         repository=candidate.repository,
@@ -112,7 +119,7 @@ def has_batch_pull_request(
 
 
 def _owned_batch_pull_request(
-    payload: object, candidate: MergeTrainBatchCandidate
+    payload: object, candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan
 ) -> dict[str, object]:
     pull_request = _json_object(payload, "Managed batch PR")
     head = _json_object(pull_request.get("head"), "Managed batch PR head")
@@ -158,8 +165,10 @@ def _batch_owner_test_notes(
         )
         body = detail.get("body")
         notes = owner_test_notes(body if isinstance(body, str) else "")
-        if pure_dependabot_update(
-            detail, read=lambda path: client.transport.request(method="GET", path=path)
+        if pure_dependency_update(
+            detail,
+            read=lambda path: client.transport.request(method="GET", path=path),
+            store=client._branch_refresh_store,
         ):
             raw_labels = detail.get("labels", ())
             labels = (
@@ -243,10 +252,15 @@ def _bound_batch_pull_request(
 
 
 def close_batch_pull_request(
-    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+    *,
+    client: GitHubMergeTrainClient,
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+    reason: str,
 ) -> None:
     """Close PRs owned by this generated ref even when their mutable fields drift."""
-    if not candidate.candidate_sha or candidate.head_check_reuse is not None:
+    if not candidate.candidate_sha or (
+        isinstance(candidate, MergeTrainBatchCandidate) and candidate.head_check_reuse is not None
+    ):
         return
     for payload in _candidate_pull_requests(client=client, candidate=candidate):
         number = payload["number"]
@@ -266,6 +280,7 @@ def close_batch_pull_request(
             continue
         if pull_request.get("state") != "open":
             raise MergeAdmissionReconciliationRequiredError("Batch PR lifecycle is unavailable.")
+        _comment_close_reason_once(client=client, candidate=candidate, number=number, reason=reason)
         response = client.transport.request(
             method="PATCH",
             path=f"/repos/{_repository_path(candidate.repository)}/pulls/{number}",
@@ -276,6 +291,32 @@ def close_batch_pull_request(
             raise MergeAdmissionReconciliationRequiredError("Batch PR retirement is not confirmed.")
 
 
+def _comment_close_reason_once(
+    *,
+    client: GitHubMergeTrainClient,
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+    number: int,
+    reason: str,
+) -> None:
+    marker = f"<!-- launchplane-batch-close:{candidate.batch_id}:{candidate.candidate_sha} -->"
+    path = f"/repos/{_repository_path(candidate.repository)}/issues/{number}/comments?per_page=100"
+    for page in range(1, CLOSE_COMMENT_PAGE_LIMIT + 1):
+        comments = client.transport.request(method="GET", path=f"{path}&page={page}")
+        if not isinstance(comments, list):
+            raise MergeAdmissionReconciliationRequiredError("Batch PR comments are unavailable.")
+        if any(
+            isinstance(item, dict) and marker in str(item.get("body") or "") for item in comments
+        ):
+            return
+        if len(comments) < 100:
+            break
+    client.comment_pull_request(
+        repository=candidate.repository,
+        pull_request_number=number,
+        body=f"{marker}\nLaunchplane is closing this batch: {reason}",
+    )
+
+
 def batch_pull_request_body(
     *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
 ) -> str:
@@ -284,10 +325,11 @@ def batch_pull_request_body(
         f"- #{entry.pull_request_number} at `{entry.head_sha}`" for entry in candidate.entries
     )
     return (
-        f"{marker}\n\nThis PR lands Launchplane's tested candidate `{candidate.candidate_sha}` "
-        f"through the protected merge endpoint. Constituent PRs and reviewed heads:\n\n{members}\n\n"
+        f"{marker}\n\nThis PR validates Launchplane's candidate `{candidate.candidate_sha}`. "
+        f"The train selects its protected landing route. Constituent PRs and reviewed heads:\n\n{members}\n\n"
         "Launchplane revalidates every constituent and records the shared landing effect. "
-        "Keep source PRs and branches intact. Let the Launchplane controller merge this PR; "
+        "Keep source PRs and branches intact. Let the Launchplane controller either merge this PR "
+        "or close it after landing through the original PRs; "
         "do not merge it by hand or update its generated branch. An out-of-controller merge "
         "without a preceding admission remains fenced for explicit reconciliation. "
         "The controller confirms constituent completion after landing.\n\n"

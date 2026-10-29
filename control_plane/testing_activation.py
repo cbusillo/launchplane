@@ -1,6 +1,5 @@
 """Activate only new testing resources; retain the old recipient and unknown effects."""
 
-import base64
 from collections.abc import Callable
 from dataclasses import dataclass
 import hmac
@@ -16,6 +15,7 @@ from control_plane.build_provenance import GitHubBuildProvenanceTransport
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.testing_activation import (
     TestingActivationPlan,
     TestingActivationRefusal,
@@ -28,8 +28,15 @@ from control_plane.disposable_lanes import disposable_lane_configuration
 from control_plane.disposable_lanes import LaneConfigurationRecord
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.dokploy import api, compose, post_deploy, source
+from control_plane.dokploy.network_capacity import (
+    BridgeNetworkCapacityRefused,
+    compose_bridge_network_requirement,
+    require_bridge_network_capacity,
+)
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.generic_web_testing_exclusion import (
     _bind,
+    bind_testing_recipient,
     _target_reservations,
     inspect_generic_web_testing_exclusion,
 )
@@ -43,6 +50,8 @@ from control_plane.live_target_runtime import (
 )
 from control_plane.odoo_testing_resources import (
     GenericWebTestingResources,
+    ApplicationTestingResources,
+    OdooTestingResources,
     resource_readback_passes,
 )
 from control_plane.provider_operations import (
@@ -67,13 +76,30 @@ from control_plane.testing_activation_compose import (
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.testing_separation_resources import (
     ROUTE as PREPARATION_ROUTE,
-    SeparationResourcesResult,
+    SeparationResourcesRefusal,
+    parse_preparation_receipt,
     preparation_binding,
 )
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 from control_plane.workflows.ship import utc_now_timestamp
 
 ROUTE = "/v1/products/{product}/testing-activation"
+
+
+def activation_adapter(
+    root: Path,
+    store: PostgresRecordStore,
+    product: str,
+    request: TestingActivationRequest,
+    actor: str,
+    scope: str,
+    trace_id: str,
+) -> "TestingActivationAdapter":
+    if request.application is not None:
+        from control_plane.testing_application_activation import ApplicationActivationAdapter
+
+        return ApplicationActivationAdapter(root, store, product, request, actor, scope, trace_id)
+    return TestingActivationAdapter(root, store, product, request, actor, scope, trace_id)
 
 
 def read_product_compose(store: PostgresRecordStore, product: str, commit: str, path: str) -> str:
@@ -116,10 +142,44 @@ def verified_product_image(store: PostgresRecordStore, product: str, commit: str
 
 
 def activation_record(
-    store: PostgresRecordStore, product: str, context: str
+    store: PostgresRecordStore,
+    product: str,
+    context: str,
+    *,
+    scope: str = "",
+    preparation_key: str = "",
+    plan_sha256: str = "",
 ) -> TestingActivationRecord | None:
+    records = [
+        TestingActivationRecord.model_validate(payload)
+        for payload in store.list_testing_application_activations(product, context)
+    ]
+    if scope or preparation_key:
+        matches = [
+            row
+            for row in records
+            if (row.scope, row.request.preparation_key) == (scope, preparation_key)
+        ]
+    elif plan_sha256:
+        matches = [row for row in records if row.plan_sha256 == plan_sha256]
+    elif records:
+        target = store.read_dokploy_target_id_record(context_name=context, instance_name="testing")
+        matches = [row for row in records if row.published and row.target_id == target.target_id]
+    else:
+        matches = []
+    if len(matches) > 1:
+        raise TestingActivationRefusal("Activation operation custody is ambiguous.")
+    if matches:
+        return matches[0]
+    if scope or preparation_key:
+        return None
     payload = store.read_testing_activation(product, context)
-    return TestingActivationRecord.model_validate(payload) if payload is not None else None
+    legacy = TestingActivationRecord.model_validate(payload) if payload is not None else None
+    return (
+        legacy
+        if legacy is not None and (not plan_sha256 or legacy.plan_sha256 == plan_sha256)
+        else None
+    )
 
 
 def configuration_digest(
@@ -150,8 +210,12 @@ def configuration_digest(
                 and row.binding_id in replaced_bindings
             )
         ]
-        configuration.extend(generated.secret_records)
-        configuration.extend(generated.secret_bindings)
+        configuration.extend(
+            row for row in generated.secret_records if row.integration == "runtime_environment"
+        )
+        configuration.extend(
+            row for row in generated.secret_bindings if row.integration == "runtime_environment"
+        )
     if version == 3:
         configuration.sort(key=lambda row: row.model_dump_json())
     keys = {item.binding_key for item in configuration if hasattr(item, "binding_key")}
@@ -193,7 +257,7 @@ def configuration_digest(
 
 def preparation_resources(
     store: PostgresRecordStore, product: str, request: TestingActivationRequest, scope: str
-) -> tuple[GenericWebTestingResources, str]:
+) -> tuple[OdooTestingResources, str]:
     row = store.read_idempotency_record(
         scope=scope,
         route_path=PREPARATION_ROUTE.format(product=product),
@@ -201,19 +265,64 @@ def preparation_resources(
     )
     if row is None or row.state != "completed":
         raise TestingActivationRefusal("Use the original caller's completed allocation key.")
-    receipt = SeparationResourcesResult.model_validate(row.response_payload.get("result"))
+    receipt = parse_preparation_receipt(row.response_payload.get("result"))
+    if isinstance(receipt, SeparationResourcesRefusal):
+        raise TestingActivationRefusal("The original preparation refused allocation.")
     if (receipt.product, receipt.context) != (product, request.context):
         raise TestingActivationRefusal("Allocation belongs to another testing lane.")
     old_id = store.read_dokploy_target_id_record(
         context_name=request.context, instance_name="testing"
     )
-    existing = activation_record(store, product, request.context)
-    resources = GenericWebTestingResources(
+    if receipt.application != request.application:
+        raise TestingActivationRefusal(
+            "Activation must use the original reviewed resource specification."
+        )
+    existing = activation_record(
+        store,
+        product,
+        request.context,
+        **(
+            {"scope": scope, "preparation_key": request.preparation_key}
+            if request.application is not None
+            else {}
+        ),
+    )
+    values = dict(
         product=product,
         context=request.context,
         operation_id=receipt.plan_sha256,
-        target_id=existing.retained_target_id.target_id if existing else old_id.target_id,
+        target_id=receipt.retained_target_id
+        or (existing.retained_target_id.target_id if existing else old_id.target_id),
         namespace=f"lp-testing-{receipt.plan_sha256[:32]}",
+    )
+    if request.application is not None and not receipt.allocation_operation_key:
+        raise TestingActivationRefusal("Application allocation has no original operation identity.")
+    if receipt.allocation_operation_key:
+        from control_plane.provider_operations import build_provider_operation_key
+        from control_plane.testing_separation_resources import application_resource_generation
+
+        if (
+            request.application is None
+            or receipt.allocation_operation_key
+            != build_provider_operation_key(
+                scope=row.scope,
+                route_path=row.route_path,
+                idempotency_key=row.idempotency_key,
+                request_fingerprint=row.request_fingerprint,
+                reconciliation_key=row.reconciliation_key,
+            )
+        ):
+            raise TestingActivationRefusal("Allocation belongs to a different original operation.")
+        generation = application_resource_generation(
+            receipt.plan_sha256, receipt.allocation_operation_key
+        )
+        values.update(operation_id=generation, namespace=f"lp-testing-{generation[:32]}")
+    resources = (
+        ApplicationTestingResources.model_validate(
+            {**values, "state_kind": request.application.state.kind}
+        )
+        if request.application is not None
+        else GenericWebTestingResources.model_validate(values)
     )
     if (
         receipt.volumes != resources.volumes
@@ -225,11 +334,19 @@ def preparation_resources(
     return resources, row.record_id
 
 
+def shared_read_only_binding(binding: SecretBinding) -> bool:
+    return bool(
+        binding.declared_secret_class == "shared_safe"
+        and binding.sharing_reason
+        and binding.sharing_reason.kind == "read_only_source"
+    )
+
+
 def runtime_values(
     store: PostgresRecordStore,
     root: Path,
     record: TestingActivationRecord,
-    resources: GenericWebTestingResources,
+    resources: OdooTestingResources,
 ) -> dict[str, str]:
     environment = runtime_environments.resolve_site_runtime_environment(
         control_plane_root=root,
@@ -282,11 +399,7 @@ def runtime_values(
             "testing",
         ):
             raise TestingActivationRefusal("Testing credentials must have lane-specific bindings.")
-        if (
-            binding.declared_secret_class == "shared_safe"
-            and binding.sharing_reason
-            and binding.sharing_reason.kind == "read_only_source"
-        ):
+        if shared_read_only_binding(binding):
             shared.add(key)
         elif binding.declared_secret_class not in {"testing", "non_prod"}:
             raise TestingActivationRefusal("A carried key can reach a live writable system.")
@@ -340,7 +453,7 @@ def ports_for(record: TestingActivationRecord, values: dict[str, str]) -> set[in
 
 
 def rendered_source(
-    record: TestingActivationRecord, values: dict[str, str], resources: GenericWebTestingResources
+    record: TestingActivationRecord, values: dict[str, str], resources: OdooTestingResources
 ) -> dict[str, Any]:
     rendered = interpolate(json.loads(record.compose_source), values)
     credential_values = {
@@ -365,6 +478,10 @@ def target_without_hold(target: Any) -> dict[str, Any]:
     payload = target.model_dump(mode="json", exclude={"updated_at", "source_label"})
     payload["policies"].pop("staff_testing_hold", None)
     return cast(dict[str, Any], payload)
+
+
+def recipient_target_identity(target: DokployTargetRecord) -> dict[str, Any]:
+    return target.model_dump(mode="json", exclude={"updated_at", "source_label", "policies"})
 
 
 def same_reservation_intent(current: object, original: object) -> bool:
@@ -398,6 +515,39 @@ def retained_fence_is_separated(store: object, reservation: object) -> bool:
         if snapshot.instance != "testing" or not snapshot.product:
             return False
         record = activation_record(store, snapshot.product, snapshot.context)
+        if record is not None and record.request.application is not None:
+            _profile, current, target_id, target = bind_testing_recipient(
+                store, record.product, record.context, "testing"
+            )
+            seen: set[str] = set()
+            while record.target_id not in seen:
+                seen.add(record.target_id)
+                if not completed_application_activation(store, record):
+                    return False
+                if any(
+                    same_reservation_intent(reservation, original)
+                    for original in record.retained_reservations
+                ):
+                    return (
+                        target.target_id == target_id.target_id
+                        and current.target_type == target.provider_target_type == "application"
+                        and target_id.target_id != snapshot.target_id
+                    )
+                candidates = [
+                    TestingActivationRecord.model_validate(value)
+                    for value in store.list_testing_application_activations(
+                        record.product, record.context
+                    )
+                ]
+                predecessors = [
+                    value
+                    for value in candidates
+                    if value.published and value.target_id == record.retained_target_id.target_id
+                ]
+                if len(predecessors) != 1:
+                    return False
+                record = predecessors[0]
+            return False
         if (
             record is None
             or not record.published
@@ -426,6 +576,55 @@ def retained_fence_is_separated(store: object, reservation: object) -> bool:
         return False
 
 
+def completed_application_activation(
+    store: PostgresRecordStore, record: TestingActivationRecord
+) -> bool:
+    """Only the real original parent's completed publication permits continuation."""
+    if (
+        record.request.application is None
+        or not record.published
+        or record.published_target is None
+    ):
+        return False
+    parent = store.read_testing_application_activation_operation(
+        record.product, record.context, record.scope, record.request.preparation_key
+    )
+    if (
+        parent is None
+        or parent.state != "completed"
+        or parent.reconciliation_key != record.plan_sha256
+    ):
+        return False
+    result = parent.response_payload.get("result")
+    return (
+        isinstance(result, dict)
+        and result.get("plan_sha256") == record.plan_sha256
+        and result.get("separation_verified") is True
+    )
+
+
+def completed_application_predecessor(
+    store: object,
+    *,
+    product: str,
+    context: str,
+    target_id: str,
+    inventory: object,
+    deployment: object,
+) -> bool:
+    """An exact captured predecessor can be left behind once, without adopting its originals."""
+    if not isinstance(store, PostgresRecordStore):
+        return False
+    record = activation_record(store, product, context)
+    return (
+        record is not None
+        and record.target_id == target_id
+        and record.retained_inventory == inventory
+        and record.retained_deployment == deployment
+        and completed_application_activation(store, record)
+    )
+
+
 def require_activation_hold_lift(
     store: object, request: object, actor: str, root: Path, *, inspect_provider: bool = True
 ) -> bool:
@@ -441,7 +640,9 @@ def require_activation_hold_lift(
         raise TestingActivationRefusal(
             "Activation continuation requires service-owned testing records."
         )
-    record = activation_record(store, request.product, request.context)
+    record = activation_record(
+        store, request.product, request.context, plan_sha256=request.activation_plan_sha256
+    )
     if (
         record is None
         or not record.published
@@ -452,7 +653,7 @@ def require_activation_hold_lift(
         raise TestingActivationRefusal(
             "The activation does not authorize this interlock continuation."
         )
-    adapter = TestingActivationAdapter(
+    adapter = activation_adapter(
         root,
         store,
         record.product,
@@ -477,12 +678,13 @@ def require_activation_hold_lift(
         return True
     adapter.verify_provider(record)
     resources, _ = preparation_resources(store, record.product, record.request, record.scope)
-    inspect_new_resources(
-        root,
-        resources,
-        ports_for(record, runtime_values(store, root, record, resources)),
-        lambda _phase: None,
-    )
+    if record.request.application is None:
+        inspect_new_resources(
+            root,
+            resources,
+            ports_for(record, runtime_values(store, root, record, resources)),
+            lambda _phase: None,
+        )
     return True
 
 
@@ -591,7 +793,7 @@ def plan(record: TestingActivationRecord) -> dict[str, Any]:
 
 def inspect_new_resources(
     root: Path,
-    resources: GenericWebTestingResources,
+    resources: OdooTestingResources,
     ports: set[int],
     before_effect: Callable[[str], None],
 ) -> None:
@@ -607,14 +809,10 @@ def inspect_new_resources(
         compose_name=resources.context,
         target_payload=payload,
     )
-    encoded = base64.b64encode(json.dumps(sorted(ports)).encode()).decode()
-    program = (
-        resources.script("readback")
-        + "\npython3 - "
-        + encoded
-        + " <<'LP_PORTS'\n"
-        + PORT_INSPECTION_PROGRAM
-        + "\nLP_PORTS\n"
+    from control_plane.host_package import host_schedule
+
+    program = host_schedule(
+        "activation", {"resources": resources.host_spec("readback"), "ports": sorted(ports)}
     )
     evidence = post_deploy.run_manual_data_schedule(
         host=host,
@@ -704,7 +902,16 @@ class TestingActivationAdapter:
             self.root, self.store, self.product, self.request, self.actor, self.scope
         )
 
+    def bindings(self) -> tuple[Any, Any, Any, Any]:
+        return _bind(self.store, self.product, self.request.context, "testing")
+
     def require_unchanged(self, record: TestingActivationRecord) -> None:
+        if not record.published:
+            protection = self.store.read_disposable_lane_safety(
+                record.product, record.context, "testing"
+            )
+            if protection is not None and protection.usage == "in_use":
+                raise TestingActivationRefusal("Known staff use protects the retained recipient.")
         if configuration_digest(
             self.store, self.product, record.context, version=record.configuration_version
         ) != (record.generated_configuration_sha256 or record.configuration_sha256):
@@ -712,13 +919,24 @@ class TestingActivationAdapter:
                 "Testing configuration or key policy changed.",
                 code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
             )
-        _, target, target_id, provider = _bind(self.store, self.product, record.context, "testing")
+        target = self.require_recipient_custody(record)
+        if record.published and target_without_hold(target) != target_without_hold(
+            record.published_target
+        ):
+            raise TestingActivationRefusal(
+                "Activated testing authority changed.",
+                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+            )
+
+    def require_recipient_custody(self, record: TestingActivationRecord) -> DokployTargetRecord:
+        _, target, target_id, provider = self.bindings()
         if record.published:
             if (
                 target_id.target_id != record.target_id
                 or provider.target_id != record.target_id
                 or record.published_target is None
-                or target_without_hold(target) != target_without_hold(record.published_target)
+                or recipient_target_identity(target)
+                != recipient_target_identity(record.published_target)
             ):
                 raise TestingActivationRefusal(
                     "Activated testing recipient changed.",
@@ -744,6 +962,7 @@ class TestingActivationAdapter:
                     "The retained original reservation changed.",
                     code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
                 )
+        return cast(DokployTargetRecord, target)
 
     def save(self, record: TestingActivationRecord, **updates: Any) -> TestingActivationRecord:
         replacement = record.model_copy(update=updates)
@@ -753,8 +972,14 @@ class TestingActivationAdapter:
         return replacement
 
     def verify_provider(self, record: TestingActivationRecord) -> None:
+        self.verify_compose_provider(record)
+
+    def verify_compose_provider(
+        self, record: TestingActivationRecord, *, values: dict[str, str] | None = None
+    ) -> None:
         resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
-        values = runtime_values(self.store, self.root, record, resources)
+        if values is None:
+            values = runtime_values(self.store, self.root, record, resources)
         expected = json.loads(record.compose_source)
         for volume in expected["volumes"].values():
             volume["external"] = True
@@ -849,25 +1074,8 @@ class TestingActivationAdapter:
                     )
         try:
             actual = interpolate(actual, values)
-            # Dokploy adds this root declaration even without domains. Ignore only
-            # that exact unused declaration; attachments and aliases remain fenced.
-            if isinstance(actual, dict) and isinstance(actual.get("services"), dict):
-                networks = actual.get("networks")
-                provider_network = "dokploy-network"
-                if (
-                    not payload.get("domains")
-                    and isinstance(networks, dict)
-                    and networks.get(provider_network) == {"external": True}
-                    and provider_network not in expected.get("networks", {})
-                    and all(
-                        isinstance(service.get("networks", []), (list, dict))
-                        and provider_network not in service.get("networks", [])
-                        for service in actual["services"].values()
-                    )
-                ):
-                    networks.pop(provider_network)
-                    if not networks and "networks" not in expected:
-                        actual.pop("networks")
+            if not payload.get("domains") and isinstance(actual, dict):
+                compose.discard_unused_dokploy_network(actual, expected=expected)
             qualify_compose(
                 actual,
                 volumes=set(resources.volumes.values()),
@@ -1050,12 +1258,13 @@ class TestingActivationAdapter:
             image_reference=record.image_reference,
             host_ports=record.host_ports,
             qualified_at=record.qualified_at,
+            external_capabilities=record.external_capabilities,
         ).model_dump(mode="json")
 
     def publish(
         self,
         record: TestingActivationRecord,
-        resources: GenericWebTestingResources,
+        resources: OdooTestingResources,
         checkpoint: Callable[[str], None],
     ) -> TestingActivationRecord:
         values = runtime_values(self.store, self.root, record, resources)
@@ -1147,7 +1356,7 @@ class TestingActivationAdapter:
             update={
                 "generated_configuration_sha256": configuration_digest(
                     self.store, self.product, record.context, version=3, generated=bundle
-                )
+                ),
             }
         )
         self.store.write_testing_activation(
@@ -1296,12 +1505,6 @@ class TestingActivationAdapter:
                     lease.checkpoint_effect(phase)
                     started = True
 
-                inspect_new_resources(
-                    self.root,
-                    resources,
-                    ports_for(record, runtime_values(self.store, self.root, record, resources)),
-                    checkpoint,
-                )
                 host, token = source.read_dokploy_config(control_plane_root=self.root)
                 old = api.fetch_dokploy_target_payload(
                     host=host,
@@ -1317,6 +1520,21 @@ class TestingActivationAdapter:
                     raise TestingActivationRefusal(
                         "Preserve an existing activation placement for original-key inspection."
                     )
+                if existing is None:
+                    require_bridge_network_capacity(
+                        host=host,
+                        token=token,
+                        server_id=str(old.get("serverId") or ""),
+                        required_networks=compose_bridge_network_requirement(
+                            json.loads(record.compose_source)
+                        ),
+                    )
+                inspect_new_resources(
+                    self.root,
+                    resources,
+                    ports_for(record, runtime_values(self.store, self.root, record, resources)),
+                    checkpoint,
+                )
                 # A refused/transient inspection must not strand a permanent
                 # custody row. Persist immediately before creation, after all
                 # prerequisites; every subsequent uncertain write stays fenced.
@@ -1434,6 +1652,7 @@ class TestingActivationAdapter:
                     template = json.loads(record.compose_source)
                     for volume in template["volumes"].values():
                         volume["external"] = True
+                    env_text = api.serialize_dokploy_env_text(values, target_type="compose")
                     record = self.save(record, phase="configure_new_recipient")
                     checkpoint(record.phase)
                     api.dokploy_request(
@@ -1449,7 +1668,7 @@ class TestingActivationAdapter:
                             "composePath": "docker-compose.yml",
                             "autoDeploy": False,
                             "composeFile": json.dumps(template),
-                            "env": api.serialize_dokploy_env_text(values),
+                            "env": env_text,
                         },
                     )
                 record = self.materialize_source(record, checkpoint)
@@ -1465,7 +1684,14 @@ class TestingActivationAdapter:
             if not started:
                 raise ProviderMutationRejectedError(
                     error
-                    if isinstance(error, TestingActivationRefusal)
+                    if isinstance(
+                        error,
+                        (
+                            TestingActivationRefusal,
+                            BridgeNetworkCapacityRefused,
+                            NativeSourceAuthorizationDenied,
+                        ),
+                    )
                     else ValueError("Activation refused before provider effects.")
                 ) from error
             raise ProviderMutationUnknownError(

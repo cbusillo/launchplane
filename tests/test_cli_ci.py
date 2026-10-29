@@ -36,9 +36,9 @@ class ColdStartupTests(unittest.TestCase):
 
 
 class PostgresIntegrationCommandTests(unittest.TestCase):
-    @patch("control_plane.cli_ci.subprocess.run")
-    def test_postgres_integration_runs_every_real_postgres_module(self, run: MagicMock) -> None:
-        run.return_value = subprocess.CompletedProcess(args=(), returncode=0)
+    @patch("control_plane.cli_ci.subprocess.Popen")
+    def test_postgres_integration_runs_every_real_postgres_module(self, popen: MagicMock) -> None:
+        popen.return_value.__enter__.return_value.wait.return_value = 0
 
         result = CliRunner().invoke(
             run_postgres_integration_tests,
@@ -46,11 +46,12 @@ class PostgresIntegrationCommandTests(unittest.TestCase):
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        command = run.call_args.args[0]
+        command = popen.call_args.args[0]
         self.assertEqual(
             command[-len(POSTGRES_INTEGRATION_MODULES) :],
             list(POSTGRES_INTEGRATION_MODULES),
         )
+        self.assertNotIn("::warning", result.output)
 
     def test_parallel_shards_cover_the_serial_suite_once(self) -> None:
         loader = unittest.TestLoader()
@@ -58,7 +59,7 @@ class PostgresIntegrationCommandTests(unittest.TestCase):
             iter_test_target_ids(loader.loadTestsFromNames(POSTGRES_INTEGRATION_MODULES))
         )
         self.assertFalse(loader.errors)
-        for count in (2, 3):
+        for count in (2, 3, 6):
             with self.subTest(shard_count=count):
                 shards = [
                     postgres_integration_shard_targets(shard_count=count, shard_index=index)
@@ -92,12 +93,12 @@ class PostgresIntegrationCommandTests(unittest.TestCase):
             postgres_integration_shard_targets(shard_count=3, shard_index=0),
         )
 
-    @patch("control_plane.cli_ci.subprocess.run")
+    @patch("control_plane.cli_ci.subprocess.Popen")
     def test_shard_executes_its_discovered_tests_and_propagates_failure(
-        self, run: MagicMock
+        self, popen: MagicMock
     ) -> None:
         targets = postgres_integration_shard_targets(shard_count=3, shard_index=1)
-        run.return_value = subprocess.CompletedProcess(args=(), returncode=1)
+        popen.return_value.__enter__.return_value.wait.return_value = 1
         result = CliRunner().invoke(
             run_postgres_integration_tests,
             [
@@ -110,14 +111,14 @@ class PostgresIntegrationCommandTests(unittest.TestCase):
             ],
         )
         self.assertNotEqual(result.exit_code, 0)
-        self.assertEqual(run.call_args.args[0][-len(targets) :], list(targets))
+        self.assertEqual(popen.call_args.args[0][-len(targets) :], list(targets))
         self.assertEqual(
-            run.call_args.kwargs["env"]["LAUNCHPLANE_TEST_POSTGRES_URL"],
+            popen.call_args.kwargs["env"]["LAUNCHPLANE_TEST_POSTGRES_URL"],
             "postgresql+psycopg://fixture@127.0.0.1/postgres",
         )
 
-    @patch("control_plane.cli_ci.subprocess.run")
-    def test_invalid_shard_does_not_start_tests(self, run: MagicMock) -> None:
+    @patch("control_plane.cli_ci.subprocess.Popen")
+    def test_invalid_shard_does_not_start_tests(self, popen: MagicMock) -> None:
         for count, index in ((0, 0), (2, -1), (2, 2), (10000, 9999)):
             with self.subTest(count=count, index=index):
                 result = CliRunner().invoke(
@@ -132,9 +133,47 @@ class PostgresIntegrationCommandTests(unittest.TestCase):
                     ],
                 )
                 self.assertNotEqual(result.exit_code, 0)
-        run.assert_not_called()
+        popen.assert_not_called()
 
     def test_discovery_failure_is_not_silently_omitted(self) -> None:
         with patch("control_plane.cli_ci.POSTGRES_INTEGRATION_MODULES", ("tests.missing_fixture",)):
             with self.assertRaisesRegex(UnittestShardingError, "failed to load"):
                 postgres_integration_shard_targets(shard_count=3, shard_index=0)
+
+    @patch("control_plane.cli_ci.subprocess.Popen")
+    def test_slow_shard_warns_without_interrupting_or_replacing_its_result(
+        self, popen: MagicMock
+    ) -> None:
+        warning_seconds = 0.01
+        for returncode in (0, 1):
+            with self.subTest(returncode=returncode):
+                process = popen.return_value.__enter__.return_value
+                process.reset_mock()
+                process.wait.side_effect = [
+                    subprocess.TimeoutExpired("fixture", warning_seconds),
+                    returncode,
+                ]
+                with patch(
+                    "control_plane.cli_ci.postgres_integration_shard_targets",
+                    return_value=("tests.fixture.test_storage",),
+                ):
+                    result = CliRunner().invoke(
+                        run_postgres_integration_tests,
+                        [
+                            "--database-url",
+                            "postgresql+psycopg://fixture@127.0.0.1/postgres",
+                            "--warn-after-seconds",
+                            str(warning_seconds),
+                        ],
+                    )
+                self.assertEqual(result.exit_code == 0, returncode == 0, result.output)
+                self.assertIn("::warning", result.output)
+                summaries = [
+                    json.loads(line) for line in result.output.splitlines() if line.startswith("{")
+                ]
+                self.assertEqual(summaries[-1]["returncode"], returncode)
+                self.assertEqual(process.wait.call_args_list[0].kwargs["timeout"], warning_seconds)
+                self.assertEqual(process.wait.call_args_list[1].args, ())
+                self.assertEqual(process.wait.call_args_list[1].kwargs, {})
+                process.terminate.assert_not_called()
+                process.kill.assert_not_called()

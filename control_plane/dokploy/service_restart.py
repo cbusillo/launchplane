@@ -1,28 +1,39 @@
 """Dokploy's container restart API, with strict inspected Compose membership."""
 
-import hashlib
 import json
+from datetime import datetime
 from typing import cast
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.lane_service_restart import RestartContainerIdentity
 from control_plane.contracts.runtime_identity import (
+    RUNTIME_IDENTITY_ENV_KEY,
     RuntimeIdentity,
     compare_runtime_identity,
     parse_runtime_identity_payload,
-    RUNTIME_IDENTITY_ENV_KEY,
 )
 from control_plane.dokploy import api
 from control_plane.dokploy.runtime_evidence import normalize_expected_image_reference
 
 
 def _digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(value)
 
 
 class ServiceInspectionUnavailable(ValueError):
     """No usable provider evidence; never infer a container from this result."""
+
+
+def _require_database_creation_before_deployment(created_at: str, finished_at: str) -> None:
+    created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+    if (
+        created.tzinfo is None
+        or finished.tzinfo is None
+        or created.year < 1970
+        or created > finished
+    ):
+        raise ValueError("Database container is not bound to the current deployment.")
 
 
 def inspect_service(
@@ -33,7 +44,18 @@ def inspect_service(
     server_id: str,
     service: str,
     expected: RuntimeIdentity,
+    database_deployment_finished_at: str = "",
 ) -> RestartContainerIdentity:
+    database_dependency = service == "database" and bool(database_deployment_finished_at)
+    if database_dependency:
+        inspect_service(
+            host=host,
+            token=token,
+            app_name=app_name,
+            server_id=server_id,
+            service="web",
+            expected=expected,
+        )
     query: dict[str, str | int] = {"appName": app_name, "appType": "docker-compose"}
     if server_id:
         query["serverId"] = server_id
@@ -91,10 +113,17 @@ def inspect_service(
             if isinstance(value, str) and value.startswith(RUNTIME_IDENTITY_ENV_KEY + "=")
         ]
         observed = parse_runtime_identity_payload(identities[0]) if len(identities) == 1 else None
-        if compare_runtime_identity(expected=expected, observed=observed)[0] != "match":
+        if database_dependency:
+            _require_database_creation_before_deployment(
+                str(config_raw.get("Created") or ""), database_deployment_finished_at
+            )
+        elif compare_runtime_identity(expected=expected, observed=observed)[0] != "match":
             raise ValueError("Container does not run the recorded current artifact.")
         image = str(config.get("Image") or "")
-        if normalize_expected_image_reference(image) != expected.image_reference:
+        if (
+            not database_dependency
+            and normalize_expected_image_reference(image) != expected.image_reference
+        ):
             raise ValueError("Container image differs from the recorded current artifact.")
         health = state.get("Health")
         selected.append(

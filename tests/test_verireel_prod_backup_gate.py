@@ -330,10 +330,12 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(failed.status, "fail")
             self.assertEqual(failed.phase, "failed")
-            self.assertIn("unsafe to retry", failed.error_message)
+            self.assertEqual(failed.lease_owner, "")
+            self.assertTrue(failed.finished_at)
             failed_backup_gate = record_store.read_backup_gate_record("backup-gate-side-effect")
             self.assertEqual(failed_backup_gate.status, "fail")
-            self.assertIn("unsafe to retry", failed_backup_gate.evidence["error_message"])
+            self.assertTrue(failed_backup_gate.required)
+            self.assertEqual(failed_backup_gate.evidence["error_message"], failed.error_message)
 
     def test_verireel_operation_worker_status_and_loop_are_observable(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -14,7 +14,16 @@ from pydantic import (
 PreviewInventoryScanStatus = Literal["pass", "fail", "unsupported", "unavailable"]
 PREVIEW_INVENTORY_COLLECTION_SOURCE = "service-preview-inventory"
 _SCOPED_SOURCE_PREFIX = "preview-inventory-scope-v1:"
+_SLEEP_SOURCE_PREFIX = "preview-inventory-scope-v2:"
 _SCOPED_READER_MESSAGE = "Scoped preview inventory; use a current reader for details."
+
+
+class PreviewSleepObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slug: str
+    state: Literal["awake", "asleep", "cannot_sleep", "unknown"]
+    reason: str = ""
 
 
 class _ScanSource(BaseModel):
@@ -25,6 +34,7 @@ class _ScanSource(BaseModel):
     truncated: bool
     status: PreviewInventoryScanStatus
     error_message: str
+    sleep_observations: tuple[PreviewSleepObservation, ...] = ()
 
 
 class PreviewInventoryScanRecord(BaseModel):
@@ -42,6 +52,7 @@ class PreviewInventoryScanRecord(BaseModel):
     preview_count: int = Field(ge=0)
     preview_slugs: tuple[str, ...] = ()
     error_message: str = ""
+    sleep_observations: tuple[PreviewSleepObservation, ...] = ()
 
     @model_validator(mode="before")
     @classmethod
@@ -49,12 +60,12 @@ class PreviewInventoryScanRecord(BaseModel):
         if (
             isinstance(value, dict)
             and isinstance(source := value.get("source"), str)
-            and source.startswith(_SCOPED_SOURCE_PREFIX)
+            and source.startswith((_SCOPED_SOURCE_PREFIX, _SLEEP_SOURCE_PREFIX))
             # Inventory callers control source, but cannot supply the persisted
             # compatibility message. Source alone must never establish scope.
             and value.get("error_message") == _SCOPED_READER_MESSAGE
         ):
-            metadata = _ScanSource.model_validate_json(source[len(_SCOPED_SOURCE_PREFIX) :])
+            metadata = _ScanSource.model_validate_json(source.partition(":")[2])
             return {**value, **metadata.model_dump()}
         return value
 
@@ -66,9 +77,15 @@ class PreviewInventoryScanRecord(BaseModel):
         # Keep that payload readable after an image rollback. The existing opaque
         # source string carries versioned scope/outcome metadata for newer readers.
         payload: dict[str, object] = handler(self)
-        for field in ("product", "repository", "truncated"):
+        for field in ("product", "repository", "truncated", "sleep_observations"):
             payload.pop(field, None)
-        if self.product or self.repository or self.truncated or self.status not in {"pass", "fail"}:
+        if (
+            self.product
+            or self.repository
+            or self.truncated
+            or self.sleep_observations
+            or self.status not in {"pass", "fail"}
+        ):
             metadata = _ScanSource(
                 source=self.source,
                 product=self.product,
@@ -76,9 +93,14 @@ class PreviewInventoryScanRecord(BaseModel):
                 truncated=self.truncated,
                 status=self.status,
                 error_message=self.error_message,
+                sleep_observations=self.sleep_observations,
             )
-            payload["source"] = _SCOPED_SOURCE_PREFIX + json.dumps(
-                metadata.model_dump(), sort_keys=True, separators=(",", ":")
+            metadata_payload = metadata.model_dump()
+            prefix = _SLEEP_SOURCE_PREFIX if self.sleep_observations else _SCOPED_SOURCE_PREFIX
+            if not self.sleep_observations:
+                metadata_payload.pop("sleep_observations")
+            payload["source"] = prefix + json.dumps(
+                metadata_payload, sort_keys=True, separators=(",", ":")
             )
             payload["status"] = "pass" if self.status == "pass" and not self.truncated else "fail"
             payload["error_message"] = _SCOPED_READER_MESSAGE
@@ -96,6 +118,9 @@ class PreviewInventoryScanRecord(BaseModel):
             raise ValueError("preview inventory scan record requires source")
         if self.preview_count != len(self.preview_slugs):
             raise ValueError("preview inventory scan record preview_count must match preview_slugs")
+        sleep_slugs = [item.slug for item in self.sleep_observations]
+        if len(sleep_slugs) != len(set(sleep_slugs)) or set(sleep_slugs) - set(self.preview_slugs):
+            raise ValueError("Sleep observations must identify unique observed previews.")
         return self
 
 

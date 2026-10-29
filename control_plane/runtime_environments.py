@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 import click
 
@@ -13,7 +13,14 @@ from control_plane.contracts.secret_record import SecretBinding, SecretScope
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.dokploy import source as dokploy_source
-from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.preview_settings import validate_preview_scope
+from control_plane.runtime_key_safety import (
+    RuntimeKeySafetyPolicyReadStore,
+    evaluate_runtime_key_safety,
+    latest_active_runtime_key_safety_policy,
+    runtime_key_safety_environment_class,
+)
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 
 DEFAULT_RUNTIME_ENVIRONMENTS_FILE = "config/runtime-environments.toml"
 
@@ -151,7 +158,7 @@ def site_delivered_secret_bindings_from_store(
 class SiteRuntimeEnvironment:
     """A site lane's environment after retirement and the platform-credential policy."""
 
-    values: dict[str, str]
+    values: dict[str, str] = field(repr=False)
     secret_keys: frozenset[str]
     retired_keys: frozenset[str] = frozenset()
     site_keys: frozenset[str] = frozenset()
@@ -200,16 +207,11 @@ def resolve_site_runtime_environment(
         control_plane_root=control_plane_root,
         database_url=database_url,
     )
-    context_definition = definition.contexts.get(context_name)
-    if context_definition is None:
+    if context_name not in definition.contexts:
         raise MissingRuntimeContextDefinitionError(
             f"Runtime environments file has no context definition for {context_name!r}."
         )
-    values = _normalize_scalar_map(context_definition.shared_env)
-    instance_definition = context_definition.instances.get(instance_name)
-    if instance_definition is not None:
-        values.update(_normalize_scalar_map(instance_definition.env))
-    values.update(
+    target_environment = (
         target_environment_override
         if target_environment_override is not None
         else resolve_tracked_target_environment_values(
@@ -226,16 +228,13 @@ def resolve_site_runtime_environment(
         database_url=database_url,
         binding_keys=secret_binding_keys,
     )
-    setting_keys = frozenset(values)
-    values.update(secret_values)
-    site_keys = frozenset(values)
     retired_keys = retired_provider_keys_for_lane(
         context_name=context_name, instance_name=instance_name, database_url=database_url
     )
-    values = {key: value for key, value in values.items() if key not in retired_keys}
-    if runtime_platform_credentials.find_platform_credentials(values):
+    secret_sources: dict[str, _RuntimeValueSource] = {}
+    if runtime_platform_credentials.find_platform_credentials(secret_values):
         try:
-            sources = _runtime_value_sources(
+            secret_sources = _runtime_value_sources(
                 control_plane_root=control_plane_root,
                 context_name=context_name,
                 instance_name=instance_name,
@@ -245,15 +244,196 @@ def resolve_site_runtime_environment(
                 secret_binding_keys=secret_binding_keys,
             )
         except click.ClickException:
-            # The refusal still names each key, without its source.
-            sources = {}
-        _refuse_platform_credentials(
-            values=values, sources=sources, target=f"{context_name}/{instance_name}"
+            pass
+    return _site_runtime_environment(
+        definition=definition,
+        context_name=context_name,
+        instance_name=instance_name,
+        target_environment=target_environment,
+        secret_values=secret_values,
+        retired_keys=retired_keys,
+        secret_sources=secret_sources,
+    )
+
+
+class SiteRuntimeEnvironmentStore(
+    control_plane_secrets.SecretReadStore, RuntimeEnvironmentRecordStore, Protocol
+):
+    pass
+
+
+def resolve_site_runtime_environment_from_store(
+    *,
+    record_store: SiteRuntimeEnvironmentStore,
+    context_name: str,
+    instance_name: str,
+    target_environment: dict[str, str],
+) -> SiteRuntimeEnvironment:
+    """The canonical site render using the executing operation's record store."""
+    definition = load_optional_runtime_environment_definition_from_store(record_store=record_store)
+    if definition is None:
+        definition = RuntimeEnvironmentDefinition(schema_version=1, shared_env={}, contexts={})
+    if context_name not in definition.contexts:
+        definition = RuntimeEnvironmentDefinition(
+            schema_version=definition.schema_version,
+            shared_env=definition.shared_env,
+            contexts={
+                **definition.contexts,
+                context_name: RuntimeEnvironmentContextDefinition(shared_env={}, instances={}),
+            },
         )
+    scoped_secret_values = (
+        control_plane_secrets.resolve_scoped_secret_values_for_integration_from_store(
+            record_store=record_store,
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            context_name=context_name,
+            instance_name=instance_name,
+            scopes=site_secret_scopes(instance_name),
+        )
+    )
+    secret_values = {key: value for key, (value, _scope) in scoped_secret_values.items()}
+    scope_labels = {
+        "global": "a global",
+        "context": f"a {context_name} context",
+        "context_instance": f"a {context_name}/{instance_name} instance",
+    }
+    return _site_runtime_environment(
+        definition=definition,
+        context_name=context_name,
+        instance_name=instance_name,
+        target_environment=target_environment,
+        secret_values=secret_values,
+        secret_sources={
+            key: _RuntimeValueSource(f"{scope_labels[scope]} runtime-environment managed secret")
+            for key, (_value, scope) in scoped_secret_values.items()
+        },
+        retired_keys=retired_provider_keys_from_store(
+            record_store=record_store,
+            context_name=context_name,
+            instance_name=instance_name,
+        ),
+    )
+
+
+def resolve_preview_runtime_environment_from_store(
+    *,
+    record_store: SiteRuntimeEnvironmentStore,
+    context_name: str,
+    template_values: dict[str, str],
+) -> SiteRuntimeEnvironment:
+    bindings = control_plane_secrets.resolve_effective_secret_bindings_from_store(
+        record_store=record_store,
+        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=context_name,
+        instance_name="preview",
+        scopes=site_secret_scopes("preview"),
+    )
+    instance_values = {
+        key: value
+        for record in record_store.list_runtime_environment_records(
+            context_name=context_name, instance_name="preview"
+        )
+        if record.scope == "instance"
+        and record.context == context_name
+        and record.instance == "preview"
+        for key, value in record.env.items()
+    }
+    try:
+        validate_preview_scope(
+            instance_values, context=context_name, secret_keys=frozenset(bindings)
+        )
+        if bindings:
+            policy = latest_active_runtime_key_safety_policy(
+                cast(RuntimeKeySafetyPolicyReadStore, record_store)
+            )
+            evaluation = evaluate_runtime_key_safety(
+                target=RuntimeKeySafetyTarget(
+                    context=context_name, instance="preview", environment_class="preview"
+                ),
+                required_binding_keys=bindings,
+                secret_bindings=tuple(binding for binding, _record in bindings.values()),
+                secret_rules=policy.rules,
+                integration_key_markers=policy.integration_key_markers,
+            )
+            if evaluation.status != "pass":
+                raise ValueError("Managed preview secrets failed runtime key-safety evaluation.")
+    except ValueError:
+        raise click.ClickException(
+            "Managed preview settings failed validation or key-safety evaluation."
+        ) from None
+    preview = resolve_site_runtime_environment_from_store(
+        record_store=record_store,
+        context_name=context_name,
+        instance_name="preview",
+        target_environment={},
+    )
+    overrides = {
+        key: value
+        for key, value in preview.values.items()
+        if key in instance_values or key in preview.secret_keys
+    }
+    return SiteRuntimeEnvironment(
+        values={
+            key: value
+            for key, value in {**template_values, **overrides}.items()
+            if key not in preview.retired_keys
+        },
+        secret_keys=preview.secret_keys,
+        retired_keys=preview.retired_keys,
+        setting_keys=frozenset(instance_values),
+    )
+
+
+def _site_runtime_environment(
+    *,
+    definition: RuntimeEnvironmentDefinition,
+    context_name: str,
+    instance_name: str,
+    target_environment: dict[str, str],
+    secret_values: dict[str, str],
+    retired_keys: frozenset[str] | set[str],
+    secret_sources: dict[str, _RuntimeValueSource] | None = None,
+) -> SiteRuntimeEnvironment:
+    context_definition = definition.contexts.get(context_name)
+    if context_definition is None:
+        raise MissingRuntimeContextDefinitionError(
+            f"Runtime environments file has no context definition for {context_name!r}."
+        )
+    values = _normalize_scalar_map(context_definition.shared_env)
+    instance_definition = context_definition.instances.get(instance_name)
+    if instance_definition is not None:
+        values.update(_normalize_scalar_map(instance_definition.env))
+    values.update(target_environment)
+    setting_keys = frozenset(values)
+    values.update(secret_values)
+    site_keys = frozenset(values)
+    values = {key: value for key, value in values.items() if key not in retired_keys}
+    sources = {
+        key: source
+        for layer, source in _record_layers(
+            definition=definition,
+            context_name=context_name,
+            instance_name=instance_name,
+            target_env=target_environment,
+            include_global=False,
+        )
+        for key in layer
+    }
+    sources.update(
+        {
+            key: (secret_sources or {}).get(
+                key, _RuntimeValueSource("a site runtime-environment managed secret")
+            )
+            for key in secret_values
+        }
+    )
+    _refuse_platform_credentials(
+        values=values, sources=sources, target=f"{context_name}/{instance_name}"
+    )
     return SiteRuntimeEnvironment(
         values=values,
         secret_keys=frozenset(key for key in secret_values if key in values),
-        retired_keys=retired_keys,
+        retired_keys=frozenset(retired_keys),
         site_keys=site_keys,
         setting_keys=setting_keys,
     )
@@ -565,52 +745,6 @@ def resolve_tracked_target_environment_values(
     return dict(target_definition.env)
 
 
-def _parse_runtime_environment_definition(
-    payload: dict[str, object],
-    *,
-    source_file: Path,
-) -> RuntimeEnvironmentDefinition:
-    schema_version = _read_required_int(payload, "schema_version", scope="runtime_environments")
-    contexts_table = _read_optional_table(payload, "contexts", scope="runtime_environments")
-    contexts: dict[str, RuntimeEnvironmentContextDefinition] = {}
-    for context_name, raw_context in contexts_table.items():
-        context_table = _ensure_table(
-            raw_context,
-            scope=f"runtime_environments.contexts.{context_name}",
-        )
-        instances_table = _read_optional_table(
-            context_table,
-            "instances",
-            scope=f"runtime_environments.contexts.{context_name}",
-        )
-        instances: dict[str, RuntimeEnvironmentInstanceDefinition] = {}
-        for instance_name, raw_instance in instances_table.items():
-            instance_table = _ensure_table(
-                raw_instance,
-                scope=f"runtime_environments.contexts.{context_name}.instances.{instance_name}",
-            )
-            instances[instance_name] = RuntimeEnvironmentInstanceDefinition(
-                env=_read_optional_scalar_map(
-                    instance_table,
-                    "env",
-                    scope=f"runtime_environments.contexts.{context_name}.instances.{instance_name}",
-                )
-            )
-        contexts[context_name] = RuntimeEnvironmentContextDefinition(
-            shared_env=_read_optional_scalar_map(
-                context_table,
-                "shared_env",
-                scope=f"runtime_environments.contexts.{context_name}",
-            ),
-            instances=instances,
-        )
-    return RuntimeEnvironmentDefinition(
-        schema_version=schema_version,
-        shared_env=_read_optional_scalar_map(payload, "shared_env", scope="runtime_environments"),
-        contexts=contexts,
-    )
-
-
 def _load_optional_runtime_environment_definition_from_database(
     *, database_url: str
 ) -> RuntimeEnvironmentDefinition | None:
@@ -670,86 +804,5 @@ def build_runtime_environment_definition_from_records(
     return RuntimeEnvironmentDefinition(schema_version=1, shared_env=shared_env, contexts=contexts)
 
 
-def build_runtime_environment_records_from_definition(
-    definition: RuntimeEnvironmentDefinition,
-    *,
-    updated_at: str,
-    source_label: str,
-) -> tuple[RuntimeEnvironmentRecord, ...]:
-    records: list[RuntimeEnvironmentRecord] = []
-    if definition.shared_env:
-        records.append(
-            RuntimeEnvironmentRecord(
-                scope="global",
-                env=dict(definition.shared_env),
-                updated_at=updated_at,
-                source_label=source_label,
-            )
-        )
-    for context_name, context_definition in sorted(definition.contexts.items()):
-        if context_definition.shared_env:
-            records.append(
-                RuntimeEnvironmentRecord(
-                    scope="context",
-                    context=context_name,
-                    env=dict(context_definition.shared_env),
-                    updated_at=updated_at,
-                    source_label=source_label,
-                )
-            )
-        for instance_name, instance_definition in sorted(context_definition.instances.items()):
-            if not instance_definition.env:
-                continue
-            records.append(
-                RuntimeEnvironmentRecord(
-                    scope="instance",
-                    context=context_name,
-                    instance=instance_name,
-                    env=dict(instance_definition.env),
-                    updated_at=updated_at,
-                    source_label=source_label,
-                )
-            )
-    return tuple(records)
-
-
 def _normalize_scalar_map(raw_values: ScalarMap) -> dict[str, str]:
     return {key: str(value) for key, value in raw_values.items()}
-
-
-def _read_required_int(source: dict[str, object], key: str, *, scope: str) -> int:
-    value = source.get(key)
-    if not isinstance(value, int):
-        raise click.ClickException(f"Expected {scope}.{key} to be an integer.")
-    return value
-
-
-def _read_optional_table(source: dict[str, object], key: str, *, scope: str) -> dict[str, object]:
-    value = source.get(key)
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise click.ClickException(f"Expected {scope}.{key} to be a table when present.")
-    return value
-
-
-def _ensure_table(value: object, *, scope: str) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise click.ClickException(f"Expected {scope} to be a table.")
-    return value
-
-
-def _read_optional_scalar_map(source: dict[str, object], key: str, *, scope: str) -> ScalarMap:
-    value = source.get(key)
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise click.ClickException(f"Expected {scope}.{key} to be a table when present.")
-    scalar_map: ScalarMap = {}
-    for raw_key, raw_value in value.items():
-        if not isinstance(raw_key, str):
-            raise click.ClickException(f"Expected {scope}.{key} keys to be strings.")
-        if not isinstance(raw_value, (str, int, float, bool)):
-            raise click.ClickException(f"Expected {scope}.{key}.{raw_key} to be a scalar value.")
-        scalar_map[raw_key] = raw_value
-    return scalar_map

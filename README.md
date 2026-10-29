@@ -6,35 +6,38 @@ package is `control_plane`; its CLI is `launchplane`.
 
 Read the Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md),
 then this repository's [DIRECTION.md](DIRECTION.md) for purpose, priorities,
-roles, stop boundaries, and retired designs. Overall direction takes precedence;
-issues track work. [AGENTS.md](AGENTS.md) is the agent execution guide and the only
+roles, stop boundaries, and retired designs.
+[AGENTS.md](AGENTS.md) is the agent execution guide and the only
 agent-instruction filename, including any directory-specific guidance.
 
 ## Development
 
 Use `uv` with the interpreter pinned in [.python-version](.python-version), and
-Node 22.12 or later with the pnpm version in
-[frontend/package.json](frontend/package.json). CI uses the same Python pin.
+Node with the major pinned in [.node-version](.node-version). The compatibility
+floors remain in the package metadata, and Corepack reads the exact pnpm version
+from [frontend/package.json](frontend/package.json). CI reads both runtime pins.
+Docker base-image majors remain reviewed copies because `FROM` must resolve before
+a build can `COPY` repository version files.
 From the repository root:
 
 ```bash
 uv sync --extra dev
 uv run launchplane --help
 uv run launchplane service serve --help
-pnpm --dir frontend install --frozen-lockfile
-pnpm --dir frontend validate
+(cd frontend && pnpm install --frozen-lockfile)
+(cd frontend && pnpm validate)
 ```
 
-Frontend validation runs unit tests, the OpenAPI drift check, TypeScript, and the
-production Vite build. The TypeScript OpenAPI client is an ignored build artifact;
-development, type checks, browser checks, and production builds generate it from
-the checked UI schema. After a backend contract change, run
-`pnpm --dir frontend generate:openapi` and commit the schemas and agent contract.
-CI rejects drift in those checked artifacts. Existing branches that still commit
-the TypeScript client may need one final refresh to adopt its removal.
+Frontend validation runs unit tests, the agent-contract drift check, TypeScript,
+and the production Vite build. The canonical OpenAPI JSON, UI slice and TypeScript
+client are ignored build artifacts generated from Python source before frontend
+tests, development, type checks and production builds, including Docker and CI.
+Python contract tests and inventory scripts also derive schemas from source.
+After a backend contract change, run `(cd frontend && pnpm generate:openapi)`
+and commit only the agent contract. CI still rejects drift in that runtime contract.
 For IDE type resolution before the first build, run
-`pnpm --dir frontend generate:openapi-types` once.
-`pnpm --dir frontend test:browser` runs the Playwright
+`(cd frontend && pnpm generate:openapi-types)` once.
+`(cd frontend && pnpm test:browser)` runs the Playwright
 browser smoke. Use [`.github/github.json`](.github/github.json) for current gates
 and [testing style](docs/style/testing.md) for choosing proportionate tests:
 
@@ -43,16 +46,10 @@ uv run --extra dev python -m unittest tests.test_module_name
 ```
 
 Replace `tests.test_module_name` with the module for the changed behavior.
-During the [Q326 trial](docs/style/testing.md#local-test-loop), routine changes
-use focused local tests plus lint, type checks, and IDE inspection; the full
-sharded suite runs only in CI and must pass before `gh-pr.py ready` and merge.
-The approved Q375 refinement keeps safety classifications and adds whole
-modules for touched safety areas to local focused tests; testing style owns
-the selection rules.
+Follow [testing style](docs/style/testing.md#local-test-loop) for local safety
+module selection, the Q778 focused PR pilot and the full candidate merge gate.
 
-Implementation goes through a task branch and PR. Once required checks pass and
-review findings are accounted for, follow [AGENTS.md](AGENTS.md) to hand the PR
-to the merge train. Follow DIRECTION.md for merge and release authority.
+Follow [AGENTS.md](AGENTS.md) for source delivery and DIRECTION.md for merge and release authority.
 
 ## Service and runtime records
 

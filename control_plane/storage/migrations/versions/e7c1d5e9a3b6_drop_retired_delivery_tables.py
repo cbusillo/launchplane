@@ -1,6 +1,6 @@
 """Drop consumer-free delegated-delivery and older unmodeled history tables.
 
-Prepared contract migration for #2437. Hosted startup stays on down_revision
+Prepared contract migration for #2437. Hosted startup excludes this branch
 until shared-data/release approval. Take and rehearse a full database backup
 before applying: downgrade cannot recover these historical rows.
 """
@@ -38,6 +38,12 @@ RETIRED_TABLES = (
     "launchplane_provider_delivery_inspections",
 )
 
+RETIRED_TRIGGER_FUNCTIONS = (
+    "launchplane_ordinary_landing_identity_guard",
+    "launchplane_ordinary_read_identity_guard",
+    "launchplane_ordinary_provider_wait_guard",
+)
+
 
 def upgrade() -> None:
     connection = op.get_bind()
@@ -52,11 +58,7 @@ def upgrade() -> None:
     for name in selected:
         op.drop_table(name)
     if connection.dialect.name == "postgresql":
-        for name in (
-            "launchplane_ordinary_landing_identity_guard",
-            "launchplane_ordinary_read_identity_guard",
-            "launchplane_ordinary_provider_wait_guard",
-        ):
+        for name in RETIRED_TRIGGER_FUNCTIONS:
             op.execute(f"DROP FUNCTION IF EXISTS {name}()")
     # ordinary_effect_identity_guard and ordinary_append_only_guard still
     # protect retained effect/custody/activation history.

@@ -1,5 +1,8 @@
+from tests.merge_train_policy_fixtures import seed_dependency_policy
 import json
 import unittest
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
@@ -7,6 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import click
+from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS, NOTHING_TO_TEST
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import (
@@ -23,6 +27,7 @@ from control_plane.product_review import (
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
     owner_review_reference_url,
+    owner_review_status,
 )
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
@@ -41,6 +46,11 @@ from tests.http_app_test_support import (
 )
 from tests.support.auth import StubVerifier
 from tests.support.profiles import product_profile_payload
+from control_plane.contracts.product_reconcile import (
+    ProductReconcileRequestRecord,
+    ProductReconcileTarget,
+)
+from control_plane.storage.postgres import PostgresRecordStore
 
 _REPOSITORY = "every/example-site"
 _PULL_REQUEST = 42
@@ -72,13 +82,16 @@ class _GitHub:
         self.head_sha = head_sha
         self.head_ref = "pr-42"
         self.base_ref = ""
+        self.state: str | None = "open"
+        self.merged = False
         self.statuses: list[dict[str, object]] = []
         self.legacy_statuses: list[dict[str, object]] = []
         self.check_runs: list[dict[str, object]] = []
         self.comments: list[dict[str, object]] = []
         self.writes: list[tuple[str, str, dict[str, object]]] = []
         self.fail_writes = False
-        self.revoked_app_tokens = 0
+        self.minted_app_tokens: list[str] = []
+        self.revoked_app_tokens: list[str] = []
         self.revoked_delivery_tokens: list[str] = []
         self.lose_comment_response = False
         self.fail_comment_reads = False
@@ -97,7 +110,7 @@ class _GitHub:
             if revoked_token == "feedback-token":
                 self.revoked_delivery_tokens.append(revoked_token)
             else:
-                self.revoked_app_tokens += 1
+                self.revoked_app_tokens.append(revoked_token)
             return None
         if method != "GET":
             assert isinstance(body, dict)
@@ -106,6 +119,8 @@ class _GitHub:
             self.writes.append((method, path, body))
         if path == f"{repository_path}/pulls/{_PULL_REQUEST}":
             return {
+                "state": self.state,
+                "merged": self.merged,
                 "body": self.body,
                 "head": {
                     "sha": self.head_sha,
@@ -166,6 +181,14 @@ class _GitHub:
             return check_run
         raise AssertionError(f"Unexpected GitHub request: {method} {path}")
 
+    def app_token(self, repository: str, repository_id: str) -> GitHubAppInstallationToken:
+        token = replace(
+            _app_token(repository, repository_id),
+            token=f"app-token-{len(self.minted_app_tokens)}",
+        )
+        self.minted_app_tokens.append(token.token)
+        return token
+
     def _record_review_check(self, check_run: dict[str, object]) -> None:
         if check_run["name"] != "launchplane/owner-review":
             return
@@ -206,7 +229,7 @@ def _publisher(github: _GitHub) -> OwnerReviewStatusPublisher:
         public_origin=_PUBLIC_ORIGIN,
         github_token=lambda **_: "feedback-token",
         api_request=github,
-        github_app_token=_app_token,
+        github_app_token=github.app_token,
         github_feedback_app_id=lambda **_: 99,
     )
 
@@ -244,6 +267,183 @@ class OwnerReviewStatusTests(unittest.TestCase):
         temporary_directory = TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.store = FilesystemRecordStore(state_dir=Path(temporary_directory.name))
+        self.store.write_preview_record(_preview_read_record())
+        self.store.write_preview_generation_record(_preview_generation_read_record())
+
+    def test_unavailable_preview_never_invites_the_client(self) -> None:
+        self.store.write_preview_generation_record(_preview_generation_read_record(state="failed"))
+        github = _GitHub()
+        self._publish(github)
+        self.assertEqual(github.statuses[-1]["state"], "pending")
+        self.assertNotEqual(
+            str(github.statuses[-1]["description"]),
+            owner_review_status(
+                profile=_profile(),
+                pull_request_number=_PULL_REQUEST,
+                head_sha=_HEAD_SHA,
+                decisions=(),
+            ).description,
+        )
+
+    def test_preview_failure_survives_retry_and_clears_on_working_preview(self) -> None:
+        self.store.write_preview_generation_record(_preview_generation_read_record(state="failed"))
+        request = ProductReconcileRequestRecord(
+            target_key="example-site:preview:42",
+            product="example-site",
+            target_kind="preview",
+            pull_request_number=42,
+            state="failed",
+            requested_at="2026-10-24T15:00:00Z",
+            updated_at="2026-10-24T15:00:00Z",
+            request_count=1,
+            last_error="Provider unavailable",
+            last_plan={"action": "apply", "last_failed_error_summary": "Provider unavailable"},
+        )
+        for state in ("failed", "pending", "running"):
+            with (
+                self.subTest(state=state),
+                patch.object(
+                    self.store,
+                    "read_product_reconcile_request",
+                    create=True,
+                    return_value=request.model_copy(update={"state": state}),
+                ),
+            ):
+                github = _GitHub()
+                self._publish(github)
+                self.assertIn("Provider unavailable", str(github.statuses[-1]["description"]))
+
+        self.store.write_preview_record(_preview_read_record())
+        self.store.write_preview_generation_record(_preview_generation_read_record())
+        with patch.object(
+            self.store,
+            "read_product_reconcile_request",
+            create=True,
+            return_value=request.model_copy(
+                update={"state": "done", "last_error": "", "last_plan": {}}
+            ),
+        ):
+            github = _GitHub()
+            self._publish(github)
+        self.assertEqual(
+            github.statuses[-1]["description"],
+            owner_review_status(
+                profile=_profile(),
+                pull_request_number=_PULL_REQUEST,
+                head_sha=_HEAD_SHA,
+                decisions=(),
+            ).description,
+        )
+
+    def test_current_reconcile_failure_is_projected_before_completion(self) -> None:
+        from control_plane.product_reconcile import run_product_reconcile_once, ReconcileOutcome
+
+        directory = self.enterContext(TemporaryDirectory())
+        store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/state.sqlite3")
+        store.ensure_schema()
+        self.addCleanup(store.close)
+        store.write_product_profile_record(_profile())
+        target = ProductReconcileTarget(
+            product="example-site", target_kind="preview", pull_request_number=42
+        )
+        github = _GitHub()
+        outcomes = (
+            ReconcileOutcome({"action": "apply", "head_sha": _HEAD_SHA}, error="Refresh refused"),
+            ReconcileOutcome(
+                {"action": "wait", "reason": "no_verified_build", "head_sha": _HEAD_SHA}
+            ),
+            ReconcileOutcome(
+                {"action": "wait", "reason": "no_verified_build", "head_sha": _OLDER_HEAD_SHA}
+            ),
+        )
+        with (
+            patch(
+                "control_plane.product_reconcile.OwnerReviewStatusPublisher",
+                return_value=_publisher(github),
+            ),
+            patch(
+                "control_plane.product_reconcile.reconcile_product_request", side_effect=outcomes
+            ),
+            patch("control_plane.product_reconcile_feedback._deliver", return_value={}),
+        ):
+            for index, _ in enumerate(outcomes):
+                github.head_sha = _OLDER_HEAD_SHA if index == 2 else _HEAD_SHA
+                store.request_product_reconcile(target, "2026-10-24T15:00:00Z")
+                result = run_product_reconcile_once(
+                    record_store=store,
+                    lease_owner="preview-test",
+                    control_plane_root=Path(directory),
+                    public_origin=lambda: _PUBLIC_ORIGIN,
+                    feedback_token=lambda *_: "",
+                )
+                assert result is not None
+                self.assertEqual(result.last_plan["last_failed_head_sha"], _HEAD_SHA)
+                self.assertIn(
+                    str(result.last_plan["last_failed_error_summary"]),
+                    str(github.statuses[0]["description"]),
+                )
+        store.write_preview_record(_preview_read_record())
+        generation = _preview_generation_read_record()
+        store.write_preview_generation_record(
+            generation.model_copy(
+                update={
+                    "anchor_summary": generation.anchor_summary.model_copy(
+                        update={"head_sha": _OLDER_HEAD_SHA}
+                    ),
+                }
+            )
+        )
+        expected = owner_review_status(
+            profile=_profile(), pull_request_number=42, head_sha=_OLDER_HEAD_SHA, decisions=()
+        )
+        self.assertEqual(
+            _publisher(github).publish(store=store, profile=_profile(), pull_request_number=42),
+            expected,
+        )
+        store.request_product_reconcile(target, "2026-10-24T15:01:00Z")
+        with (
+            patch(
+                "control_plane.product_reconcile.OwnerReviewStatusPublisher",
+                return_value=_publisher(github),
+            ),
+            patch(
+                "control_plane.product_reconcile.reconcile_product_request",
+                side_effect=ValueError("PR read unavailable"),
+            ),
+            patch("control_plane.product_reconcile_feedback._deliver", return_value={}),
+        ):
+            result = run_product_reconcile_once(
+                record_store=store,
+                lease_owner="preview-test",
+                control_plane_root=Path(directory),
+                public_origin=lambda: _PUBLIC_ORIGIN,
+            )
+        assert result is not None
+        self.assertNotIn("head_sha", result.last_plan)
+        self.assertEqual(github.statuses[0]["description"], expected.description)
+
+    def test_missing_preview_preserves_pending_saved_feedback(self) -> None:
+        decision = _decision(decision="changes_requested", decided_at="2026-10-24T15:00:00Z")
+        self.store.write_product_review_decision_record(decision)
+        self.store.write_preview_generation_record(_preview_generation_read_record(state="failed"))
+        github = _GitHub()
+        github.fail_comment_reads = True
+        with patch.object(
+            self.store,
+            "read_preview_generation_record",
+            side_effect=AssertionError("Saved decision must not read preview state"),
+        ) as read:
+            self._publish(github)
+            read.assert_not_called()
+        self.assertEqual(
+            github.statuses[-1]["description"],
+            owner_review_status(
+                profile=_profile(),
+                pull_request_number=42,
+                head_sha=_HEAD_SHA,
+                decisions=(decision,),
+            ).description,
+        )
 
     def _publish(
         self, github: _GitHub, *, owner_set: bool = True, retire_leftovers: bool = False
@@ -262,7 +462,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
             patch("control_plane.product_review_status.resolve_advisory_github_app_identity"),
             patch(
                 "control_plane.product_review_status.mint_repository_installation_token",
-                side_effect=lambda **kwargs: _app_token(
+                side_effect=lambda **kwargs: github.app_token(
                     kwargs["repository"], kwargs["repository_id"]
                 ),
             ),
@@ -273,8 +473,158 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(github.check_runs[-1]["name"], "launchplane/owner-review")
         self.assertEqual(github.check_runs[-1]["app"], {"id": _APP_ID})
-        self.assertEqual(github.revoked_app_tokens, 1)
+        self.assertEqual(github.revoked_app_tokens, github.minted_app_tokens)
         self.assertEqual(github.revoked_delivery_tokens, ["feedback-token"])
+
+    def test_closed_pr_delivers_saved_feedback_without_current_review_effects(self) -> None:
+        github = _GitHub()
+        self._publish(github)
+        github.check_runs.append(
+            {
+                "id": 32,
+                "name": "launchplane/owner-acceptance",
+                "app": {"id": _APP_ID},
+                "status": "in_progress",
+            }
+        )
+        decision = _decision(decision="accepted", decided_at="2026-09-20T10:00:00Z")
+        self.store.write_product_review_decision_record(decision)
+        github.state = "closed"
+        github.base_ref = "main"
+        checks = [dict(run) for run in github.check_runs]
+        minted = list(github.minted_app_tokens)
+        with (
+            patch("control_plane.product_review_status.record_decision_base") as base,
+            patch("control_plane.product_review_status.carry_owner_acceptance") as carry,
+        ):
+            for _ in range(2):
+                result = _publisher(github).publish(
+                    store=self.store,
+                    profile=_profile(),
+                    pull_request_number=_PULL_REQUEST,
+                    retire_leftovers=True,
+                )
+                self.assertIsNone(result)
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.check_runs, checks)
+        self.assertEqual(github.minted_app_tokens, minted)
+        saved = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+        )
+        self.assertEqual(
+            saved,
+            (
+                decision.model_copy(
+                    update={
+                        "feedback_url": f"https://github.com/{_REPOSITORY}/pull/{_PULL_REQUEST}"
+                        f"#issuecomment-{github.comments[0]['id']}"
+                    }
+                ),
+            ),
+        )
+        base.assert_not_called()
+        carry.assert_not_called()
+
+    def test_closed_pr_lock_failures_cannot_update_review_checks(self) -> None:
+        for failure in ("enter", "exit"):
+            with self.subTest(failure=failure):
+                github = _GitHub()
+                github.state = "closed"
+                github.check_runs.append(
+                    {
+                        "id": 32,
+                        "name": "launchplane/owner-acceptance",
+                        "app": {"id": _APP_ID},
+                        "status": "in_progress",
+                    }
+                )
+                checks = [dict(run) for run in github.check_runs]
+                self.store.write_product_review_decision_record(
+                    _decision(decision="accepted", decided_at="2026-09-20T10:00:00Z")
+                )
+
+                @contextmanager
+                def failing_lock(**_: object) -> Iterator[None]:
+                    if failure == "enter":
+                        raise RuntimeError("Review lock acquisition failed")
+                    yield
+                    raise RuntimeError("Review lock transaction commit failed")
+
+                with patch.object(self.store, "product_review_lock", failing_lock):
+                    self._publish(github, retire_leftovers=True)
+
+                self.assertEqual(bool(github.comments), failure == "exit")
+                self.assertEqual(github.minted_app_tokens, [])
+                self.assertEqual(github.check_runs, checks)
+                self.assertTrue(
+                    all(
+                        path == f"/repos/{_REPOSITORY}/issues/{_PULL_REQUEST}/comments"
+                        for _, path, _ in github.writes
+                    )
+                )
+
+    def test_unknown_pr_state_does_not_suppress_review_refresh(self) -> None:
+        github = _GitHub()
+        github.state = None
+        self._publish(github)
+        self.assertEqual(github.check_runs[0]["status"], "in_progress")
+
+    def test_failed_pr_read_can_refresh_on_the_next_attempt(self) -> None:
+        github = _GitHub()
+        with (
+            patch(
+                "control_plane.product_review_status.OwnerReviewStatusPublisher._pull_request_facts",
+                side_effect=click.ClickException("Read unavailable"),
+            ),
+            self.assertLogs("control_plane.product_review_status", "WARNING"),
+        ):
+            self._publish(github)
+        self.assertEqual(github.writes, [])
+        self._publish(github)
+        self.assertEqual(github.check_runs[0]["status"], "in_progress")
+
+    def test_removed_review_label_or_client_completes_only_the_bound_existing_check(self) -> None:
+        for remove_client in (False, True):
+            with self.subTest(remove_client=remove_client):
+                github = _GitHub()
+                self._publish(github, owner_set=remove_client)
+                own = github.check_runs[0]
+                self.assertEqual(own["status"], "in_progress")
+                foreign = {**own, "id": 999, "external_id": "f" * 64}
+                github.check_runs.insert(0, foreign)
+                github.labels = ()
+                github.body = "## Client test notes\nNothing for the Client to test: CI only."
+
+                self._publish(github, owner_set=False)
+
+                self.assertEqual((own["status"], own.get("conclusion")), ("completed", "neutral"))
+                self.assertEqual(foreign["status"], "in_progress")
+                self.assertEqual(github.revoked_app_tokens, github.minted_app_tokens)
+                self.assertEqual(
+                    self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                    ),
+                    (),
+                )
+
+    def test_unowned_unmarked_pr_does_not_touch_foreign_checks(self) -> None:
+        for field, value in (
+            ("external_id", "f" * 64),
+            ("app", {"id": 999}),
+            ("head_sha", _OLDER_HEAD_SHA),
+        ):
+            with self.subTest(field=field):
+                github = _GitHub()
+                self._publish(github)
+                github.check_runs[0][field] = value
+                github.labels = ()
+                github.writes.clear()
+
+                self._publish(github, owner_set=False)
+
+                self.assertEqual(github.writes, [])
+                self.assertEqual(github.check_runs[0]["status"], "in_progress")
+                self.assertEqual(github.revoked_app_tokens, github.minted_app_tokens)
 
     def test_review_link_encodes_target_and_rejects_non_origin_urls(self) -> None:
         self.assertEqual(
@@ -314,13 +664,14 @@ class OwnerReviewStatusTests(unittest.TestCase):
             ],
         )
 
-    def test_director_standing_does_not_publish_a_pending_preview_review(self) -> None:
-        for body, expected in (
-            ("## Client test notes\nTry the approval buttons.", "neutral"),
-            ("", "failure"),
+    def test_director_standing_publishes_a_pending_preview_review_only_for_the_label(self) -> None:
+        for body, labels, expected in (
+            ("## Client test notes\nTry the approval buttons.", (), "neutral"),
+            ("", (), "failure"),
+            ("## Client test notes\nTry the approval buttons.", ("owner-review",), "pending"),
         ):
-            with self.subTest(body=body):
-                github = _GitHub()
+            with self.subTest(body=body, labels=labels):
+                github = _GitHub(labels=labels)
                 github.body = body
                 profile = _profile().model_copy(
                     update={"release_on_acceptance": "director_standing"}
@@ -375,7 +726,108 @@ class OwnerReviewStatusTests(unittest.TestCase):
             github.statuses[0]["description"], "Waiting for @site-owner to review the preview"
         )
 
-    def test_pure_dependabot_update_publishes_neutral_without_inviting_client(self) -> None:
+    def test_former_client_decisions_neither_accept_nor_veto_for_the_current_client(self) -> None:
+        profile = _profile().model_copy(
+            update={"owner": _profile().owner.model_copy(update={"github_id": "9002"})}
+        )
+        for decision in ("accepted", "changes_requested"):
+            saved = _decision(decision=decision, decided_at="2026-09-20T10:00:00Z").model_copy(
+                update={"feedback_url": "https://github.com/feedback/1"}
+            )
+            self.store.write_product_review_decision_record(saved)
+            for review in ("required", "engineering", "director_standing"):
+                with self.subTest(decision=decision, review=review):
+                    github = _GitHub(labels=("owner-review",) if review == "required" else ())
+                    if review == "director_standing":
+                        github.body = "## Client test notes\nTry the changed page."
+                    selected_profile = (
+                        profile.model_copy(update={"release_on_acceptance": "director_standing"})
+                        if review == "director_standing"
+                        else profile
+                    )
+                    result = _publisher(github).publish(
+                        store=self.store,
+                        profile=selected_profile,
+                        pull_request_number=_PULL_REQUEST,
+                    )
+                    assert result is not None
+                    self.assertEqual(result.state, "pending" if review == "required" else "neutral")
+                    self.assertEqual(github.statuses[0]["state"], result.state)
+                    self.assertEqual(
+                        self.store.list_product_review_decision_records(
+                            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                        ),
+                        (saved,),
+                    )
+
+    def test_former_client_decision_does_not_mask_the_current_clients_decision(self) -> None:
+        cases: tuple[tuple[ProductReviewDecision, str], ...] = (
+            ("accepted", "success"),
+            ("changes_requested", "failure"),
+        )
+        for decision, expected in cases:
+            self.setUp()
+            current = _decision(decision=decision, decided_at="2026-09-20T10:00:00Z")
+            former = _decision(
+                decision="changes_requested" if decision == "accepted" else "accepted",
+                decided_at="2026-09-20T11:00:00Z",
+            ).model_copy(update={"owner_github_id": "9002"})
+            for saved in (current, former):
+                self.store.write_product_review_decision_record(saved)
+            for review in ("required", "engineering", "director_standing"):
+                with self.subTest(decision=decision, review=review):
+                    github = _GitHub(labels=("owner-review",) if review == "required" else ())
+                    if review == "director_standing":
+                        github.body = "## Client test notes\nTry the changed page."
+                    profile = _profile()
+                    if review == "director_standing":
+                        profile = profile.model_copy(
+                            update={"release_on_acceptance": "director_standing"}
+                        )
+                    result = _publisher(github).publish(
+                        store=self.store, profile=profile, pull_request_number=_PULL_REQUEST
+                    )
+                    assert result is not None
+                    self.assertEqual(
+                        result.state,
+                        "neutral" if decision == "accepted" and review != "required" else expected,
+                    )
+                    self.assertEqual(github.statuses[0]["state"], result.state)
+
+    def test_unchanged_client_id_still_accepts_after_a_login_change(self) -> None:
+        github = _GitHub()
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-20T10:00:00Z")
+        )
+        profile = _profile().model_copy(
+            update={"owner": _profile().owner.model_copy(update={"github_login": "renamed-client"})}
+        )
+        result = _publisher(github).publish(
+            store=self.store, profile=profile, pull_request_number=_PULL_REQUEST
+        )
+        assert result is not None
+        self.assertEqual(result.state, "success")
+
+    def test_decisions_for_another_target_do_not_decide_the_current_status(self) -> None:
+        saved = _decision(decision="accepted", decided_at="2026-09-20T10:00:00Z").model_copy(
+            update={"feedback_url": "https://github.com/feedback/1"}
+        )
+        for update in (
+            {"product": "another-product"},
+            {"repository": "every/another-repository"},
+            {"pull_request_number": _PULL_REQUEST + 1},
+            {"head_sha": _OLDER_HEAD_SHA},
+        ):
+            with self.subTest(update=update):
+                result = owner_review_status(
+                    profile=_profile(),
+                    pull_request_number=_PULL_REQUEST,
+                    head_sha=_HEAD_SHA,
+                    decisions=(saved.model_copy(update=update),),
+                )
+                self.assertEqual(result.state, "pending")
+
+    def test_pure_dependency_update_publishes_neutral_without_inviting_client(self) -> None:
         class DependabotGitHub(_GitHub):
             def __call__(self, **kwargs: object) -> object:
                 if "/compare/" in str(kwargs["path"]):
@@ -383,13 +835,15 @@ class OwnerReviewStatusTests(unittest.TestCase):
                 value = super().__call__(**kwargs)
                 if str(kwargs["path"]).endswith(f"/pulls/{_PULL_REQUEST}"):
                     assert isinstance(value, dict)
-                    value["user"] = {"login": "dependabot[bot]", "type": "Bot"}
+                    value["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
                     value["base"] = {
+                        "ref": "main",
                         "sha": "base",
                         "repo": {"id": 5150, "full_name": self.repository},
                     }
                 return value
 
+        seed_dependency_policy(self.store, repository=_REPOSITORY)
         github = DependabotGitHub(labels=())
         github.body = "Bumps a dependency."
         self._publish(github)
@@ -406,14 +860,36 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(github.statuses[0]["state"], "failure")
 
     def test_real_notes_without_label_publish_review_and_missing_notes_fail(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+
         github = _GitHub(labels=())
         github.body = "## Client test notes\nTry the changed prices."
         self._publish(github)
         self.assertEqual(github.statuses[0]["state"], "pending")
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-20T10:00:00Z")
+        )
+        github.body += f"\n### {OPEN_CLIENT_QUESTIONS}\n- What is the business address?"
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
         github.body = "## Client test notes\n<!-- empty template -->"
         self._publish(github)
         self.assertEqual(github.statuses[0]["state"], "failure")
         self.assertIn("missing", str(github.statuses[0]["description"]))
+
+    def test_near_miss_engineering_notes_name_the_fix_instead_of_waiting(self) -> None:
+        # odoo-tenant-cm#214 named the Client; the check waited for a review nobody asked for.
+        github = _GitHub(labels=())
+        github.body = (
+            "## Client test notes\n\nNothing for Justin to test. No screen, menu or data changes."
+        )
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        self.assertIn(NOTHING_TO_TEST, str(github.statuses[0]["description"]))
+
+        github.body = "## Client test notes\n\nNothing for the Client to test: no screen changes."
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "neutral")
 
     def test_engineering_notes_replace_stale_failure_on_the_same_head(self) -> None:
         github = _GitHub(labels=())
@@ -475,6 +951,63 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(github.statuses[0]["state"], "failure")
         self.assertEqual(github.check_runs[0]["conclusion"], "failure")
 
+    def test_engineering_notes_preserve_rejection_after_head_moves_until_client_accepts(
+        self,
+    ) -> None:
+        github = _GitHub(labels=())
+        self.store.write_product_review_decision_record(
+            _decision(
+                decision="changes_requested",
+                head_sha=_OLDER_HEAD_SHA,
+                decided_at="2026-09-20T10:00:00Z",
+            )
+        )
+
+        self._publish(github)
+
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        self.assertEqual(github.check_runs[0]["conclusion"], "failure")
+        github.labels = ("owner-review",)
+        github.body = "## Client test notes\nTry the corrected page."
+
+        self._publish(github)
+
+        self.assertEqual(github.statuses[0]["state"], "failure")
+        github.labels = ()
+        github.body = "## Client test notes\nNothing for the Client to test: CI only."
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-20T11:00:00Z")
+        )
+
+        self._publish(github)
+
+        self.assertEqual(github.statuses[0]["state"], "neutral")
+
+    def test_release_testing_engineering_notes_publish_neutral_without_acceptance(self) -> None:
+        github = _GitHub(labels=())
+        github.body = (
+            f"## Client test notes\n{ENGINEERING_RELEASE_TESTS}\n"
+            "Check the imported parts at release."
+        )
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "neutral")
+        self.assertEqual(github.comments, [])
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            ),
+            (),
+        )
+        github.labels = ("owner-review",)
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "pending")
+        github.labels = ()
+        self.store.write_product_review_decision_record(
+            _decision(decision="changes_requested", decided_at="2026-09-20T10:00:00Z")
+        )
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
+
     def test_marked_pull_request_without_an_owner_says_so(self) -> None:
         github = _GitHub()
 
@@ -532,7 +1065,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         assert isinstance(output, dict)
         self.assertEqual(output["title"], "Retired")
         self.assertIn("launchplane/owner-review", output["summary"])
-        self.assertEqual(github.revoked_app_tokens, 2)
+        self.assertEqual(github.revoked_app_tokens, github.minted_app_tokens)
 
     def test_absent_or_foreign_leftovers_are_not_created_or_touched(self) -> None:
         github = _GitHub(labels=())
@@ -798,7 +1331,14 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(github.comments), 1)
 
     async def test_retry_saved_feedback_without_preview_preserves_the_decision(self) -> None:
+        for state, merged in (("open", False), ("closed", False), ("closed", True)):
+            with self.subTest(state=state, merged=merged):
+                await self._retry_saved_feedback_without_preview(state=state, merged=merged)
+
+    async def _retry_saved_feedback_without_preview(self, *, state: str, merged: bool) -> None:
         github = _GitHub()
+        github.state = state
+        github.merged = merged
         self.store.write_product_profile_record(_profile())
         original = _decision(
             decision="accepted", head_sha=_OLDER_HEAD_SHA, decided_at="2026-09-25T12:00:00Z"
@@ -837,6 +1377,11 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200)
             self.assertFalse(response.json()["can_decide"])
             self.assertTrue(response.json()["latest_decision"]["feedback_url"])
+            self.assertEqual(
+                response.json()["latest_decision"]["feedback_url"],
+                f"https://github.com/{_REPOSITORY}/pull/{_PULL_REQUEST}"
+                f"#issuecomment-{github.comments[0]['id']}",
+            )
         saved = self.store.list_product_review_decision_records(
             repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
         )
@@ -847,7 +1392,12 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(saved[0].feedback_requested)
         self.assertEqual(len(github.comments), 1)
-        self.assertEqual(github.statuses[0]["state"], "pending")
+        if state == "closed":
+            self.assertEqual(github.check_runs, [])
+            self.assertEqual(github.minted_app_tokens, [])
+        else:
+            self.assertEqual(github.statuses[0]["state"], "pending")
+        self.assertEqual(github.revoked_app_tokens, github.minted_app_tokens)
 
     async def test_feedback_retry_requires_owner_session_and_a_matching_saved_decision(
         self,
@@ -1144,7 +1694,9 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.reason, original.reason)
         self.assertTrue(saved.feedback_url)
 
-    async def test_ready_preview_feedback_writes_the_status_and_retires_leftovers(self) -> None:
+    async def test_ready_feedback_without_a_serving_preview_does_not_invite_the_client(
+        self,
+    ) -> None:
         github = _GitHub(repository="every/verireel")
         github.statuses = [
             {"context": "manager-preview-approval", "state": "pending", "description": "Waiting"}
@@ -1178,9 +1730,14 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             [(status["context"], status["state"]) for status in github.statuses[:2]],
             [("launchplane/owner-review", "pending"), ("manager-preview-approval", "pending")],
         )
-        self.assertEqual(
+        self.assertNotEqual(
             github.owner_review_statuses()[0]["description"],
-            "Waiting for @site-owner to review the preview",
+            owner_review_status(
+                profile=LaunchplaneProductProfileRecord.model_validate(profile_payload),
+                pull_request_number=42,
+                head_sha=_HEAD_SHA,
+                decisions=(),
+            ).description,
         )
 
 

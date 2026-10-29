@@ -11,16 +11,19 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from control_plane.client_release import accepted_release_can_start, read_client_release_run
+from control_plane.client_release import (
+    accepted_release_can_start,
+    _read_client_release_continuation,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.service_deploy_drain import read_status
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.release_review_shared import repository_key
 from control_plane.release_review import (
-    ReleaseEvidenceUnavailable,
     ReleaseReviewStore,
     release_version,
+    recorded_generic_web_testing_version,
 )
 
 
@@ -107,13 +110,7 @@ def _release_in_flight(
     *,
     newest: bool,
 ) -> bool:
-    """Whether the release worker is running this release or will start its next step.
-
-    This mirrors the worker's own checks, so a release it would refuse to
-    continue never holds the train.
-    """
-
-    run = read_client_release_run(store=store, profile=profile, decision=decision)
+    run = _read_client_release_continuation(store=store, profile=profile, decision=decision)
     if run is None:
         return False
     # A step or its automatic recovery is changing production now.
@@ -131,9 +128,13 @@ def _release_in_flight(
         return False
     checklist = decision.checklist
     try:
-        candidate = release_version(store=store, profile=profile, instance="testing")
+        candidate = (
+            recorded_generic_web_testing_version(store=store, profile=profile)
+            if profile.driver_id == "generic-web"
+            else release_version(store=store, profile=profile, instance="testing")
+        )
         production = release_version(store=store, profile=profile, instance="prod")
-    except ReleaseEvidenceUnavailable:
+    except (FileNotFoundError, ValueError):
         return False
     # A rollback starts from the promoted candidate; a backup or promotion needs
     # production on the reviewed version, and both need testing on the candidate.

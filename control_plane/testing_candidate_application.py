@@ -4,30 +4,33 @@ import base64
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-import re
 
+from control_plane.copy_readback_diagnostics import readback_marker_is_safe
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_candidate_application import (
     TestingCandidateApplication,
     TestingCandidatePrepared,
+    candidate_compose_project_matches,
 )
 from control_plane.dokploy import api, compose, post_deploy, source
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeProgramFailed
 from control_plane.dokploy.target_source_setup import require_empty_compose_source
 from control_plane.dokploy_target_setup_http import fetch_dokploy_compose_domains_for_target_setup
 from control_plane.integration_readback import (
-    INTEGRATION_FAMILIES,
     INTEGRATION_READBACK_PASSED_PATH,
     INTEGRATION_READBACK_PROGRAM,
-    IntegrationReadbackPolicy,
 )
 from control_plane.odoo_testing_native_source import prepare_native_testing_delivery
 from control_plane.odoo_testing_restore import generation_binding, TESTING_COPY_COMPLETION_PARAMETER
 from control_plane.provider_operations import ProviderOperationLease
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_candidate_allocation import require_candidate_target_custody
-from control_plane.testing_candidate_probe import CANDIDATE_HOST_PROBE, CANDIDATE_CONTAINER_PROBE
+from control_plane.testing_candidate_probe import (
+    CANDIDATE_HOST_PROBE,
+    CANDIDATE_CONTAINER_PROBE,
+    sanitized_testing_readback_policy,
+)
 from control_plane.testing_candidate_runtime import TestingCandidateRuntimeInputs
 
 
@@ -37,6 +40,11 @@ class CandidateObservationUnavailable(ValueError):
 
 class CandidatePrivateReadinessFailed(CandidateObservationUnavailable):
     """The fixed read-only probe returned a failure, rather than losing its transport."""
+
+    def __init__(self, message: str, *, native_failure: NativeProgramFailed | None = None) -> None:
+        super().__init__(message)
+        self.evidence = native_failure.evidence if native_failure is not None else {}
+        self.code = native_failure.code if native_failure is not None else ""
 
 
 def candidate_private_readiness(
@@ -52,6 +60,7 @@ def candidate_private_readiness(
         host=host, token=token, target_type="compose", target_id=allocation.compose_id
     )
     require_candidate_configuration(allocation, inputs, payload)
+    compose_project = str(payload["appName"])
     generation = plan.generation
     spec: dict[str, object] = {
         "generation": generation.model_dump(mode="json")
@@ -61,7 +70,7 @@ def candidate_private_readiness(
             "instance": "testing",
             "resources_binding_sha256": allocation.resources_binding_sha256,
         },
-        "compose_project": str(payload.get("appName") or ""),
+        "compose_project": compose_project,
         "database_name": inputs.runtime_environment["ODOO_DB_NAME"],
         "database_data_directory": compose.ODOO_DATABASE_DATA_DIRECTORY,
         "image_reference": plan.image_reference,
@@ -77,11 +86,7 @@ def candidate_private_readiness(
         "witness_sql": "SELECT value FROM ir_config_parameter WHERE key='"
         + TESTING_COPY_COMPLETION_PARAMETER
         + "';\n",
-        "readback_spec": IntegrationReadbackPolicy(
-            families=INTEGRATION_FAMILIES,
-            allowed_integrations=(),
-            protected_shopify_store_handles=(),
-        ).encoded_spec(),
+        "readback_spec": sanitized_testing_readback_policy().encoded_spec(),
         "readback_program": base64.b64encode(INTEGRATION_READBACK_PROGRAM.encode()).decode(),
         "credential_program": base64.b64encode(CANDIDATE_CONTAINER_PROBE.encode()).decode(),
     }
@@ -96,8 +101,10 @@ def candidate_private_readiness(
             receive=frames.append,
             timeout_seconds=120,
         )
-    except NativeProgramFailed:
-        raise CandidatePrivateReadinessFailed("The private probe returned a failure.") from None
+    except NativeProgramFailed as error:
+        raise CandidatePrivateReadinessFailed(
+            "The private probe returned a failure.", native_failure=error
+        ) from None
     if frames != [{"type": "complete", "private_readiness_verified": True}]:
         raise CandidateObservationUnavailable("Candidate private readiness is unverified.")
     return TestingCandidatePrepared(
@@ -108,6 +115,7 @@ def candidate_private_readiness(
         + ":"
         + inputs.runtime_environment["ODOO_HTTP_PORT"],
         deployment_id=deployment_id,
+        compose_project=compose_project,
         source_witness=generation_binding(generation) if generation else "empty:" + plan.digest,
         integration_isolation_verified=True,
         credentials_verified=True,
@@ -132,6 +140,12 @@ def require_candidate_configuration(
         allocation.namespace,
     ):
         raise ValueError("Candidate placement changed.")
+    project = str(payload.get("appName") or "")
+    if not candidate_compose_project_matches(allocation.namespace, project):
+        raise ValueError("Candidate Compose project changed.")
+    prepared = allocation.application.prepared if allocation.application is not None else None
+    if prepared is not None and prepared.compose_project and project != prepared.compose_project:
+        raise CandidateObservationUnavailable("The original prepared Compose project changed.")
     if (
         payload.get("autoDeploy") is not False
         or payload.get("sourceType") != "raw"
@@ -139,6 +153,12 @@ def require_candidate_configuration(
         or compose.compose_file_sha256(str(payload.get("composeFile") or ""))
         != compose.compose_file_sha256(inputs.compose_file)
         or api.parse_dokploy_env_text(str(payload.get("env") or "")) != inputs.runtime_environment
+        or (
+            api.compose_environment_is_encoded(str(payload.get("env") or ""))
+            and api.compose_unqualified_keys(
+                str(payload.get("env") or ""), inputs.runtime_environment
+            )
+        )
     ):
         raise ValueError("Candidate configuration has not retained its exact admitted inputs.")
 
@@ -161,6 +181,13 @@ def candidate_configuration_sha256(payload: api.JsonObject) -> str:
             },
             "composeFile": compose.compose_file_sha256(str(payload.get("composeFile") or "")),
             "env": api.parse_dokploy_env_text(str(payload.get("env") or "")),
+            # Keep historical unmarked custody hashes recoverable. New literal
+            # transport must also bind its wire form, which changes consumption.
+            **(
+                {"env_wire_sha256": canonical_json_sha256(str(payload.get("env") or ""))}
+                if api.compose_environment_is_encoded(str(payload.get("env") or ""))
+                else {}
+            ),
         }
     )
 
@@ -218,9 +245,8 @@ def observe_candidate_configuration(
                 (payload.get("serverId"), payload.get("environmentId"))
                 != (record.server_id, record.environment_id)
                 or payload.get("name") != record.namespace
-                or not re.fullmatch(
-                    re.escape(record.namespace) + r"(?:-[a-z0-9]{6})?",
-                    str(payload.get("appName") or ""),
+                or not candidate_compose_project_matches(
+                    record.namespace, str(payload.get("appName") or "")
                 )
                 or payload.get("env") not in (None, "")
             ):
@@ -306,6 +332,7 @@ def prepare_candidate_application(
             inputs=inputs,
             deployment_id=app.deployment_id,
         )
+        remove_prepared_candidate_source_cache(store, record)
         return record
 
     def payload() -> api.JsonObject:
@@ -331,7 +358,11 @@ def prepare_candidate_application(
                 )
             ):
                 raise ValueError("Candidate is no longer unused.")
-            environment = api.serialize_dokploy_env_text(inputs.runtime_environment)
+            environment = api.serialize_dokploy_env_text(
+                inputs.runtime_environment,
+                target_type="compose",
+                compose_type=str(current.get("composeType") or "docker-compose"),
+            )
             api.refuse_app_runtime_env_write(
                 env_text=environment, current_env_text="", target="testing candidate"
             )
@@ -506,6 +537,7 @@ def prepare_candidate_application(
             fresh_restore_source_environment=inputs.plan.upstream_source,
             prepare_native_source=native if inputs.native_source else None,
             testing_candidate_namespace=record.namespace,
+            database_url=store.database_url,
         )
         save(workflow_evidence=evidence)
     # On an interrupted restore, inspect the actual copy/gate/credentials instead
@@ -518,7 +550,28 @@ def prepare_candidate_application(
         host=host, token=token, allocation=record, inputs=inputs, deployment_id=app.deployment_id
     )
     save(phase="prepared", prepared=prepared)
+    remove_prepared_candidate_source_cache(store, record)
     return record
+
+
+def remove_prepared_candidate_source_cache(
+    store: PostgresRecordStore, record: TestingCandidateAllocation
+) -> None:
+    from control_plane.odoo_testing_native_source import (
+        recorded_native_testing_capture,
+        remove_completed_native_capture_cache,
+    )
+
+    app = record.application
+    if app is None or app.phase != "prepared":
+        raise ValueError("Raw source cleanup requires the prepared candidate proof.")
+    generation = app.plan.generation
+    if generation is None or generation.source_mode != "container-export":
+        return
+    capture = recorded_native_testing_capture(store, generation)
+    if capture is None:
+        raise ValueError("The prepared native copy has no original capture receipt.")
+    remove_completed_native_capture_cache(capture)
 
 
 def candidate_restore_terminal(
@@ -559,7 +612,23 @@ def candidate_restore_terminal(
         raise CandidateObservationUnavailable("Candidate restore is still running or unknown.")
     if require_success and status not in api._DEPLOYMENT_SUCCESS_STATUSES:
         raise ValueError("Candidate restore failed; keep the old copy serving.")
-    return app.restore_schedule_id + ":" + api.deployment_key(new[0]) + ":" + status
+    evidence = app.restore_schedule_id + ":" + api.deployment_key(new[0])
+    if status in api._DEPLOYMENT_FAILURE_STATUSES:
+        markers = post_deploy._read_odoo_post_deploy_log_markers(
+            host=host,
+            token=token,
+            schedule_id=app.restore_schedule_id,
+            schedule_deployment_key=api.deployment_key(new[0]),
+            deployment_id=api.deployment_key(new[0]),
+            deployment=new[0],
+        )
+        predicate = markers.get("readback_failed_predicate", "")
+        kind = markers.get("readback_failure_kind", "")
+        if readback_marker_is_safe(
+            "readback_failed_predicate", predicate
+        ) and readback_marker_is_safe("readback_failure_kind", kind):
+            evidence += f":{predicate}_{kind}"
+    return evidence + ":" + status
 
 
 def candidate_build_terminal(*, host: str, token: str, record: TestingCandidateAllocation) -> str:

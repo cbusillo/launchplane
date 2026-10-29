@@ -9,6 +9,7 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane.contracts.authz_policy_record import build_authz_policy_record_id
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 ADMINISTRATOR_ENROLLMENT_SCHEMA_VERSION: Final[Literal[1]] = 1
@@ -25,7 +26,6 @@ AdministratorEnrollmentState = Literal[
     "enrolled",
 ]
 AdministratorEnrollmentPolicyBridgeState = Literal["not_applied", "applied"]
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _ENROLLMENT_ID_PATTERN = re.compile(r"^administrator-enrollment-[a-z0-9][a-z0-9_-]{7,127}$")
 
 
@@ -47,7 +47,7 @@ def _timestamp(value: str, field_name: str) -> datetime:
 
 
 def _sha256(value: str, field_name: str) -> str:
-    if _SHA256_PATTERN.fullmatch(value) is None:
+    if SHA256_PATTERN.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
     return value
 

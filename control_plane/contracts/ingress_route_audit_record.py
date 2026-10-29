@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import hashlib
-import json
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.text_fields import require_text
 
 IngressRouteAuditMode = Literal["dry-run", "apply"]
 IngressRouteAuditStatus = Literal["pending", "planned", "applied", "unchanged"]
@@ -60,13 +61,13 @@ class IngressRouteAuditRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "IngressRouteAuditRecord":
-        self.record_id = _required_text(self.record_id, "ingress route audit requires record_id")
-        self.product = _required_text(self.product, "ingress route audit requires product")
-        self.context = _required_text(self.context, "ingress route audit requires context")
-        self.provider = _required_text(self.provider, "ingress route audit requires provider")
-        self.trace_id = _required_text(self.trace_id, "ingress route audit requires trace_id")
-        self.reason = _required_text(self.reason, "ingress route audit requires reason")
-        self.recorded_at = _required_text(
+        self.record_id = require_text(self.record_id, "ingress route audit requires record_id")
+        self.product = require_text(self.product, "ingress route audit requires product")
+        self.context = require_text(self.context, "ingress route audit requires context")
+        self.provider = require_text(self.provider, "ingress route audit requires provider")
+        self.trace_id = require_text(self.trace_id, "ingress route audit requires trace_id")
+        self.reason = require_text(self.reason, "ingress route audit requires reason")
+        self.recorded_at = require_text(
             self.recorded_at, "ingress route audit requires recorded_at"
         )
         self.edge_endpoint_key = self.edge_endpoint_key.strip()
@@ -101,23 +102,13 @@ def build_ingress_route_audit_record_id(
     context: str,
     domains: tuple[str, ...],
 ) -> str:
-    normalized_trace_id = _required_text(trace_id, "ingress route audit id requires trace_id")
-    material = json.dumps(
+    normalized_trace_id = require_text(trace_id, "ingress route audit id requires trace_id")
+    digest = nonvalidating_compact_sorted_json_sha256(
         {
             "trace_id": normalized_trace_id,
             "product": product.strip(),
             "context": context.strip(),
             "domains": sorted(domain.strip().lower() for domain in domains if domain.strip()),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+        }
+    )[:16]
     return f"ingress-route-audit-{normalized_trace_id}-{digest}"
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

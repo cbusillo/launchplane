@@ -6,18 +6,27 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 import logging
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 import click
 from control_plane.lane_movement import LaneMovementRefused
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
+)
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerRequest
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverRecord
 from control_plane.contracts.production_backup_authority import (
     ProxmoxGuestBackupDestinationReference,
 )
-from control_plane.contracts.promotion_record import BackupGateEvidence, PromotionRecord
+from control_plane.contracts.promotion_record import (
+    BackupGateEvidence,
+    PromotionRecord,
+    promotion_failure,
+)
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
@@ -27,6 +36,47 @@ from control_plane.workflows.production_backup_gate import resolve_production_ba
 
 ODOO_PROMOTION_BACKUP_ACTION = "odoo_prod_promotion_run.execute"
 GENERIC_WEB_PROMOTION_BACKUP_ACTION = "generic_web_prod_promotion.execute"
+
+
+class ProductionBackupNotAdmissible(GenericWebPromotionAdmissionRefused):
+    def __init__(self, message: str, *, reason: Literal["expired", "superseded", "busy"]) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+def _backup_admission_refusal(
+    message: str, *, reason: Literal["expired", "superseded", "busy"], promotion_action: str
+) -> click.ClickException:
+    if promotion_action == GENERIC_WEB_PROMOTION_BACKUP_ACTION:
+        return ProductionBackupNotAdmissible(message, reason=reason)
+    return click.ClickException(message)
+
+
+def backup_capture_freshness_refusal(
+    binding: ProductionBackupGateWorkerRequest,
+    evidence: dict[str, str],
+    *,
+    now: datetime,
+    check_freshness: bool = True,
+) -> str:
+    expired = False
+    for field, maximum_age in (
+        ("snapshot_finished_at", binding.policy.fast_snapshot.max_evidence_age_seconds),
+        (
+            "independent_backup_finished_at",
+            binding.policy.independent_backup.max_evidence_age_seconds,
+        ),
+    ):
+        try:
+            timestamp = datetime.fromisoformat(evidence[field].replace("Z", "+00:00"))
+            if check_freshness:
+                age = (now - timestamp).total_seconds()
+                if age < 0:
+                    return "future"
+                expired = expired or age > maximum_age
+        except (KeyError, TypeError, ValueError):
+            return "invalid"
+    return "expired" if expired else ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +122,20 @@ class ProductionPromotionBackupStore(Protocol):
         statuses: tuple[str, ...] = (),
         limit: int | None = None,
     ) -> tuple[VeriReelProdBackupGateOperationRecord, ...]: ...
+
+
+def promotion_is_temporary_admission_refusal(promotion: PromotionRecord) -> bool:
+    return (
+        promotion.deploy.status == "fail"
+        and promotion.failure is not None
+        and promotion.failure.code
+        in {
+            "lane_movement.source_order_unavailable",
+            GenericWebPromotionSourceRefused.failure_code,
+            GenericWebPromotionAdmissionRefused.failure_code,
+        }
+        and promotion.backup_gate.evidence.get("provider_effects_status") == "not_started"
+    )
 
 
 def require_production_promotion_backup(
@@ -167,22 +231,15 @@ def require_production_promotion_backup(
         # retention and competing consumption are still checked below.
         admitted_at = admitted.backup_gate.evidence.get("admission_checked_at", "")
         now = datetime.fromisoformat(admitted_at) if admitted_at else cutover_recovery.began_at
-    for field, maximum_age in (
-        ("snapshot_finished_at", binding.policy.fast_snapshot.max_evidence_age_seconds),
-        (
-            "independent_backup_finished_at",
-            binding.policy.independent_backup.max_evidence_age_seconds,
-        ),
-    ):
-        try:
-            timestamp = datetime.fromisoformat(evidence[field].replace("Z", "+00:00"))
-            age = (now - timestamp).total_seconds()
-        except (KeyError, TypeError, ValueError) as error:
-            raise click.ClickException(
-                "Production backup evidence has an invalid timestamp."
-            ) from error
-        if age < 0 or age > maximum_age:
-            raise click.ClickException("Production backup evidence is stale or future-dated.")
+    freshness = backup_capture_freshness_refusal(binding, evidence, now=now)
+    if freshness == "expired":
+        raise _backup_admission_refusal(
+            "Production backup evidence is stale or future-dated.",
+            reason="expired",
+            promotion_action=promotion_action,
+        )
+    if freshness:
+        raise click.ClickException("Production backup evidence has an invalid or future timestamp.")
     # A later capture may have pruned this snapshot, including a capture whose
     # terminal result was lost after retention. Require a fresh capture instead.
     for other in store.list_verireel_prod_backup_gate_operation_records():
@@ -200,20 +257,15 @@ def require_production_promotion_backup(
             and other.started_at
             and other.started_at >= operation.started_at
         ):
-            raise click.ClickException(
-                "Production backup evidence was superseded by another capture."
+            raise _backup_admission_refusal(
+                "Production backup evidence was superseded by another capture.",
+                reason="superseded",
+                promotion_action=promotion_action,
             )
     for promotion in promotions:
         if promotion.record_id == active_promotion_record_id:
             continue
-        if (
-            promotion.deploy.status == "fail"
-            and promotion.failure is not None
-            and promotion.failure.code == "lane_movement.source_order_unavailable"
-            and promotion.backup_gate.evidence.get("provider_effects_status") == "not_started"
-        ):
-            # The guard recorded a temporary read refusal before its first
-            # provider checkpoint. This capture has protected no write yet.
+        if promotion_is_temporary_admission_refusal(promotion):
             continue
         if backup_record_id in (
             promotion.backup_gate.evidence.get("backup_record_id"),
@@ -263,7 +315,11 @@ def production_promotion_backup_guard(
         raise click.ClickException("Production promotion admission does not bind its backup.")
     with record_store.production_backup_source_lock(_source_key(operation)) as check_lock:
         if check_lock is None:
-            raise click.ClickException("Production backup source is busy.")
+            raise _backup_admission_refusal(
+                "Production backup source is busy.",
+                reason="busy",
+                promotion_action=promotion_action,
+            )
 
         effects_started = False
         protection_evidence = {"source_lock_status": "held"}
@@ -333,6 +389,8 @@ def production_promotion_backup_guard(
                 and not effects_started
             ):
                 failed.failure = error.record_failure()
+            elif isinstance(error, GenericWebPromotionAdmissionRefused) and not effects_started:
+                failed.failure = promotion_failure(error.failure_code)
             failed.backup_gate.evidence.update(protection_evidence)
             record_store.write_promotion_record(failed)
             raise

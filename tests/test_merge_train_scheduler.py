@@ -1,4 +1,5 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
 from unittest import TestCase
@@ -6,6 +7,9 @@ from unittest.mock import MagicMock, patch
 from typing import cast
 
 from control_plane import merge_train_events, merge_train_scheduler
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+from control_plane.merge_train_github_token import merge_train_github_token_value
+from control_plane.merge_train_github import GitHubMergeTrainClient, UrllibMergeTrainGitHubTransport
 from control_plane.merge_train import (
     MergeTrainBranchClient,
     apply_merge_train_branch_update_intent,
@@ -23,6 +27,8 @@ from control_plane.contracts.merge_train_policy import (
     parse_merge_train_policy_toml,
 )
 from control_plane.merge_train_controller_run_once import MergeTrainControllerRunOnceResult
+from control_plane.merge_train_pr_feedback import write_merge_train_pr_feedback_record
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
 from control_plane.merge_train_wake import (
     MergeTrainWake,
@@ -79,7 +85,7 @@ def _controller_result() -> MergeTrainControllerRunOnceResult:
             "controller_action": "wait_for_checks",
             "candidate": {"entries": [{"pull_request_number": 7}]},
         },
-        records={"merge_train_controller_state_record_id": "controller-1"},
+        records={"merge_train_batch_candidate_record_id": "candidate-1"},
     )
 
 
@@ -167,6 +173,16 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.mocks["evaluate_merge_train_admission_from_store"].return_value = _admission(
             "admitted"
         )
+        credential = GitHubAppInstallationToken(
+            token="token",
+            app_id=1,
+            installation_id=2,
+            repository_id=3,
+            repository="cbusillo/alpha",
+            expires_at="unused",
+            permissions=("checks:read",),
+        )
+        self.mocks["resolve_merge_train_github_token"].return_value = credential
         revoked: list[str] = []
         reads: list[str] = []
 
@@ -188,7 +204,17 @@ class MergeTrainSchedulerPassTests(TestCase):
             for _ in range(2):
                 self.assertEqual(evidence.list_open_pull_requests("cbusillo/alpha", limit=1), ())
             # The controller still needs its credential after admission evidence completes.
-            provider(path="/repos/cbusillo/alpha/pulls", token=kwargs["token"])
+            self.assertIs(kwargs["token"], credential)
+            self.assertIsInstance(evaluator.technical_check_client, GitHubMergeTrainClient)
+            assert isinstance(evaluator.technical_check_client, GitHubMergeTrainClient)
+            technical_transport = evaluator.technical_check_client.transport
+            assert isinstance(technical_transport, UrllibMergeTrainGitHubTransport)
+            self.assertEqual(technical_transport.token_permissions, credential.permissions)
+            snapshot_transport = UrllibMergeTrainGitHubTransport(token=credential)
+            self.assertEqual(snapshot_transport.token_permissions, credential.permissions)
+            provider(
+                path="/repos/cbusillo/alpha/pulls", token=merge_train_github_token_value(credential)
+            )
             return _controller_result()
 
         self.mocks["execute_merge_train_controller_run_once"].side_effect = execute
@@ -498,6 +524,7 @@ class MergeTrainSchedulerPassTests(TestCase):
         self.mocks["write_merge_train_pr_feedback_record"].assert_not_called()
 
     def test_mutating_controller_pass_delivers_feedback(self) -> None:
+        diagnostic = "missing-security-gate"
         self.mocks["resolve_merge_train_policy_record"].return_value = _policy_record(
             ("cbusillo/alpha", MergeTrainSchedulerPolicy(enabled=True, mutate=True)),
         )
@@ -505,7 +532,38 @@ class MergeTrainSchedulerPassTests(TestCase):
             "admitted"
         )
 
-        (result,) = self._run()
+        observed = _controller_result()
+        observed.accepted_result["candidate"] = {
+            "entries": [{"pull_request_number": 7}],
+            "required_checks_observation_error": diagnostic,
+        }
+        self.mocks["execute_merge_train_controller_run_once"].return_value = observed
+        self.mocks[
+            "write_merge_train_pr_feedback_record"
+        ].side_effect = write_merge_train_pr_feedback_record
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            for name in (
+                "merge_train_feedback_delivery_lock",
+                "list_merge_train_pr_feedback_records",
+                "write_merge_train_pr_feedback_record",
+            ):
+                getattr(self.record_store, name).side_effect = getattr(store, name)
+            with patch(
+                "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                return_value={
+                    "action": "created",
+                    "comment_id": 9,
+                    "comment_url": "https://github.com/cbusillo/alpha/issues/7#issuecomment-9",
+                },
+            ):
+                (result,) = self._run()
+            reloaded = FilesystemRecordStore(Path(directory)).list_merge_train_pr_feedback_records(
+                repository="cbusillo/alpha", base_branch="main", pr_number=7
+            )
+            self.assertEqual(len(reloaded), 1)
+            self.assertIn(diagnostic, reloaded[0].comment_markdown)
+            self.assertEqual(reloaded[0].delivery_status, "delivered")
 
         self.assertTrue(
             self.mocks["execute_merge_train_controller_run_once"].call_args.kwargs["request"].mutate

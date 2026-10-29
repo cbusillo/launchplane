@@ -14,12 +14,20 @@ from control_plane.contracts.disposable_lane import (
     DisposableLaneObservationRequest,
 )
 from control_plane.disposable_lane_collection import disposable_collection_coverage
+from control_plane.contracts.application_resource_observation import ApplicationResourceObservation
 from control_plane.odoo_testing_usage import ODOO_USAGE_REASON_CODES
+
+
+def observation_body(payload: DisposableLaneObservationRequest) -> dict[str, object]:
+    excluded = {"expected_observation_sha256"} if payload.mode != "clear" else set()
+    if not payload.include_application_resources:
+        excluded.add("include_application_resources")
+    return payload.model_dump(mode="json", exclude=excluded)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("inspect", "collect", "record", "clear"))
+    parser.add_argument("mode", choices=("inspect", "collect", "clear"))
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--config")
     parser.add_argument("--env-config")
@@ -27,21 +35,27 @@ def main() -> int:
     for field in ("product", "context", "instance"):
         parser.add_argument(f"--{field}", required=True)
     parser.add_argument("--preview-id", default="")
+    parser.add_argument("--expected-binding-sha256", default="")
+    parser.add_argument("--expected-observation-sha256", default="")
     parser.add_argument("--lifetime-seconds", type=int)
-    parser.add_argument("--usage", choices=("unknown", "unused", "in_use"), default="unknown")
     parser.add_argument(
-        "--data", choices=("unknown", "reproducible", "only_copy"), default="unknown"
+        "--application-resources",
+        action="store_true",
+        help="Observe existing testing application storage metadata without qualifying safety.",
     )
-    parser.add_argument(
-        "--production-resources",
-        choices=("unknown", "isolated", "shared", "separation_ready"),
-        default="unknown",
-    )
-    for field in ("usage", "data", "isolation"):
-        parser.add_argument(f"--{field}-evidence", default="")
     args = parser.parse_args()
-    if args.mode == "record" and not args.preview_id:
-        parser.error("Recording cleanup facts requires an exact preview ID.")
+    if args.application_resources and (
+        args.mode != "collect" or args.instance != "testing" or args.preview_id
+    ):
+        parser.error("--application-resources requires collect for testing without a preview ID.")
+    if args.mode == "clear" and not re.fullmatch(r"[0-9a-f]{64}", args.expected_binding_sha256):
+        parser.error("Clearing requires --expected-binding-sha256 from a reviewed inspection.")
+    if args.mode == "clear" and not re.fullmatch(r"[0-9a-f]{64}", args.expected_observation_sha256):
+        parser.error(
+            "Clearing requires --expected-observation-sha256 from the same reviewed inspection."
+        )
+    if args.mode != "clear" and (args.expected_binding_sha256 or args.expected_observation_sha256):
+        parser.error("Only clear accepts an explicitly reviewed binding.")
     helper = args.operator_helper.expanduser().resolve(strict=True)
     if helper.name != "launchplane-write-action.py":
         parser.error("Select the installed Launchplane operator helper.")
@@ -56,19 +70,23 @@ def main() -> int:
         context=args.context,
         instance=args.instance,
         preview_id=args.preview_id,
+        expected_binding_sha256=args.expected_binding_sha256,
+        expected_observation_sha256=args.expected_observation_sha256,
     )
     try:
         response = transport["request_launchplane"](
             service_url=settings["service_url"],
             path=DISPOSABLE_LANE_OBSERVATION_ROUTE,
             settings=settings,
-            body=payload.model_dump(mode="json"),
+            body=observation_body(payload),
             timeout=30,
         )
         if args.mode == "clear":
             if (
                 response["result"]["mode"] != "clear"
                 or response["result"]["provider_mutation"] is not False
+                or response["result"]["binding_sha256"] != payload.expected_binding_sha256
+                or response["result"]["observation_sha256"] != payload.expected_observation_sha256
             ):
                 raise ValueError("The observation clear did not settle as requested.")
             print(
@@ -82,28 +100,17 @@ def main() -> int:
             return 0
         if response["result"]["mode"] != "inspect":
             raise ValueError("The inspection did not settle as requested.")
-        if args.mode in {"collect", "record"}:
+        if args.mode == "collect":
             digest = response["result"]["binding_sha256"]
             payload = DisposableLaneObservationRequest(
                 **{
                     **payload.model_dump(),
                     "mode": args.mode,
                     "expected_binding_sha256": digest,
+                    "include_application_resources": args.application_resources,
                     **(
                         {"lifetime_seconds": args.lifetime_seconds}
                         if args.lifetime_seconds is not None
-                        else {}
-                    ),
-                    **(
-                        {
-                            "usage": args.usage,
-                            "data": args.data,
-                            "production_resources": args.production_resources,
-                            "usage_evidence": args.usage_evidence,
-                            "data_evidence": args.data_evidence,
-                            "isolation_evidence": args.isolation_evidence,
-                        }
-                        if args.mode == "record"
                         else {}
                     ),
                 }
@@ -112,13 +119,36 @@ def main() -> int:
                 service_url=settings["service_url"],
                 path=DISPOSABLE_LANE_OBSERVATION_ROUTE,
                 settings=settings,
-                body=payload.model_dump(mode="json"),
+                body=observation_body(payload),
                 timeout=240,
             )
         result = response["result"]
+        inspection: dict[str, object] = {}
+        if args.mode == "inspect":
+            digest = result["binding_sha256"]
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("The inspection did not return a valid binding.")
+            inspection["binding_sha256"] = digest
+            if "observation_sha256" in result:
+                observation_digest = result["observation_sha256"]
+                if not isinstance(observation_digest, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", observation_digest
+                ):
+                    raise ValueError("The inspection did not return a valid observation digest.")
+                report = result["observation"]
+                if report is not None:
+                    report = {key: report[key] for key in ("usage", "data", "production_resources")}
+                    if (
+                        report["usage"] not in {"unknown", "unused", "in_use"}
+                        or report["data"] not in {"unknown", "reproducible", "only_copy"}
+                        or report["production_resources"]
+                        not in {"unknown", "isolated", "shared", "separation_ready"}
+                    ):
+                        raise ValueError("Invalid recorded observation.")
+                inspection.update(observation_sha256=observation_digest, observation=report)
         if result["mode"] != args.mode:
             raise ValueError("The collection did not settle as requested.")
-        if args.mode in {"collect", "record"} and (
+        if args.mode == "collect" and (
             result["binding_sha256"] != payload.expected_binding_sha256
             or result["provider_mutation"] is not False
         ):
@@ -178,16 +208,25 @@ def main() -> int:
             qualification = "never_served_diagnostics_unavailable"
         if (reason_code == "never_served") != (qualification == "never_served"):
             raise ValueError("Never-served qualification and usage disagree.")
+        application_resources = {}
+        if args.application_resources:
+            application_resources["application_resources"] = (
+                ApplicationResourceObservation.model_validate(
+                    result.get("application_resources"), extra="ignore"
+                ).model_dump(mode="json")
+            )
         print(
             json.dumps(
                 {
                     "mode": args.mode,
+                    **inspection,
                     "facts": facts,
                     "historical_usage_retained": historical_usage_retained,
                     "odoo_usage": {**usage_facts, "reason_code": reason_code},
                     "never_served_qualification": qualification,
                     "source_coverage": coverage,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
+                    **application_resources,
                 }
             )
         )

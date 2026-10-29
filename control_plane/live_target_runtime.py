@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
+import re
 from collections.abc import Callable, Iterable, Mapping
 from typing import Protocol, cast
 
@@ -17,6 +18,7 @@ from control_plane.contracts.product_profile_record import (
     product_context_owner_map,
 )
 from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.disposable_lanes import (
     DisposableLaneStore,
     DisposableLaneSafetyUnknown,
@@ -71,6 +73,28 @@ class LiveTargetRuntimeApplyEnvelope(BaseModel):
     reviewed_binding_sha256: str = ""
     no_cache: bool = False
     deploy_timeout_seconds: int | None = Field(default=None, gt=0)
+    requalify_literal_keys: tuple[str, ...] = ()
+    selected_keys: tuple[str, ...] | None = None
+
+    @field_validator("selected_keys")
+    @classmethod
+    def _validate_selected_keys(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        if (
+            not value
+            or len(set(value)) != len(value)
+            or any(re.fullmatch(r"[A-Za-z0-9_.-]+", key) is None for key in value)
+        ):
+            raise ValueError("Select nonempty, unique managed runtime key names.")
+        return tuple(sorted(value))
+
+    @field_validator("requalify_literal_keys")
+    @classmethod
+    def _validate_literal_keys(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(re.fullmatch(r"[A-Za-z0-9_.-]+", key) is None for key in value):
+            raise ValueError("Literal qualification requires runtime key names.")
+        return tuple(sorted(set(value)))
 
     @field_validator("mode")
     @classmethod
@@ -91,11 +115,22 @@ class LiveTargetRuntimeApplyEnvelope(BaseModel):
             raise ValueError("Live target runtime apply requires context.")
         if not self.instance:
             raise ValueError("Live target runtime apply requires instance.")
+        if self.selected_keys is not None and (
+            self.separation_only
+            or self.deploy
+            or self.no_cache
+            or self.deploy_timeout_seconds is not None
+            or set(self.requalify_literal_keys) - set(self.selected_keys)
+        ):
+            raise ValueError(
+                "Selected runtime sync cannot deploy, stage separation or qualify unselected keys."
+            )
         if self.separation_only and (
             self.instance != "testing"
             or self.deploy
             or self.no_cache
             or self.deploy_timeout_seconds is not None
+            or self.requalify_literal_keys
         ):
             raise ValueError("Separation stages testing configuration with deployment disabled.")
         if self.mode == "dry-run" and (
@@ -171,19 +206,30 @@ def provider_key_retirement_blocked(key: str, declared: set[str]) -> bool:
 
 
 def retained_database_password_changed(
-    *, instance_name: str, desired_env: Mapping[str, str], live_env: Mapping[str, str]
+    *,
+    instance_name: str,
+    desired_env: Mapping[str, str],
+    live_env: Mapping[str, str],
+    live_env_text: str | None = None,
+    literal_keys: Iterable[str] = (),
 ) -> bool:
-    """Whether a testing write would hand the running database a different password.
+    """Protect testing password changes and all retained credential reinterpretation.
 
     Postgres sets the role password only when it creates its volume, so the running
     target's ``ODOO_DB_PASSWORD`` is the one its retained database still accepts; a
     fresh testing generation brings its own database instead.
     """
     live_value = live_env.get("ODOO_DB_PASSWORD", "")
-    return (
-        instance_name == "testing"
-        and bool(live_value)
-        and desired_env.get("ODOO_DB_PASSWORD", live_value) != live_value
+    return bool(live_value) and (
+        (
+            instance_name == "testing"
+            and desired_env.get("ODOO_DB_PASSWORD", live_value) != live_value
+        )
+        or (
+            "ODOO_DB_PASSWORD" in literal_keys
+            and live_env_text is not None
+            and bool(dokploy_api.compose_unqualified_keys(live_env_text, ("ODOO_DB_PASSWORD",)))
+        )
     )
 
 
@@ -467,15 +513,21 @@ def evaluate_runtime_key_safety_for_live_target_sync(
     instance_name: str,
     require_policy: bool = True,
     required_binding_keys: tuple[str, ...] | None = None,
+    secret_bindings: tuple[SecretBinding, ...] | None = None,
 ) -> dict[str, object]:
+    """Evaluate current policy, optionally against the caller's exact delivered suppliers."""
     target = RuntimeKeySafetyTarget(
         context=context_name,
         instance=instance_name,
         environment_class=runtime_key_safety_environment_class(instance_name),
     )
-    all_runtime_bindings = record_store.list_secret_bindings(
-        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-        limit=None,
+    all_runtime_bindings = (
+        secret_bindings
+        if secret_bindings is not None
+        else record_store.list_secret_bindings(
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            limit=None,
+        )
     )
     bindings = tuple(
         binding
@@ -491,7 +543,7 @@ def evaluate_runtime_key_safety_for_live_target_sync(
         return {"required": False, "status": "skipped", "checked_binding_keys": []}
     try:
         policy_record = latest_active_runtime_key_safety_policy(record_store)
-        if required_binding_keys is not None:
+        if required_binding_keys is not None or secret_bindings is not None:
             evaluation = evaluate_runtime_key_safety(
                 target=target,
                 required_binding_keys=binding_keys,
@@ -535,42 +587,6 @@ def evaluate_runtime_key_safety_for_live_target_sync(
             summary=summary,
         )
     return summary
-
-
-def require_product_profile_runtime_keys(
-    *,
-    record_store: LiveTargetRuntimeProfileStore,
-    product_name: str,
-    context_name: str,
-    instance_name: str,
-    allow_owned_preview: bool = False,
-) -> set[str]:
-    profile = record_store.read_product_profile_record(product_name)
-    lane = next(
-        (
-            candidate
-            for candidate in profile.lanes
-            if candidate.context == context_name and candidate.instance == instance_name
-        ),
-        None,
-    )
-    if lane is None and not (
-        allow_owned_preview
-        and _owned_runtime_preview(record_store, profile, context_name, instance_name)
-    ):
-        raise LiveTargetRuntimeError(
-            f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
-            code="product_lane_not_found",
-        )
-    allowed_keys = _declared_runtime_keys(
-        profile=profile, context_name=context_name, instance_name=instance_name
-    )
-    if not allowed_keys:
-        raise LiveTargetRuntimeError(
-            f"Product {product_name!r} has no expected runtime keys for {context_name}/{instance_name}.",
-            code="runtime_environment_empty",
-        )
-    return allowed_keys
 
 
 def _declared_runtime_keys(
@@ -811,6 +827,8 @@ def apply_live_target_runtime_environment(
     before_provider_mutation: Callable[[], None] | None = None,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     allow_owned_preview: bool = False,
+    requalify_literal_keys: Iterable[str] = (),
+    selected_keys: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
@@ -834,7 +852,27 @@ def apply_live_target_runtime_environment(
     except click.ClickException as error:
         raise LiveTargetRuntimeError(str(error), code="runtime_environment_unavailable") from error
     desired_env_map = site_environment.values
-    retired_keys = set(site_environment.retired_keys)
+    literal_keys = set(requalify_literal_keys)
+    if selected_keys is not None:
+        if (
+            not selected_keys
+            or len(set(selected_keys)) != len(selected_keys)
+            or set(selected_keys) - desired_env_map.keys()
+            or deploy
+            or no_cache
+            or deploy_timeout_seconds is not None
+        ):
+            raise LiveTargetRuntimeError(
+                "Selected runtime sync requires existing, non-retired managed keys and deployment disabled.",
+                code="runtime_key_selection_invalid",
+            )
+        desired_env_map = {key: desired_env_map[key] for key in sorted(selected_keys)}
+    if literal_keys - desired_env_map.keys():
+        raise LiveTargetRuntimeError(
+            "Literal qualification requires names present in the managed runtime inputs.",
+            code="compose_literal_keys_invalid",
+        )
+    retired_keys = set(site_environment.retired_keys) if selected_keys is None else set()
     if not desired_env_map:
         raise LiveTargetRuntimeError(
             f"No Launchplane runtime environment values resolved for {context_name}/{instance_name}.",
@@ -908,16 +946,32 @@ def apply_live_target_runtime_environment(
     except click.ClickException as error:
         raise LiveTargetRuntimeError(str(error), code="dokploy_target_read_failed") from error
     live_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    is_compose = (
+        target_definition.target_type == "compose" and target_payload.get("composeType") != "stack"
+    )
+    if literal_keys and not is_compose:
+        raise LiveTargetRuntimeError(
+            "Literal qualification requires a Compose target.", code="compose_literal_keys_invalid"
+        )
+    unqualified_keys = (
+        dokploy_api.compose_unqualified_keys(str(target_payload.get("env") or ""), desired_env_map)
+        if is_compose
+        else []
+    )
     if retained_database_password_changed(
-        instance_name=instance_name, desired_env=desired_env_map, live_env=live_env_map
+        instance_name=instance_name,
+        desired_env=desired_env_map,
+        live_env=live_env_map,
+        live_env_text=str(target_payload.get("env") or ""),
+        literal_keys=literal_keys,
     ):
         raise LiveTargetRuntimeError(
-            "The stored ODOO_DB_PASSWORD differs from the one the running testing database "
-            "was created with; replace the lane through a fresh testing generation.",
+            "ODOO_DB_PASSWORD would change the retained database credential's meaning. "
+            "For testing, replace the lane through a fresh testing generation.",
             code="retained_database_credential_changed",
         )
     provider_env_platform_credentials = provider_env_platform_credential_report(
-        live_env_map=live_env_map, retired_keys=retired_keys
+        live_env_map=live_env_map, retired_keys=site_environment.retired_keys
     )
     initial_delta = runtime_env_live_target_delta(
         desired_env_map=desired_env_map,
@@ -925,7 +979,11 @@ def apply_live_target_runtime_environment(
         retired_keys=retired_keys,
     )
     changed_keys = initial_delta["changed_keys"]
-    changed_key_count = len(changed_keys) if isinstance(changed_keys, list) else 0
+    qualification_keys = literal_keys & set(unqualified_keys)
+    remaining_unqualified_keys = unqualified_keys
+    changed_key_count = (len(changed_keys) if isinstance(changed_keys, list) else 0) + len(
+        qualification_keys
+    )
     deploy_result: dict[str, str] | None = None
     verification: dict[str, object] = {
         "status": "skipped",
@@ -996,10 +1054,33 @@ def apply_live_target_runtime_environment(
             refreshed_env_map = dokploy_api.parse_dokploy_env_text(
                 str(refreshed_payload.get("env") or "")
             )
+            if retained_database_password_changed(
+                instance_name=instance_name,
+                desired_env=desired_env_map,
+                live_env=refreshed_env_map,
+                live_env_text=str(refreshed_payload.get("env") or ""),
+                literal_keys=literal_keys,
+            ):
+                raise LiveTargetRuntimeError(
+                    "Retained database credentials changed; for testing, use a fresh generation.",
+                    code="retained_database_credential_changed",
+                )
             updated_env_map = control_plane_runtime_environments.merge_provider_environment(
                 current_env_map=refreshed_env_map,
                 desired_env_map=desired_env_map,
                 retired_keys=retired_keys,
+            )
+            env_text = dokploy_api.serialize_dokploy_env_text(
+                updated_env_map,
+                target_type=target_definition.target_type,
+                compose_type=str(refreshed_payload.get("composeType") or "docker-compose"),
+                current_env_text=str(refreshed_payload.get("env") or ""),
+                literal_keys=literal_keys,
+            )
+            dokploy_api.refuse_app_runtime_env_write(
+                env_text=env_text,
+                current_env_text=str(refreshed_payload.get("env") or ""),
+                target="Runtime environment sync",
             )
             with provider_mutation_guard() if provider_mutation_guard else nullcontext():
                 if before_provider_mutation is not None:
@@ -1010,7 +1091,7 @@ def apply_live_target_runtime_environment(
                     target_type=target_definition.target_type,
                     target_id=target_definition.target_id,
                     target_payload=refreshed_payload,
-                    env_text=dokploy_api.serialize_dokploy_env_text(updated_env_map),
+                    env_text=env_text,
                 )
             persisted_payload = dokploy_api.fetch_dokploy_target_payload(
                 host=host,
@@ -1029,12 +1110,30 @@ def apply_live_target_runtime_environment(
             retired_keys=retired_keys,
         )
         verification_changed_keys = verification_delta["changed_keys"]
+        remaining_unqualified_keys = (
+            dokploy_api.compose_unqualified_keys(
+                str(persisted_payload.get("env") or ""), desired_env_map
+            )
+            if is_compose
+            else []
+        )
+        unqualified_persisted = (
+            dokploy_api.compose_unqualified_keys(
+                str(persisted_payload.get("env") or ""), dokploy_api.compose_literal_keys(env_text)
+            )
+            if is_compose
+            else []
+        )
         verification = {
-            "status": "pass" if verification_changed_keys == [] else "fail",
+            "status": "pass"
+            if verification_changed_keys == [] and not unqualified_persisted
+            else "fail",
             "missing_keys": verification_delta["missing_keys"],
             "different_keys": verification_delta["different_keys"],
             "verified_key_count": verification_delta["unchanged_key_count"],
         }
+        if is_compose:
+            verification["unqualified_keys"] = unqualified_persisted
         if retired_keys:
             verification["retired_keys_still_present"] = verification_delta["retired_keys_present"]
         if verification["status"] != "pass":
@@ -1066,12 +1165,19 @@ def apply_live_target_runtime_environment(
         "mode": "apply" if apply_changes else "dry-run",
         "context": context_name,
         "instance": instance_name,
+        "selected_keys": sorted(selected_keys) if selected_keys is not None else None,
         "tracked_target": {
             "target_id": target_definition.target_id,
             "target_type": target_definition.target_type,
             "target_name": target_definition.target_name,
         },
         "runtime_environment": initial_delta,
+        "compose_transport": {
+            "requested_literal_keys": sorted(literal_keys),
+            "qualification_keys": sorted(qualification_keys),
+            "unqualified_keys": remaining_unqualified_keys,
+            "env_written_without_deploy": bool(apply_changes and changed_key_count and not deploy),
+        },
         "provider_env_platform_credentials": provider_env_platform_credentials,
         "apply": {
             "applied": apply_changes,

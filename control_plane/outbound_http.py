@@ -80,6 +80,7 @@ class PublicHttpResponse:
     redirect_count: int
     headers: tuple[tuple[str, str], ...]
     body: bytes
+    visited_urls: tuple[str, ...] = ()
 
     def header(self, name: str) -> str:
         normalized_name = name.lower()
@@ -323,6 +324,7 @@ def request_public_http(
     max_response_body_bytes: int = 256 * 1024,
     resolver: AddressResolver | None = None,
     connection_factory: PublicHttpConnectionFactory | None = None,
+    allowed_https_hosts: tuple[str, ...] = (),
 ) -> PublicHttpResponse:
     if timeout_seconds <= 0:
         raise ValueError("Public HTTP timeout must be positive.")
@@ -337,10 +339,14 @@ def request_public_http(
     current_body = body
     current_headers = _safe_request_headers(headers or {})
     redirect_count = 0
+    visited_urls: list[str] = []
     open_connection = connection_factory or _public_http_connection
 
     while True:
+        if allowed_https_hosts:
+            require_https_custody(current_url, allowed_https_hosts)
         destination = resolve_public_http_destination(current_url, resolver=resolver)
+        visited_urls.append(destination.url)
         connection = open_connection(destination, _remaining_seconds(deadline))
         response: _HttpResponse | None = None
         try:
@@ -377,6 +383,7 @@ def request_public_http(
                 redirect_count=redirect_count,
                 headers=response_headers,
                 body=response_body,
+                visited_urls=tuple(visited_urls),
             )
         if redirect_count >= max_redirects:
             raise RuntimeError(f"redirect loop after {max_redirects} redirects")
@@ -408,18 +415,54 @@ def request_public_http(
         redirect_count += 1
 
 
+def require_https_custody(url: str, hosts: tuple[str, ...]) -> None:
+    try:
+        parsed, hostname, port = _parse_http_url(url)
+    except ValueError as error:
+        raise PublicHttpDestinationError(
+            "invalid_url", "Invalid custody-bound health URL."
+        ) from error
+    if parsed.scheme.lower() != "https" or port != 443 or hostname not in hosts:
+        raise PublicHttpDestinationError(
+            "invalid_url", "Health redirect leaves the recorded HTTPS custody."
+        )
+
+
+def custody_redirects_match(
+    *,
+    url: str,
+    final_url: str,
+    redirect_count: int,
+    visited_urls: tuple[str, ...],
+    hosts: tuple[str, ...],
+) -> bool:
+    try:
+        chain = visited_urls or ((url,) if redirect_count == 0 else ())
+        if (
+            len(chain) != redirect_count + 1
+            or _normalized_url(chain[0]) != _normalized_url(url)
+            or _normalized_url(chain[-1]) != _normalized_url(final_url or url)
+        ):
+            return False
+        for hop in chain:
+            require_https_custody(hop, hosts)
+        return True
+    except ValueError:
+        return False
+
+
 def request_private_edge_health(
     url: str,
     *,
-    edge_api_url: str,
+    edge_url: str,
     timeout_seconds: float,
     resolver: AddressResolver | None = None,
     connection_factory: PublicHttpConnectionFactory | None = None,
 ) -> PublicHttpResponse:
     """GET one health path at the configured edge, retaining its TLS name.
 
-    The caller must independently verify current testing route ownership. The
-    API origin identifies the edge machine, never an upstream application.
+    The caller must independently verify current testing route ownership.
+    Verified provider metadata identifies the edge machine, never an upstream application.
     Only private addresses of that machine may receive the health request;
     endpoint DNS, redirects, API cookies and API credentials are never used.
     """
@@ -432,7 +475,7 @@ def request_private_edge_health(
         or parsed.fragment
     ):
         raise PublicHttpDestinationError("invalid_url", "An exact HTTPS health URL is required.")
-    _edge, edge_hostname, _edge_port = _parse_http_url(edge_api_url)
+    _edge, edge_hostname, _edge_port = _parse_http_url(edge_url)
     resolve = resolver or _system_address_resolver
 
     def edge_addresses(name: str, requested_port: int) -> tuple[ResolvedAddressInfo, ...]:

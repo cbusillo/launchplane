@@ -1,11 +1,17 @@
-"""Shared backup credential references and a capture-free provider qualification."""
-
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import Depends, Header, Path, Query
 
-from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
+from control_plane.contracts.production_backup_gate import (
+    ProductionBackupGateRequest,
+    ProductionBackupGateWorkerRequest,
+)
+from control_plane.contracts.backup_policy_proposal import BackupPolicyProposalInput
+from control_plane.contracts.secret_record import SecretBinding
+from control_plane.production_backup_authority import plan_production_backup_authority_write
+from control_plane.privileged_operation_registry import plan_backup_policy_proposal
 from control_plane.contracts.product_profile_record import (
     is_exclusive_product_context,
     product_context_owner_map,
@@ -24,28 +30,82 @@ from control_plane.production_backup_credentials import (
     credential_options,
     plan_credential_bindings,
 )
+from control_plane.production_backup_key_generation import (
+    generated_capture_keys,
+    generate_capture_key_bundle,
+    plan_capture_key_generation,
+)
 from control_plane.service_auth import (
     AuthorizationTarget,
     LaunchplaneIdentity,
     TerminalAgentIdentity,
+    GitHubHumanIdentity,
+    LocalAdminIdentity,
+    director_agent_identity,
 )
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
-from control_plane.storage.product_authority_bundle import (
-    SecretCopySourceConflictError,
-    ProductProfileConflictError,
-    ProductContextOwnershipError,
-)
-from control_plane import secrets
-from control_plane.workflows.production_backup_gate import (
-    resolve_production_backup_binding,
+from control_plane.storage.product_authority_bundle import ProductContextOwnershipError
+from control_plane.guest_capture_credentials import (
+    guest_capture_metadata,
+    resolve_guest_capture_values,
     SSH_PRIVATE_KEY,
     SSH_KNOWN_HOSTS,
+    capture_boundary,
+)
+from control_plane.workflows.production_backup_gate import (
+    resolve_production_backup_binding,
 )
 from control_plane.workflows.production_backup_provider import execute_production_backup_provider
 
 CREDENTIAL_ROUTE = "/v1/products/{product}/environments/prod/backup-worker-bindings"
 CREDENTIAL_APPLY_ROUTE = CREDENTIAL_ROUTE + "/apply"
 PREFLIGHT_ROUTE = "/v1/production-backup-authority/preflight"
+
+
+def resolve_backup_preflight_binding(
+    store: PostgresRecordStore,
+    request: ProductionBackupGateRequest,
+    proposal_id: str,
+) -> ProductionBackupGateWorkerRequest:
+    if not proposal_id:
+        return resolve_production_backup_binding(store, request)
+    proposal = store.read_privileged_operation_record(proposal_id)
+    if (
+        proposal.descriptor_id != "production-backup-policy"
+        or proposal.status != "planned"
+        or not isinstance(proposal.request, BackupPolicyProposalInput)
+        or (
+            proposal.expires_at
+            and datetime.fromisoformat(proposal.expires_at.replace("Z", "+00:00"))
+            <= datetime.now(timezone.utc)
+        )
+    ):
+        raise ValueError("A pending, current backup proposal is required.")
+    authority = proposal.request.authority
+    policy = authority.policy
+    if (policy.product, policy.context, policy.instance, policy.promotion_action) != (
+        request.product,
+        request.context,
+        request.instance,
+        request.promotion_action,
+    ):
+        raise ValueError("Backup proposal does not belong to the requested lane.")
+    if plan_backup_policy_proposal(store, proposal.request) != proposal.evidence:
+        raise ValueError("Backup proposal authority changed.")
+    plan = plan_production_backup_authority_write(record_store=store, envelope=authority)
+    targets = {
+        target.target_id: target
+        for target in plan.future_target_records
+        if target.status == "active"
+    }
+    if not set(policy.target_ids) <= targets.keys():
+        raise ValueError("Proposed capture targets are unavailable.")
+    return ProductionBackupGateWorkerRequest(
+        request=request,
+        policy=policy,
+        source_target=targets[policy.fast_snapshot.source_target_id],
+        destination_target=targets[policy.independent_backup.destination_target_id],
+    )
 
 
 def register_production_backup_credential_routes(
@@ -122,6 +182,7 @@ def register_production_backup_credential_routes(
                 "context": context,
                 "instance": instance,
                 "credentials": credential_options(records, bindings),
+                "generated_capture_keys": generated_capture_keys(store, records),
             },
         )
 
@@ -151,7 +212,7 @@ def register_production_backup_credential_routes(
         )
         # Config access already permits creating these exact-lane worker bindings.
         fingerprint = request_fingerprint(
-            {"product": product, "request": body.model_dump(mode="json")}
+            {"product": product, "request": body.fingerprint_payload()}
         )
         scope = idempotency_scope(identity)
         if body.mode == "apply":
@@ -182,8 +243,20 @@ def register_production_backup_credential_routes(
                 )
         profile = store.read_product_profile_record(product)
         records, bindings = credential_metadata(store, context=context, instance=instance)
+        replacements: tuple[SecretBinding, ...]
+        boundary = None
         try:
-            plan, replacements = plan_credential_bindings(profile, records, bindings, body)
+            capture_state = store.guest_capture_enrollment_state(context, instance)
+            creation = None
+            if body.generate_capture_key:
+                plan, boundary = plan_capture_key_generation(
+                    store, profile, context, instance, records, bindings, body, capture_state
+                )
+                replacements, enrollment = (), None
+            else:
+                plan, replacements, enrollment = plan_credential_bindings(
+                    profile, records, bindings, body, capture_state
+                )
         except ValueError as error:
             if body.mode == "apply":
                 replay = store.prepare_db_only_mutation(
@@ -229,6 +302,17 @@ def register_production_backup_credential_routes(
                 code="backup_credential_conflict",
                 message="Worker records changed; review a fresh dry run.",
             )
+        if body.generate_capture_key:
+            assert boundary is not None
+            creation, enrollment, public_metadata = generate_capture_key_bundle(
+                store,
+                context=context,
+                instance=instance,
+                boundary=boundary,
+                known_hosts=body.known_hosts,
+                actor=scope,
+            )
+            response.result = {**plan, **public_metadata, "applied": True}
         try:
             status, receipt = store.compare_and_rebind_worker_credentials(
                 expected_profile=profile,
@@ -236,8 +320,11 @@ def register_production_backup_credential_routes(
                 instance=instance,
                 expected_records=records,
                 expected_bindings=bindings,
+                expected_capture_state=capture_state,
+                guest_capture_credential=enrollment,
                 replacements=replacements,
                 reason=body.reason,
+                creation=creation,
                 mutation=DbOnlyMutationRequest(
                     scope=scope,
                     route_path=CREDENTIAL_APPLY_ROUTE,
@@ -249,11 +336,7 @@ def register_production_backup_credential_routes(
                     response_payload=response.model_dump(mode="json"),
                 ),
             )
-        except (
-            SecretCopySourceConflictError,
-            ProductProfileConflictError,
-            ProductContextOwnershipError,
-        ) as error:
+        except (ValueError, ProductContextOwnershipError) as error:
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace,
@@ -280,11 +363,24 @@ def register_production_backup_credential_routes(
         promotion_action: Annotated[str, Query(min_length=1)],
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        proposal_id: Annotated[str, Query(max_length=96)] = "",
     ) -> AcceptedEvidenceResponse:
         trace = dependencies.next_trace_id()
         require_access(
             identity, "production_backup_authority.read", product, context, instance, trace
         )
+        if proposal_id and not (
+            director_agent_identity(identity)
+            or isinstance(identity, LocalAdminIdentity)
+            or isinstance(identity, GitHubHumanIdentity)
+            and identity.role == "admin"
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="Pending backup qualification requires a Director identity. Active policy qualification remains available.",
+            )
         store, expected_context, expected_instance = lane(record_store, product, trace)
         if (context, instance) != (expected_context, expected_instance):
             raise dependencies.http_error(
@@ -294,7 +390,7 @@ def register_production_backup_credential_routes(
                 message="Use the product's recorded production lane.",
             )
         try:
-            binding = resolve_production_backup_binding(
+            binding = resolve_backup_preflight_binding(
                 store,
                 ProductionBackupGateRequest(
                     product=product,
@@ -304,40 +400,18 @@ def register_production_backup_credential_routes(
                     backup_record_id="read-only-preflight",
                     timeout_seconds=30,
                 ),
+                proposal_id,
             )
-            records, bindings = credential_metadata(store, context=context, instance=instance)
-            for key in (SSH_PRIVATE_KEY, SSH_KNOWN_HOSTS):
-                if (
-                    len(
-                        [
-                            o
-                            for o in credential_options(records, bindings)
-                            if o["binding_key"] == key
-                        ]
-                    )
-                    != 1
-                ):
-                    raise ValueError("Shared backup credentials are missing or ambiguous.")
-            values = secrets.resolve_secret_values_for_integration_from_store(
-                record_store=store,
-                integration=secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
-                context_name=context,
-                instance_name=instance,
-                scopes=frozenset({"context_instance"}),
-            )
+            metadata = guest_capture_metadata(store, binding)
+            values = resolve_guest_capture_values(store, binding)
             result = execute_production_backup_provider(
                 binding,
                 ssh_private_key=values.get(SSH_PRIVATE_KEY, ""),
                 ssh_known_hosts=values.get(SSH_KNOWN_HOSTS, ""),
                 preflight_only=True,
             )
-            current = resolve_production_backup_binding(store, binding.request)
-            current_records, current_bindings = credential_metadata(
-                store, context=context, instance=instance
-            )
-            unchanged = (
-                current == binding and records == current_records and bindings == current_bindings
-            )
+            current = resolve_backup_preflight_binding(store, binding.request, proposal_id)
+            unchanged = current == binding and metadata == guest_capture_metadata(store, current)
             return accepted_evidence_response(
                 trace_id=trace,
                 records={},
@@ -346,6 +420,9 @@ def register_production_backup_credential_routes(
                     "error_code": result.error_code if unchanged else "backup_authority_changed",
                     "policy_record_id": binding.policy.record_id,
                     "policy_revision": binding.policy.policy_revision,
+                    "credential_binding_id": capture_boundary(
+                        binding.policy, binding.source_target, binding.destination_target
+                    ).event_id,
                     "boundary_status": result.evidence.get("boundary_status", "unverified")
                     if unchanged
                     else "unverified",
@@ -361,7 +438,7 @@ def register_production_backup_credential_routes(
                 status_code=409,
                 trace_id=trace,
                 code="backup_preflight_unavailable",
-                message="Backup authority or exact-lane worker credentials are unavailable.",
+                message="Backup authority or guest capture credentials are unavailable.",
             ) from error
 
     app.add_api_route(

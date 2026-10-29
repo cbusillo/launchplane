@@ -7,7 +7,9 @@ from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 import click
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from control_plane.http_error_evidence import ProviderResponseValidationError
 
 
 type JsonPrimitive = str | int | float | bool | None
@@ -23,6 +25,59 @@ NpmplusAuthRequest = Literal[
     "authentik",
     "authentik-send-basic-auth",
 ]
+
+
+def _normalize_proxy_host_domains(values: tuple[str, ...]) -> tuple[str, ...]:
+    names: list[str] = []
+    for raw in values:
+        name = raw.strip().lower()
+        if not name:
+            raise ValueError("NPMplus proxy host domain names must be non-empty")
+        if name not in names:
+            names.append(name)
+    if not names:
+        raise ValueError("NPMplus proxy host requires at least one domain name")
+    return tuple(names)
+
+
+def _positive_access_list_ids(value: object) -> list[int]:
+    if not isinstance(value, list) or any(
+        isinstance(access_list_id, bool)
+        or not isinstance(access_list_id, int)
+        or access_list_id < 1
+        for access_list_id in value
+    ):
+        raise ValueError("NPMplus proxy host access-list ids must be positive integers")
+    return value
+
+
+class NpmplusHostIdentity(Protocol):
+    @property
+    def id(self) -> int: ...
+
+    @property
+    def domain_names(self) -> tuple[str, ...]: ...
+
+
+class NpmplusProxyHostClaim(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int = Field(ge=1)
+    domain_names: tuple[str, ...]
+
+    @field_validator("domain_names", mode="after")
+    @classmethod
+    def _normalize_domain_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _normalize_proxy_host_domains(value)
+
+
+PRIVATE_BEARER_FORWARDING = (
+    'set $launchplane_bearer_authorization "";\n'
+    'if ($http_authorization ~ "^Bearer .+") {\n'
+    "    set $launchplane_bearer_authorization $http_authorization;\n"
+    "}\n"
+    "proxy_set_header Authorization $launchplane_bearer_authorization;\n"
+)
 
 
 class NpmplusAccessList(BaseModel):
@@ -68,6 +123,24 @@ class NpmplusLocationPayload(BaseModel):
 class NpmplusLocation(NpmplusLocationPayload):
     model_config = ConfigDict(extra="ignore")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _require_round_trip_access_list_policy(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        membership_fields = ("npmplus_access_list_ids", "access_lists")
+        if not any(field in value for field in ("npmplus_access_list_type", *membership_fields)):
+            return value
+        if value.get("npmplus_access_list_type") != "global" or not any(
+            field in value for field in membership_fields
+        ):
+            raise ValueError("NPMplus location requires verified host access-list inheritance")
+        if any(value[field] != [] for field in membership_fields if field in value):
+            raise ValueError(
+                "NPMplus location cannot round-trip independent access-list membership"
+            )
+        return value
+
 
 class NpmplusProxyHostPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -94,6 +167,7 @@ class NpmplusProxyHostPayload(BaseModel):
     npmplus_auth_request: NpmplusAuthRequest = "none"
     advanced_config: str = ""
     enabled: bool = True
+    npmplus_location_config: str = Field(default="", exclude_if=lambda value: not value)
     meta: JsonObject = Field(default_factory=dict)
     locations: tuple[NpmplusLocationPayload, ...] = ()
 
@@ -107,19 +181,12 @@ class NpmplusProxyHostPayload(BaseModel):
 
     @model_validator(mode="after")
     def _validate_domain_names(self) -> "NpmplusProxyHostPayload":
-        normalized_domain_names: list[str] = []
-        for raw_domain_name in self.domain_names:
-            domain_name = raw_domain_name.strip().lower()
-            if not domain_name:
-                raise ValueError("NPMplus proxy host domain names must be non-empty")
-            if domain_name not in normalized_domain_names:
-                normalized_domain_names.append(domain_name)
-        if not normalized_domain_names:
-            raise ValueError("NPMplus proxy host requires at least one domain name")
-        self.domain_names = tuple(normalized_domain_names)
+        self.domain_names = _normalize_proxy_host_domains(self.domain_names)
         return self
 
     def to_api_payload(self) -> JsonObject:
+        if self.npmplus_location_config not in ("", PRIVATE_BEARER_FORWARDING):
+            raise ValueError("Only the code-owned private Bearer forwarder may be written.")
         if self.trust_forwarded_proto or not self.http2_support or self.meta:
             raise ValueError(
                 "The current NPMplus API does not accept legacy protocol or metadata writes."
@@ -139,6 +206,9 @@ class NpmplusProxyHostPayload(BaseModel):
             [] if self.access_list_id == 0 else [self.access_list_id]
         )
         payload["npmplus_access_list_type"] = "public" if self.access_list_id == 0 else "custom"
+        for location in payload["locations"]:
+            location["npmplus_access_list_type"] = "global"
+            location["npmplus_access_list_ids"] = []
         return payload
 
 
@@ -146,6 +216,7 @@ class NpmplusProxyHost(NpmplusProxyHostPayload):
     model_config = ConfigDict(extra="ignore")
 
     id: int = Field(ge=1)
+    access_list_id: int = Field(ge=0)
     locations: tuple[NpmplusLocation, ...] = ()
 
     @model_validator(mode="before")
@@ -155,17 +226,26 @@ class NpmplusProxyHost(NpmplusProxyHostPayload):
             return value
         access_list_ids = value.get("npmplus_access_list_ids")
         access_list_type = value.get("npmplus_access_list_type")
-        if access_list_ids is None and access_list_type is None:
+        if access_list_ids is None and access_list_type is None and "access_lists" not in value:
             return value
-        if access_list_ids is None or access_list_type is None:
-            raise ValueError("NPMplus proxy host access-list fields must be provided together")
-        if not isinstance(access_list_ids, list) or any(
-            isinstance(access_list_id, bool)
-            or not isinstance(access_list_id, int)
-            or access_list_id < 1
-            for access_list_id in access_list_ids
-        ):
-            raise ValueError("NPMplus proxy host access-list ids must be positive integers")
+        if access_list_type is None:
+            raise ValueError("NPMplus proxy host access-list type is required")
+        if "access_lists" in value:
+            relations = value["access_lists"]
+            if not isinstance(relations, list) or any(
+                not isinstance(relation, dict) or "id" not in relation for relation in relations
+            ):
+                raise ValueError("NPMplus proxy host access-list relations must contain ids")
+            related_ids = _positive_access_list_ids([relation["id"] for relation in relations])
+            if (
+                access_list_ids is not None
+                and _positive_access_list_ids(access_list_ids) != related_ids
+            ):
+                raise ValueError("NPMplus proxy host access-list representations disagree")
+            access_list_ids = related_ids
+        if access_list_ids is None:
+            raise ValueError("NPMplus proxy host access-list membership is required")
+        access_list_ids = _positive_access_list_ids(access_list_ids)
         if access_list_type == "public":
             if access_list_ids:
                 raise ValueError("Public NPMplus proxy hosts cannot reference access-list ids")
@@ -201,6 +281,13 @@ class NpmplusOtherHost(BaseModel):
 
     domain_names: tuple[str, ...] = Field(min_length=1)
     enabled: bool
+
+
+def _validate_response[Model: BaseModel](model: type[Model], value: object) -> Model:
+    try:
+        return model.model_validate(value)
+    except ValidationError as error:
+        raise ProviderResponseValidationError(error, model) from error
 
 
 @dataclass(frozen=True)
@@ -270,20 +357,22 @@ class NpmplusClient:
             )
         self._authenticated = True
 
-    def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]:
+    def list_proxy_hosts(self) -> tuple[NpmplusProxyHostClaim, ...]:
         payload = self._request(method="GET", path="/api/nginx/proxy-hosts")
         if not isinstance(payload, list):
             raise click.ClickException("NPMplus proxy-host list returned an invalid payload.")
-        proxy_hosts: list[NpmplusProxyHost] = []
+        proxy_hosts: list[NpmplusProxyHostClaim] = []
         for index, host_payload in enumerate(payload):
             if not isinstance(host_payload, dict):
                 raise click.ClickException(
                     f"NPMplus proxy-host list entry {index} returned an invalid payload."
                 )
-            proxy_hosts.append(NpmplusProxyHost.model_validate(host_payload))
+            proxy_hosts.append(_validate_response(NpmplusProxyHostClaim, host_payload))
         return tuple(proxy_hosts)
 
-    def get_proxy_host(self, host_id: int, *, public_only: bool = False) -> NpmplusProxyHost:
+    def get_proxy_host(
+        self, host_id: int, *, public_only: bool = False, private_bearer_auth: bool = False
+    ) -> NpmplusProxyHost:
         payload = self._request(method="GET", path=f"/api/nginx/proxy-hosts/{host_id}")
         if not isinstance(payload, dict):
             raise click.ClickException("NPMplus proxy-host read returned an invalid payload.")
@@ -299,13 +388,17 @@ class NpmplusClient:
                     "npmplus_mtls_verify_client_optional": False,
                     "npmplus_mtls_bypass_auth_request": False,
                     "npmplus_auth_request_upstream": "",
-                    "npmplus_location_config": "",
                     "npmplus_directory": "",
                 }.items()
             )
+            or payload.get("npmplus_location_config")
+            not in (("", PRIVATE_BEARER_FORWARDING) if private_bearer_auth else ("",))
         ):
             raise click.ClickException("NPMplus route is not a loaded public proxy host.")
-        return NpmplusProxyHost.model_validate(payload)
+        host = _validate_response(NpmplusProxyHost, payload)
+        if host.id != host_id:
+            raise click.ClickException("NPMplus proxy host identity does not match the request.")
+        return host
 
     def list_other_host_domains(self) -> tuple[str, ...]:
         domains: list[str] = []
@@ -314,7 +407,7 @@ class NpmplusClient:
             if not isinstance(payload, list):
                 raise click.ClickException("NPMplus hostname claims are unavailable.")
             for item in payload:
-                host = NpmplusOtherHost.model_validate(item)
+                host = _validate_response(NpmplusOtherHost, item)
                 if host.enabled:
                     domains.extend(name.strip().lower() for name in host.domain_names)
         return tuple(domains)
@@ -323,7 +416,7 @@ class NpmplusClient:
         payload = self._request(method="GET", path=f"/api/nginx/certificates/{certificate_id}")
         if not isinstance(payload, dict):
             raise click.ClickException("NPMplus certificate read returned an invalid payload.")
-        certificate = NpmplusCertificate.model_validate(payload)
+        certificate = _validate_response(NpmplusCertificate, payload)
         if certificate.id != certificate_id:
             raise click.ClickException("NPMplus certificate identity changed.")
         return certificate
@@ -332,7 +425,7 @@ class NpmplusClient:
         payload = self._request(method="GET", path=f"/api/nginx/access-lists/{access_list_id}")
         if not isinstance(payload, dict):
             raise click.ClickException("NPMplus access-list read returned an invalid payload.")
-        access_list = NpmplusAccessList.model_validate(payload)
+        access_list = _validate_response(NpmplusAccessList, payload)
         if access_list.id != access_list_id:
             raise click.ClickException("NPMplus access-list identity does not match the request.")
         return access_list
@@ -350,7 +443,7 @@ class NpmplusClient:
         )
         if not isinstance(response, dict):
             raise click.ClickException("NPMplus proxy-host create returned an invalid payload.")
-        return NpmplusProxyHost.model_validate(response)
+        return _validate_response(NpmplusProxyHost, response)
 
     def update_proxy_host(
         self, *, host_id: int, payload: NpmplusProxyHostPayload
@@ -362,7 +455,7 @@ class NpmplusClient:
         )
         if not isinstance(response, dict):
             raise click.ClickException("NPMplus proxy-host update returned an invalid payload.")
-        return NpmplusProxyHost.model_validate(response)
+        return _validate_response(NpmplusProxyHost, response)
 
     def disable_proxy_host(self, host_id: int) -> NpmplusProxyHost:
         self._request(method="POST", path=f"/api/nginx/proxy-hosts/{host_id}/disable")

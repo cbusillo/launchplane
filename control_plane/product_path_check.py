@@ -27,6 +27,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.product_reconcile import product_reconcile_target_key
 from control_plane.contracts.production_backup_authority import (
     ProductionBackupAuthorityReadModel,
 )
@@ -50,6 +51,7 @@ from control_plane.workflows.odoo_prod_rollback import (
 )
 from control_plane.contracts.odoo_prod_promotion_operation import ODOO_PROD_PROMOTION_RUN_ACTION
 from control_plane.operation_status_read import safe_operation_error_code
+from control_plane.lane_movement import LANE_MOVEMENT_REFUSALS
 from control_plane.product_reconcile_read import (
     ProductReconcileRequestReader,
     product_reconcile_request_view,
@@ -72,6 +74,7 @@ GENERIC_WEB_PROMOTION_ACTION = "generic_web_prod_promotion.dispatch"
 
 PathName = Literal["testing", "promote", "rollback"]
 PATH_NAMES: tuple[PathName, ...] = ("testing", "promote", "rollback")
+TESTING_HOLD_ACTIVE = "testing_hold_active"
 TestingIntent = Literal["provision", "generation", "testing-replacement"]
 StepState = Literal["clear", "blocked", "unknown"]
 FixKind = Literal["none", "code", "grant", "owner_approval", "client_acceptance", "by_hand", "wait"]
@@ -322,9 +325,9 @@ def _testing_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
             _step(
                 "testing_hold",
                 "blocked",
-                "testing_hold_active",
-                "Site staff hold the testing lane; deploys wait until the hold is lifted.",
-                "wait",
+                TESTING_HOLD_ACTIVE,
+                "The testing lane has a protective hold. Review its purpose and use the supported hold continuation.",
+                "by_hand",
             )
         )
     else:
@@ -432,7 +435,9 @@ def _previous_promotion_step(latest: PromotionRecord | None | Unread) -> PathChe
     if latest.failure is not None:
         # The description comes from the code, never from the stored text.
         code = latest.failure.code
-        description = PROMOTION_FAILURE_DESCRIPTIONS.get(code)
+        description = PROMOTION_FAILURE_DESCRIPTIONS.get(code) or LANE_MOVEMENT_REFUSALS.get(
+            code.removeprefix("lane_movement.")
+        )
         return _step(
             step_id,
             "clear",
@@ -648,11 +653,13 @@ def read_path_check_inputs(
 def _testing_reconcile_plan(
     record_store: object, profile: LaunchplaneProductProfileRecord
 ) -> dict[str, object] | None:
-    requests = cast(ProductReconcileRequestReader, record_store).list_product_reconcile_requests(
-        product=profile.product
-    )
-    testing = next((record for record in requests if record.target_kind == "testing"), None)
-    if testing is None:
+    try:
+        testing = cast(ProductReconcileRequestReader, record_store).read_product_reconcile_request(
+            product_reconcile_target_key(
+                product=profile.product, target_kind="testing", pull_request_number=None
+            )
+        )
+    except FileNotFoundError:
         return None
     return {
         **product_reconcile_request_view(testing).last_plan,

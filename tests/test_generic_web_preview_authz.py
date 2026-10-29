@@ -7,7 +7,7 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.generic_web_preview_authz import (
     GENERIC_WEB_PREVIEW_MANAGED_SET_ID,
     GenericWebPreviewAuthzPlanRequest,
-    build_generic_web_preview_authz_reconcile_request,
+    plan_generic_web_preview_authz_reconcile,
     generic_web_preview_ingress_operator_rules,
     generic_web_preview_rules,
     resolve_generic_web_preview_retirement_authority,
@@ -138,10 +138,10 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             github_actions=generic_web_preview_rules(other_request),
         )
 
-        reconcile = build_generic_web_preview_authz_reconcile_request(
+        reconcile = plan_generic_web_preview_authz_reconcile(
             current_policy=current_policy,
             request=_request(),
-        )
+        ).reconcile_request
 
         self.assertEqual(len(reconcile.desired_policy.github_actions), 2 * _product_rule_count())
         self.assertEqual(
@@ -156,10 +156,10 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             github_actions=generic_web_preview_rules(request),
         )
 
-        reconcile = build_generic_web_preview_authz_reconcile_request(
+        reconcile = plan_generic_web_preview_authz_reconcile(
             current_policy=current_policy,
             request=request,
-        )
+        ).reconcile_request
 
         self.assertEqual(len(reconcile.desired_policy.github_actions), _product_rule_count())
 
@@ -170,17 +170,17 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "use expand and contract"):
-            build_generic_web_preview_authz_reconcile_request(
+            plan_generic_web_preview_authz_reconcile(
                 current_policy=current_policy,
                 request=_request(launchplane_sha="b" * 40),
-            )
+            ).reconcile_request
 
     def test_expand_rejects_missing_product_rules(self) -> None:
         with self.assertRaisesRegex(ValueError, "expand requires current product rules"):
-            build_generic_web_preview_authz_reconcile_request(
+            plan_generic_web_preview_authz_reconcile(
                 current_policy=LaunchplaneAuthzPolicy(schema_version=2),
                 request=_request(operation="expand"),
-            )
+            ).reconcile_request
 
     def test_expand_then_contract_supports_sha_rotation(self) -> None:
         original = _request()
@@ -188,16 +188,16 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             schema_version=2,
             github_actions=generic_web_preview_rules(original),
         )
-        expanded = build_generic_web_preview_authz_reconcile_request(
+        expanded = plan_generic_web_preview_authz_reconcile(
             current_policy=current_policy,
             request=_request(operation="expand", launchplane_sha="b" * 40),
-        )
+        ).reconcile_request
         self.assertEqual(len(expanded.desired_policy.github_actions), 2 * _product_rule_count())
 
-        contracted = build_generic_web_preview_authz_reconcile_request(
+        contracted = plan_generic_web_preview_authz_reconcile(
             current_policy=expanded.desired_policy,
             request=_request(operation="contract", launchplane_sha="b" * 40),
-        )
+        ).reconcile_request
         self.assertEqual(len(contracted.desired_policy.github_actions), _product_rule_count())
         self.assertTrue(
             all(
@@ -231,18 +231,18 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             self.assertEqual(rule.event_names, ("workflow_dispatch",))
             self.assertTrue(rule.job_workflow_refs)
 
-        expanded = build_generic_web_preview_authz_reconcile_request(
+        expanded = plan_generic_web_preview_authz_reconcile(
             current_policy=current_policy,
             request=_request(operation="expand", include_ingress_operator=True),
-        )
+        ).reconcile_request
         self.assertEqual(
             len(expanded.desired_policy.github_actions), _product_rule_count() + len(ingress_rules)
         )
 
-        contracted = build_generic_web_preview_authz_reconcile_request(
+        contracted = plan_generic_web_preview_authz_reconcile(
             current_policy=expanded.desired_policy,
             request=_request(operation="contract"),
-        )
+        ).reconcile_request
         self.assertEqual(len(contracted.desired_policy.github_actions), _product_rule_count())
         self.assertFalse(
             any(
@@ -253,13 +253,13 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
 
     def test_ingress_operator_expansion_requires_pinned_templates(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires one unambiguous pinned"):
-            build_generic_web_preview_authz_reconcile_request(
+            plan_generic_web_preview_authz_reconcile(
                 current_policy=LaunchplaneAuthzPolicy(
                     schema_version=2,
                     github_actions=generic_web_preview_rules(_request()),
                 ),
                 request=_request(operation="expand", include_ingress_operator=True),
-            )
+            ).reconcile_request
 
     def test_retire_removes_only_target_product(self) -> None:
         target = _request()
@@ -274,10 +274,10 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             github_actions=(*generic_web_preview_rules(target), *generic_web_preview_rules(other)),
         )
 
-        retired = build_generic_web_preview_authz_reconcile_request(
+        retired = plan_generic_web_preview_authz_reconcile(
             current_policy=current_policy,
             request=_request(operation="retire"),
-        )
+        ).reconcile_request
 
         self.assertEqual(len(retired.desired_policy.github_actions), _product_rule_count())
         self.assertEqual(
@@ -324,12 +324,12 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
             github_actions=(*target_rules, *ingress_rules, *other_rules),
         )
 
-        retired = build_generic_web_preview_authz_reconcile_request(
+        retired = plan_generic_web_preview_authz_reconcile(
             current_policy=current_policy,
             request=_request(
                 operation="retire", repository="", repository_id="", repository_owner_id=""
             ),
-        )
+        ).reconcile_request
 
         self.assertEqual(len(retired.desired_policy.github_actions), _product_rule_count())
         self.assertEqual(
@@ -416,15 +416,15 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
                 profile=_profile(repository_id="789"),
             )
         with self.assertRaisesRegex(ValueError, "assertion does not match authority"):
-            build_generic_web_preview_authz_reconcile_request(
+            plan_generic_web_preview_authz_reconcile(
                 current_policy=LaunchplaneAuthzPolicy(
                     schema_version=2,
                     github_actions=target_rules,
                 ),
                 request=_request(operation="retire", repository="example/other-web"),
-            )
+            ).reconcile_request
         with self.assertRaisesRegex(ValueError, "identity assertion does not match authority"):
-            build_generic_web_preview_authz_reconcile_request(
+            plan_generic_web_preview_authz_reconcile(
                 current_policy=LaunchplaneAuthzPolicy(
                     schema_version=2,
                     github_actions=target_rules,
@@ -432,7 +432,7 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
                 request=_request(
                     operation="retire", repository_id="789", repository_owner_id="456"
                 ),
-            )
+            ).reconcile_request
 
     def test_retire_rejects_multi_product_current_rule(self) -> None:
         target_rules = generic_web_preview_rules(_request())
@@ -444,13 +444,13 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "exact singleton target product selector"):
-            build_generic_web_preview_authz_reconcile_request(
+            plan_generic_web_preview_authz_reconcile(
                 current_policy=LaunchplaneAuthzPolicy(
                     schema_version=2,
                     github_actions=(*target_rules[1:], multi_product_rule),
                 ),
                 request=_request(operation="retire"),
-            )
+            ).reconcile_request
 
     def test_retire_rejects_wildcard_current_rule(self) -> None:
         target_rules = generic_web_preview_rules(_request())
@@ -462,13 +462,13 @@ class GenericWebPreviewAuthzTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "exact singleton target product selector"):
-            build_generic_web_preview_authz_reconcile_request(
+            plan_generic_web_preview_authz_reconcile(
                 current_policy=LaunchplaneAuthzPolicy(
                     schema_version=2,
                     github_actions=(*target_rules[1:], wildcard_rule),
                 ),
                 request=_request(operation="retire"),
-            )
+            ).reconcile_request
 
     def test_retire_request_rejects_partial_assertions_and_ingress_expansion(self) -> None:
         with self.assertRaisesRegex(ValueError, "require both repository_id"):

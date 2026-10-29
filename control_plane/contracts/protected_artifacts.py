@@ -2,7 +2,14 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.artifact_identity import (
+    ArtifactAddonSelector,
+    ArtifactAddonSource,
+    ArtifactBuildProvenance,
+    ArtifactIdentityManifest,
+    ArtifactImageReference,
+    ArtifactSourceBuild,
+)
 from control_plane.contracts.deployment_record import (
     DeploymentRecord,
     previous_passing_deployment,
@@ -21,7 +28,20 @@ ProtectedArtifactReason = Literal[
     "release-tuple",
     "active-preview-generation",
     "active-preview-feedback",
+    "cutover-host",
 ]
+
+
+class ProtectedArtifactManifestProvenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1, 2]
+    source_commit: str
+    image: ArtifactImageReference
+    build_provenance: ArtifactBuildProvenance
+    addon_sources: tuple[ArtifactAddonSource, ...]
+    addon_selectors: tuple[ArtifactAddonSelector, ...]
+    source_build: ArtifactSourceBuild | None
 
 
 class ProtectedArtifactEntry(BaseModel):
@@ -44,6 +64,11 @@ class ProtectedArtifactEntry(BaseModel):
     preview_generation_id: str = ""
     anchor_repo: str = ""
     anchor_pr_number: int = 0
+    manifest_provenance: ProtectedArtifactManifestProvenance | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_entry(self) -> "ProtectedArtifactEntry":
@@ -565,6 +590,43 @@ def build_protected_artifact_set(
         *release_tuple_entries,
         *preview_entries,
     ]
+    for profile in profiles:
+        if normalized_product and profile.product != normalized_product:
+            continue
+        for lane in profile.lanes:
+            if normalized_context and lane.context != normalized_context:
+                continue
+            runtime = lane.odoo_cutover.host_runtime if lane.odoo_cutover is not None else None
+            if runtime is None:
+                continue
+            for reference in (runtime.prepared_image, runtime.restore_image):
+                repository, digest = reference.split("@", 1)
+                entries.append(
+                    ProtectedArtifactEntry(
+                        product=profile.product,
+                        context=lane.context,
+                        instance=lane.instance,
+                        environment_kind="stable",
+                        image_references=(reference,),
+                        image_repository=repository,
+                        image_digest=digest,
+                        reason="cutover-host",
+                        source_record_type="product_profile",
+                        source_record_id=profile.product,
+                    )
+                )
+    for entry in entries:
+        manifest = manifests.get(entry.artifact_id)
+        if manifest is not None:
+            entry.manifest_provenance = ProtectedArtifactManifestProvenance(
+                schema_version=manifest.schema_version,
+                source_commit=manifest.source_commit,
+                image=manifest.image,
+                build_provenance=manifest.build_provenance,
+                addon_sources=manifest.addon_sources,
+                addon_selectors=manifest.addon_selectors,
+                source_build=manifest.source_build,
+            )
     artifact_ids = _normalized_values([entry.artifact_id for entry in entries])
     image_references = _normalized_values(
         [image_reference for entry in entries for image_reference in entry.image_references]

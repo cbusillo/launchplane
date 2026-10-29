@@ -1,3 +1,7 @@
+from tempfile import TemporaryDirectory
+from pathlib import Path
+from control_plane.storage.filesystem import FilesystemRecordStore
+from tests.merge_train_policy_fixtures import seed_dependency_policy
 import unittest
 import hashlib
 from unittest.mock import patch
@@ -40,6 +44,9 @@ from tests.test_merge_train_github import (
 from tests.test_merge_train_structural_provenance import _entry, _records
 
 
+_CLOSE_REASON = "the queue changed."
+
+
 class _BatchProvider:
     def __init__(self, candidate: Any) -> None:
         self.candidate = candidate
@@ -62,6 +69,7 @@ class _BatchProvider:
         self.before_merge: Callable[[], None] = lambda: None
         self.requires_conversation_resolution = False
         self.batch_threads: tuple[tuple[bool, str], ...] = ()
+        self.batch_comments: list[dict[str, object]] = []
 
     @property
     def merge_calls(self) -> list[tuple[str, str, dict[str, object] | None]]:
@@ -119,6 +127,12 @@ class _BatchProvider:
             return self.pull_request(self.number)
         if method == "GET" and "/pulls/" in path:
             return self.pull_request(int(path.rsplit("/", maxsplit=1)[1]))
+        if method == "GET" and f"/issues/{self.number}/comments?" in path:
+            return list(self.batch_comments)
+        if method == "POST" and path.endswith(f"/issues/{self.number}/comments"):
+            assert body is not None
+            self.batch_comments.append(body)
+            return {"html_url": f"https://github.com/{self.repository_name}/pull/{self.number}"}
         if method == "PATCH" and path.endswith(f"/pulls/{self.number}"):
             assert body == {"state": "closed"}
             self.closed = True
@@ -362,7 +376,9 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
 
     def test_single_candidate_retirement_closes_its_generated_pr(self) -> None:
         self._prepare((_entry(1, 1),))
-        self.client.close_batch_pull_request(candidate=self.provider.candidate)
+        self.client.close_batch_pull_request(
+            candidate=self.provider.candidate, reason=_CLOSE_REASON
+        )
         self.assertTrue(self.provider.closed)
         self.assertFalse(self.provider.merged)
         self.assertFalse(self.provider.merge_calls)
@@ -397,6 +413,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         provider_request.start()
         self.addCleanup(provider_request.stop)
         profile = SimpleNamespace(
+            driver_id="generic-web",
             product="site",
             release_on_acceptance="held",
             is_active=True,
@@ -415,7 +432,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
     def test_engineering_reclassification_cannot_clear_batch_member_veto(self) -> None:
         state = {"value": "neutral", "engineering": "yes"}
         rejection = _client_veto_record(
-            repository=self.provider.repository_name, number=2, head_sha=self.provider.heads[2]
+            repository=self.provider.repository_name, number=2, head_sha="before-base-update"
         )
         self._require_client_review_for_second_member(state, [rejection])
         with self.assertRaises(MergeAdmissionDeniedError):
@@ -514,7 +531,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
 
             def pull_request(self, number: int) -> dict[str, object]:
                 return super().pull_request(number) | {
-                    "user": {"login": "dependabot[bot]", "type": "Bot"},
+                    "user": {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"},
                     "labels": [{"name": label} for label in self.review_labels],
                 }
 
@@ -525,9 +542,13 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
                     return {"files": [{"filename": "uv.lock", "status": "modified"}]}
                 return super().request(method=method, path=path, body=body)
 
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = FilesystemRecordStore(Path(directory.name))
+        seed_dependency_policy(store, repository=self.guard.candidate_record.candidate.repository)
         provider = DependabotProvider(self.guard.candidate_record.candidate)
         body = _batch_owner_test_notes(
-            client=GitHubMergeTrainClient(transport=provider),
+            client=GitHubMergeTrainClient(transport=provider, branch_refresh_store=store),
             candidate=self.guard.candidate_record.candidate,
         )
         intent = client_test_notes(owner_test_notes(body))
@@ -540,6 +561,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             for entry in provider.candidate.entries
         }
         profile = SimpleNamespace(
+            driver_id="generic-web",
             release_on_acceptance="held",
             is_active=True,
             repository=provider.repository_name,
@@ -585,16 +607,49 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         self.assertEqual(self.provider.merge_calls, [])
 
     def test_retirement_closes_only_the_bound_batch_pr_and_is_idempotent(self) -> None:
-        self.client.close_batch_pull_request(candidate=self.provider.candidate)
-        self.client.close_batch_pull_request(candidate=self.provider.candidate)
+        self.client.close_batch_pull_request(
+            candidate=self.provider.candidate, reason=_CLOSE_REASON
+        )
+        self.client.close_batch_pull_request(
+            candidate=self.provider.candidate, reason=_CLOSE_REASON
+        )
         self.assertTrue(self.provider.closed)
         self.assertEqual(len([r for r in self.provider.requests if r[0] == "PATCH"]), 1)
+        comments = [
+            body for method, path, body in self.provider.requests if path.endswith("/comments")
+        ]
+        self.assertEqual(len(comments), 1)
+        assert comments[0] is not None
+        self.assertIn(_CLOSE_REASON, str(comments[0]["body"]))
         self.assertTrue(all(self.provider.pull_request(n)["state"] == "open" for n in (1, 2)))
+
+    def test_interrupted_retirement_does_not_repeat_its_reason(self) -> None:
+        original = self.provider.request
+
+        def refuse_close(
+            *, method: str, path: str, body: dict[str, object] | None = None
+        ) -> object:
+            if method == "PATCH":
+                raise MergeTrainGitHubError("unavailable", status_code=502)
+            return original(method=method, path=path, body=body)
+
+        with patch.object(self.provider, "request", side_effect=refuse_close):
+            with self.assertRaises(MergeTrainGitHubError):
+                self.client.close_batch_pull_request(
+                    candidate=self.provider.candidate, reason=_CLOSE_REASON
+                )
+        self.client.close_batch_pull_request(
+            candidate=self.provider.candidate, reason=_CLOSE_REASON
+        )
+        self.assertTrue(self.provider.closed)
+        self.assertEqual(len(self.provider.batch_comments), 1)
 
     def test_retirement_does_not_dispose_of_an_unrecorded_merge(self) -> None:
         self.provider.merged = True
         with self.assertRaises(MergeAdmissionReconciliationRequiredError):
-            self.client.close_batch_pull_request(candidate=self.provider.candidate)
+            self.client.close_batch_pull_request(
+                candidate=self.provider.candidate, reason=_CLOSE_REASON
+            )
         self.assertFalse(any(r[0] == "PATCH" for r in self.provider.requests))
 
     def test_retirement_handles_mutable_batch_pr_drift(self) -> None:
@@ -617,7 +672,9 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
                 with patch.object(self.provider, "pull_request", side_effect=altered):
                     with self.assertRaises(MergeTrainGitHubStaleHeadError):
                         self.client.ensure_batch_pull_request(candidate=self.provider.candidate)
-                    self.client.close_batch_pull_request(candidate=self.provider.candidate)
+                    self.client.close_batch_pull_request(
+                        candidate=self.provider.candidate, reason=_CLOSE_REASON
+                    )
                 self.assertTrue(self.provider.closed)
         self.assertEqual(self.provider.merge_calls, [])
 

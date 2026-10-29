@@ -84,6 +84,17 @@
   font-weight: 650;
 }
 
+.host-network-capacity {
+  border-top: 1px solid var(--border);
+  margin-top: 16px;
+  padding-top: 12px;
+  overflow-wrap: anywhere;
+}
+
+.host-network-capacity h3 { margin: 0 0 8px; }
+.host-network-capacity p { font-size: 0.85rem; }
+.host-network-capacity[data-status="short"] strong { color: var(--warning); }
+
 @media (max-width: 720px) {
   .workspace-nav {
     margin-right: -15px;
@@ -1294,6 +1305,12 @@
   font-weight: 800;
   letter-spacing: 0.03em;
   text-transform: uppercase;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.odoo-secret-parameter-panel code {
+  overflow-wrap: anywhere;
 }
 
 .product-config-select {
@@ -1333,6 +1350,8 @@
   text-transform: none;
 }
 
+.promotion-recovery-panel select,
+.product-config-field select,
 .product-config-field input[type="text"],
 .product-config-field input[type="password"],
 .product-config-field textarea,
@@ -1350,6 +1369,7 @@
   text-transform: none;
 }
 
+.promotion-recovery-panel select:focus,
 .product-config-field input:focus,
 .product-config-field textarea:focus,
 .product-config-reason textarea:focus {
@@ -1358,6 +1378,7 @@
   outline-offset: 1px;
 }
 
+.promotion-recovery-panel select:disabled,
 .product-config-field input:disabled,
 .product-config-field textarea:disabled {
   cursor: not-allowed;

@@ -26,7 +26,7 @@ from control_plane.trusted_maintenance import (
     TrustedMaintenanceRuleMatchError,
     trusted_maintenance_current_authority,
 )
-from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.timestamps import utc_now_timestamp
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,

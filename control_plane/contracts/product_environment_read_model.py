@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from fnmatch import fnmatchcase
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
@@ -17,6 +18,7 @@ from control_plane.contracts.deployment_record import (
     DeploymentRecord,
     previous_passing_deployment,
 )
+from control_plane.contracts.dokploy_target_record import TestingHoldPurpose
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.lane_service_restart import LaneServiceRestartRecovery
@@ -37,6 +39,13 @@ from control_plane.contracts.runtime_dependency_health import (
     runtime_dependency_coverage_current,
 )
 from control_plane.runtime_dependency_health import derive_runtime_dependencies
+from control_plane.product_review import ProductReviewStore, preview_review_unavailability
+from control_plane.product_reconcile_read import product_preview_requests, preview_refresh_failure
+from control_plane.testing_lane_hold import (
+    TESTING_HOLD_INSTANCE,
+    TestingHoldReader,
+    read_staff_testing_hold,
+)
 from control_plane.contracts.product_incident_read_model import (
     ProductIncidentEnvironmentScope,
     ProductIncidentSummary,
@@ -53,6 +62,7 @@ from control_plane.contracts.product_profile_record import (
     product_lane_monitoring_incident_eligible,
     product_lane_monitoring_probe_effective,
     product_config_requirement_applies_to_lane,
+    product_config_target,
 )
 from control_plane.contracts.production_backup_authority import (
     ProductionBackupAuthorityStatus,
@@ -71,10 +81,16 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentSeverity,
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.split_ingress import (
+    read_split_ingress_binding,
+    split_ingress_monitoring_lane,
+    split_ingress_advisory_check,
+)
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
+from control_plane.contracts.sync_cycle_health import SyncCycleHealthEvidence
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretClass
 from control_plane.contracts.secret_record import SecretBinding, SecretSharingReason
 from control_plane.drivers.registry import (
@@ -91,12 +107,24 @@ from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
     resolve_production_backup_authority,
 )
+from control_plane.integration_readback import integration_credential_warnings
+from control_plane.timestamps import utc_now_timestamp
 
 
 from control_plane.preview_inventory_evidence import (
     PreviewInventoryEvidence,
     read_preview_inventory_evidence,
 )
+
+
+class PreviewSettingsReadStore(Protocol):
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
+
+    def list_secret_bindings(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[SecretBinding, ...]: ...
 
 
 ActionAllowed = Callable[[str, str, str, tuple[str, ...]], bool]
@@ -382,6 +410,11 @@ class ProductHealthMonitoringCheckSummary(BaseModel):
     enabled: bool
     probe_effective: bool
     incident_eligible: bool
+    advisory: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     private_endpoint_configured: bool = False
     status: str = "missing"
     failure_code: str = ""
@@ -389,6 +422,11 @@ class ProductHealthMonitoringCheckSummary(BaseModel):
     record_id: str = ""
     summary: str = ""
     dependency_health: RuntimeDependencyHealthEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    sync: SyncCycleHealthEvidence | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
         json_schema_extra={"x-launchplane-optional-response": True},
@@ -467,11 +505,17 @@ class ProductEnvironmentSummary(BaseModel):
     public_ingress: ProductPublicIngressSummary = Field(default_factory=ProductPublicIngressSummary)
     trust_state: FreshnessStatus
     provenance: DataProvenance
+    deploy_hold: TestingHoldPurpose | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     warnings: tuple[str, ...] = ()
     available_actions: tuple[ProductActionAvailability, ...] = ()
 
 
 PRODUCT_PREVIEW_REFERENCE_LIMIT = 50
+PRODUCT_PREVIEW_RECOVERY_LIMIT = 100
 
 
 class ProductPreviewReference(BaseModel):
@@ -714,6 +758,15 @@ def build_product_site_overview(
         instances_resolver=_product_action_instances_resolver(profile=profile),
     )
     warnings = tuple(warning for warning in (descriptor_warning,) if warning)
+    if profile.preview.enabled:
+        warnings += _preview_refresh_warnings(record_store, profile)
+    if preview_summary.untracked_observed_slugs:
+        warnings += _untracked_preview_warnings(
+            record_store=record_store,
+            profile=profile,
+            slugs=preview_summary.untracked_observed_slugs,
+            action_allowed=action_allowed,
+        )
     trust_state = _combine_trust_states(
         (summary.trust_state for summary in environment_summaries),
         fallback="recorded",
@@ -733,6 +786,88 @@ def build_product_site_overview(
     )
 
 
+def _untracked_preview_warnings(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    slugs: tuple[str, ...],
+    action_allowed: ActionAllowed,
+) -> tuple[str, ...]:
+    from control_plane.preview_reservation_recovery import (
+        classify_preview_reservation,
+        held_preview_reservations,
+    )
+
+    warnings: set[str] = set()
+    unresolved = set(slugs)
+    if action_allowed("preview.read", profile.product, profile.preview.context, ()):
+        try:
+            held = held_preview_reservations(
+                record_store, product=profile.product, limit=PRODUCT_PREVIEW_RECOVERY_LIMIT + 1
+            )
+            if len(held) > PRODUCT_PREVIEW_RECOVERY_LIMIT:
+                warnings.add("Preview recovery status is incomplete; retain untracked resources.")
+            for reservation in held[:PRODUCT_PREVIEW_RECOVERY_LIMIT]:
+                status = classify_preview_reservation(
+                    reservation, profile=profile, store=record_store
+                )
+                number = cast(int, status["target_pull_request_number"])
+                if not number:
+                    warnings.add(
+                        "A retained preview operation cannot be matched to a change; retain untracked resources."
+                    )
+                    continue
+                slug = profile.preview.slug_template.format(number=number)
+                if slug not in slugs:
+                    continue
+                guidance = (
+                    "Inspect the original operation before retrying or cleaning up."
+                    if status["original_binding_available"]
+                    else "Original operation evidence is missing; retain resources and recover that evidence."
+                )
+                warnings.add(
+                    f"PR #{number}: Preview operation is recorded as {reservation.state}. {guidance}"
+                )
+                unresolved.discard(slug)
+        except (SQLAlchemyError, ValueError, OSError):
+            logging.getLogger(__name__).warning(
+                "Untracked preview recovery status could not be read.", exc_info=True
+            )
+            warnings.add("Preview recovery status is unavailable; retain untracked resources.")
+    if unresolved:
+        warnings.add(
+            f"{len(unresolved)} previews are present without a current status. "
+            "Retain resources until original operations and data custody are verified."
+        )
+    return tuple(sorted(warnings))
+
+
+def _preview_refresh_warnings(
+    record_store: object, profile: LaunchplaneProductProfileRecord
+) -> tuple[str, ...]:
+    try:
+        return tuple(
+            f"PR #{request.pull_request_number}: {unavailable}"
+            for request in product_preview_requests(record_store, product=profile.product)
+            if request.pull_request_number is not None
+            and preview_refresh_failure(request)
+            and (
+                unavailable := preview_review_unavailability(
+                    store=cast(ProductReviewStore, record_store),
+                    profile=profile,
+                    pull_request_number=request.pull_request_number,
+                    head_sha=str(request.last_plan.get("head_sha") or ""),
+                    request=request,
+                )
+            )
+        )
+    except (SQLAlchemyError, ValueError, OSError):
+        logging.getLogger(__name__).warning(
+            "Preview refresh attention could not be read.", exc_info=True
+        )
+        return ("Preview refresh attention is unavailable; preview failures cannot be ruled out.",)
+
+
 def build_product_environment_detail(
     *,
     record_store: ProductReadModelStore,
@@ -742,6 +877,9 @@ def build_product_environment_detail(
 ) -> ProductEnvironmentDetail:
     profile = record_store.read_product_profile_record(product)
     lane = _find_lane(profile=profile, environment=environment)
+    lane = split_ingress_monitoring_lane(
+        profile, lane, read_split_ingress_binding(record_store, profile, lane)
+    )
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
     lane_summary = _read_product_lane_summary(
         record_store=record_store,
@@ -768,6 +906,7 @@ def build_product_environment_detail(
         warning
         for warning in (
             descriptor_warning,
+            *integration_credential_warnings(lane_summary, record_store=record_store),
             *(
                 topology_warning.detail
                 for topology_warning in topology.warnings
@@ -839,23 +978,57 @@ def build_product_environment_config_status(
     write_prerequisites: ProductConfigWritePrerequisites = ProductConfigWritePrerequisites(),
 ) -> ProductEnvironmentConfigStatus:
     profile = record_store.read_product_profile_record(product)
-    lane = _find_lane(profile=profile, environment=environment)
+    lane = product_config_target(profile, environment)
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
-    lane_summary = _read_product_lane_summary(
-        record_store=record_store,
-        profile=profile,
-        lane=lane,
-    )
+    lane_summary: LaunchplaneLaneSummary | None
+    if lane.instance == "preview":
+        lane_summary = LaunchplaneLaneSummary(
+            context=lane.context,
+            instance=lane.instance,
+            runtime_environment_records=tuple(
+                record
+                for record in cast(
+                    PreviewSettingsReadStore, record_store
+                ).list_runtime_environment_records(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+                if record.scope == "instance" and record.instance == "preview"
+            ),
+            secret_bindings=tuple(
+                binding
+                for binding in cast(PreviewSettingsReadStore, record_store).list_secret_bindings(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+                if binding.context == lane.context and binding.instance == "preview"
+            ),
+            provenance=DataProvenance(source_kind="record", freshness_status="recorded"),
+        )
+    else:
+        lane_summary = _read_product_lane_summary(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+        )
     provenance = (
         lane_summary.provenance if lane_summary is not None else _missing_lane_provenance(lane)
     )
     runtime_settings = _runtime_config_status_items(
-        requirements=profile.expected_config.runtime_environment_keys,
+        requirements=tuple(
+            item
+            for item in profile.expected_config.runtime_environment_keys
+            if lane.instance != "preview"
+            or (item.context == lane.context and item.instance == "preview")
+        ),
         lane=lane,
         lane_summary=lane_summary,
     )
     managed_secrets = _managed_secret_config_status_items(
-        requirements=profile.expected_config.managed_secret_bindings,
+        requirements=tuple(
+            item
+            for item in profile.expected_config.managed_secret_bindings
+            if lane.instance != "preview"
+            or (item.context == lane.context and item.instance == "preview")
+        ),
         lane=lane,
         lane_summary=lane_summary,
     )
@@ -925,9 +1098,7 @@ def _production_backup_authority_read_models(
         (lane.instance,),
     ):
         return ()
-    generated_at = (
-        datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    )
+    generated_at = utc_now_timestamp()
     try:
         authority_store = require_production_backup_authority_store(record_store)
     except TypeError:
@@ -2010,11 +2181,6 @@ def _profile_provenance(profile: LaunchplaneProductProfileRecord) -> DataProvena
     )
 
 
-def _first_lane_context(profile: LaunchplaneProductProfileRecord) -> str:
-    first_lane = next(iter(profile.lanes), None)
-    return first_lane.context if first_lane is not None else ""
-
-
 def _profile_anchor_repo(profile: LaunchplaneProductProfileRecord) -> str:
     _owner, separator, repo = profile.repository.strip().partition("/")
     if separator and repo.strip() and "/" not in repo.strip():
@@ -2209,8 +2375,10 @@ def _build_environment_summary(
             fallback=provenance.freshness_status,
         ),
         provenance=provenance,
-        warnings=tuple(
-            warning.detail for warning in topology.warnings if warning.severity != "info"
+        deploy_hold=_testing_deploy_hold(record_store=record_store, lane=lane),
+        warnings=(
+            *integration_credential_warnings(lane_summary, record_store=record_store),
+            *(warning.detail for warning in topology.warnings if warning.severity != "info"),
         ),
         available_actions=_action_availability(
             descriptor=descriptor,
@@ -2242,6 +2410,15 @@ def _read_product_lane_summary(
     return None
 
 
+def _testing_deploy_hold(
+    *, record_store: object, lane: ProductLaneProfile
+) -> TestingHoldPurpose | None:
+    if lane.instance != TESTING_HOLD_INSTANCE or not isinstance(record_store, TestingHoldReader):
+        return None
+    hold = read_staff_testing_hold(record_store=record_store, context=lane.context)
+    return hold.purpose if hold is not None else None
+
+
 def _missing_lane_provenance(lane: ProductLaneProfile) -> DataProvenance:
     return DataProvenance(
         source_kind="record",
@@ -2257,7 +2434,7 @@ def _build_preview_summary(
     action_allowed: ActionAllowed,
 ) -> ProductPreviewSummary:
     if not profile.preview.enabled:
-        return ProductPreviewSummary(enabled=False)
+        return ProductPreviewSummary(enabled=False, context=profile.preview.context)
     summaries: tuple[LaunchplanePreviewSummary | PreviewRecord, ...] = ()
     list_preview_summaries = getattr(record_store, "list_preview_summaries", None)
     list_preview_records = getattr(record_store, "list_preview_records", None)
@@ -2350,7 +2527,7 @@ def _build_preview_summary(
         active_count=len(summaries),
         inventory=inventory
         if records_allowed
-        else inventory.model_copy(update={"observed_slugs": ()}),
+        else inventory.model_copy(update={"observed_slugs": (), "sleep_observations": ()}),
         unobserved_record_slugs=tuple(sorted(tracked_slugs - observed_slugs))
         if comparable and records_allowed
         else (),
@@ -2372,6 +2549,8 @@ def _health_monitoring_summary(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> ProductHealthMonitoringSummary:
+    binding = read_split_ingress_binding(record_store, profile, lane)
+    lane = split_ingress_monitoring_lane(profile, lane, binding)
     incidents = sort_open_incidents(
         tuple(
             incident
@@ -2523,6 +2702,7 @@ def _health_monitoring_summary(
                 enabled=check.enabled,
                 probe_effective=probe_effective,
                 incident_eligible=incident_eligible,
+                advisory=split_ingress_advisory_check(profile, lane, binding, check),
                 private_endpoint_configured=bool(check.private_endpoint_key),
                 status=status,
                 failure_code=latest.failure_code or "" if latest is not None else "",
@@ -2530,6 +2710,11 @@ def _health_monitoring_summary(
                 record_id=latest.record_id if latest is not None else "",
                 summary=summary,
                 dependency_health=dependency_health,
+                sync=(
+                    next((target.sync for target in latest.targets if target.sync), None)
+                    if latest is not None
+                    else None
+                ),
                 incident_status=open_incident.status if open_incident is not None else "",
                 incident_id=open_incident.incident_id if open_incident is not None else "",
                 incident_severity=open_incident.severity if open_incident is not None else "",
@@ -2583,6 +2768,8 @@ def _public_ingress_summary(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> ProductPublicIngressSummary:
+    binding = read_split_ingress_binding(record_store, profile, lane)
+    lane = split_ingress_monitoring_lane(profile, lane, binding)
     monitoring_intent = lane.health_monitoring.monitoring_intent
     incident_eligible = monitoring_intent == "public"
     if monitoring_intent == "private":
@@ -2604,7 +2791,7 @@ def _public_ingress_summary(
         check_kind="public_http",
         limit=50,
     )
-    latest, _ = select_public_probe_observations(lane=lane, records=records)
+    latest, _ = select_public_probe_observations(lane=lane, records=records, binding=binding)
     if latest is None or not isinstance(latest, PublicIngressObservationRecord):
         return ProductPublicIngressSummary(
             monitoring_intent=monitoring_intent,

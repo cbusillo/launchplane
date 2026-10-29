@@ -1,0 +1,300 @@
+import hashlib
+import json
+from pathlib import Path
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from typing import Protocol, cast
+
+from control_plane import runtime_environments as environments
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.generic_web_release_settings import (
+    GenericWebReleaseSettings,
+    GenericWebReleaseBaseline,
+)
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.release_review import ReleaseVersion
+from control_plane.contracts.runtime_identity import (
+    COMPOSE_IMAGE_REFERENCE_ENV_KEYS,
+    runtime_identity_env,
+)
+from control_plane.contracts.deployment_record import DEPLOYMENT_OPERATION_EVIDENCE_KEY
+
+RELEASE_SETTINGS_KEY = "release_runtime_settings"
+ROLLBACK_SETTINGS_KEY = "release_runtime_settings_baseline"
+
+
+def requires_initial_settings_request(
+    production: ReleaseVersion, candidate: ReleaseVersion
+) -> bool:
+    return production.runtime_settings is None and candidate.runtime_settings is not None
+
+
+class ReleaseSettingsStore(environments.SiteSecretDeliveryStore, Protocol):
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
+
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory: ...
+
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
+
+
+def plain_release_settings(
+    settings: GenericWebReleaseSettings, secret_keys: set[str]
+) -> GenericWebReleaseSettings:
+    return GenericWebReleaseSettings(
+        values={key: value for key, value in settings.values.items() if key not in secret_keys},
+        absent_keys=tuple(key for key in settings.absent_keys if key not in secret_keys),
+    )
+
+
+def managed_release_keys(store: ReleaseSettingsStore, context: str) -> set[str]:
+    return set(
+        environments.site_delivered_secret_bindings_from_store(
+            record_store=store, context_name=context, instance_name="prod"
+        )
+    )
+
+
+def recorded_release_settings(record: DeploymentRecord) -> GenericWebReleaseSettings | None:
+    payload = record.runtime_source.get(RELEASE_SETTINGS_KEY)
+    return GenericWebReleaseSettings.model_validate_json(payload) if payload is not None else None
+
+
+def desired_release_settings(
+    store: ReleaseSettingsStore, profile: LaunchplaneProductProfileRecord
+) -> GenericWebReleaseSettings | None:
+    lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
+    if lane is None or profile.driver_id == "odoo" or lane.generic_web_cutover is not None:
+        return None
+    from control_plane.client_release import native_release_recipient
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if (
+        isinstance(store, PostgresRecordStore)
+        and native_release_recipient(store, profile) is not None
+    ):
+        return None
+    records = tuple(
+        record for record in store.list_runtime_environment_records() if record.scope != "global"
+    )
+    definition = environments.build_runtime_environment_definition_from_records(records)
+    target_env: dict[str, str] = {}
+    try:
+        target_env = dict(
+            store.read_dokploy_target_record(
+                context_name=lane.context, instance_name=lane.instance
+            ).env
+        )
+    except FileNotFoundError:
+        pass
+    retired = environments.retired_provider_keys_from_store(
+        record_store=store,
+        context_name=lane.context,
+        instance_name=lane.instance,
+    )
+    values = environments.resolve_app_values_from_definition(
+        definition=definition,
+        context_name=lane.context,
+        instance_name=lane.instance,
+        target_env=target_env,
+        retired_keys=retired,
+    )
+    secret_keys = managed_release_keys(store, lane.context)
+    values = {key: value for key, value in values.items() if key not in secret_keys}
+    try:
+        inventory = store.read_environment_inventory(
+            context_name=lane.context, instance_name=lane.instance
+        )
+        previous = recorded_release_settings(
+            store.read_deployment_record(inventory.deployment_record_id)
+        )
+        reserved_keys = set(COMPOSE_IMAGE_REFERENCE_ENV_KEYS)
+        if inventory.runtime_identity is not None:
+            reserved_keys.update(runtime_identity_env(inventory.runtime_identity))
+        values = {key: value for key, value in values.items() if key not in reserved_keys}
+        retired -= reserved_keys
+
+    except FileNotFoundError:
+        previous = None
+    if previous is not None:
+        retired = set(retired) | (
+            (set(previous.values) | set(previous.absent_keys)) - values.keys()
+        )
+    retired -= secret_keys
+    if not values and not retired and previous is None:
+        return None
+    return GenericWebReleaseSettings(values=values, absent_keys=tuple(sorted(retired)))
+
+
+class ReleaseSettingsReader(Protocol):
+    def read_release_settings(
+        self, *, control_plane_root: Path, target: object, keys: frozenset[str]
+    ) -> GenericWebReleaseSettings: ...
+
+
+def recorded_release_baseline(record: DeploymentRecord) -> GenericWebReleaseBaseline | None:
+    payload = record.runtime_source.get(ROLLBACK_SETTINGS_KEY)
+    return GenericWebReleaseBaseline.model_validate_json(payload) if payload is not None else None
+
+
+def merge_release_settings(
+    previous: GenericWebReleaseSettings, replacement: GenericWebReleaseSettings
+) -> GenericWebReleaseSettings:
+    values = {
+        key: value for key, value in previous.values.items() if key not in replacement.absent_keys
+    }
+    values.update(replacement.values)
+    return GenericWebReleaseSettings(
+        values=values,
+        absent_keys=tuple(
+            sorted((set(previous.absent_keys) | set(replacement.absent_keys)) - values.keys())
+        ),
+    )
+
+
+def rollback_release_baseline(
+    store: ReleaseSettingsStore,
+    source: DeploymentRecord,
+    target_id: str,
+) -> GenericWebReleaseBaseline | None:
+    visited: set[str] = set()
+    settings = GenericWebReleaseSettings()
+    while source.record_id not in visited:
+        visited.add(source.record_id)
+        baseline = recorded_release_baseline(source)
+        if baseline is None:
+            break
+        settings = merge_release_settings(settings, baseline.settings)
+        if baseline.deployment_record_id == target_id:
+            return GenericWebReleaseBaseline(deployment_record_id=target_id, settings=settings)
+        predecessor = store.read_deployment_record(baseline.deployment_record_id)
+        if predecessor.context != source.context or predecessor.instance != source.instance:
+            raise ValueError("Release baseline belongs to another lane.")
+        source = predecessor
+    return None
+
+
+def prepare_release_settings(
+    *,
+    store: ReleaseSettingsStore,
+    provider: object,
+    control_plane_root: Path,
+    target: object,
+    context: str,
+    settings: GenericWebReleaseSettings | None,
+    evidence: dict[str, str],
+    rollback_target: str = "",
+    rollback_source: str = "",
+) -> GenericWebReleaseSettings | None:
+    from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
+
+    resolved = cast(GenericWebResolvedDeployTarget, target)
+    read_record = store.read_deployment_record
+    secret_keys = managed_release_keys(store, context)
+    try:
+        inventory = store.read_environment_inventory(context_name=context, instance_name="prod")
+    except FileNotFoundError:
+        if settings is None and not rollback_target:
+            return None
+        raise
+    previous = read_record(rollback_source or inventory.deployment_record_id)
+    retained_payload = evidence.get(ROLLBACK_SETTINGS_KEY)
+    baseline = (
+        GenericWebReleaseBaseline.model_validate_json(retained_payload)
+        if retained_payload
+        else None
+    )
+    if rollback_target:
+        reviewed = recorded_release_settings(read_record(rollback_target))
+        baseline = baseline or rollback_release_baseline(store, previous, rollback_target)
+        if baseline is not None and baseline.deployment_record_id != rollback_target:
+            raise ValueError("Rollback baseline differs from its pinned target.")
+        settings = baseline.settings if baseline else reviewed
+        if settings is not None:
+            settings = plain_release_settings(settings, secret_keys)
+        current = recorded_release_settings(previous)
+        if current is not None:
+            current = plain_release_settings(current, secret_keys)
+            current_keys = set(current.values) | set(current.absent_keys)
+            retained_keys = set(settings.values) | set(settings.absent_keys) if settings else set()
+            if not current_keys <= retained_keys:
+                raise ValueError("Rollback lacks retained settings for the current release keys.")
+        if reviewed is None:
+            evidence.pop(RELEASE_SETTINGS_KEY, None)
+        else:
+            evidence[RELEASE_SETTINGS_KEY] = reviewed.model_dump_json()
+    else:
+        reviewed = recorded_release_settings(previous)
+        if (
+            settings is not None
+            and (set(settings.values) | set(settings.absent_keys)) & secret_keys
+        ):
+            raise ValueError("The reviewed release settings now overlap managed secrets.")
+        settings = settings if settings is not None else reviewed
+        if settings is None:
+            return None
+        encoded = settings.model_dump_json()
+        original = evidence.get(RELEASE_SETTINGS_KEY)
+        if (
+            original is not None
+            and GenericWebReleaseSettings.model_validate_json(original) != settings
+        ):
+            raise ValueError("Deployment retry must retain its original release settings.")
+        evidence[RELEASE_SETTINGS_KEY] = encoded
+        if reviewed is not None:
+            reviewed = plain_release_settings(reviewed, secret_keys)
+        settings = plain_release_settings(settings, secret_keys)
+        if baseline is None:
+            keys = set(settings.values) | set(settings.absent_keys)
+            if reviewed is not None:
+                keys |= set(reviewed.values) | set(reviewed.absent_keys)
+            if not callable(getattr(provider, "read_release_settings", None)):
+                raise ValueError(
+                    "The deploy provider cannot capture release settings for rollback."
+                )
+            captured = cast(ReleaseSettingsReader, provider).read_release_settings(
+                control_plane_root=control_plane_root,
+                target=resolved,
+                keys=frozenset(keys),
+            )
+            if set(captured.values) | set(captured.absent_keys) != keys:
+                raise ValueError("Provider did not capture every previous release setting.")
+            baseline = GenericWebReleaseBaseline(
+                deployment_record_id=previous.record_id,
+                settings=merge_release_settings(captured, reviewed) if reviewed else captured,
+            )
+    if baseline is not None:
+        evidence[ROLLBACK_SETTINGS_KEY] = baseline.model_dump_json()
+    resolved.release_settings = settings
+    return settings
+
+
+def verify_recorded_release_settings(
+    *,
+    store: ReleaseSettingsStore,
+    provider: object,
+    control_plane_root: Path,
+    target: object,
+    record: DeploymentRecord,
+) -> str:
+    settings = recorded_release_settings(record)
+    if record.runtime_source.get(DEPLOYMENT_OPERATION_EVIDENCE_KEY) == "rollback":
+        baseline = recorded_release_baseline(record)
+        settings = baseline.settings if baseline is not None else settings
+    if settings is None:
+        return ""
+    settings = plain_release_settings(settings, managed_release_keys(store, record.context))
+    keys = set(settings.values) | set(settings.absent_keys)
+    if not callable(getattr(provider, "read_release_settings", None)):
+        raise ValueError("Release settings readback is unavailable.")
+    actual = cast(ReleaseSettingsReader, provider).read_release_settings(
+        control_plane_root=control_plane_root,
+        target=target,
+        keys=frozenset(keys),
+    )
+    if actual != settings:
+        raise ValueError("Provider settings differ from the recorded release.")
+    return hashlib.sha256(json.dumps(actual.model_dump(), sort_keys=True).encode()).hexdigest()

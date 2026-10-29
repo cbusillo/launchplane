@@ -1,4 +1,6 @@
 from tests.support.auth import scoped_agent_test
+from control_plane.contracts.sync_cycle_health import sync_cycle_health_evidence_from_payload
+from tests.support.sync_cycle_health import sync_cycle_payload
 import asyncio
 import json
 import os
@@ -38,7 +40,6 @@ from control_plane.contracts.public_ingress_monitoring import (
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
 from control_plane.contracts.secret_record import SecretBinding
-from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.http_app import (
     create_launchplane_fastapi_app,
     idempotency_request_fingerprint,
@@ -59,29 +60,15 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
     ProductProfileCompareWriteResult,
 )
-from control_plane.work_graph_issue_inbox import (
-    GitHubIssueInboxReadModel,
-    GitHubIssueInboxReconcileResult,
-)
-from control_plane.work_graph_service import (
-    WorkGraphIssueInboxReconcileResponse,
-    WorkGraphRankResponse,
-)
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
-    _browser_mutation_headers,
-    _get_work_graph_issue_inbox,
-    _get_work_graph_snapshot,
     _github_human_artifact_protection_policy,
     _github_human_identity,
-    _github_human_work_graph_rank_policy,
     _github_oauth_config,
-    _local_admin_work_graph_rank_policy,
     _local_operator_artifact_protection_policy,
     _local_operator_bearer_config,
     _local_operator_product_environment_read_policy,
-    _local_operator_work_graph_rank_policy,
     _MissingProductReadStore,
     _post_product_expected_config,
     _post_product_health_monitoring,
@@ -89,8 +76,6 @@ from tests.http_app_test_support import (
     _post_product_profile,
     _post_product_preview_tls,
     _post_product_stable_lane_repair,
-    _post_work_graph_issue_inbox_reconcile,
-    _post_work_graph_rank,
     _product_environment_read_policy,
     _product_expected_config_policy,
     _product_health_monitoring_policy,
@@ -101,12 +86,9 @@ from tests.http_app_test_support import (
     _ProductProfileReplayOnlyStore,
     _RejectingVerifier,
     _seed_agent_context_read_records,
-    _seed_empty_agent_context_read_store,
     _seed_product_environment_read_records,
     _terminal_agent_launchplane_read_policy,
     _terminal_agent_product_environment_read_policy,
-    _terminal_agent_work_graph_rank_policy,
-    _work_graph_read_policy,
 )
 from tests.support.openapi import openapi_response
 from tests.support.protected_artifacts import seed_protected_artifact_store
@@ -130,7 +112,6 @@ from tests.support.profiles import (
     _product_profile_payload,
 )
 from tests.support.stores import _sqlite_database_url, _write_runtime_key_safety_policy
-from tests.support.work_graph import _work_graph_snapshot_payload
 
 
 def _product_expected_config_payload() -> dict[str, object]:
@@ -1026,17 +1007,6 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
         self.assertEqual(payload["error"]["code"], "invalid_request")
         self.assertNotIn("detail", payload)
 
-    async def test_openapi_includes_config_status_route(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        openapi = response.json()
-        route = openapi["paths"]["/v1/products/{product}/environments/{environment}/config-status"][
-            "get"
-        ]
-        self.assertIn("ProductEnvironmentConfigStatusResponse", json.dumps(route))
-        self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
-
 
 class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -1372,6 +1342,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             )
 
             response = await _get_agent_context(app, repository="every/example-site")
+            mapping_response = await _get_repo_product_mapping(app)
             app_store.close()
 
         self.assertEqual(response.status_code, 200)
@@ -1380,538 +1351,60 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["repository"], "every/example-site")
         sections = context["sections"]
         self.assertEqual(sections["repo_product_mapping"]["status"], "available")
-        self.assertEqual(sections["work_graph_snapshot"]["status"], "available")
-        self.assertEqual(sections["every_code_summary"]["status"], "available")
+        context_mapping = sections["repo_product_mapping"]["payload"]["mapping"]
+        direct_mapping = mapping_response.json()["mapping"]
+        context_mapping.pop("generated_at")
+        direct_mapping.pop("generated_at")
+        self.assertEqual(
+            context_mapping,
+            direct_mapping,
+        )
         self.assertEqual(sections["preview_readiness"]["status"], "available")
-        summary = sections["every_code_summary"]["payload"]["summary"]
-        self.assertEqual(summary["repository"], "every/example-site")
-        self.assertEqual(summary["summaries"][0]["issue_number"], 190)
         readiness = sections["preview_readiness"]["payload"]["readiness"]
         self.assertEqual(readiness["repository"], "every/example-site")
         self.assertEqual(readiness["items"][0]["readiness_status"], "ready")
 
-    async def test_agent_context_marks_work_graph_unavailable_without_dropping_sections(
-        self,
-    ) -> None:
-        def unavailable_planning_facts() -> tuple[WorkGraphPlanningIssueFacts, ...]:
-            raise RuntimeError("planning provider unavailable")
-
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_empty_agent_context_read_store(database_url)
-            app_store = PostgresRecordStore(database_url=database_url)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_product_environment_read_policy(
-                    context="launchplane", products=("launchplane",)
-                ),
-                record_store_factory=lambda: app_store,
-                work_graph_planning_facts_provider=unavailable_planning_facts,
-            )
-
-            response = await _get_agent_context(app)
-            app_store.close()
-
-        self.assertEqual(response.status_code, 200)
-        sections = response.json()["context"]["sections"]
-        self.assertEqual(sections["repo_product_mapping"]["status"], "available")
-        self.assertEqual(sections["work_graph_snapshot"]["status"], "unavailable")
-        self.assertEqual(sections["work_graph_snapshot"]["reason_code"], "work_graph_unavailable")
-        self.assertEqual(sections["every_code_summary"]["status"], "available")
-        self.assertEqual(sections["preview_readiness"]["status"], "available")
-
-    async def test_work_graph_snapshot_returns_launchplane_assembled_snapshot(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+    async def test_ambiguous_product_references_preserve_scoped_profile_reads(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_url = _sqlite_database_url(Path(directory) / "launchplane.sqlite3")
             _seed_agent_context_read_records(database_url)
-            app_store = PostgresRecordStore(database_url=database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            self.addCleanup(store.close)
+            profile = store.read_product_profile_record("example-site")
+            store.write_product_profile_record(
+                profile.model_copy(update={"product": "hidden-site"})
+            )
+            policy = _product_environment_read_policy(products=("launchplane",))
+            profile_policy = _product_profile_read_policy(product=profile.product)
+            policy = policy.model_copy(
+                update={"github_actions": policy.github_actions + profile_policy.github_actions}
+            )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
-                authz_policy=_work_graph_read_policy(),
-                record_store_factory=lambda: app_store,
+                authz_policy=policy,
+                record_store_factory=lambda: store,
             )
 
-            response = await _get_work_graph_snapshot(app)
-            app_store.close()
+            direct = await _get_repo_product_mapping(app)
+            context = await _get_agent_context(app, repository=profile.repository)
+            visible = await _get_product_profile(app, profile.product)
+            hidden = await _get_product_profile(app, "hidden-site")
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(set(payload), {"status", "trace_id", "snapshot", "source"})
-        self.assertEqual(payload["source"]["product_count"], 1)
-        self.assertEqual(payload["source"]["work_request_count"], 2)
-        self.assertEqual(payload["source"]["planning_fact_count"], 0)
-        snapshot = payload["snapshot"]
-        self.assertEqual(snapshot["schema_version"], 1)
-        repos_by_name = {repo["repository"]: repo for repo in snapshot["repos"]}
-        self.assertEqual(repos_by_name["every/example-site"]["classification"], "managed_runtime")
-        self.assertEqual(repos_by_name["every/example-site"]["product"], "example-site")
-        self.assertEqual(repos_by_name["cbusillo/tooling"]["classification"], "active_awareness")
-        issues_by_key = {
-            (issue["repository"], issue["number"]): issue for issue in snapshot["issues"]
-        }
-        self.assertEqual(issues_by_key[("every/example-site", 190)]["focus"], "Next")
-
-    async def test_work_graph_snapshot_uses_compact_planning_facts_when_available(
-        self,
-    ) -> None:
-        def planning_facts() -> tuple[WorkGraphPlanningIssueFacts, ...]:
-            return (
-                WorkGraphPlanningIssueFacts.model_validate(
-                    {
-                        "repository": "every/example-site",
-                        "number": 190,
-                        "focus": "Now",
-                        "manager": "Chris",
-                        "finish_line": "Project fields are visible in the cockpit.",
-                        "labels": ("plan", "plan:active"),
-                        "blocking": 1,
-                        "updated_at": "2026-05-06T03:54:00Z",
-                    }
-                ),
+        self.assertEqual(direct.status_code, 200)
+        self.assertEqual(context.status_code, 200)
+        for mapping in (
+            direct.json()["mapping"],
+            context.json()["context"]["sections"]["repo_product_mapping"]["payload"]["mapping"],
+        ):
+            self.assertIn(profile.repository, mapping["ambiguous_repositories"])
+            self.assertEqual(
+                mapping["ambiguous_repository_product_references"],
+                [{"repository": profile.repository, "products": [profile.product]}],
             )
-
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_agent_context_read_records(database_url)
-            app_store = PostgresRecordStore(database_url=database_url)
-            app = create_launchplane_fastapi_app(
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_work_graph_read_policy(),
-                record_store_factory=lambda: app_store,
-                work_graph_planning_facts_provider=planning_facts,
-            )
-
-            response = await _get_work_graph_snapshot(app)
-            app_store.close()
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["source"]["planning_fact_count"], 1)
-        issues_by_key = {
-            (issue["repository"], issue["number"]): issue for issue in payload["snapshot"]["issues"]
-        }
-        issue = issues_by_key[("every/example-site", 190)]
-        self.assertEqual(issue["focus"], "Now")
-        self.assertEqual(issue["manager"], "Chris")
-        self.assertEqual(issue["finish_line"], "Project fields are visible in the cockpit.")
-        self.assertEqual(issue["labels"], ["every-code", "plan", "plan:active"])
-        self.assertEqual(issue["blocking"], 1)
-        self.assertEqual(issue["updated_at"], "2026-05-06T03:54:00Z")
-
-    async def test_work_graph_snapshot_rejects_unauthorized_identity(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=LaunchplaneAuthzPolicy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _get_work_graph_snapshot(app)
-
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
-
-    async def test_work_graph_snapshot_requires_database_backed_store(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_work_graph_read_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _get_work_graph_snapshot(app)
-
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
-
-    async def test_work_graph_rank_returns_ranked_queue(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_work_graph_read_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _post_work_graph_rank(
-            app,
-            payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
-        )
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        self.assertEqual(payload["status"], "accepted")
-        self.assertEqual(payload["records"], {})
-        WorkGraphRankResponse.model_validate(payload)
-        queue = payload["result"]["queue"]
-        self.assertEqual(len(queue["items"]), 1)
-        self.assertEqual(queue["hidden_count"], 1)
-        self.assertEqual(queue["items"][0]["number"], 190)
-        self.assertEqual(queue["items"][0]["recommendation"], "deep_work")
-
-    async def test_work_graph_rank_rejects_unauthorized_identity(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=LaunchplaneAuthzPolicy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _post_work_graph_rank(
-            app,
-            payload={"snapshot": _work_graph_snapshot_payload()},
-        )
-
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
-
-    async def test_work_graph_rank_accepts_granted_owner_agent_planning(
-        self,
-    ) -> None:
-        cases = (
-            (
-                "terminal_agent",
-                _terminal_agent_work_graph_rank_policy(),
-                BearerIdentityConfig(
-                    terminal_agent_token="terminal-read-token",
-                    terminal_agent_subject="local-owner-agent",
-                    terminal_agent_token_label="local-owner-read",
-                ),
-                "terminal-read-token",
-            ),
-            (
-                "local_operator",
-                _local_operator_work_graph_rank_policy(),
-                _local_operator_bearer_config(),
-                "local-operator-token",
-            ),
-            (
-                "local_admin",
-                _local_admin_work_graph_rank_policy(),
-                BearerIdentityConfig(
-                    local_admin_token="local-admin-token",
-                    local_admin_subject="local-owner-agent",
-                    local_admin_token_label="local-owner-admin",
-                ),
-                "local-admin-token",
-            ),
-        )
-        for label, policy, bearer_config, token in cases:
-            with self.subTest(identity=label):
-                app = create_launchplane_fastapi_app(
-                    verifier=_RejectingVerifier(),
-                    authz_policy=policy,
-                    bearer_identity_config=bearer_config,
-                    record_store_factory=lambda: _MissingProductReadStore(),
-                )
-
-                response = await _post_work_graph_rank(
-                    app,
-                    payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
-                    authorization=f"Bearer {token}",
-                )
-
-                self.assertEqual(response.status_code, 202)
-
-    async def test_work_graph_rank_rejects_unclassified_issue(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_work_graph_read_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-        snapshot = _work_graph_snapshot_payload()
-        snapshot["repos"] = []
-
-        response = await _post_work_graph_rank(app, payload={"snapshot": snapshot})
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()["error"]["code"], "invalid_request")
-
-    async def test_human_session_can_rank_work_graph_snapshot(self) -> None:
-        oauth_config = _github_oauth_config()
-        session_store = InMemoryHumanSessionStore()
-        session_manager = HumanSessionManager(config=oauth_config, session_store=session_store)
-        human_session = session_manager.issue(_github_human_identity())
-        app = create_launchplane_fastapi_app(
-            verifier=_RejectingVerifier(),
-            authz_policy=_github_human_work_graph_rank_policy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-            human_session_manager=session_manager,
-        )
-
-        response = await _post_work_graph_rank(
-            app,
-            payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
-            authorization="",
-            headers=_browser_mutation_headers(session_manager, human_session),
-        )
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["result"]["queue"]["items"][0]["number"], 190)
-
-    async def test_work_graph_issue_inbox_returns_provider_payload(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_work_graph_read_policy(products=("launchplane",)),
-            record_store_factory=lambda: _MissingProductReadStore(),
-            work_graph_issue_inbox_provider=lambda: GitHubIssueInboxReadModel.model_validate(
-                {
-                    "generated_at": "2026-05-21T12:00:00Z",
-                    "project_configured": True,
-                    "repository_count": 1,
-                    "issue_count": 2,
-                    "stale_project_item_count": 1,
-                    "repositories": [
-                        {
-                            "repository": "cbusillo/launchplane",
-                            "issue_count": 2,
-                            "present_in_project_count": 1,
-                            "missing_from_project_count": 1,
-                            "issues": [
-                                {
-                                    "key": "cbusillo/launchplane#697",
-                                    "repository": "cbusillo/launchplane",
-                                    "number": 697,
-                                    "title": "Add read-only grouped GitHub issue inbox",
-                                    "url": "https://github.com/cbusillo/launchplane/issues/697",
-                                    "state": "OPEN",
-                                    "project_status": "missing",
-                                    "present_in_project": False,
-                                },
-                                {
-                                    "key": "cbusillo/launchplane#601",
-                                    "repository": "cbusillo/launchplane",
-                                    "number": 601,
-                                    "title": "Closed Project item",
-                                    "url": "https://github.com/cbusillo/launchplane/issues/601",
-                                    "state": "closed",
-                                    "project_status": "closed",
-                                    "present_in_project": True,
-                                },
-                            ],
-                        }
-                    ],
-                }
-            ),
-        )
-
-        response = await _get_work_graph_issue_inbox(app)
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertTrue(payload["configured"])
-        inbox = payload["inbox"]
-        self.assertEqual(inbox["repository_count"], 1)
-        self.assertEqual(inbox["stale_project_item_count"], 1)
-        self.assertEqual(inbox["repositories"][0]["issues"][0]["key"], "cbusillo/launchplane#697")
-        self.assertIs(inbox["repositories"][0]["issues"][0]["present_in_project"], False)
-        self.assertEqual(inbox["repositories"][0]["issues"][1]["project_status"], "closed")
-
-    async def test_work_graph_issue_inbox_returns_empty_payload_without_provider(
-        self,
-    ) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_work_graph_read_policy(products=("launchplane",)),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _get_work_graph_issue_inbox(app)
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertFalse(payload["configured"])
-        self.assertEqual(payload["inbox"]["generated_at"], "")
-        self.assertFalse(payload["inbox"]["project_configured"])
-        self.assertEqual(payload["inbox"]["repository_count"], 0)
-        self.assertEqual(payload["inbox"]["issue_count"], 0)
-        self.assertEqual(payload["inbox"]["repositories"], [])
-
-    async def test_work_graph_issue_inbox_rejects_unauthorized_identity(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=LaunchplaneAuthzPolicy(),
-            record_store_factory=lambda: _MissingProductReadStore(),
-            work_graph_issue_inbox_provider=lambda: GitHubIssueInboxReadModel(
-                generated_at="2026-05-21T12:00:00Z",
-                repository_count=0,
-                issue_count=0,
-            ),
-        )
-
-        response = await _get_work_graph_issue_inbox(app)
-
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
-
-    async def test_work_graph_issue_inbox_reconcile_dry_run_returns_missing_items(
-        self,
-    ) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_work_graph_read_policy(products=("launchplane",)),
-            record_store_factory=lambda: _MissingProductReadStore(),
-            work_graph_issue_inbox_reconcile_provider=lambda request: (
-                GitHubIssueInboxReconcileResult.model_validate(
-                    {
-                        "generated_at": "2026-05-21T12:00:00Z",
-                        "mode": request.mode,
-                        "repository_count": 1,
-                        "issue_count": 1,
-                        "would_add_count": 1,
-                        "items": [
-                            {
-                                "key": "cbusillo/launchplane#698",
-                                "repository": "cbusillo/launchplane",
-                                "number": 698,
-                                "title": "Reconcile missing GitHub issues into Code Plans",
-                                "url": "https://github.com/cbusillo/launchplane/issues/698",
-                                "action": "would_add",
-                            }
-                        ],
-                    }
-                )
-            ),
-        )
-
-        response = await _post_work_graph_issue_inbox_reconcile(
-            app,
-            payload={"mode": "dry_run"},
-        )
-
-        self.assertEqual(response.status_code, 202)
-        payload = response.json()
-        WorkGraphIssueInboxReconcileResponse.model_validate(payload)
-        reconcile = payload["result"]["reconcile"]
-        self.assertEqual(reconcile["mode"], "dry_run")
-        self.assertEqual(reconcile["would_add_count"], 1)
-        self.assertEqual(reconcile["items"][0]["action"], "would_add")
-
-    async def test_work_graph_issue_inbox_reconcile_apply_requires_reconcile_action(
-        self,
-    ) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_work_graph_read_policy(products=("launchplane",)),
-            record_store_factory=lambda: _MissingProductReadStore(),
-            work_graph_issue_inbox_reconcile_provider=lambda request: (
-                GitHubIssueInboxReconcileResult.model_validate(
-                    {
-                        "generated_at": "2026-05-21T12:00:00Z",
-                        "mode": request.mode,
-                        "repository_count": 0,
-                        "issue_count": 0,
-                    }
-                )
-            ),
-        )
-
-        response = await _post_work_graph_issue_inbox_reconcile(
-            app,
-            payload={"mode": "apply"},
-        )
-
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
-
-    async def test_work_graph_issue_inbox_reconcile_apply_returns_counts(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "every/verireel",
-                        "workflow_refs": [
-                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                        ],
-                        "event_names": ["pull_request"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["work_graph.issue_inbox.reconcile"],
-                    }
-                ]
-            }
-        )
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=policy,
-            record_store_factory=lambda: _MissingProductReadStore(),
-            work_graph_issue_inbox_reconcile_provider=lambda request: (
-                GitHubIssueInboxReconcileResult.model_validate(
-                    {
-                        "generated_at": "2026-05-21T12:00:00Z",
-                        "mode": request.mode,
-                        "repository_count": 1,
-                        "issue_count": 1,
-                        "added_count": 1,
-                        "items": [
-                            {
-                                "key": "cbusillo/launchplane#698",
-                                "repository": "cbusillo/launchplane",
-                                "number": 698,
-                                "url": "https://github.com/cbusillo/launchplane/issues/698",
-                                "action": "added",
-                            }
-                        ],
-                    }
-                )
-            ),
-        )
-
-        response = await _post_work_graph_issue_inbox_reconcile(
-            app,
-            payload={"mode": "apply"},
-        )
-
-        self.assertEqual(response.status_code, 202)
-        reconcile = response.json()["result"]["reconcile"]
-        self.assertEqual(reconcile["added_count"], 1)
-        self.assertEqual(reconcile["items"][0]["action"], "added")
-
-    async def test_work_graph_issue_inbox_reconcile_returns_invalid_request_without_provider(
-        self,
-    ) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
-            authz_policy=_work_graph_read_policy(products=("launchplane",)),
-            record_store_factory=lambda: _MissingProductReadStore(),
-        )
-
-        response = await _post_work_graph_issue_inbox_reconcile(
-            app,
-            payload={"mode": "dry_run"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()["error"]["code"], "invalid_request")
-
-    async def test_terminal_agent_cannot_reconcile_work_graph_issue_inbox(self) -> None:
-        app = create_launchplane_fastapi_app(
-            verifier=_RejectingVerifier(),
-            authz_policy=_terminal_agent_work_graph_rank_policy(),
-            bearer_identity_config=BearerIdentityConfig(
-                terminal_agent_token="terminal-read-token",
-                terminal_agent_subject="local-owner-agent",
-                terminal_agent_token_label="local-owner-read",
-            ),
-            record_store_factory=lambda: _MissingProductReadStore(),
-            work_graph_issue_inbox_reconcile_provider=lambda request: (
-                GitHubIssueInboxReconcileResult.model_validate(
-                    {
-                        "generated_at": "2026-05-21T12:00:00Z",
-                        "mode": request.mode,
-                        "repository_count": 0,
-                        "issue_count": 0,
-                    }
-                )
-            ),
-        )
-
-        response = await _post_work_graph_issue_inbox_reconcile(
-            app,
-            payload={"mode": "dry_run"},
-            authorization="Bearer terminal-read-token",
-        )
-
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+            self.assertEqual(mapping["product_reference_coverage"]["authorization"], "scoped")
+            self.assertNotIn("hidden-site", json.dumps(mapping))
+        self.assertEqual(visible.status_code, 200)
+        self.assertEqual(hidden.status_code, 403)
 
     async def test_agent_context_reads_require_identity(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -1925,18 +1418,6 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         responses = [
             await _get_repo_product_mapping(app, authorization=""),
             await _get_agent_context(app, authorization=""),
-            await _get_work_graph_snapshot(app, authorization=""),
-            await _post_work_graph_rank(
-                app,
-                payload={"snapshot": _work_graph_snapshot_payload()},
-                authorization="",
-            ),
-            await _get_work_graph_issue_inbox(app, authorization=""),
-            await _post_work_graph_issue_inbox_reconcile(
-                app,
-                payload={"mode": "dry_run"},
-                authorization="",
-            ),
         ]
 
         for response in responses:
@@ -2031,116 +1512,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mapping_response.status_code, 200)
         sections = response.json()["context"]["sections"]
         self.assertEqual(sections["repo_product_mapping"]["status"], "available")
-        self.assertEqual(sections["work_graph_snapshot"]["status"], "available")
-        self.assertEqual(sections["every_code_summary"]["status"], "available")
         self.assertEqual(sections["preview_readiness"]["status"], "available")
-
-    async def test_openapi_includes_agent_context_read_contracts(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        openapi = response.json()
-        expected_routes = {
-            "/v1/repo-product-mapping": (
-                "read_repo_product_mapping",
-                "RepoProductMappingResponse",
-            ),
-            "/v1/agent/context": ("read_agent_context", "AgentContextResponse"),
-            "/v1/work-graph/snapshot": (
-                "read_work_graph_snapshot",
-                "WorkGraphSnapshotResponse",
-            ),
-            "/v1/work-graph/github/issues": (
-                "read_work_graph_issue_inbox",
-                "WorkGraphIssueInboxResponse",
-            ),
-        }
-        for path, (operation_id, response_model_name) in expected_routes.items():
-            route = openapi["paths"][path]["get"]
-            self.assertEqual(route["operationId"], operation_id)
-            self.assertEqual(
-                route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-                f"#/components/schemas/{response_model_name}",
-            )
-            for status_code in ("401", "403", "503"):
-                self.assertIn(
-                    "LaunchplaneErrorResponse", json.dumps(route["responses"][status_code])
-                )
-            self.assertFalse(
-                openapi["components"]["schemas"][response_model_name]["additionalProperties"]
-            )
-        rank_route = openapi["paths"]["/v1/work-graph/rank"]["post"]
-        self.assertEqual(rank_route["operationId"], "rank_work_graph_snapshot")
-        self.assertEqual(
-            rank_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/WorkGraphRankResponse",
-        )
-        for status_code in ("400", "401", "403"):
-            self.assertIn(
-                "LaunchplaneErrorResponse", json.dumps(rank_route["responses"][status_code])
-            )
-        reconcile_route = openapi["paths"]["/v1/work-graph/github/issues/reconcile"]["post"]
-        self.assertEqual(
-            reconcile_route["operationId"],
-            "reconcile_work_graph_issue_inbox",
-        )
-        self.assertEqual(
-            reconcile_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/WorkGraphIssueInboxReconcileResponse",
-        )
-        for status_code in ("400", "401", "403"):
-            self.assertIn(
-                "LaunchplaneErrorResponse",
-                json.dumps(reconcile_route["responses"][status_code]),
-            )
-
-        expected_write_routes = {
-            "/v1/product-config/apply": (
-                "apply_product_config",
-                "ProductConfigApplyResponse",
-                ("400", "401", "403", "409", "503"),
-            ),
-            "/v1/drivers/generic-web/prod-promotion": (
-                "apply_generic_web_prod_promotion",
-                "GenericWebProdPromotionResponse",
-                ("400", "401", "403", "404", "409", "503"),
-            ),
-            "/v1/drivers/generic-web/prod-promotion-workflow": (
-                "dispatch_generic_web_prod_promotion_workflow",
-                "GenericWebPromotionWorkflowResponse",
-                ("400", "401", "403", "404", "409", "503"),
-            ),
-            "/v1/products/{product}/environments/{environment}/promotion/dry-run": (
-                "dry_run_product_promotion",
-                "ProductPromotionDryRunResponse",
-                ("400", "401", "403", "404", "409", "503"),
-            ),
-            "/v1/products/{product}/environments/{environment}/promotion/workflow-dispatch": (
-                "dispatch_product_promotion_workflow",
-                "ProductPromotionWorkflowDispatchResponse",
-                ("400", "401", "403", "404", "409", "503"),
-            ),
-        }
-        for path, (
-            operation_id,
-            response_model_name,
-            error_statuses,
-        ) in expected_write_routes.items():
-            route = openapi["paths"][path]["post"]
-            self.assertEqual(route["operationId"], operation_id)
-            self.assertEqual(
-                route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-                f"#/components/schemas/{response_model_name}",
-            )
-            self.assertFalse(
-                openapi["components"]["schemas"][response_model_name]["additionalProperties"]
-            )
-            for status_code in error_statuses:
-                self.assertIn(
-                    "LaunchplaneErrorResponse",
-                    json.dumps(route["responses"][status_code]),
-                )
-            self.assertNotIn("422", route["responses"])
 
     async def test_list_products_returns_db_backed_overviews(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2371,6 +1743,9 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                                         status="pass",
                                         http_status=200,
                                         summary="HTTP 200",
+                                        sync=sync_cycle_health_evidence_from_payload(
+                                            {"sync": sync_cycle_payload()}
+                                        ),
                                     ),
                                 ),
                             )
@@ -2385,6 +1760,12 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                     monitoring = response.json()["environment"]["health_monitoring"]
                     self.assertEqual(monitoring["provenance"]["freshness_status"], "recorded")
                     check = monitoring["checks"][0]
+                    if mode in ("stale", "fresh"):
+                        self.assertEqual(
+                            check["sync"]["cycle"]["cycle_id"], sync_cycle_payload()["cycle_id"]
+                        )
+                    else:
+                        self.assertNotIn("sync", check)
                     if mode in ("disabled", "inapplicable"):
                         self.assertFalse(check["probe_effective"])
                         self.assertEqual(
@@ -2683,68 +2064,6 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("provider-host-private-123", response.text)
         self.assertNotIn("certificate-private-789", response.text)
 
-    async def test_openapi_includes_product_environment_read_contracts(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        openapi = response.json()
-        expected_routes = {
-            "/v1/products": ("list_products", "ProductEnvironmentListResponse"),
-            "/v1/products/{product}": ("read_product", "ProductOverviewResponse"),
-            "/v1/products/{product}/activity": (
-                "read_product_activity",
-                "ProductActivityResponse",
-            ),
-            "/v1/products/{product}/environments": (
-                "list_product_environments",
-                "ProductEnvironmentsResponse",
-            ),
-            "/v1/products/{product}/environments/{environment}": (
-                "read_product_environment",
-                "ProductEnvironmentResponse",
-            ),
-            "/v1/products/{product}/environments/{environment}/public-ingress/incidents": (
-                "list_product_environment_public_ingress_incidents",
-                "ProductEnvironmentIncidentsResponse",
-            ),
-            "/v1/products/{product}/environments/{environment}/public-ingress/incidents/{incident_id}": (
-                "read_product_environment_public_ingress_incident",
-                "ProductEnvironmentIncidentResponse",
-            ),
-        }
-        for path, (operation_id, response_model_name) in expected_routes.items():
-            route = openapi["paths"][path]["get"]
-            self.assertEqual(route["operationId"], operation_id)
-            self.assertEqual(
-                route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-                f"#/components/schemas/{response_model_name}",
-            )
-            for status_code in ("400", "401", "403", "404", "503"):
-                self.assertIn(
-                    "LaunchplaneErrorResponse", json.dumps(route["responses"][status_code])
-                )
-            self.assertFalse(
-                openapi["components"]["schemas"][response_model_name]["additionalProperties"]
-            )
-        topology_schema = openapi["components"]["schemas"]["ProductEnvironmentTopology"]
-        self.assertEqual(
-            set(topology_schema["properties"]),
-            {"desired", "provider_recorded", "observed", "warnings", "trust_state"},
-        )
-        warning_schema = openapi["components"]["schemas"]["ProductTopologyWarning"]
-        warning_codes = set(warning_schema["properties"]["code"]["enum"])
-        self.assertTrue(
-            {
-                "missing_route_authority",
-                "domain_divergence",
-                "stale_route_authority",
-                "tls_ownership_unknown",
-                "tls_mismatch",
-            }.issubset(warning_codes)
-        )
-        target_properties = openapi["components"]["schemas"]["ProductTargetSummary"]["properties"]
-        self.assertNotIn("target_id", target_properties)
-
 
 class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
     async def test_product_stable_lane_repair_dry_run_and_apply(self) -> None:
@@ -2932,7 +2251,8 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(set(payload), {"status", "trace_id", "driver_id", "profiles"})
+        self.assertEqual(payload["coverage"]["status"], "complete")
+        self.assertEqual(payload["coverage"]["source"], "complete")
         self.assertEqual(payload["status"], "ok")
         self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
         self.assertEqual(payload["driver_id"], "generic-web")
@@ -4416,13 +3736,6 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_required")
 
-    async def test_openapi_includes_product_health_monitoring_contract(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        route = response.json()["paths"]["/v1/product-profiles/health-monitoring/apply"]["post"]
-        self.assertEqual(route["operationId"], "apply_product_health_monitoring")
-
     async def test_apply_product_prelaunch_rebuild_policy_dry_run_preserves_profile(
         self,
     ) -> None:
@@ -5447,40 +4760,6 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_required")
 
-    async def test_openapi_includes_product_preview_tls_contract(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        route = response.json()["paths"]["/v1/product-profiles/preview-tls/apply"]["post"]
-        self.assertEqual(route["operationId"], "apply_product_preview_tls")
-        self.assertEqual(
-            route["requestBody"]["content"]["application/json"]["schema"]["title"],
-            "ProductPreviewTlsApplyRequest",
-        )
-        self.assertEqual(
-            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
-        )
-        for status_code in ("400", "401", "403", "404", "409", "503"):
-            self.assertIn(status_code, route["responses"])
-
-    async def test_openapi_includes_product_stable_lane_repair_contract(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        route = response.json()["paths"]["/v1/product-profiles/stable-lane-repair/apply"]["post"]
-        self.assertEqual(route["operationId"], "apply_product_stable_lane_repair")
-        self.assertEqual(
-            route["requestBody"]["content"]["application/json"]["schema"]["title"],
-            "ProductStableLaneRepairRequest",
-        )
-        self.assertEqual(
-            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
-        )
-        for status_code in ("400", "401", "403", "404", "409", "503"):
-            self.assertIn(status_code, route["responses"])
-
     async def test_list_product_profiles_accepts_every_code_worker_token(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -5620,44 +4899,6 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("list_product_profile_records", list_response.json()["error"]["message"])
         self.assertIn("read_product_profile_record", show_response.json()["error"]["message"])
 
-    async def test_openapi_includes_product_profile_contracts(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        openapi = response.json()
-        list_route = openapi["paths"]["/v1/product-profiles"]["get"]
-        write_route = openapi["paths"]["/v1/product-profiles"]["post"]
-        show_route = openapi["paths"]["/v1/product-profiles/{product}"]["get"]
-        self.assertEqual(list_route["operationId"], "list_product_profiles")
-        self.assertEqual(write_route["operationId"], "write_product_profile")
-        self.assertEqual(show_route["operationId"], "read_product_profile")
-        self.assertEqual(
-            list_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/ProductProfileListResponse",
-        )
-        self.assertEqual(
-            write_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AcceptedEvidenceResponse",
-        )
-        self.assertEqual(
-            write_route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/LaunchplaneProductProfileRecord",
-        )
-        self.assertEqual(
-            show_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/ProductProfileResponse",
-        )
-        for status_code in ("400", "401", "403", "409", "503"):
-            self.assertIn(status_code, write_route["responses"])
-        self.assertEqual(
-            openapi["components"]["schemas"]["ProductProfileListResponse"]["additionalProperties"],
-            False,
-        )
-        self.assertEqual(
-            openapi["components"]["schemas"]["ProductProfileResponse"]["additionalProperties"],
-            False,
-        )
-
 
 class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
     async def test_protected_artifacts_returns_launchplane_inventory(self) -> None:
@@ -5675,6 +4916,7 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
             )
 
             response = await _get_protected_artifacts(app, product="verireel")
+            manifest = record_store.read_artifact_manifest("artifact-verireel-prod")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -5684,6 +4926,15 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("artifact-verireel-prod", protected_artifacts["artifact_ids"])
         self.assertIn("artifact-preview-verireel-pr-196", protected_artifacts["artifact_ids"])
         self.assertNotIn("artifact-preview-verireel-pr-195", protected_artifacts["artifact_ids"])
+        retained = next(
+            entry
+            for entry in protected_artifacts["entries"]
+            if entry["artifact_id"] == manifest.artifact_id
+        )
+        self.assertEqual(retained["manifest_provenance"]["source_commit"], manifest.source_commit)
+        self.assertEqual(
+            retained["manifest_provenance"]["image"], manifest.image.model_dump(mode="json")
+        )
 
     @scoped_agent_test
     async def test_protected_artifacts_requires_wildcard_context_for_whole_product(

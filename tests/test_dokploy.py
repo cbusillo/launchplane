@@ -148,6 +148,46 @@ class _FakeDokployTargetStore:
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_schedule_inventory_requires_an_explicit_whole_object_array(self) -> None:
+        malformed: tuple[JsonValue, ...] = (
+            None,
+            {},
+            {"raw": "synthetic-private-value"},
+            {"data": None},
+            {"items": [], "total": 40},
+            {"data": []},
+            [None],
+            [{}, None],
+        )
+        for payload in malformed:
+            with (
+                self.subTest(payload=payload),
+                patch.object(dokploy_api, "dokploy_request", return_value=payload),
+            ):
+                with self.assertRaises(click.ClickException) as caught:
+                    dokploy_api.list_dokploy_schedules(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        target_id="retained",
+                        schedule_type="compose",
+                    )
+                self.assertNotIn("synthetic-private-value", str(caught.exception))
+        valid_inventories: tuple[list[JsonValue], ...] = ([], [{"scheduleId": "retained-job"}])
+        for rows in valid_inventories:
+            with (
+                self.subTest(rows=rows),
+                patch.object(dokploy_api, "dokploy_request", return_value=rows),
+            ):
+                self.assertEqual(
+                    dokploy_api.list_dokploy_schedules(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        target_id="retained",
+                        schedule_type="compose",
+                    ),
+                    tuple(rows),
+                )
+
     def test_dokploy_request_redacts_http_error_body(self) -> None:
         error = HTTPError(
             url="https://dokploy.example/api/schedule.runManually",
@@ -157,9 +197,12 @@ class DokployConfigTests(unittest.TestCase):
             fp=BytesIO(
                 b'{"message":"Remote command failed with exit code 1",'
                 b'"DATABASE_URL":"postgresql://user:password@database/example",'
-                b'"SERVICE_TOKEN":"secret-token"}'
+                b'"SERVICE_TOKEN":"secret-token",'
+                b'"headers":{"Set-Cookie":[\n"session_id=cookie-secret; HttpOnly",\n'
+                b'"other=made-up-cookie"]},"status":502}'
             ),
         )
+        self.addCleanup(error.close)
         with patch("control_plane.dokploy.api.urlopen", side_effect=error):
             with self.assertRaises(dokploy_api.DokployRequestFailed) as raised:
                 dokploy_api.dokploy_request(
@@ -170,10 +213,43 @@ class DokployConfigTests(unittest.TestCase):
                     payload={"scheduleId": "schedule-one"},
                 )
 
+        self.assertTrue(error.closed)
         self.assertTrue(raised.exception.remote_command_failed)
         self.assertNotIn("password", raised.exception.format_message())
         self.assertNotIn("secret-token", raised.exception.format_message())
+        self.assertNotIn("cookie-secret", raised.exception.format_message())
+        self.assertNotIn("made-up-cookie", raised.exception.format_message())
+        self.assertIn('"status":502', raised.exception.format_message())
         self.assertIn("[redacted]", raised.exception.format_message())
+
+    def test_dokploy_request_closes_http_error_when_its_body_times_out(self) -> None:
+        class TimeoutBody(BytesIO):
+            def read(self, size: int | None = -1) -> bytes:
+                raise TimeoutError("read timed out")
+
+        body = TimeoutBody()
+        error = HTTPError(
+            url="https://dokploy.example/api/application.one",
+            code=500,
+            msg="Internal Server Error",
+            hdrs=Message(),
+            fp=body,
+        )
+        self.addCleanup(error.close)
+        with (
+            patch("control_plane.dokploy.api.urlopen", side_effect=error),
+            self.assertRaises(dokploy_api.DokployRequestFailed) as raised,
+        ):
+            dokploy_api.dokploy_request(
+                host="https://dokploy.example",
+                token="provider-token",
+                path="/api/application.one",
+                method="GET",
+            )
+        self.assertTrue(error.closed)
+        self.assertTrue(body.closed)
+        self.assertEqual(raised.exception.status_code, error.code)
+        self.assertIn("response read timed out", raised.exception.format_message())
 
     def test_dokploy_request_converts_response_read_timeout_to_request_failure(self) -> None:
         class TimeoutResponse:
@@ -442,20 +518,25 @@ class DokployConfigTests(unittest.TestCase):
             remote_command_failed=True,
         )
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
-                "control_plane.dokploy.api.latest_deployment_for_schedule",
-                side_effect=(
-                    {"deploymentId": "deployment-before", "status": "success"},
-                    {"deploymentId": "deployment-failed", "status": "failed"},
-                ),
+                "control_plane.dokploy.api._read_schedule_deployments",
+                return_value=[{"deploymentId": "deployment-failed", "status": "failed"}],
             ),
-            patch("control_plane.dokploy.api.dokploy_request", side_effect=request_error),
             patch(
-                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
-                return_value=(
-                    "sh: 1: npx: not found",
-                    "DATABASE_URL=postgresql://user:password@database/example",
-                    "PREVIEW_DB_ARGS_BASE64=opaque-secret-payload",
+                "control_plane.dokploy.api.dokploy_request",
+                side_effect=(
+                    request_error,
+                    {
+                        "logs": [
+                            "sh: 1: npx: not found",
+                            "DATABASE_URL=postgresql://user:password@database/example",
+                            "PREVIEW_DB_ARGS_BASE64=opaque-secret-payload",
+                            "'Cookie': [",
+                            "'session_id=made-up-cookie'",
+                            "]",
+                        ]
+                    },
                 ),
             ),
         ):
@@ -473,6 +554,7 @@ class DokployConfigTests(unittest.TestCase):
         self.assertIn("npx: not found", raised.exception.format_message())
         self.assertNotIn("password", raised.exception.format_message())
         self.assertNotIn("opaque-secret-payload", raised.exception.format_message())
+        self.assertNotIn("made-up-cookie", raised.exception.format_message())
         self.assertIn("DATABASE_URL=[redacted]", raised.exception.format_message())
         self.assertIn("PREVIEW_DB_ARGS_BASE64=[redacted]", raised.exception.format_message())
 
@@ -632,6 +714,46 @@ class DokployConfigTests(unittest.TestCase):
             redacted_line,
             '{"API_KEY":"[redacted]","nested":{"SERVICE_TOKEN":"[redacted]"},"note":"safe"}',
         )
+
+    def test_redact_dokploy_log_line_redacts_cookie_headers(self) -> None:
+        self.assertEqual(
+            control_plane_dokploy.redact_dokploy_log_line(
+                "GET /web 200 Cookie: session_id=abc123; frontend_lang=en_US"
+            ),
+            "GET /web 200 Cookie: [redacted]",
+        )
+        self.assertEqual(
+            control_plane_dokploy.redact_dokploy_log_line(
+                "set-cookie: session_id=abc123; Path=/; HttpOnly"
+            ),
+            "set-cookie: [redacted]",
+        )
+
+    def test_redact_dokploy_log_line_redacts_structured_cookie_fields(self) -> None:
+        redacted = control_plane_dokploy.redact_dokploy_log_line(
+            '{"status":502,"Cookie":"sid=\\"abc\\"; x=abc123","set-cookie":["sid=a]bc123", "x=abc123"]}'
+        )
+        self.assertNotIn("abc", redacted)
+        self.assertIn('"status":502', redacted)
+        self.assertEqual(
+            control_plane_dokploy.redact_dokploy_log_line(
+                "{'Set-Cookie': 'sid=abc123; Secure', 'path': '/web'}"
+            ),
+            "{'Set-Cookie': '[redacted]', 'path': '/web'}",
+        )
+
+    def test_redact_dokploy_log_line_redacts_truncated_cookie_values(self) -> None:
+        self.assertEqual(
+            control_plane_dokploy.redact_dokploy_log_line(
+                '{"status":502,"Cookie":"sid=abc123; x=ab'
+            ),
+            '{"status":502,"Cookie":[redacted]',
+        )
+
+    def test_redact_dokploy_log_line_keeps_cookie_settings_diagnostics(self) -> None:
+        line = "SESSION_COOKIE_SECURE=true prefer-secure-cookie=false cookie consent banner shown"
+
+        self.assertEqual(control_plane_dokploy.redact_dokploy_log_line(line), line)
 
     def test_normalize_dokploy_log_payload_reads_message_objects_in_dict_lists(self) -> None:
         lines = control_plane_dokploy.normalize_dokploy_log_payload(
@@ -1180,8 +1302,16 @@ target_name = "syo-testing-app"
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs",
-                    return_value=("started", "SMTP_PASSWORD=[redacted]"),
+                    "control_plane.dokploy.api.dokploy_request",
+                    return_value={
+                        "logs": [
+                            "started",
+                            "Cookie: [",
+                            "'session_id=made-up-cookie'",
+                            "]",
+                            "SMTP_PASSWORD=made-up-smtp",
+                        ]
+                    },
                 ),
             ):
                 result = runner.invoke(
@@ -1196,7 +1326,7 @@ target_name = "syo-testing-app"
                         "--instance",
                         " Testing ",
                         "--lines",
-                        "2",
+                        "3",
                     ],
                 )
 
@@ -1207,7 +1337,8 @@ target_name = "syo-testing-app"
         self.assertEqual(payload["target"]["target_id"], "app-123")
         self.assertEqual(payload["target"]["target_name"], "syo-testing-app")
         self.assertEqual(payload["target"]["app_name"], "syo-testing-gfbiqh")
-        self.assertEqual(payload["logs"]["lines"], ["started", "SMTP_PASSWORD=[redacted]"])
+        self.assertNotIn("made-up-", result.output)
+        self.assertTrue(any("SMTP_PASSWORD=" in line for line in payload["logs"]["lines"]))
         self.assertNotIn("secret-token", result.output)
 
     def test_environments_logs_reports_missing_records_without_traceback(self) -> None:
@@ -2795,6 +2926,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 }
 
             with (
+                patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
                 patch(
                     "control_plane.dokploy.api.fetch_dokploy_target_payload",
                     side_effect=fetch_target_payload,
@@ -2826,7 +2958,11 @@ domains = ["cm-testing.shinycomputers.com"]
                     return_value={"deploymentId": "schedule-before"},
                 ),
                 patch(
-                    "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                    "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                    return_value={"deploymentId": "schedule-after"},
+                ),
+                patch(
+                    "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                     return_value="deployment=schedule-after status=done",
                 ),
                 patch(
@@ -2906,6 +3042,41 @@ domains = ["cm-testing.shinycomputers.com"]
             "Launchplane post-deploy exact",
         )
 
+    def test_post_deploy_unencodable_environment_does_not_checkpoint_or_write(self) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="opw", instance="prod", target_id="compose-123", target_name="opw-prod"
+        )
+        effects: list[str] = []
+        with (
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "ODOO_DB_NAME=fixture\nAPP_SETTING=bad\x00value",
+                    "appName": "fixture-app",
+                    "serverId": "fixture-server",
+                },
+            ),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
+            patch("control_plane.dokploy.api.update_dokploy_target_env") as update,
+            patch("control_plane.dokploy.api.trigger_deployment") as deploy,
+            patch("control_plane.dokploy.api.upsert_dokploy_schedule") as schedule,
+            self.assertRaises(dokploy_api.DokployEnvironmentEncodingError),
+        ):
+            control_plane_dokploy.run_compose_post_deploy_update(
+                host="https://dokploy.example",
+                token="fixture-token",
+                target_definition=target_definition,
+                env_file=None,
+                workflow_environment_overrides={
+                    LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY: "true"
+                },
+                before_provider_mutation=effects.append,
+            )
+        self.assertFalse(effects)
+        update.assert_not_called()
+        deploy.assert_not_called()
+        schedule.assert_not_called()
+
     def test_run_compose_post_deploy_update_fails_when_runtime_override_env_does_not_persist(
         self,
     ) -> None:
@@ -2938,6 +3109,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 side_effect=lambda **_kwargs: None,
             ),
             patch("control_plane.dokploy.api.trigger_deployment"),
+            patch("control_plane.dokploy.api.find_matching_dokploy_schedule", return_value=None),
             patch("control_plane.dokploy.api.upsert_dokploy_schedule") as upsert_schedule,
         ):
             with self.assertRaises(click.ClickException) as raised_error:
@@ -2992,6 +3164,7 @@ domains = ["cm-testing.shinycomputers.com"]
             }
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 side_effect=fetch_target_payload,
@@ -3021,7 +3194,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 return_value={"deploymentId": "schedule-before"},
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch("control_plane.dokploy.api.fetch_dokploy_deployment_logs", return_value=()),
@@ -3054,6 +3231,7 @@ domains = ["cm-testing.shinycomputers.com"]
             return {"scheduleId": "schedule-123"}
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3070,13 +3248,14 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
-                side_effect=(
-                    {"deploymentId": "schedule-before"},
-                    {"id": "schedule-after", "status": "done"},
-                ),
+                side_effect=({"id": "schedule-after", "status": "done"},),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
@@ -3155,13 +3334,16 @@ domains = ["cm-testing.shinycomputers.com"]
                     ),
                     find_matching_dokploy_schedule=Mock(return_value=None),
                     upsert_dokploy_schedule=Mock(return_value={"scheduleId": "schedule-example"}),
+                    read_dokploy_schedule_baseline=Mock(return_value=[]),
                     latest_deployment_for_schedule=Mock(
                         side_effect=[
-                            {"id": "before"},
                             {"id": "after", "logs": logs},
                         ]
                     ),
-                    wait_for_dokploy_schedule_deployment=Mock(
+                    _read_back_triggered_schedule_deployment=Mock(
+                        return_value={"deploymentId": "after"}
+                    ),
+                    wait_for_exact_dokploy_schedule_deployment=Mock(
                         return_value="deployment=after status=done"
                     ),
                     fetch_dokploy_deployment_logs=Mock(return_value=logs),
@@ -3202,6 +3384,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3219,7 +3402,6 @@ domains = ["cm-testing.shinycomputers.com"]
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
-                    {"deploymentId": "schedule-before"},
                     {
                         "deploymentId": "schedule-after",
                         "status": "done",
@@ -3231,7 +3413,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 ),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch("control_plane.dokploy.api.fetch_dokploy_deployment_logs") as fetch_logs_mock,
@@ -3268,6 +3454,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3285,7 +3472,6 @@ domains = ["cm-testing.shinycomputers.com"]
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
-                    {"deploymentId": "schedule-before"},
                     {
                         "deploymentId": "schedule-after-newer",
                         "status": "running",
@@ -3294,7 +3480,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 ),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after-waited"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after-waited status=done",
             ),
             patch(
@@ -3342,6 +3532,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3358,13 +3549,14 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
-                side_effect=(
-                    {"deploymentId": "schedule-before"},
-                    {"deploymentId": "schedule-after", "status": "done"},
-                ),
+                side_effect=({"deploymentId": "schedule-after", "status": "done"},),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
@@ -3401,6 +3593,7 @@ domains = ["cm-testing.shinycomputers.com"]
         )
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3417,13 +3610,14 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
-                side_effect=(
-                    {"status": "done"},
-                    {"status": "done"},
-                ),
+                side_effect=({"status": "done"},),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-row-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-row-after status=done",
             ),
             patch(
@@ -3472,6 +3666,7 @@ domains = ["cm-testing.shinycomputers.com"]
             return {"scheduleId": "schedule-123"}
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -3502,7 +3697,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 return_value={"deploymentId": "schedule-before"},
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
@@ -3696,6 +3895,7 @@ esac
             return {"ok": True}
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={"appName": "cm-prod-app", "serverId": "server-123"},
@@ -3709,7 +3909,11 @@ esac
                 return_value={"deploymentId": "schedule-before"},
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
@@ -3760,6 +3964,7 @@ esac
         )
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={"appName": "cm-prod-app", "serverId": "server-123"},
@@ -3777,7 +3982,11 @@ esac
                 return_value={"ok": True},
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
@@ -3835,6 +4044,7 @@ esac
             return {"scheduleId": "schedule-verify"}
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={"appName": "cm-prod-app", "serverId": "server-123"},
@@ -3852,7 +4062,11 @@ esac
                 return_value={"ok": True},
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=success",
             ),
             patch(
@@ -4162,6 +4376,7 @@ esac
             return {"ok": True}
 
         with (
+            patch("control_plane.dokploy.api.read_dokploy_schedule_baseline", return_value=[]),
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
                 return_value={
@@ -4197,7 +4412,6 @@ esac
             patch(
                 "control_plane.dokploy.api.latest_deployment_for_schedule",
                 side_effect=(
-                    {"deploymentId": "schedule-before"},
                     {
                         "deploymentId": "schedule-after",
                         "logs": [
@@ -4210,7 +4424,11 @@ esac
                 ),
             ),
             patch(
-                "control_plane.dokploy.api.wait_for_dokploy_schedule_deployment",
+                "control_plane.dokploy.api._read_back_triggered_schedule_deployment",
+                return_value={"deploymentId": "schedule-after"},
+            ),
+            patch(
+                "control_plane.dokploy.api.wait_for_exact_dokploy_schedule_deployment",
                 return_value="deployment=schedule-after status=done",
             ),
             patch(
@@ -4343,6 +4561,26 @@ esac
 
 
 class LaunchplaneServiceDeployTests(unittest.TestCase):
+    def test_rendered_product_services_honor_the_configured_filestore(self) -> None:
+        import yaml
+        from control_plane.testing_activation_compose import interpolate
+
+        configured = "/volumes/data/custom-filestore"
+        document = yaml.safe_load(
+            control_plane_dokploy.render_odoo_raw_compose_file(
+                image_reference="fixture-image", hold_web_until_integration_readback=False
+            )
+        )
+        for name in ("web", "script-runner"):
+            with self.subTest(service=name):
+                self.assertEqual(
+                    interpolate(
+                        document["services"][name]["environment"]["ODOO_FILESTORE_PATH"],
+                        {"ODOO_FILESTORE_PATH": configured},
+                    ),
+                    configured,
+                )
+
     @staticmethod
     def _target_payload(
         *, env_text: str, custom_git_ssh_key_id: str = "ssh-key-123"

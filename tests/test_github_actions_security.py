@@ -9,12 +9,12 @@ from unittest import TestCase
 
 from tests.support.workflows import SAME_REPO_PULL_REQUEST_IF
 from tests.support.workflows import load_workflow
+from control_plane.contracts.record_fields import GIT_SHA1_PATTERN
 
 
 USES_LINE_PATTERN = re.compile(
     r"^\s*(?:-\s+)?uses:\s*(?P<reference>[^#\s]+)(?:\s+#\s*(?P<provenance>.+?))?\s*$"
 )
-FULL_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 VERSION_PROVENANCE_PATTERN = re.compile(r"^v\d+(?:\.\d+){0,2}(?:[-+][A-Za-z0-9.-]+)?$")
 CONTAINER_TAG_PATTERN = re.compile(r"^v?\d+(?:\.\d+){0,2}(?:[-+][A-Za-z0-9.-]+)?$")
 STATIC_CONTAINER_REFERENCE_PATTERN = re.compile(
@@ -32,12 +32,6 @@ PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
     ),
     Path(".github/workflows/generic-web-preview-authorization.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml"}
-    ),
-    Path(".github/workflows/authz-policy-reconcile.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml"}
-    ),
-    Path(".github/workflows/deploy-launchplane.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml"}
     ),
     Path(".github/workflows/route-binding-reconcile.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-route-binding-reconcile.yml"}
@@ -158,13 +152,10 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
             "bounded legacy generic-web deploy reservation inspection",
         )
     ),
-    "cbusillo/launchplane/.github/workflows/reusable-authz-policy-reconcile.yml": (
-        ActionClassification("First-party same-repository", "authorization policy administration")
-    ),
     "cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml": (
         ActionClassification(
             "First-party same-repository",
-            "protected generic-web target, record, and authorization apply",
+            "protected generic-web target and record apply",
         )
     ),
     "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml": (
@@ -687,7 +678,7 @@ class GitHubActionsSecurityTests(TestCase):
                 violations.append(
                     f"{action.location}: unclassified remote action source {source!r}."
                 )
-            if FULL_SHA_PATTERN.fullmatch(revision) is None:
+            if GIT_SHA1_PATTERN.fullmatch(revision) is None:
                 violations.append(
                     f"{action.location}: remote action {source!r} must use a 40-character SHA."
                 )

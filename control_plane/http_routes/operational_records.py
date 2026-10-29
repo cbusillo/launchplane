@@ -1,7 +1,17 @@
+from collections.abc import Callable
 from typing import Annotated, Literal, Protocol, cast
 
-from fastapi import Depends, Path, Response
-from pydantic import BaseModel, ConfigDict
+from fastapi import Depends, Path, Query, Response
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import SQLAlchemyError
+
+from control_plane.provider_hold_attention import (
+    PROVIDER_HOLD_ATTENTION_ROUTE,
+    PROVIDER_HOLD_PAGE_LIMIT,
+    ProviderHoldAttentionPage,
+    ProviderHoldAttentionReadStore,
+    parse_provider_hold_cursor,
+)
 
 from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
@@ -10,20 +20,33 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.product_profile_record import product_config_targets
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentRecord,
     RuntimeEnvironmentScope,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
-from control_plane.contracts.secret_record import SecretScope
+from control_plane.contracts.secret_record import SecretScope, SecretValueOrigin
+from control_plane.contracts.read_coverage import ReadCoverage, read_coverage
+from control_plane.product_binding_resolution import (
+    ProductBindingResolution,
+    product_binding_resolution,
+)
 from control_plane.http_routes.support import (
     LAUNCHPLANE_SERVICE_CONTEXT,
     ApiRouteRegistrar,
     ReadRouteDependencies,
 )
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
+    LaunchplaneIdentity,
+    director_agent_identity,
+)
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.storage.factory import storage_backend_name
+from control_plane.outbox_inspection import OutboxInspection, OutboxInspectionStore, inspect_outbox
 
 
 class DeploymentRecordResponse(BaseModel):
@@ -63,6 +86,22 @@ class RecentOperationsResponse(BaseModel):
     recent_previews: tuple[PreviewRecord, ...]
 
 
+class ProviderHoldAttentionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    attention: ProviderHoldAttentionPage
+
+
+class OutboxInspectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    inspection: OutboxInspection
+
+
 class SecretStatusBinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -82,6 +121,8 @@ class ProductSecretBindingsResponse(BaseModel):
     trace_id: str
     product: str
     bindings: list[product_secret_copy.ProductSecretBindingMetadata]
+    coverage: ReadCoverage
+    lane_binding_resolution: ProductBindingResolution | None = None
 
 
 class SecretStatusAuditEvent(BaseModel):
@@ -112,6 +153,9 @@ class SecretStatusReadModel(BaseModel):
     updated_by: str
     last_validated_at: str
     current_version_id: str
+    current_version_value_origin: SecretValueOrigin | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
     version_count: int
     current_version_created_at: str
     binding: SecretStatusBinding | None = None
@@ -445,6 +489,62 @@ def register_inventory_operation_read_routes(
     *,
     dependencies: ReadRouteDependencies,
 ) -> None:
+    def read_outbox_inspection(
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=5000)] = 1000,
+    ) -> OutboxInspectionResponse:
+        trace_id = dependencies.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="operations.read",
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The caller cannot inspect Launchplane outbox deliveries.",
+            )
+        if not all(
+            callable(getattr(record_store, name, None))
+            for name in (
+                "list_outbox_delivery_records",
+                "list_public_ingress_notification_policy_records",
+                "read_public_ingress_incident_record",
+            )
+        ):
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Outbox inspection requires database-backed records.",
+            )
+        try:
+            inspection = inspect_outbox(cast(OutboxInspectionStore, record_store), limit=limit)
+        except (ValueError, SQLAlchemyError) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="outbox_inspection_unavailable",
+                message="Outbox inspection failed. Delivery counts and destinations remain unknown.",
+            ) from error
+        return OutboxInspectionResponse(trace_id=trace_id, inspection=inspection)
+
+    app.add_api_route(
+        "/v1/outbox/inspection",
+        read_outbox_inspection,
+        methods=["GET"],
+        response_model=OutboxInspectionResponse,
+        operation_id="read_outbox_inspection",
+        summary="Inspect pending outbox delivery kinds and destination references without sending",
+        responses={code: {"model": dependencies.error_response_model} for code in (401, 403, 503)},
+    )
+
     def read_environment_inventory(
         context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -502,6 +602,72 @@ def register_inventory_operation_read_routes(
                 message="Workflow cannot read inventory for the requested context.",
             )
         return EnvironmentInventoryResponse(trace_id=trace_id, record=inventory)
+
+    def read_provider_hold_attention(
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=PROVIDER_HOLD_PAGE_LIMIT)] = 50,
+        cursor: Annotated[str | None, Query(max_length=100)] = None,
+    ) -> ProviderHoldAttentionResponse:
+        trace_id = dependencies.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="operations.read",
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The caller cannot read Launchplane service operation attention.",
+            )
+        try:
+            parse_provider_hold_cursor(cursor)
+        except ValueError as error:
+            raise dependencies.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_cursor",
+                message="The operation attention cursor is invalid.",
+            ) from error
+        if not callable(getattr(record_store, "read_provider_hold_attention_page", None)):
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="The record store does not support service operation attention.",
+            )
+        try:
+            attention = cast(
+                ProviderHoldAttentionReadStore, record_store
+            ).read_provider_hold_attention_page(
+                limit=limit,
+                cursor=cursor,
+            )
+        except (ValueError, SQLAlchemyError) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="provider_attention_unavailable",
+                message="Retained operation evidence is unavailable. No absence is established.",
+            ) from error
+        return ProviderHoldAttentionResponse(trace_id=trace_id, attention=attention)
+
+    app.add_api_route(
+        PROVIDER_HOLD_ATTENTION_ROUTE,
+        read_provider_hold_attention,
+        methods=["GET"],
+        response_model=ProviderHoldAttentionResponse,
+        operation_id="read_provider_hold_attention",
+        summary="Read a bounded page of retained service operation attention",
+        responses={
+            code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 503)
+        },
+    )
 
     def read_recent_operations(
         context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -621,12 +787,18 @@ def register_managed_secret_read_routes(
     app: ApiRouteRegistrar,
     *,
     dependencies: ReadRouteDependencies,
+    policy_reader: Callable[[], LaunchplaneAuthzPolicy],
 ) -> None:
     def list_product_secret_bindings(
         product: str,
         response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        include_resolution: bool = False,
+        integration: Annotated[str, Query(min_length=1, max_length=256, pattern=r"^\S+$")] = (
+            control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+        ),
+        scopes: Annotated[list[SecretScope] | None, Query()] = None,
     ) -> ProductSecretBindingsResponse:
         trace_id = dependencies.next_trace_id()
         response.headers["Cache-Control"] = "no-store"
@@ -652,9 +824,53 @@ def register_managed_secret_read_routes(
             )
         try:
             require_secret_status_read_store(record_store)
-            bindings = product_secret_copy.product_secret_binding_metadata(
-                cast(product_secret_copy.ProductSecretCopyStore, record_store), product=product
+            store = cast(product_secret_copy.ProductSecretCopyStore, record_store)
+            profiles = store.list_product_profile_records()
+            profile = next((item for item in profiles if item.product == product), None)
+            if profile is None:
+                raise product_secret_copy.ProductSecretCopyError(
+                    "Product secret bindings require an existing product."
+                )
+            universal_secret_reader = director_agent_identity(identity) or (
+                isinstance(identity, GitHubHumanIdentity)
+                and policy_reader().names_administrator(identity)
             )
+
+            def metadata_scope_read_allowed(
+                context: str,
+                instance: str,
+                *,
+                environment_read: bool,
+            ) -> bool:
+                target = AuthorizationTarget(
+                    scope="instance" if instance else "context",
+                    instances=(instance,) if instance else (),
+                )
+                return dependencies.authorization_allows(
+                    identity=identity,
+                    action="secret.list",
+                    product=LAUNCHPLANE_SERVICE_CONTEXT,
+                    context=context,
+                    target=target,
+                    inherit_agent_read_role=False,
+                ) or (
+                    environment_read
+                    and dependencies.authorization_allows(
+                        identity=identity,
+                        action="product_environment.read",
+                        product=product,
+                        context=context,
+                        target=target,
+                        inherit_agent_read_role=False,
+                    )
+                )
+
+            copy_authorization_complete = universal_secret_reader or all(
+                metadata_scope_read_allowed(lane.context, instance, environment_read=True)
+                for lane in product_config_targets(profile)
+                for instance in ("", lane.instance)
+            )
+            bindings = product_secret_copy.product_secret_binding_metadata(store, product=product)
             visible_bindings = []
             for binding in bindings:
                 instance = str(binding["instance"])
@@ -678,6 +894,27 @@ def register_managed_secret_read_routes(
                     target=target,
                 ):
                     visible_bindings.append(binding)
+            resolution = None
+            if include_resolution:
+
+                def scope_read_allowed(scope: SecretScope, context: str, instance: str) -> bool:
+                    if universal_secret_reader:
+                        return True
+                    if scope == "global":
+                        return False
+                    return metadata_scope_read_allowed(
+                        context,
+                        instance if scope == "context_instance" else "",
+                        environment_read=False,
+                    )
+
+                resolution = product_binding_resolution(
+                    store,
+                    profile=profile,
+                    integration=integration,
+                    scopes=frozenset(scopes or ("global", "context", "context_instance")),
+                    scope_read_allowed=scope_read_allowed,
+                )
         except product_secret_copy.ProductSecretCopyError as error:
             raise dependencies.http_error(
                 status_code=404,
@@ -699,6 +936,19 @@ def register_managed_secret_read_routes(
                 product_secret_copy.ProductSecretBindingMetadata.model_validate(binding)
                 for binding in visible_bindings
             ],
+            coverage=read_coverage(
+                record_store,
+                collections=("product_profiles", "secret_records", "secret_bindings"),
+                population="configured_runtime_copy_metadata_in_exclusive_declared_product_contexts",
+                authorization_complete=copy_authorization_complete,
+                exclusions=(
+                    "global_secrets",
+                    "historical_and_undeclared_lanes",
+                    "ambiguous_contexts",
+                    "other_integrations",
+                ),
+            ),
+            lane_binding_resolution=resolution,
         )
 
     app.add_api_route(

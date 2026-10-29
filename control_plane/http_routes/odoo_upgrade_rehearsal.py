@@ -13,6 +13,7 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
     REHEARSAL_PUBLIC_FAILURE_MESSAGES,
     OdooUpgradeRehearsalRequest,
     RehearsalPrerequisite,
+    REHEARSAL_RELEASED_RESERVATION_HEADERS,
     rehearsal_identity,
 )
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -31,6 +32,7 @@ from control_plane.http_routes.support import (
 from control_plane.odoo_upgrade_rehearsal import (
     OdooRehearsalAdapter,
     RehearsalRefused,
+    RehearsalPreparationReadRefused,
     rehearsal_inputs,
     require_rehearsal_transition,
     require_unaliased_rehearsal,
@@ -38,6 +40,7 @@ from control_plane.odoo_upgrade_rehearsal import (
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.dokploy import api
+from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 from control_plane.odoo_rehearsal_preflight import rehearsal_preflight
 
 
@@ -114,7 +117,14 @@ def register_odoo_upgrade_rehearsal_routes(
                 refuse(403, "authorization_denied")
             if not idempotency_key.strip() or not body.reviewed_plan_sha256:
                 refuse(400, "review_required")
-        elif not dependencies.authorization_allows(
+        if body.mode == "readback" and (
+            body.action == "validate-business"
+            and not idempotency_key.strip()
+            or idempotency_key.strip()
+            and not body.reviewed_plan_sha256
+        ):
+            refuse(400, "original_review_required")
+        if body.mode != "apply" and not dependencies.authorization_allows(
             identity=identity,
             action="operations.read",
             product=product,
@@ -146,6 +156,37 @@ def register_odoo_upgrade_rehearsal_routes(
             principal = previous.principal
         adapter = OdooRehearsalAdapter(root, record_store, product, body, principal, trace)
         try:
+            if body.action in {"retire-incomplete", "abandon-validation"} or (
+                body.action == "retire" and body.consumer_confirmation is not None
+            ):
+                from control_plane.odoo_incomplete_rehearsal_retirement import (
+                    IncompleteRehearsalRetirement,
+                )
+
+                if body.consumer_confirmation is not None and not idempotency_key.strip():
+                    refuse(400, "idempotency_key_required")
+                retirement = IncompleteRehearsalRetirement(adapter, idempotency_key)
+                if body.mode == "apply":
+                    return await run_provider_mutation(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=ROUTE.format(product=product),
+                        # Keep the original execute's held reservation intact
+                        # until native disposal and placement absence are proved.
+                        reservation_scope=retirement.reservation_scope(),
+                        idempotency_key=idempotency_key,
+                        request_fingerprint=retirement.request_fingerprint(),
+                        trace_id=trace,
+                        adapter=retirement,
+                        in_progress_message="The original incomplete rehearsal retirement is running.",
+                        reconcile_message="Retirement is uncertain. Preserve the original key and custody.",
+                    )
+                result = await run_in_worker_thread(
+                    retirement.readback if body.mode == "readback" else retirement.plan
+                )
+                return accepted_evidence_response(
+                    trace_id=trace, records={"rehearsal": body.rehearsal_id}, result=result
+                )
             if body.mode == "apply":
                 return await run_provider_mutation(
                     record_store=record_store,
@@ -194,7 +235,7 @@ def register_odoo_upgrade_rehearsal_routes(
                         "business_host_frozen",
                         "resources_preserved",
                     ):
-                        public_record.pop(field)
+                        public_record.pop(field, None)
                 result = {
                     **public_record,
                     **{
@@ -222,9 +263,40 @@ def register_odoo_upgrade_rehearsal_routes(
                     ),
                     "prepare_not_started": result.get("prepare_not_started", False),
                     **({"custody": result["custody"]} if result.get("custody") else {}),
+                    **{
+                        key: result[key]
+                        for key in (
+                            "child_failure",
+                            "retained_upgrade_logs",
+                            "business_validation",
+                            "pending_business_validation",
+                            "business_validation_postcheck_verified",
+                        )
+                        if result.get(key) is not None
+                    },
+                    **({"diagnostics_private": True} if result.get("diagnostics_private") else {}),
+                    **(
+                        {"retained_upgrade_logs_unavailable": True}
+                        if result.get("retained_upgrade_logs_unavailable")
+                        else {}
+                    ),
+                    **(
+                        {"attachment_mismatch": result["attachment_mismatch"]}
+                        if result.get("attachment_mismatch") is not None
+                        else {}
+                    ),
                     **(
                         {"capture_attachment_validation": result["capture_attachment_validation"]}
                         if result.get("capture_attachment_validation") is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "capture_database_reference_validation": result[
+                                "capture_database_reference_validation"
+                            ]
+                        }
+                        if result.get("capture_database_reference_validation") is not None
                         else {}
                     ),
                     **(
@@ -254,13 +326,26 @@ def register_odoo_upgrade_rehearsal_routes(
                     )
                 result = {
                     **adapter.public(record),
-                    "plan_sha256": record.binding_sha256,
+                    "plan_sha256": adapter.reviewed_binding(record),
                     "action": body.action,
                     "applied": False,
                 }
             return accepted_evidence_response(
                 trace_id=trace, records={"rehearsal": body.rehearsal_id}, result=result
             )
+        except RehearsalPreparationReadRefused as error:
+            refusal = dependencies.http_error(
+                status_code=error.status_code,
+                trace_id=trace,
+                code=error.code,
+                message=str(error),
+            )
+            refusal.headers = dict(REHEARSAL_RELEASED_RESERVATION_HEADERS)
+            raise refusal from None
+        except BridgeNetworkCapacityRefused as error:
+            raise dependencies.http_error(
+                status_code=409, trace_id=trace, code=error.code, message=str(error)
+            ) from None
         except RehearsalRefused as error:
             if error.prerequisite is not None:
                 raise dependencies.http_error(

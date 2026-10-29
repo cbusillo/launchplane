@@ -14,12 +14,13 @@ from control_plane.testing_generation_retirement import (
     ROUTE,
     TestingGenerationRetirementPlan,
     TestingGenerationRetirementRequest,
+    TestingGenerationCustodyInspection,
 )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("dry-run", "apply", "readback"))
+    parser.add_argument("mode", choices=("dry-run", "apply", "readback", "inspect"))
     parser.add_argument("--operator-helper", type=Path, required=True)
     for name in ("product", "context", "operation-id", "reason"):
         parser.add_argument(f"--{name}", required=True)
@@ -30,7 +31,7 @@ def main() -> int:
         parser.add_argument(f"--{name}")
     args = parser.parse_args()
     evidence = args.evidence_file.expanduser().resolve() if args.evidence_file else None
-    if args.mode != "readback" and evidence is None:
+    if args.mode not in {"readback", "inspect"} and evidence is None:
         parser.error("Dry-run and apply require private review evidence.")
     if evidence is not None and (
         evidence.is_relative_to(Path(__file__).resolve().parents[1])
@@ -62,7 +63,7 @@ def main() -> int:
             saved = json.loads(evidence.read_text())
             if saved["request"] != review_request:
                 raise ValueError("Review belongs to another request.")
-            expected = TestingGenerationRetirementPlan.model_validate(saved["plan"])
+            expected = TestingGenerationRetirementPlan.model_validate(saved["plan"], extra="ignore")
             if expected.applied:
                 raise ValueError("Apply requires an unapplied review.")
             body = draft.model_copy(
@@ -83,7 +84,31 @@ def main() -> int:
         trace = transport["public_trace_id"](response["trace_id"])
         if response["status"] != "accepted":
             raise ValueError("Retirement was not accepted.")
-        plan = TestingGenerationRetirementPlan.model_validate(response["result"])
+        if args.mode == "inspect":
+            inspection = TestingGenerationCustodyInspection.model_validate(
+                response["result"], extra="ignore"
+            )
+            if (
+                inspection.plan.product,
+                inspection.plan.context,
+                inspection.plan.operation_id,
+                inspection.plan.applied,
+            ) != (args.product, draft.context, draft.operation_id, True):
+                raise ValueError("Custody inspection belongs to another retained generation.")
+            if any(item.context != draft.context for item in inspection.reservations):
+                raise ValueError("Custody reservations belong to another context.")
+            print(
+                json.dumps(
+                    {
+                        "status": "observed",
+                        "mode": args.mode,
+                        "trace_id": trace,
+                        **inspection.model_dump(mode="json"),
+                    }
+                )
+            )
+            return 0
+        plan = TestingGenerationRetirementPlan.model_validate(response["result"], extra="ignore")
         if (plan.product, plan.context, plan.operation_id, plan.applied) != (
             args.product,
             draft.context,
@@ -109,7 +134,10 @@ def main() -> int:
             )
             if (
                 readback["status"] != "accepted"
-                or TestingGenerationRetirementPlan.model_validate(readback["result"]) != plan
+                or TestingGenerationRetirementPlan.model_validate(
+                    readback["result"], extra="ignore"
+                )
+                != plan
             ):
                 raise ValueError("Retirement readback differs from its receipt.")
         print(
