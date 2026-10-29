@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Literal, cast
 from unittest.mock import Mock, patch
 from tests.support.promotion_backup import stub_verified_promotion_backup
+from tests.support.lane_builds import LaneBuildGitHub
 from control_plane.workflows.production_promotion_backup import ProductionPromotionBackupGuard
 
 import click
@@ -1289,6 +1290,29 @@ def _store_with_production(
     return store
 
 
+def prepare_production_promotion_test(case: unittest.TestCase) -> LaneBuildGitHub:
+    stub_verified_promotion_backup(case, "control_plane.workflows.generic_web_promotion")
+    profile = _profile()
+    history = LaneBuildGitHub(
+        profile.repository,
+        profile.image.repository,
+        {"1" * 40: "sha256:" + "f" * 64, "2" * 40: "sha256:" + "b" * 64},
+    )
+    case.enterContext(
+        patch(
+            "control_plane.product_reconcile.resolve_build_provenance_transport",
+            return_value=history,
+        )
+    )
+    case.enterContext(
+        patch(
+            "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+            return_value=None,
+        )
+    )
+    return history
+
+
 class GenericWebProdPromotionRollbackTests(unittest.TestCase):
     def test_refused_provider_setting_stays_out_of_the_deployment_error(self) -> None:
         store = _store_with_production()
@@ -1309,27 +1333,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         self.assertEqual(provider.deployed_artifacts, [])
 
     def setUp(self) -> None:
-        stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
-        from tests.support.lane_builds import LaneBuildGitHub
-
-        profile = _profile()
-        self.build_history = LaneBuildGitHub(
-            profile.repository,
-            profile.image.repository,
-            {"1" * 40: "sha256:" + "f" * 64, "2" * 40: "sha256:" + "b" * 64},
-        )
-        self.enterContext(
-            patch(
-                "control_plane.product_reconcile.resolve_build_provenance_transport",
-                return_value=self.build_history,
-            )
-        )
-        self.enterContext(
-            patch(
-                "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
-                return_value=None,
-            )
-        )
+        self.build_history = prepare_production_promotion_test(self)
 
     @staticmethod
     def _promote(
