@@ -400,6 +400,8 @@ class FakePreviewProvider:
 
     def __init__(self) -> None:
         self.applied: list[tuple[str, int]] = []
+        self.targets: dict[tuple[str, str], str] = {}
+        self.allocations = 0
         self.omitted_integration_credential_keys: tuple[str, ...] = ()
 
     def hooks(self) -> PreviewProviderHooks:
@@ -415,10 +417,25 @@ class FakePreviewProvider:
         *,
         profile: LaunchplaneProductProfileRecord,
         request: OdooPreviewApplyInputsRequest,
+        record_store: Any = None,
         **_kwargs: object,
     ) -> dict[str, object]:
         slug = f"pr-{request.pr_number}"
         url = f"https://{slug}.example.test"
+        compose_name = request.preview_slug or f"cm-odoo-preview-{slug}"
+        creating = False
+        if record_store is not None and request.operation == "refresh":
+            from control_plane.workflows.launchplane import find_preview_record
+
+            preview = find_preview_record(
+                record_store=record_store,
+                context_name=profile.preview.context,
+                anchor_repo=profile.repository.partition("/")[2],
+                anchor_pr_number=request.pr_number,
+            )
+            creating = (profile.preview.context, compose_name) not in self.targets and (
+                preview is None or preview.state == "destroyed"
+            )
         return OdooPreviewApplyInputsResult(
             status="ready",
             product=profile.product,
@@ -447,19 +464,35 @@ class FakePreviewProvider:
                 repository=profile.repository,
                 preview_slug=slug,
                 preview_url=url,
-                compose_ref=f"cm-odoo-preview-{slug}",
-                compose_name=f"cm-odoo-preview-{slug}",
+                compose_ref=f"${{created.composeId:{compose_name}}}"
+                if creating
+                else self.targets.get((profile.preview.context, compose_name), compose_name),
+                compose_name=compose_name,
                 summary="ready",
             ),
             omitted_integration_credential_keys=self.omitted_integration_credential_keys,
             source=request.source,
         ).model_dump(mode="json")
 
+    def allocate_target(self, issued_plan: OdooPreviewApplyInputsResult) -> str:
+        plan = issued_plan.dry_run_plan
+        target = plan.compose_ref
+        if target.startswith("${created."):
+            self.allocations += 1
+            target = f"{plan.compose_name}-allocation-{self.allocations}"
+        self.targets[(issued_plan.context, plan.compose_name)] = target
+        return target
+
     def execute_apply(
         self, *, issued_plan: OdooPreviewApplyInputsResult, **_kwargs: object
     ) -> dict[str, object]:
         self.applied.append((issued_plan.operation, issued_plan.plan_request.pr_number))
         dry_run_plan = issued_plan.dry_run_plan
+        key = (issued_plan.context, dry_run_plan.compose_name)
+        if issued_plan.operation == "refresh":
+            target = self.allocate_target(issued_plan)
+        else:
+            target = self.targets.pop(key, dry_run_plan.compose_ref)
         return {
             "status": "pass",
             "operation": issued_plan.operation,
@@ -469,6 +502,7 @@ class FakePreviewProvider:
             "preview_url": dry_run_plan.preview_url,
             "domain_host": dry_run_plan.preview_url.removeprefix("https://"),
             "compose_name": dry_run_plan.compose_name,
+            "compose_id": target,
         }
 
     def observe_apply(self, **_kwargs: object) -> tuple[str, None, bool]:
@@ -6446,7 +6480,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile()["preview_result_status"], "pass")
         self.assertEqual(self.provider.applied, [("destroy", 5)])
 
-    def test_reopened_pr_is_not_held_by_an_exhausted_destroy(self) -> None:
+    def test_reopened_pr_retains_unknown_source_fence_after_exhausted_destroy(self) -> None:
         self.write_preview()
         self.github.pull_request["state"] = "closed"
         with patch.object(self.provider, "build_inputs", side_effect=ValueError("refused")):
@@ -6459,10 +6493,10 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.github.pull_request["state"] = "open"
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)
-        # The legacy generation has no exact build proof; reopening refreshes it.
-        self.assertEqual(self.reconcile()["action"], "apply")
-        self.request("preview", 5)
-        self.assertEqual(self.reconcile()["reason"], "already_serving")
+        refused = self.run_once()
+        self.assertEqual(refused.state, "failed")
+        self.assertEqual(refused.last_plan["last_failed_error_code"], "preview_provenance_refused")
+        self.assertFalse(self.provider.applied)
 
     def test_busy_destroy_does_not_consume_a_failure_attempt(self) -> None:
         from tests.test_product_review_status import _GitHub, _publisher

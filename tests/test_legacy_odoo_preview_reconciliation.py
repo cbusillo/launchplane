@@ -1137,7 +1137,7 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         operation_name: Literal["refresh", "destroy"] = "refresh",
         *,
         pr_number: int | None = None,
-        compose_name: str = "custom-physical-name",
+        compose_name: str = "",
         compose_id: str = "",
         creating: bool = False,
     ) -> Any:
@@ -1149,6 +1149,9 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         )
         from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsRequest
 
+        compose_name = (
+            compose_name or f"custom-physical-pr-{pr_number or self.preview.anchor_pr_number}"
+        )
         planned = fake.build_inputs(
             profile=self.profile,
             request=OdooPreviewApplyInputsRequest(
