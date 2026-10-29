@@ -43,7 +43,58 @@ def _app(
     return app
 
 
+def _pattern_app(
+    pattern: str,
+    *,
+    route_class: type[APIRoute] = PreparedAPIRoute,
+    metadata: object | None = None,
+) -> FastAPI:
+    app = FastAPI()
+    app.router.route_class = route_class
+    annotation: Any = Annotated[str, Query(pattern=pattern)]
+    if metadata is not None:
+        annotation = Annotated[annotation, metadata]
+
+    async def read(value: annotation) -> dict[str, str]:
+        return {"value": value}
+
+    app.add_api_route("/pattern", read)
+    return app
+
+
 class PreparedRouteIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_equal_public_pattern_metadata_reuses_preparation(self) -> None:
+        _pattern_app("a+")
+        with patch.object(APIRoute, "__init__", side_effect=AssertionError("route rebuilt")):
+            equal = _pattern_app("a+")
+        self.assertEqual((await request(equal, "GET", "/pattern?value=aaa")).status_code, 200)
+
+        different = _pattern_app("b+")
+        baseline = _pattern_app("b+", route_class=APIRoute)
+        self.assertEqual(different.openapi(), baseline.openapi())
+        for value in ("bbb", "aaa"):
+            reference = await request(baseline, "GET", f"/pattern?value={value}")
+            observed = await request(different, "GET", f"/pattern?value={value}")
+            self.assertEqual(
+                (observed.status_code, observed.json()), (reference.status_code, reference.json())
+            )
+
+        class CustomMetadata:
+            def __eq__(self, other: object) -> bool:
+                return isinstance(other, CustomMetadata)
+
+        _pattern_app("c+", metadata=CustomMetadata())
+        rebuilt: list[str] = []
+        original = APIRoute.__init__
+
+        def prepare(route: APIRoute, path: str, *args: Any, **kwargs: Any) -> None:
+            rebuilt.append(path)
+            original(route, path, *args, **kwargs)
+
+        with patch.object(APIRoute, "__init__", prepare):
+            _pattern_app("c+", metadata=CustomMetadata())
+        self.assertEqual(rebuilt, ["/pattern"])
+
     async def test_warm_route_serves_current_records_without_repeating_preparation(self) -> None:
         _app({"record": "warm-up"})
         with patch.object(APIRoute, "__init__", side_effect=AssertionError("route rebuilt")):

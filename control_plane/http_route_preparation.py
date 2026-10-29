@@ -13,7 +13,11 @@ from fastapi.dependencies.utils import get_typed_signature, get_typed_return_ann
 from fastapi.params import Depends
 from fastapi.routing import APIRoute, request_response
 from fastapi.utils import generate_unique_id
+from pydantic import Field
 from pydantic.fields import FieldInfo
+
+
+_PATTERN_METADATA_TYPE = type(Field(pattern="").metadata[0])
 
 
 class _UncacheableRoute(Exception):
@@ -41,6 +45,8 @@ def _value_key(value: Any, bindings: list[Callable[..., Any]]) -> Any:
             _value_key(value.asdict(), bindings),
             _value_key(extra_attributes, bindings),
         )
+    if type(value) is _PATTERN_METADATA_TYPE:
+        return type(value), _value_key(vars(value), bindings)
     if isinstance(value, DefaultPlaceholder):
         return type(value), value is _Unset, _value_key(value.value, bindings)
     origin = get_origin(value)
