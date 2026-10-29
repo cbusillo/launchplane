@@ -8,7 +8,7 @@ import click
 
 from control_plane import secrets
 from control_plane.npmplus import NpmplusClient, NpmplusCredentials
-from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
+from control_plane.runtime_environments import SiteRuntimeEnvironmentStore
 from control_plane.service_runtime_settings import SERVICE_CONTEXT
 from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyRequest,
@@ -23,12 +23,8 @@ NPMPLUS_IDENTITY_ENV_KEY = "LAUNCHPLANE_NPMPLUS_IDENTITY"
 NPMPLUS_SECRET_ENV_KEY = "LAUNCHPLANE_NPMPLUS_SECRET"
 
 
-class IngressCredentialStore(RuntimeEnvironmentRecordStore, secrets.SecretReadStore, Protocol):
-    pass
-
-
 def build_npmplus_ingress_client_from_records(
-    *, record_store: IngressCredentialStore
+    *, record_store: SiteRuntimeEnvironmentStore
 ) -> NpmplusClient:
     records = tuple(
         record

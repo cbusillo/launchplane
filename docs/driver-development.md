@@ -283,27 +283,10 @@ provider adapter constructs its client from environment keys named
 `LAUNCHPLANE_NPMPLUS_SECRET`; do not commit real values or local admin
 overrides.
 
-`build_npmplus_ingress_client_from_records(record_store=...)` prepares the
-replacement reader. It requires exactly one `RuntimeEnvironmentRecord` with
-`scope=context`, `context=launchplane` and no instance; its endpoint uses the
-same base-URL key above. Identity and secret each require one configured
-`launchplane_service` binding in that exact context, a configured context-scoped
-write-only secret record, and its matching current encrypted version. Global,
-instance, other-integration and ambiguous bindings cannot supply credentials.
-The reader does not authenticate, write records, or fall back to host values.
-Service credentials are excluded from product runtime rendering.
-
-This reader is preparation, not active default behavior. Existing ingress
-consumers and self-deploy seeds remain until the existing credential can be
-adopted through a qualified write-only service path from independent custody,
-or a separately reviewed targeted service transfer. The service settings route
-does not yet declare the endpoint key, and product-config provider adoption
-does not support `launchplane_service`. Do not use direct DB writes, extract
-credentials, or create a replacement. Qualify adoption and rollback before
-switching the default ingress provider, testing private/public ingress,
-application private-route and private-health consumers together. Only then
-retire self-deploy seeds; the Director deletes GitHub copies after the owning
-migration issue records supported readback and rollback proof.
+`build_npmplus_ingress_client_from_records(record_store=...)` prepares a
+service-record-backed replacement without changing the default reader. See
+[the NPMplus migration](https://github.com/cbusillo/launchplane/issues/3510)
+for adoption, consumer activation and settings-retirement prerequisites.
 
 Ingress audit records must persist the adapter's provider identity explicitly;
 do not rely on a provider-specific model default for admin evidence.

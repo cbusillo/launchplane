@@ -142,7 +142,7 @@ class RecordIngressProviderTests(unittest.TestCase):
     def test_service_credentials_never_enter_product_runtime_render(self) -> None:
         rendered = resolve_site_runtime_environment_from_store(
             record_store=self.store,
-            context_name="product-site",
+            context_name=SERVICE_CONTEXT,
             instance_name="testing",
             target_environment={},
         )
