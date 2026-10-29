@@ -1,5 +1,4 @@
 from pathlib import Path
-import hashlib
 import base64
 import json
 from typing import Any
@@ -12,6 +11,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
 )
 from control_plane.contracts.secret_record import SecretBinding
+from control_plane.odoo_testing_usage import MAX_CREDENTIAL_CANDIDATES, credential_digest
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 from control_plane.odoo_preview_apply_http import (
@@ -171,8 +171,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         if frame.get("resources_qualified"):
             nonce = kwargs["payload"]["preview_spec"]["credential_nonce"]
             frame["credential_hashes"] = [
-                hashlib.sha256((nonce + value).encode()).hexdigest()
-                for value in self.preview_candidates
+                credential_digest(nonce, value) for value in self.preview_candidates
             ]
         kwargs["receive"](frame)
 
@@ -185,6 +184,45 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         spec = self.remote.call_args.kwargs["payload"]["preview_spec"]
         self.assertNotIn("production_credential_hashes", spec)
         self.assertNotIn("private-production", str(spec))
+
+    async def test_shared_metadata_does_not_count_as_a_production_credential(self) -> None:
+        for production, preview in (
+            ("postgresql://u:private-token@db/x?sslmode=require", "require"),
+            (
+                json.dumps({"private_key": "private-token", "token_uri": "https://auth.invalid"}),
+                "https://auth.invalid",
+            ),
+        ):
+            with self.subTest(production=production):
+                self.production["SERVICE_SECRET"] = production
+                self.preview_candidates = [preview]
+                response = await self.collect()
+                self.assertEqual(response.status_code, 202, response.text)
+
+    async def test_held_preview_keeps_the_hold_as_its_usage_evidence(self) -> None:
+        from control_plane.contracts.dokploy_target_record import (
+            DokployTargetPolicies,
+            DokployTargetStaffTestingHold,
+        )
+
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="cm",
+                instance=self.issued.preview_slug,
+                updated_at=self.profile.updated_at,
+                policies=DokployTargetPolicies(
+                    staff_testing_hold=DokployTargetStaffTestingHold(reason="Staff trial")
+                ),
+            )
+        )
+        response = await self.collect()
+        self.assertEqual(response.status_code, 202, response.text)
+        safety = self.store.read_disposable_lane_safety(
+            self.profile.product, "cm", self.issued.preview_slug
+        )
+        assert safety is not None
+        self.assertEqual(safety.usage, "in_use")
+        self.assertTrue(safety.usage_evidence.startswith("service:staff-testing-hold:"), safety)
 
     async def test_other_integrations_and_encoded_provider_secrets_are_compared(self) -> None:
         secret = "private-extra-production-token"
@@ -231,7 +269,24 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         ).decode()
         response = await self.collect()
         self.assertEqual(response.status_code, 409, response.text)
-        self.assertIn("preview_production_credentials_shared", response.text)
+        self.assertIn("preview_production_credentials_shared:custom.api_token", response.text)
+
+    async def test_credential_inventory_overflow_refuses_without_publication(self) -> None:
+        self.production.update(
+            {
+                f"EXTRA_TOKEN_{index}": f"private-{index}"
+                for index in range(MAX_CREDENTIAL_CANDIDATES)
+            }
+        )
+        response = await self.collect()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("preview_production_credential_inventory_unavailable", response.text)
+        self.remote.assert_not_called()
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, "cm", self.issued.preview_slug
+            )
+        )
 
     async def test_production_status_ticks_do_not_invalidate_credential_authority(self) -> None:
         def status_tick(**kwargs: Any) -> None:

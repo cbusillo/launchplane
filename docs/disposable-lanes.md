@@ -19,17 +19,26 @@ prefix or a different generation cannot select the recipient.
 Collection reuses the testing usage reader for recent successful sign-ins and
 authenticated session files, and the shared copy-runtime probe for actual
 mounts, backing storage, network membership and ports. It checks the running
-web and runner identities, compares their actual environments and the database
-container against current managed and provider production credentials, and runs
+web and runner identities, compares all container environments and configuration
+parameter values against current managed and provider production credentials, and runs
 the existing integration readback with no preview integration allowances.
 The host returns per-read salted digests of preview credential candidates to
 the service. Production values and digests stay inside the service. The same
 candidate reader handles URLs, JSON and encoded payloads on both sides. The
 comparison includes all configured production-context integrations, provider
-credentials and secret-backed configuration parameters. Credential digests,
+credentials, including literal and secret-backed configuration parameters.
+Production candidates retain whole managed secrets and credential-named fragments,
+so shared URL or JSON metadata is not treated as a shared credential. A collision
+names only the production key. Database parameters are read in a read-only
+transaction through the pinned database image; other database tables, such as
+user API keys, are outside this inventory. Credential digests,
 user identities, session identifiers and provider details never reach the
 API response. Authenticated sessions and recent sign-ins are independent
-boolean facts; this read creates no login or Odoo session.
+boolean facts; this read creates no login or Odoo session. Under Director decision
+Q1053, session and integration observations use the PR image's Python at the
+same trust as today's preview-deploy gate. These are not independent of the PR
+image. Host resource, environment, database-parameter and runtime-identity checks
+remain independent; no second executor is added.
 
 The reader rechecks provider, runtime, completed-operation and production
 authority before publication. Missing or changing facts refuse with a specific

@@ -1,7 +1,4 @@
-from dataclasses import dataclass, replace
-import base64
-import hashlib
-import json
+from dataclasses import dataclass
 import os
 from pathlib import Path
 
@@ -17,7 +14,6 @@ from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.integration_readback import (
     INTEGRATION_READBACK_PROGRAM,
-    IntegrationFamily,
     integration_readback_policy,
 )
 from control_plane.odoo_preview_apply_http import build_odoo_preview_runtime_identity
@@ -29,7 +25,9 @@ from control_plane.odoo_runtime_reads import (
     select_preview_runtime,
 )
 from control_plane.odoo_testing_usage import (
+    MAX_CREDENTIAL_CANDIDATES,
     OdooTestingUsage,
+    credential_digest,
     credential_candidates,
     read_odoo_testing_usage,
 )
@@ -145,9 +143,16 @@ def read_preview_inspection_authority(
     )
 
 
+@dataclass(frozen=True)
+class ProductionCredentialInventory:
+    binding_sha256: str
+    candidates: frozenset[tuple[str, str]]
+    volumes: frozenset[str]
+
+
 def production_credentials(
     store: PostgresRecordStore, *, product: str, root: Path
-) -> dict[str, str]:
+) -> ProductionCredentialInventory:
     profile = store.read_product_profile_record(product)
     lanes = [lane for lane in profile.lanes if lane.instance == "prod"]
     if len(lanes) != 1:
@@ -210,36 +215,22 @@ def production_credentials(
         not current.get(key) for key in ("ODOO_DATA_VOLUME", "ODOO_DB_VOLUME", "ODOO_LOG_VOLUME")
     ):
         raise PreviewQualificationMissing("preview_production_resource_identity_unavailable")
-    encoded_values: dict[str, str] = {}
-    encoded = current.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "")
-    if encoded:
-        encoded_payload = json.loads(base64.b64decode(encoded, validate=True))
-        for item in [
-            *encoded_payload.get("config_parameters", []),
-            *encoded_payload.get("addon_settings", []),
-        ]:
-            key = str(item.get("key") or item.get("setting") or "")
-            value = item.get("value", {}).get("value")
-            if isinstance(value, str) and looks_like_credential(key, value):
-                encoded_values[f"encoded:{key}"] = value
     try:
-        overrides = store.read_odoo_instance_override_record(
-            context_name=context, instance_name="prod"
+        candidates = {(key, value) for key, value in managed.items() if value}
+        candidates.update(
+            (key, value)
+            for values in (managed, current)
+            for key, value in credential_candidates(values)
+            if key.lower() != "token_uri" and looks_like_credential(key, value)
         )
-    except FileNotFoundError:
-        overrides = None
-    parameter_keys = (
-        sorted(
-            item.key
-            for item in overrides.config_parameters
-            if item.value.source == "secret_binding"
-        )
-        if overrides
-        else []
-    )
-    return {
-        "parameters:keys": json.dumps(parameter_keys),
-        "target:binding": canonical_json_sha256(
+        if len(candidates) > MAX_CREDENTIAL_CANDIDATES:
+            raise ValueError("credential_inventory_unavailable")
+    except ValueError:
+        raise PreviewQualificationMissing(
+            "preview_production_credential_inventory_unavailable"
+        ) from None
+    return ProductionCredentialInventory(
+        canonical_json_sha256(
             {
                 "target": target.model_dump(mode="json"),
                 "id": target_id.model_dump(mode="json"),
@@ -258,13 +249,13 @@ def production_credentials(
                         "isolatedDeployment",
                     )
                 },
-                "overrides": overrides.model_dump(mode="json") if overrides else None,
             }
         ),
-        **{f"managed:{key}": value for key, value in managed.items() if value},
-        **{f"provider:{key}": value for key, value in current.items() if value},
-        **encoded_values,
-    }
+        frozenset(candidates),
+        frozenset(
+            current[key] for key in ("ODOO_DATA_VOLUME", "ODOO_DB_VOLUME", "ODOO_LOG_VOLUME")
+        ),
+    )
 
 
 def collect_odoo_preview_qualification(
@@ -277,24 +268,11 @@ def collect_odoo_preview_qualification(
         checkpoint = "preview_production_credentials_unavailable"
         credentials = production_credentials(store, product=identity.product, root=root)
         environment = preview_resource_environment(authority.target.target_name)
-        if set(environment.values()) & {
-            value
-            for key, value in credentials.items()
-            if key.startswith("provider:") and key.endswith("_VOLUME")
-        }:
+        if set(environment.values()) & credentials.volumes:
             raise PreviewQualificationMissing("preview_production_resources_shared")
         policy = integration_readback_policy(
             instance_name="preview", policies=DokployTargetPolicies(), workflow_mode="restore"
         )
-        parameter_keys = tuple(json.loads(credentials["parameters:keys"]))
-        if parameter_keys:
-            policy = replace(
-                policy,
-                families=(
-                    *policy.families,
-                    IntegrationFamily("production_credentials", config_parameters=parameter_keys),
-                ),
-            )
         checkpoint = "preview_usage_and_resources_unavailable"
         credential_nonce = os.urandom(32).hex()
         usage = read_odoo_testing_usage(
@@ -321,19 +299,9 @@ def collect_odoo_preview_qualification(
         )
         if usage.usage == "unknown" or not usage.resources_qualified:
             raise PreviewQualificationMissing("preview_qualification_missing:" + usage.reason_code)
-        candidates = credential_candidates(
-            [
-                value
-                for key, value in credentials.items()
-                if key.startswith(("managed:", "encoded:"))
-                or key.startswith("provider:")
-                and looks_like_credential(key, value)
-            ]
-        )
-        if {
-            hashlib.sha256((credential_nonce + value).encode()).hexdigest() for value in candidates
-        }.intersection(usage.credential_hashes):
-            raise PreviewQualificationMissing("preview_production_credentials_shared")
+        for key, value in sorted(credentials.candidates):
+            if credential_digest(credential_nonce, value) in usage.credential_hashes:
+                raise PreviewQualificationMissing("preview_production_credentials_shared:" + key)
         checkpoint = "preview_qualification_authority_changed"
         assert_selection_current(store, authority.selection)
         if (

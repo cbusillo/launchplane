@@ -24050,8 +24050,6 @@ def create_launchplane_fastapi_app(
                     resource_facts = {
                         "production_resources": "isolated",
                         "isolation_evidence": preview_reference,
-                        "usage_evidence": preview_reference
-                        + (":" + observed_at.isoformat() if facts.usage == "in_use" else ""),
                     }
                 if (
                     profile.driver_id in {"odoo", "generic-web"}

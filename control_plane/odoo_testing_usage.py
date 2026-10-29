@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 import base64
 import inspect
+import hashlib
 import json
 from urllib.parse import parse_qsl, unquote, urlsplit
 from pathlib import Path
@@ -15,7 +16,11 @@ from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.dokploy import api, source
-from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH, ODOO_WEB_START_COMMAND
+from control_plane.dokploy.compose import (
+    ODOO_DATABASE_IMAGE,
+    ODOO_WEB_CONFIG_PATH,
+    ODOO_WEB_START_COMMAND,
+)
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceAuthorizationDenied
 
 
@@ -259,34 +264,46 @@ def odoo_usage_container_program(instance: str) -> str:
 ODOO_TESTING_USAGE_CONTAINER_PROGRAM = odoo_usage_container_program("testing")
 
 
-def credential_candidates(values: list[str]) -> set[str]:
-    candidates: set[str] = set()
-    pending: list[object] = list(values)
+MAX_CREDENTIAL_CANDIDATES = 4096
+
+
+def credential_digest(nonce: str, value: str) -> str:
+    return hashlib.sha256((nonce + value).encode()).hexdigest()
+
+
+def credential_candidates(values: dict[str, str]) -> set[tuple[str, str]]:
+    candidates: set[tuple[str, str]] = set()
+    pending: list[tuple[str, object]] = list(values.items())
     while pending:
-        value = pending.pop()
+        name, value = pending.pop()
         if isinstance(value, dict):
-            pending.extend(value.values())
+            setting = value.get("key") or value.get("setting")
+            literal = value.get("value")
+            if isinstance(setting, str) and isinstance(literal, dict):
+                pending.append((setting, literal.get("value")))
+            else:
+                pending.extend(value.items())
             continue
         if isinstance(value, list):
-            pending.extend(value)
+            pending.extend((name, item) for item in value)
             continue
-        if not isinstance(value, str) or not value or value in candidates:
+        if not isinstance(value, str) or not value or (name, value) in candidates:
             continue
-        if len(candidates) >= 4096 or len(value) > 1024 * 1024:
+        if len(candidates) >= MAX_CREDENTIAL_CANDIDATES or len(value) > 1024 * 1024:
             raise ValueError("credential_inventory_unavailable")
-        candidates.add(value)
+        candidates.add((name, value))
         try:
             address = urlsplit(value)
         except ValueError:
             address = urlsplit("")
         password = address.password
         if password:
-            pending.append(unquote(password))
-        pending.extend(item for _, item in parse_qsl(address.query))
+            pending.append(("password", unquote(password)))
+        pending.extend(parse_qsl(address.query))
         for encoded in (False, True):
             try:
                 pending.append(
-                    json.loads(base64.b64decode(value, validate=True) if encoded else value)
+                    (name, json.loads(base64.b64decode(value, validate=True) if encoded else value))
                 )
             except (ValueError, UnicodeError):
                 continue
@@ -295,6 +312,8 @@ def credential_candidates(values: list[str]) -> set[str]:
 
 ODOO_TESTING_USAGE_HOST_PROGRAM = (
     COPY_RUNTIME_INSPECTION_LIBRARY
+    + f"MAX_CREDENTIAL_CANDIDATES={MAX_CREDENTIAL_CANDIDATES}\n"
+    + inspect.getsource(credential_digest)
     + inspect.getsource(credential_candidates)
     + r"""
 import base64,hashlib,json,subprocess,sys
@@ -302,6 +321,7 @@ from urllib.parse import parse_qsl,unquote,urlsplit
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 prefix=sys.argv[2]
 START_COMMAND=__START_COMMAND__
+DATABASE_IMAGE=__DATABASE_IMAGE__
 checkpoint='container_inventory_unavailable'
 
 class UsageUnavailable(ValueError):
@@ -365,12 +385,15 @@ def one_inspection(identifier):
 def preview_resources():
     resource_spec=spec['preview_spec']
     inspected=inspect_copy_runtime(resource_spec,expected_instance='preview')
+    database_id,database=inspected['database']
+    if database['Config']['Image']!=DATABASE_IMAGE:
+        raise CopyReadbackRefused(ReadbackPredicate.IMAGE)
     candidates=set()
     snapshots={}
     for service,(_,container) in inspected.items():
         environment=dict(item.split('=',1) for item in container['Config']['Env'] if '=' in item)
         try:
-            candidates.update(credential_candidates(list(environment.values())))
+            candidates.update(value for _,value in credential_candidates(environment))
         except ValueError:
             raise UsageUnavailable('credential_inventory_unavailable')
         if any(environment.get(key) for key in resource_spec['forbidden_credential_keys']):
@@ -379,7 +402,20 @@ def preview_resources():
             raise CopyReadbackRefused(ReadbackPredicate.RUNTIME_IDENTITY)
         snapshots[service]={key:container.get(key) for key in ('Id','Image','Config','Mounts','NetworkSettings','HostConfig')}
         snapshots[service]['State']={key:container['State'].get(key) for key in ('Running','StartedAt','FinishedAt','Restarting','Paused')}
-    hashes=sorted(hashlib.sha256((resource_spec['credential_nonce']+value).encode()).hexdigest() for value in candidates)
+    sql="BEGIN READ ONLY; SET LOCAL statement_timeout=10000; SELECT COALESCE(json_agg(json_build_array(key,value)), '[]'::json) FROM ir_config_parameter; ROLLBACK;"
+    try:
+        output=docker('exec','-i',database_id,'sh','-c','psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"','_',resource_spec['database_name'],stdin=sql.encode())
+        parameters=json.loads(output)
+        if not isinstance(parameters,list) or any(not isinstance(row,list) or len(row)!=2 or not all(isinstance(value,str) for value in row) for row in parameters):
+            raise ValueError('credential_inventory_unavailable')
+        candidates.update(value for _,value in credential_candidates(dict(parameters)))
+        if len(candidates)>MAX_CREDENTIAL_CANDIDATES:
+            raise ValueError('credential_inventory_unavailable')
+    except subprocess.SubprocessError:
+        raise CopyReadbackRefused(ReadbackPredicate.DATABASE_READ)
+    except ValueError:
+        raise UsageUnavailable('credential_inventory_unavailable')
+    hashes=sorted(credential_digest(resource_spec['credential_nonce'],value) for value in candidates)
     return snapshots,hashes
 
 try:
@@ -424,7 +460,9 @@ except UsageUnavailable as error:
     print(prefix+json.dumps({'type':'complete','unavailable':True,'reason_code':str(error)}),flush=True)
 except Exception:
     print(prefix+json.dumps({'type':'complete','unavailable':True,'reason_code':checkpoint}),flush=True)
-""".replace("__START_COMMAND__", repr(ODOO_WEB_START_COMMAND))
+""".replace("__START_COMMAND__", repr(ODOO_WEB_START_COMMAND)).replace(
+        "__DATABASE_IMAGE__", repr(ODOO_DATABASE_IMAGE)
+    )
 )
 
 
@@ -532,7 +570,7 @@ def read_odoo_testing_usage(
         if not isinstance(hashes, list):
             return OdooTestingUsage(reason_code="probe_result_invalid")
         if preview_spec is not None and (
-            not 0 < len(hashes) <= 4096
+            not 0 < len(hashes) <= MAX_CREDENTIAL_CANDIDATES
             or any(
                 not isinstance(value, str)
                 or len(value) != 64

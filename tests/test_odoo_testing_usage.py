@@ -242,7 +242,9 @@ class SessionInventoryTests(unittest.TestCase):
             "smtps://user:" + secret + "@example.invalid",
             "https://example.invalid?token=" + secret,
         ):
-            self.assertIn(secret, credential_candidates([value]))
+            self.assertIn(
+                secret, {fragment for _, fragment in credential_candidates({"fixture": value})}
+            )
 
     def test_absent_process_is_readable_before_a_missing_serving_configuration(self) -> None:
         self.driver.connect = Mock()  # type: ignore[attr-defined]

@@ -36,7 +36,11 @@ from control_plane.dokploy.source import (
     DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS,
     DokployTargetDefinition,
 )
-from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY, render_odoo_raw_compose_file
+from control_plane.dokploy.compose import (
+    ODOO_DATABASE_IMAGE,
+    ODOO_DATABASE_DATA_DIRECTORY,
+    render_odoo_raw_compose_file,
+)
 from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
 from control_plane.preview_filestore import (
     PREPARE_PREVIEW_FILESTORE_PROGRAM,
@@ -44,6 +48,7 @@ from control_plane.preview_filestore import (
     PreviewRestoreDisposalRequired,
     prepare_preview_filestore,
 )
+from control_plane.odoo_testing_usage import MAX_CREDENTIAL_CANDIDATES, credential_digest
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 
 
@@ -57,6 +62,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         changed: bool = False,
         health_tick: bool = False,
         stopped: bool = False,
+        parameters: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         from control_plane.dokploy.compose import ODOO_WEB_START_COMMAND
         from control_plane.odoo_testing_usage import ODOO_TESTING_USAGE_HOST_PROGRAM
@@ -112,7 +118,10 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             )
             if arguments[1] != "exec":
                 return self.command(arguments, **kwargs)
-            if kwargs.get("input") == b"fixture-integrations":
+            if "psql" in " ".join(arguments):
+                self.assertIn("BEGIN READ ONLY", kwargs["input"].decode())
+                frame_bytes = json.dumps(list((parameters or {}).items())).encode()
+            elif kwargs.get("input") == b"fixture-integrations":
                 frame_bytes = (
                     b"integration_readback_ok=true\n"
                     if integration_ok
@@ -195,9 +204,34 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                     self.assertIs(result["authenticated_sessions"], True)
                     if scenario == "credentials":
                         self.assertIn(
-                            hashlib.sha256(b"fixture-nonceprivate-production-password").hexdigest(),
+                            credential_digest("fixture-nonce", "private-production-password"),
                             result["credential_hashes"],
                         )
+
+    def test_preview_parameter_values_are_inventoried_only_on_the_pinned_database_image(
+        self,
+    ) -> None:
+        result = self.preview_usage(parameters={"custom.api_token": "private-production-password"})
+        self.assertIn(
+            credential_digest("fixture-nonce", "private-production-password"),
+            result["credential_hashes"],
+        )
+        self.containers["database"]["Config"]["Image"] = "untrusted.invalid/database:latest"
+        result = self.preview_usage()
+        self.assertTrue(result["unavailable"])
+        self.assertEqual(result["reason_code"], "resource_" + ReadbackPredicate.IMAGE)
+
+    def test_preview_inventory_bound_applies_to_the_combined_containers_and_parameters(
+        self,
+    ) -> None:
+        for index, container in enumerate(self.containers.values()):
+            container["Config"]["Env"].extend(
+                f"VALUE_{number}=fixture-{index}-{number}"
+                for number in range(MAX_CREDENTIAL_CANDIDATES // 3)
+            )
+        result = self.preview_usage(parameters={"custom.api_token": "private-production-password"})
+        self.assertTrue(result["unavailable"])
+        self.assertEqual(result["reason_code"], "credential_inventory_unavailable")
 
     def setUp(self) -> None:
         temporary = self.enterContext(TemporaryDirectory())
@@ -289,6 +323,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             }
             for role in ("database", "web", "script-runner")
         }
+        self.containers["database"]["Config"]["Image"] = ODOO_DATABASE_IMAGE
         self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.overlay)}}
         self.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"] = {}
         self.private = self.data.parent / "launchplane-preview-filestore"
