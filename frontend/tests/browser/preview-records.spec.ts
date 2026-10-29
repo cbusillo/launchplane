@@ -1,5 +1,6 @@
 import { waitForState, expect, test, type Page } from "./state";
 import type { PreviewGenerationRecord, PreviewRecord, ProductReconcileRequestView } from "../../src/generated/openapi.ts";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 async function setup(page: Page) {
   await page.goto("/ui/products?fixture=products");
@@ -82,6 +83,35 @@ async function setup(page: Page) {
     delay: () => { delayFirst = true; }, release: () => release?.(), delayed: () => Boolean(release) };
 }
 
+test("provider previews expose sleep gaps and discard expired sleep evidence", { tag: "@layout" }, async ({ page }, testInfo) => {
+  const fixture = await setup(page);
+  const now = new Date(await page.evaluate(() => Date.now()));
+  fixture.product.preview.trust_state = "verified";
+  const provenance = { ...fixture.product.preview.provenance, freshness_status: "verified" as const,
+    refreshed_at: now.toISOString(), stale_after: new Date(now.getTime() + 60_000).toISOString() };
+  fixture.product.preview.provenance = provenance;
+  fixture.product.preview.inventory = { status: "nonempty", observed_count: 3,
+    observed_slugs: ["pr-28", "pr-45", "pr-99"], provenance,
+    sleep_observations: [
+      { slug: "pr-28", state: "awake", reason: "" },
+      { slug: "pr-45", state: "asleep", reason: "" },
+      { slug: "pr-99", state: "cannot_sleep", reason: "The idle gateway is missing." },
+    ] };
+  await page.goto(`/ui/products/${fixture.product.product}`);
+  const sleep = page.getByRole("region", { name: "Observed preview sleep state" });
+  await expect(sleep.getByRole("listitem").filter({ hasText: "pr-28" })).toContainText("Awake");
+  await expect(sleep.getByRole("listitem").filter({ hasText: "pr-45" })).toContainText("Asleep");
+  await expect(sleep.getByRole("listitem").filter({ hasText: "pr-99" })).toContainText("Cannot sleep:");
+  await expect(sleep).toContainText(fixture.product.preview.inventory.sleep_observations![2].reason);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await sleep.screenshot({ path: smokeArtifact(`preview-sleep-${testInfo.project.name}.png`) });
+  await page.clock.fastForward(60_001);
+  await expect(sleep).not.toContainText("Asleep");
+  await expect(sleep).not.toContainText("Awake");
+  await expect(sleep).toContainText("Sleep status unknown");
+  expect(fixture.mutations).toEqual([]);
+});
+
 test("recorded previews show pending, held cleanup and distinct serving/latest proof", async ({ page }, testInfo) => {
   const fixture = await setup(page);
   await page.goto(`/ui/products/${fixture.product.product}`);
@@ -102,7 +132,7 @@ test("recorded previews show pending, held cleanup and distinct serving/latest p
   await expect(serving).not.toContainText(fixture.latest.anchor_summary.head_sha);
   await expect(inventory).not.toContainText("RAW PROVIDER LOG");
   await latest.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `../tmp/browser-smoke/preview-records-generations-${testInfo.project.name}.png` });
+  await page.screenshot({ path: smokeArtifact(`preview-records-generations-${testInfo.project.name}.png`) });
   fixture.mode("fail");
   await inventory.getByRole("button", { name: "Refresh preview evidence" }).click();
   await expect(inventory).toContainText("Showing the last recorded response");
@@ -120,7 +150,7 @@ test("recorded previews show pending, held cleanup and distinct serving/latest p
   await expect(inventory.getByRole("link", { name: "Inspect lifecycle activity" })).toHaveAttribute("href", `/ui/products/${fixture.product.product}/activity`);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.getByRole("heading", { name: "Inspect individual previews" }).scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `../tmp/browser-smoke/preview-records-blocked-${testInfo.project.name}.png`, fullPage: true });
+  await page.screenshot({ path: smokeArtifact(`preview-records-blocked-${testInfo.project.name}.png`), fullPage: true });
   expect(fixture.mutations).toEqual([]);
   expect(fixture.pageErrors).toEqual([]);
 });

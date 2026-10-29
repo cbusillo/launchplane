@@ -20,6 +20,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 )
 from control_plane.contracts.promotion_record import ENV_KEY_NAMES_MAX, env_key_names
 from control_plane.contracts.testing_replacement_recovery import TestingReplacementRecoveryJournal
+from control_plane.contracts.text_fields import require_text as _normalize_required
 
 OdooStableTargetReplacementOperationStatus = Literal[
     "pending",
@@ -192,6 +193,13 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
                 "Schema-v2 Odoo stable target replacement operation requires authorization provenance."
             )
         if self.authorization is not None:
+            if (
+                self.authorization.grant == "director_testing_rebuild"
+                and not self.is_native_testing_rebuild
+            ):
+                raise ValueError(
+                    "Director testing rebuild provenance requires the native lifecycle."
+                )
             if self.schema_version != 2:
                 raise ValueError(
                     "Odoo target replacement authorization provenance requires schema version 2."
@@ -315,10 +323,3 @@ def odoo_replacement_original_identity(
         record.request_fingerprint,
         record.request.model_dump(mode="json"),
     )
-
-
-def _normalize_required(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized

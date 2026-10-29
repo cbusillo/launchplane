@@ -18,11 +18,8 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     build_merge_train_batch_candidate_record,
 )
-from control_plane.merge_train_github import (
-    GitHubMergeTrainClient,
-    GitHubMergeTrainSnapshotReader,
-    RecordingMergeTrainGitHubTransport,
-)
+from control_plane.merge_train_github import GitHubMergeTrainClient, GitHubMergeTrainSnapshotReader
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.product_config_authority_events import request_product_config_authority_event
 from control_plane.github_required_checks import CheckRequirement
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record

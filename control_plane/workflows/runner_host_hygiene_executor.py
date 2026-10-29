@@ -68,6 +68,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.runner_host_hygiene_audit_spool import (
     RunnerHostHygieneAuditSpool,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 AUDIT_ROUTE_PATH = "/v1/evidence/runner-host-hygiene/audits"
@@ -587,8 +588,7 @@ def _executor_intent_sha256(request: RunnerHostHygieneExecutorRequest) -> str:
     payload.pop("buildkit_cache_budgets")
     payload["resolve_action_started"] = False
     payload["target_generated_cache_run_ids"] = []
-    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def execute_runner_host_hygiene_executor(

@@ -12,7 +12,7 @@ from control_plane.contracts.runtime_identity import (
     runtime_identity_from_health_payload,
 )
 from control_plane.odoo_runtime_reads import require_runtime_identity
-from control_plane.workflows.verireel_testing_post_deploy import launch_testing_browser
+from control_plane.testing_browser import launch_testing_browser
 
 
 def require_safe_browser_control(locator: Locator) -> None:

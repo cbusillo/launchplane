@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import datetime, timezone
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.contracts.product_profile_record import (
@@ -79,26 +78,20 @@ def plan_website_settings(store: Any, request: OdooWebsiteSettingsRequest) -> di
     existing = _existing(store, request.context, request.instance)
     before = existing.model_dump(mode="json") if existing else None
     desired = request.website_settings.model_dump(mode="json") if request.website_settings else None
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "product": request.product,
-                "context": request.context,
-                "instance": request.instance,
-                "before": before,
-                "desired": desired,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "product": request.product,
+            "context": request.context,
+            "instance": request.instance,
+            "before": before,
+            "desired": desired,
+        }
+    )
     return {
         "product": request.product,
         "context": request.context,
         "instance": request.instance,
-        "record_sha256_before": hashlib.sha256(
-            json.dumps(before, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
+        "record_sha256_before": nonvalidating_compact_sorted_json_sha256(before),
         "mode": request.mode,
         "plan_sha256": digest,
         "before": existing.website_settings.model_dump(mode="json")
@@ -151,6 +144,9 @@ def _validate_candidate(
         )
     except FileNotFoundError as error:
         raise ValueError("Website settings require the current testing release record.") from error
+    from control_plane.testing_serving_copy import require_published_testing_release
+
+    require_published_testing_release(store, candidate)
     if candidate.artifact_id != request.website_settings.artifact_id:
         raise ValueError("Website settings must name this product's current testing artifact.")
 
@@ -166,13 +162,9 @@ def prepare_website_settings(
     if plan["plan_sha256"] != request.reviewed_plan_sha256:
         raise OdooWebsiteSettingsStale("Website settings changed. Run a new dry-run.")
     existing = _existing(store, request.context, request.instance)
-    current_digest = hashlib.sha256(
-        json.dumps(
-            existing.model_dump(mode="json") if existing else None,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    current_digest = nonvalidating_compact_sorted_json_sha256(
+        existing.model_dump(mode="json") if existing else None
+    )
     if current_digest != plan["record_sha256_before"]:
         raise OdooWebsiteSettingsStale(
             "Website settings changed during preparation. Run a new dry-run."

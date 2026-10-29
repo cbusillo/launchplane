@@ -13,6 +13,14 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
+from control_plane.contracts.product_profile_record import ProductOwnerProfile
+from control_plane.contracts.release_request import ReleaseRequestDecisionRecord
+from control_plane.contracts.release_review import ReleaseVersion
+from control_plane.contracts.generic_web_extensions import (
+    GenericWebLaneExtensions,
+    GenericWebMaintenanceCommand,
+)
+from control_plane.release_request import release_request_id
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
@@ -54,31 +62,6 @@ SYO_RUNTIME_KEYS = (
     "CONTACT_EMAIL_RESEND_TIMEOUT_MS",
     "NEXT_PUBLIC_META_PIXEL_ID",
 )
-
-
-def _run_runtime_key_safety_generator(
-    temporary_directory: Path,
-    *,
-    extra_env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    output_directory = temporary_directory / "runtime-key-safety"
-    github_output = temporary_directory / "github-output.txt"
-    env = {
-        **os.environ,
-        "GITHUB_SHA": "test-sha",
-        "GITHUB_OUTPUT": str(github_output),
-        "LAUNCHPLANE_RUNTIME_KEY_SAFETY_OUTPUT_DIR": str(output_directory),
-    }
-    if extra_env:
-        env.update(extra_env)
-    return subprocess.run(
-        ["bash", "scripts/deploy/render-runtime-key-safety-policy.sh"],
-        check=False,
-        cwd=Path.cwd(),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
 
 
 def _read_github_outputs(temporary_directory: Path) -> dict[str, str]:
@@ -297,6 +280,108 @@ def _assert_odoo_stable_lane_runtime_contract(
 
 
 class ProductOnboardingTests(unittest.TestCase):
+    def test_onboarding_refuses_preview_credentials_at_the_manifest_boundary(self) -> None:
+        payload = _manifest_payload()
+        preview = payload["preview"]
+        assert isinstance(preview, dict)
+        payload["runtime_environments"] = [
+            {
+                "scope": "instance",
+                "context": preview["context"],
+                "instance": "preview",
+                "env": {"CONNECTION": "host=x password=private"},
+            }
+        ]
+        with self.assertRaises(ValueError):
+            ProductOnboardingManifest.model_validate(payload)
+
+    def test_preview_settings_use_existing_runtime_records_in_onboarding(self) -> None:
+        payload = _manifest_payload()
+        preview = payload["preview"]
+        assert isinstance(preview, dict)
+        context = str(preview["context"])
+        payload["runtime_environments"] = [
+            {
+                "scope": "instance",
+                "context": context,
+                "instance": "preview",
+                "env": {"COLOR": "preview"},
+            }
+        ]
+        payload["expected_config"] = {
+            "runtime_environment_keys": [
+                {
+                    "key": "COLOR",
+                    "context": context,
+                    "instance": "preview",
+                }
+            ]
+        }
+        manifest = ProductOnboardingManifest.model_validate(payload)
+        self.assertEqual(manifest.runtime_environments[0].instance, "preview")
+        self.assertNotIn("preview", [lane.instance for lane in manifest.lanes])
+        preview["override_env"] = {"COLOR": "retired"}
+        with self.assertRaises(ValueError):
+            ProductOnboardingManifest.model_validate(payload)
+
+    def test_reapply_updates_manifest_settings_and_preserves_service_owned_state(self) -> None:
+        manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+        existing = build_product_profile_record(
+            manifest=manifest, updated_at="2026-10-25T12:00:00Z"
+        )
+        extensions = GenericWebLaneExtensions(
+            maintenance=(GenericWebMaintenanceCommand(name="refresh", command="true"),)
+        )
+        existing = existing.model_copy(
+            update={
+                "owner": ProductOwnerProfile(github_id="9001", github_login="site-owner"),
+                "production_use": "live",
+                "production_use_authority": "director_agent",
+                "release_on_acceptance": "promote",
+                "image": existing.image.model_copy(update={"scan_enabled": True}),
+                "preview": existing.preview.model_copy(update={"app_name_suffix": "-kept"}),
+                "lanes": tuple(
+                    lane.model_copy(update={"generic_web_extensions": extensions})
+                    for lane in existing.lanes
+                ),
+            }
+        )
+        request = ReleaseRequestDecisionRecord(
+            record_id=release_request_id(existing, "a" * 64, ""),
+            product=existing.product,
+            repository=existing.repository,
+            owner_github_id=existing.owner.github_id,
+            checklist_digest="a" * 64,
+            production=ReleaseVersion(artifact_id="production", source_commit="a" * 40),
+            candidate=ReleaseVersion(artifact_id="candidate", source_commit="b" * 40),
+            source="director_request",
+            reason="Release the agreed work.",
+            actor="director",
+            decided_at=existing.updated_at,
+        )
+        existing = existing.model_copy(update={"release_request": request})
+        replacement_manifest = manifest.model_copy(update={"display_name": "Changed name"})
+        replacement = build_product_profile_record(
+            manifest=replacement_manifest,
+            updated_at="2026-10-25T12:01:00Z",
+            existing_profile=existing,
+        )
+        self.assertEqual(replacement.display_name, replacement_manifest.display_name)
+        for field in (
+            "release_request",
+            "owner",
+            "production_use",
+            "production_use_authority",
+            "release_on_acceptance",
+        ):
+            self.assertEqual(getattr(replacement, field), getattr(existing, field))
+        self.assertEqual(replacement.image.scan_enabled, existing.image.scan_enabled)
+        self.assertEqual(replacement.preview.app_name_suffix, existing.preview.app_name_suffix)
+        self.assertEqual(
+            [lane.generic_web_extensions for lane in replacement.lanes],
+            [lane.generic_web_extensions for lane in existing.lanes],
+        )
+
     def test_existing_onboarding_preserves_health_monitoring_authority(self) -> None:
         existing_manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
         existing_profile = build_product_profile_record(
@@ -320,6 +405,35 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(
             replacement_profile.lanes[0].health_monitoring.monitoring_intent,
             "public",
+        )
+
+    def test_context_move_preserves_instance_monitoring_authority(self) -> None:
+        manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+        existing = build_product_profile_record(
+            manifest=manifest, updated_at="2026-10-25T12:00:00Z"
+        )
+        lane = manifest.lanes[0]
+        moved = lane.model_copy(
+            update={
+                "context": lane.context + "-moved",
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={"monitoring_intent": "prelaunch"}
+                ),
+            }
+        )
+        replacement = build_product_profile_record(
+            manifest=manifest.model_copy(
+                update={
+                    "lanes": (moved, *manifest.lanes[1:]),
+                    "historical_contexts": (lane.context,),
+                }
+            ),
+            updated_at="2026-10-25T12:01:00Z",
+            existing_profile=existing,
+        )
+        self.assertEqual(replacement.lanes[0].context, moved.context)
+        self.assertEqual(
+            replacement.lanes[0].health_monitoring, existing.lanes[0].health_monitoring
         )
 
     def test_existing_onboarding_preserves_prelaunch_rebuild_authority(self) -> None:
@@ -692,83 +806,6 @@ class ProductOnboardingTests(unittest.TestCase):
                 preserve_payload["deploy"]["supersedes_deployment_marker"],
                 "github-actions:12345:2:deploy",
             )
-
-    def test_runtime_key_safety_accepts_configured_rules(
-        self,
-    ) -> None:
-        configured_rules = [
-            {
-                "binding_key": "EXAMPLE_API_TOKEN",
-                "secret_class": "testing",
-                "allowed_targets": [{"context": "example-testing", "instances": ["testing"]}],
-                "description": "Example testing token.",
-            }
-        ]
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_runtime_key_safety_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(configured_rules)
-                },
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            policy_payload = json.loads(
-                (
-                    temporary_directory / "runtime-key-safety" / "runtime-key-safety-policy.json"
-                ).read_text(encoding="utf-8")
-            )
-            policy_idempotency = _read_github_outputs(temporary_directory)[
-                "runtime_key_safety_idempotency_key"
-            ]
-
-        self.assertEqual(policy_payload["product"], "launchplane")
-        self.assertEqual(policy_payload["source_label"], "deploy:runtime-key-safety-rules")
-        self.assertRegex(
-            policy_idempotency,
-            r"launchplane-runtime-key-safety-rules:test-sha:[0-9a-f]{64}",
-        )
-        self.assertNotIn("EXAMPLE_API_TOKEN", policy_idempotency)
-        self.assertEqual(policy_payload["rules"][0]["binding_key"], "EXAMPLE_API_TOKEN")
-        self.assertEqual(policy_payload["rules"][0]["secret_class"], "testing")
-        self.assertEqual(
-            policy_payload["rules"][0]["allowed_targets"],
-            [{"context": "example-testing", "instances": ["testing"]}],
-        )
-        self.assertEqual(policy_payload["rules"][0]["description"], "Example testing token.")
-
-    def test_runtime_key_safety_rejects_incomplete_rules(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_runtime_key_safety_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(
-                        [{"binding_key": "EXAMPLE_API_TOKEN"}]
-                    )
-                },
-            )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("binding_key and secret_class", result.stderr)
-
-    def test_runtime_key_safety_rejects_unknown_secret_class(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            result = _run_runtime_key_safety_generator(
-                temporary_directory,
-                extra_env={
-                    "LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON": json.dumps(
-                        [{"binding_key": "EXAMPLE_API_TOKEN", "secret_class": "production"}]
-                    )
-                },
-            )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("secret_class must be one of", result.stderr)
 
     def test_reonboarding_preserves_product_config_public_hosts(self) -> None:
         with TemporaryDirectory() as directory:

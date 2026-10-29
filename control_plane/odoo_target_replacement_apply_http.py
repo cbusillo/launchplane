@@ -40,6 +40,7 @@ from control_plane.release_review import (
     ProductionChangeRequiresPromotion,
 )
 from control_plane.testing_rebuild_resume import caller_binding
+from control_plane.testing_rebuild_request_settlement import TestingRebuildRequestConflict
 
 
 ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = "/v1/drivers/odoo/target-replacement-apply"
@@ -173,6 +174,20 @@ def enqueue_odoo_target_replacement_apply_operation(
     if request.replacement.strategy == "replace-and-cutover" and not request.replacement.reason:
         raise ValueError("A testing rebuild requires a concrete reason.")
 
+    if (
+        request.replacement.strategy == "replace-and-cutover"
+        and request.replacement.data_source_mode != "empty"
+    ):
+        from control_plane.clean_testing_snapshot import snapshot_storage_budget
+        from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
+        from control_plane.testing_rebuild_service import TestingRebuildRefused
+
+        profile = operation_store.read_product_profile_record(request.product)
+        try:
+            snapshot_storage_budget(profile, context)
+        except ValueError as error:
+            raise TestingRebuildRefused(TESTING_STORAGE_BUDGET_REQUIRED, str(error)) from error
+
     try:
         require_unchanged_production_artifact(
             record_store=record_store,
@@ -209,6 +224,8 @@ def enqueue_odoo_target_replacement_apply_operation(
         )
     except OdooStableLaneOperationConflictError as error:
         raise OdooTargetReplacementApplyLaneBusyError(str(error)) from error
+    except TestingRebuildRequestConflict as error:
+        raise OdooTargetReplacementApplyIdempotencyKeyReusedError from error
     if not created_operation:
         if (
             operation.idempotency_key == idempotency_key

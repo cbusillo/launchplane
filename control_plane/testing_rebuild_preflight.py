@@ -8,6 +8,8 @@ import click
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.clean_testing_snapshot import snapshot_storage_budget
+from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementRequest,
@@ -28,6 +30,7 @@ from control_plane.dokploy import post_deploy, api
 from control_plane.dokploy.native_copy_stream import (
     NativeSourceAuthorizationDenied,
     NativeSourceUnavailable,
+    native_failure_diagnostic,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_service import (
@@ -61,6 +64,7 @@ def inspect_testing_rebuild(
     store: PostgresRecordStore,
     request: OdooStableTargetReplacementRequest,
     verified_manifest: ArtifactIdentityManifest | None = None,
+    actor: str = "",
 ) -> TestingRebuildPreflight:
     if request.strategy != "replace-and-cutover":
         raise ValueError("Native preflight requires the testing copy lifecycle.")
@@ -89,7 +93,7 @@ def inspect_testing_rebuild(
     )
     try:
         intent = capture_rebuild_intent(root, store, operation)
-        check_testing_rebuild_protection(root, store, operation, intent)
+        check_testing_rebuild_protection(root, store, operation, intent, actor=actor)
     except api.DokployRequestFailed as error:
         if error.status_code in {401, 403}:
             raise NativeSourceAuthorizationDenied(
@@ -102,7 +106,7 @@ def inspect_testing_rebuild(
     except NativeSourceUnavailable as error:
         raise TestingRebuildRefused(
             "testing_rebuild_observation_unavailable",
-            "The retained testing observation is unavailable.",
+            "The retained testing observation is unavailable." + native_failure_diagnostic(error),
         ) from error
     except (NativeSourceAuthorizationDenied, TestingRebuildRefused):
         raise
@@ -111,6 +115,14 @@ def inspect_testing_rebuild(
             "testing_rebuild_inputs_unverified",
             "The retained testing inputs could not be verified.",
         ) from error
+    if apply.data_source_mode != "empty":
+        try:
+            snapshot_storage_budget(intent.profile, lane.context)
+        except ValueError as error:
+            raise TestingRebuildRefused(
+                TESTING_STORAGE_BUDGET_REQUIRED,
+                "Clean snapshots require reviewed testing storage headroom.",
+            ) from error
     try:
         candidate_credential_authority(store, lane.context)
     except NativeSourceAuthorizationDenied:

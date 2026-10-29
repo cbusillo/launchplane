@@ -9,8 +9,10 @@ from urllib.parse import quote
 
 import click
 from control_plane.generic_web_source_qualification import (
+    GenericWebSourceQualificationStore,
     GenericWebSourceUnqualified,
     GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
     qualified_generic_web_source_inventory,
 )
 from control_plane.release_review import require_release_approval
@@ -22,6 +24,7 @@ from control_plane.workflows.production_promotion_backup import (
     production_promotion_backup_guard,
     require_production_promotion_backup,
 )
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_health_url
 from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deploy_reference import (
     is_non_floating_tag_reference,
@@ -80,7 +83,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 DEFAULT_GENERIC_WEB_HEALTH_TIMEOUT_SECONDS = 60
 
 
-class GenericWebPromotionStore(GenericWebDeployStore, Protocol):
+class GenericWebPromotionStore(GenericWebDeployStore, GenericWebSourceQualificationStore, Protocol):
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
     ) -> EnvironmentInventory: ...
@@ -268,6 +271,34 @@ def execute_generic_web_prod_promotion(
     deployment_record_id: str = "",
     provider_effect_checkpoint: Callable[[str], None] | None = None,
 ) -> GenericWebProdPromotionResult:
+    from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
+
+    with serialize_generic_web_product_operation(
+        record_store=record_store, product=request.product
+    ):
+        return _execute_generic_web_prod_promotion_unserialized(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=request,
+            deploy_provider=deploy_provider,
+            resolved_deploy_target=resolved_deploy_target,
+            provider_operation_title=provider_operation_title,
+            deployment_record_id=deployment_record_id,
+            provider_effect_checkpoint=provider_effect_checkpoint,
+        )
+
+
+def _execute_generic_web_prod_promotion_unserialized(
+    *,
+    control_plane_root: Path,
+    record_store: GenericWebPromotionStore,
+    request: GenericWebProdPromotionRequest,
+    deploy_provider: GenericWebDeployProvider | None = None,
+    resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    provider_operation_title: str = "",
+    deployment_record_id: str = "",
+    provider_effect_checkpoint: Callable[[str], None] | None = None,
+) -> GenericWebProdPromotionResult:
     profile, source_lane, destination_lane = resolve_generic_web_promotion_lanes(
         record_store=record_store,
         request=request,
@@ -278,14 +309,25 @@ def execute_generic_web_prod_promotion(
         request=request,
         source_lane=source_lane,
     )
+    release_decision = None
     if not request.dry_run:
-        require_release_approval(
+        release_decision = require_release_approval(
             control_plane_root=control_plane_root,
             record_store=record_store,
             product=profile.product,
             artifact_id=request.artifact_id,
             source_commit=request.source_git_ref,
         )
+    from control_plane.generic_web_release_settings import desired_release_settings
+
+    try:
+        release_settings = (
+            release_decision.checklist.candidate.runtime_settings
+            if not request.dry_run and release_decision is not None
+            else desired_release_settings(record_store, profile)
+        )
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
+        raise click.ClickException("Production release settings could not be verified.") from error
     if request.release_tag:
         _preflight_github_release(
             control_plane_root=control_plane_root,
@@ -299,12 +341,16 @@ def execute_generic_web_prod_promotion(
         to_instance_name=destination_lane.instance,
     )
     source_health = _health_evidence_for_lane(
+        record_store=record_store,
+        profile=profile,
         lane=source_lane,
         request=request,
         health_path=profile.health_path,
         status="pending" if request.verify_health else "skipped",
     )
     destination_health = _health_evidence_for_lane(
+        record_store=record_store,
+        profile=profile,
         lane=destination_lane,
         request=request,
         health_path=profile.health_path,
@@ -415,7 +461,7 @@ def execute_generic_web_prod_promotion(
         # dispatch. Only an explicitly new record plus this invocation's first
         # checkpoint refusal proves that no forward effect was admitted.
         fresh_deployment = False
-        source_refusal: GenericWebPromotionSourceRefused | None = None
+        admission_refusal: GenericWebPromotionAdmissionRefused | None = None
         if original_deployment_record_id:
             try:
                 record_store.read_deployment_record(original_deployment_record_id)
@@ -423,10 +469,14 @@ def execute_generic_web_prod_promotion(
                 fresh_deployment = True
 
         def admit_source() -> None:
-            nonlocal source_admitted, source_refusal
+            nonlocal source_admitted, admission_refusal
             # Admit this accepted artifact after health/backup waits. Once its
             # production attempt starts, testing may advance to another build.
             if not source_admitted:
+                if desired_release_settings(record_store, profile) != release_settings:
+                    raise click.ClickException(
+                        "Production settings changed after release acceptance."
+                    )
                 try:
                     _resolve_source_inventory_inputs(
                         record_store=record_store,
@@ -435,14 +485,18 @@ def execute_generic_web_prod_promotion(
                         source_lane=source_lane,
                     )
                 except GenericWebPromotionSourceRefused as refusal:
-                    source_refusal = refusal
+                    admission_refusal = refusal
                     raise
                 source_admitted = True
 
         def promotion_checkpoint(phase: str) -> None:
-            nonlocal forward_effect_admitted
-            admit_source()
-            backup_checkpoint.before_provider_effect(phase, provider_effect_checkpoint)
+            nonlocal forward_effect_admitted, admission_refusal
+            try:
+                admit_source()
+                backup_checkpoint.before_provider_effect(phase, provider_effect_checkpoint)
+            except GenericWebPromotionAdmissionRefused as refusal:
+                admission_refusal = refusal
+                raise
             forward_effect_admitted = True
 
         try:
@@ -466,6 +520,7 @@ def execute_generic_web_prod_promotion(
                 deployment_record_id=deployment_record_id,
                 provider_effect_checkpoint=promotion_checkpoint,
                 before_deployment_records=admit_source,
+                release_settings=release_settings,
             )
         except (ValueError, TimeoutError, click.ClickException) as error:
             if destination_lane.generic_web_cutover is None or not deployment_record_id:
@@ -497,8 +552,8 @@ def execute_generic_web_prod_promotion(
         # The ordinary deploy records checkpoint refusals as failed results.
         # Restore their typed admission meaning only for this explicitly fresh,
         # never-admitted invocation; prior or uncertain effects stay conservative.
-        if source_refusal is not None and fresh_deployment and not forward_effect_admitted:
-            raise source_refusal
+        if admission_refusal is not None and fresh_deployment and not forward_effect_admitted:
+            raise admission_refusal
     backup_gate.evidence.update(backup_checkpoint.evidence)
     deployment_record = _read_deployment_record(
         record_store=record_store,
@@ -558,10 +613,13 @@ def execute_generic_web_prod_promotion(
             request=request,
             rollback_target=rollback_target,
             production_changed=deploy_result.deploy_status == "pass"
-            or deploy_result.image_effect_attempted,
+            or deploy_result.image_effect_attempted
+            or release_settings is not None
+            and deploy_result.provider_effect_attempted,
             deploy_provider=deploy_provider,
             provider_operation_title=provider_operation_title,
             deployment_record_id=deploy_result.deployment_record_id,
+            source_deployment_record_id=deploy_result.deployment_record_id,
             provider_effect_checkpoint=provider_effect_checkpoint,
         )
     deployment_record = _write_deployment_health(
@@ -743,6 +801,7 @@ def _roll_back_production(
     deployment_record_id: str,
     provider_effect_checkpoint: Callable[[str], None] | None,
     resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    source_deployment_record_id: str = "",
 ) -> _RollbackOutcome:
     target_id = rollback_target.deployment_record_id
     planned_deploy = rollback_target.planned_deploy
@@ -783,8 +842,9 @@ def _roll_back_production(
                 f"{provider_operation_title} rollback" if provider_operation_title else ""
             ),
             deployment_record_id=f"{deployment_record_id}-rollback",
+            recorded_artifact=True,
             rollback=True,
-            rollback_source_deployment_record_id=deployment_record_id,
+            rollback_source_deployment_record_id=source_deployment_record_id,
             rollback_target_deployment_record_id=target_id,
             provider_effect_checkpoint=_rollback_phase_checkpoint(provider_effect_checkpoint),
         )
@@ -821,6 +881,8 @@ def _roll_back_production(
         deployment_record_id=deploy_result.deployment_record_id,
     )
     rollback_health = _health_evidence_for_lane(
+        record_store=record_store,
+        profile=profile,
         lane=lane,
         request=request,
         health_path=profile.health_path,
@@ -972,6 +1034,8 @@ def _health_url_for_lane(*, lane: ProductLaneProfile, health_path: str) -> str:
 
 def _health_evidence_for_lane(
     *,
+    record_store: GenericWebPromotionStore,
+    profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     request: GenericWebProdPromotionRequest,
     health_path: str,
@@ -979,7 +1043,14 @@ def _health_evidence_for_lane(
 ) -> HealthcheckEvidence:
     if not request.verify_health:
         return HealthcheckEvidence(status="skipped")
-    health_url = _health_url_for_lane(lane=lane, health_path=health_path)
+    binding = read_split_ingress_binding(record_store, profile, lane)
+    health_url = (
+        split_ingress_health_url(
+            profile, lane, next(d.domain_name for d in binding.domains if d.role == "primary")
+        )
+        if binding is not None
+        else _health_url_for_lane(lane=lane, health_path=health_path)
+    )
     if not health_url:
         return HealthcheckEvidence(status="skipped")
     return HealthcheckEvidence(

@@ -1,8 +1,7 @@
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 PreviewPrFeedbackRemediationMode = Literal["dry-run", "apply"]
 PreviewPrFeedbackRemediationAction = Literal["delete_comment", "replace_comment", "none"]
@@ -65,8 +64,7 @@ class PreviewPrFeedbackRemediationRequest(BaseModel):
 
     @property
     def continuity_sha256(self) -> str:
-        canonical = json.dumps(self.continuity_payload(), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return nonvalidating_compact_sorted_json_sha256(self.continuity_payload())
 
 
 class PreviewPrFeedbackObservation(BaseModel):

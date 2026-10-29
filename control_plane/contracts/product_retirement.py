@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.retained_volume import RetainedVolumeBinding
 
 
 ProductRetirementMode = Literal["plan", "apply"]
@@ -177,12 +178,32 @@ class ProductRetirementProviderObservation(BaseModel):
     no_target: bool = False
     absence_scope_sha256: str = ""
     inventory_sha256: str = ""
+    retained_volumes: tuple[RetainedVolumeBinding, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    retained_volume_inventory_complete: bool = Field(
+        default=False, exclude_if=lambda value: not value
+    )
+    mounts_sha256: str = Field(default="", exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def _validate_observation(self) -> "ProductRetirementProviderObservation":
         self.observed_at = self.observed_at.strip()
         self.target_id = self.target_id.strip()
         self.deployment_status = self.deployment_status.strip().lower()
+        if self.mounts_sha256:
+            _require_sha256(self.mounts_sha256, "mounts_sha256")
+        if self.retained_volume_inventory_complete and any(
+            not binding.volume_identity_sha256 for binding in self.retained_volumes
+        ):
+            raise ValueError("Complete retained volume inventory requires exact identities.")
+        if len({binding.volume_name for binding in self.retained_volumes}) != len(
+            self.retained_volumes
+        ):
+            raise ValueError("Retained volume inventory contains duplicate names.")
+        self.retained_volumes = tuple(
+            sorted(self.retained_volumes, key=lambda binding: binding.volume_name)
+        )
         if self.no_target:
             if (
                 not self.observed_at
@@ -356,6 +377,9 @@ class ProductRetirementRecord(BaseModel):
     requested_at: str
     recorded_at: str
     completed_at: str = ""
+    retained_volume_production_use: Literal["unknown", "prelaunch", "live"] = Field(
+        default="unknown", exclude_if=lambda value: value == "unknown"
+    )
     continuity_sha256: str
     plan_sha256: str
     reviewed_plan_record_id: str = ""

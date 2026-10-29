@@ -12,14 +12,9 @@ from control_plane.merge_train import (
     build_merge_train_dry_run_result,
 )
 from control_plane.merge_train_github import (
-    GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubError,
     UrllibMergeTrainGitHubTransport,
-)
-from control_plane.workflows.merge_train_worker import (
-    MergeTrainWorkerClients,
-    run_merge_train_worker_step,
 )
 
 
@@ -118,7 +113,7 @@ def merge_train_dry_run(snapshot_file: Path, policy_file: Path) -> None:
     "--mutate/--dry-run",
     default=False,
     show_default=True,
-    help="Apply the selected worker transition. The default only reads GitHub and reports intent.",
+    help="Mutation uses the deployed Launchplane API. This local command only reads and reports intent.",
 )
 def merge_train_run_once(
     policy_file: Path,
@@ -128,6 +123,11 @@ def merge_train_run_once(
     github_api_base_url: str,
     mutate: bool,
 ) -> None:
+    if mutate:
+        raise click.ClickException(
+            "Use deployed Launchplane POST /v1/work-graph/merge-train/run-once for mutations; "
+            "Odoo uses POST /v1/work-graph/merge-train/controller/run-once for full candidate Build."
+        )
     try:
         policy = load_merge_train_policy(policy_file)
         policy.find_repository_policy(repository=repository, base_branch=base_branch)
@@ -148,27 +148,13 @@ def merge_train_run_once(
             repository=repository, base_branch=base_branch
         )
         dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
-        if mutate:
-            github_client = GitHubMergeTrainClient(transport=transport)
-            worker_step_result = run_merge_train_worker_step(
-                policy=policy,
-                snapshot=snapshot,
-                clients=MergeTrainWorkerClients(
-                    label_client=github_client,
-                    branch_client=github_client,
-                    merge_client=github_client,
-                ),
-            )
-            payload: dict[str, object] = worker_step_result.model_dump(mode="json")
-            payload["mode"] = "mutate"
-        else:
-            payload = {
-                "mode": "dry-run",
-                "repository": snapshot.repository,
-                "base_branch": snapshot.base_branch,
-                "snapshot": snapshot.model_dump(mode="json"),
-                "dry_run_result": dry_run_result.model_dump(mode="json"),
-            }
+        payload = {
+            "mode": "dry-run",
+            "repository": snapshot.repository,
+            "base_branch": snapshot.base_branch,
+            "snapshot": snapshot.model_dump(mode="json"),
+            "dry_run_result": dry_run_result.model_dump(mode="json"),
+        }
     except MergeTrainGitHubError as error:
         detail = str(error)
         if error.status_code is not None:

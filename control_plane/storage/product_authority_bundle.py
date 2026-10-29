@@ -19,6 +19,7 @@ from control_plane.contracts.product_profile_record import (
     product_target_owner_products,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
@@ -47,6 +48,16 @@ class RuntimeEnvironmentConflictError(ValueError):
     """Raised when runtime configuration changed after bundle planning."""
 
 
+def require_runtime_key_safety_policies(
+    expected: tuple[RuntimeKeySafetyPolicyRecord, ...] | None,
+    current: Iterable[RuntimeKeySafetyPolicyRecord],
+) -> None:
+    if expected is not None and sorted(expected, key=lambda item: item.record_id) != sorted(
+        current, key=lambda item: item.record_id
+    ):
+        raise RuntimeEnvironmentConflictError("Runtime key-safety policy changed before commit.")
+
+
 class OdooInstanceOverrideConflictError(ValueError):
     """The reviewed override record changed before its reconciliation committed."""
 
@@ -67,11 +78,11 @@ class OdooInstanceOverrideWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     record: OdooInstanceOverrideRecord
-    expected_record: OdooInstanceOverrideRecord
+    expected_record: OdooInstanceOverrideRecord | None
 
     @model_validator(mode="after")
     def validate_route(self) -> "OdooInstanceOverrideWrite":
-        if (self.record.context, self.record.instance) != (
+        if self.expected_record is not None and (self.record.context, self.record.instance) != (
             self.expected_record.context,
             self.expected_record.instance,
         ):
@@ -81,6 +92,17 @@ class OdooInstanceOverrideWrite(BaseModel):
 
 class ProductProfileConflictError(ValueError):
     """A product profile changed after it authorized a bundled write."""
+
+
+def require_absent_products(
+    absent_product_ids: tuple[str, ...],
+    current_profiles: Iterable[LaunchplaneProductProfileRecord],
+) -> None:
+    if not absent_product_ids:
+        return
+    existing = {profile.product for profile in current_profiles}
+    if any(product in existing for product in absent_product_ids):
+        raise ProductProfileConflictError("Product was registered before commit.")
 
 
 class PublicHostAuthorityBusy(RuntimeError):
@@ -234,6 +256,10 @@ class ProductAuthorityBundle(BaseModel):
 
     product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
     expected_product_profiles: tuple[LaunchplaneProductProfileRecord, ...] = ()
+    absent_product_ids: tuple[str, ...] = ()
+    expected_dokploy_targets: tuple[DokployTargetRecord, ...] = ()
+    expected_runtime_key_safety_policies: tuple[RuntimeKeySafetyPolicyRecord, ...] | None = None
+    expected_dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     dokploy_targets: tuple[DokployTargetRecord, ...] = ()
     dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     provider_target_writes: tuple[ProviderTargetWrite, ...] = ()
@@ -266,6 +292,20 @@ class ProductAuthorityBundle(BaseModel):
     # (product, context, instance); an empty instance checks the whole context.
     # This also covers authorized admins configuring Launchplane itself.
     required_product_config_target: tuple[str, str, str] | None = None
+
+    @model_validator(mode="after")
+    def validate_profile_absence(self) -> "ProductAuthorityBundle":
+        written = {profile.product for profile in self.product_profiles}
+        expected = {profile.product for profile in self.expected_product_profiles}
+        if len(set(self.absent_product_ids)) != len(self.absent_product_ids) or any(
+            not product
+            or product != product.strip()
+            or product not in written
+            or product in expected
+            for product in self.absent_product_ids
+        ):
+            raise ValueError("Absent product expectations require unique newly written products.")
+        return self
 
     @model_validator(mode="after")
     def validate_runtime_environment_routes(self) -> ProductAuthorityBundle:
@@ -324,6 +364,10 @@ class ProductContextOwnershipError(PermissionError):
     """The bundle's context no longer belongs to its product alone."""
 
 
+class ServiceIdentityAuthorityError(PermissionError):
+    pass
+
+
 def require_bundle_context_owner(
     bundle: ProductAuthorityBundle,
     profiles: Iterable[LaunchplaneProductProfileRecord],
@@ -334,15 +378,17 @@ def require_bundle_context_owner(
     if not required_owners and bundle.required_product_config_target is None:
         return
     profiles = tuple(profiles)
-    owners = product_context_owner_map(profiles)
+    owners = product_context_owner_map(
+        profiles, config_scopes=bundle.required_product_config_target is not None
+    )
     for product, context in required_owners:
         if not is_exclusive_product_context(context=context, product=product, owners=owners):
             raise ProductContextOwnershipError("The context must belong to the named product only.")
     if bundle.required_product_config_target is not None:
         product, context, instance = bundle.required_product_config_target
-        if product_target_owner_products(profiles, context=context, instance=instance) != frozenset(
-            (product,)
-        ):
+        if product_target_owner_products(
+            profiles, context=context, instance=instance, config_scopes=True
+        ) != frozenset((product,)):
             # Service-only preview identities live in the product's preview
             # context, individually named for their exact runtime instance.
             # This does not authorize runtime configuration or another purpose.

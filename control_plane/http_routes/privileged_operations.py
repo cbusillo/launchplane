@@ -4,12 +4,14 @@ from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from fastapi import Depends, Path, Query
+from sqlalchemy.exc import SQLAlchemyError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.access_policy_review import (
     AccountReader,
     bounded_account_logins,
     build_access_policy_review,
 )
+from control_plane.contracts.access_policy_review import AccessPolicyReview
 from control_plane.contracts.backup_policy_proposal import BackupPolicyProposalInput
 
 from control_plane.contracts.privileged_operation import (
@@ -64,6 +66,7 @@ from control_plane.durable_operation_authorization import (
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.privileged_operation_registry import (
     PrivilegedOperationPlannerError,
+    MergeTrainTargetNotReadyError,
     PrivilegedOperationPlanningStoreError,
     read_privileged_operation_descriptor,
 )
@@ -117,7 +120,6 @@ class PrivilegedOperationRouteDependencies:
     policy_record_reader: Callable[[], object] | None = None
     github_login_reader: Callable[[int], str] = lambda _: ""
     github_account_reader: AccountReader = lambda _: None
-    read_configured_terminal_identity: Callable[[], TerminalAgentIdentity | None] = lambda: None
     read_configured_local_operator_identity: Callable[[], LocalOperatorIdentity | None] = lambda: (
         None
     )
@@ -517,6 +519,20 @@ def register_privileged_operation_routes(
                     )
                 ),
             )
+            blocker: (
+                Literal[
+                    "privileged_operation_plan_stale", "privileged_operation_planning_unavailable"
+                ]
+                | None
+            ) = None
+            if (
+                record.status == "planned"
+                and read_privileged_operation_descriptor(record.descriptor_id).planner is not None
+            ):
+                try:
+                    blocker = current_policy_plan_blocker(record=record, record_store=record_store)
+                except (OSError, SQLAlchemyError):
+                    blocker = "privileged_operation_planning_unavailable"
             if (
                 isinstance(identity, GitHubHumanIdentity)
                 and dependencies.policy_reader().names_administrator(identity)
@@ -525,7 +541,9 @@ def register_privileged_operation_routes(
             ):
                 review = review.model_copy(
                     update={
-                        "access_policy": build_access_policy_review(
+                        "access_policy": AccessPolicyReview(state="unavailable")
+                        if blocker is not None
+                        else build_access_policy_review(
                             record_store=record_store,
                             request=record.request,
                             evidence=record.evidence,
@@ -542,6 +560,29 @@ def register_privileged_operation_routes(
                         )
                     }
                 )
+            if record.status == "planned":
+                if (
+                    blocker is None
+                    and review.access_policy is not None
+                    and review.access_policy.state == "unavailable"
+                ):
+                    blocker = "privileged_operation_planning_unavailable"
+                if blocker is not None:
+                    review = review.model_copy(
+                        update={
+                            "can_approve": False,
+                            "blockers": review.blockers.model_validate(
+                                {
+                                    **review.blockers.model_dump(),
+                                    "state": "error"
+                                    if blocker == "privileged_operation_planning_unavailable"
+                                    or review.blockers.state == "error"
+                                    else "blocked",
+                                    "codes": (*review.blockers.codes, blocker),
+                                }
+                            ),
+                        }
+                    )
             return review
         except PrivilegedOperationSemanticReviewError as error:
             raise dependencies.common.http_error(
@@ -551,14 +592,16 @@ def register_privileged_operation_routes(
                 message="Privileged-operation semantic review is unavailable for this stored descriptor state.",
             ) from error
 
-    def require_current_policy_plan(
+    def current_policy_plan_blocker(
         *,
         record: PrivilegedOperationRecord,
         record_store: object,
-        trace_id: str,
-    ) -> None:
+    ) -> (
+        Literal["privileged_operation_plan_stale", "privileged_operation_planning_unavailable"]
+        | None
+    ):
         if record.safety_class != "policy_admin":
-            return
+            return None
         try:
             planner = read_privileged_operation_descriptor(record.descriptor_id).planner
             if planner is None:
@@ -566,30 +609,30 @@ def register_privileged_operation_routes(
                     "This privileged-operation planner is retired."
                 )
             current_evidence = planner(record_store, record.request)
-        except PrivilegedOperationPlannerError as error:
-            raise dependencies.common.http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="privileged_operation_plan_stale",
-                message="The privileged-operation policy plan is stale and must be replanned.",
-            ) from error
-        except (
-            PrivilegedOperationPlanningStoreError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise dependencies.common.http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="privileged_operation_planning_unavailable",
-                message="Privileged-operation policy planning is unavailable.",
-            ) from error
+        except PrivilegedOperationPlannerError:
+            return "privileged_operation_plan_stale"
+        except (PrivilegedOperationPlanningStoreError, TypeError, ValueError):
+            return "privileged_operation_planning_unavailable"
         if current_evidence != record.evidence:
+            return "privileged_operation_plan_stale"
+        return None
+
+    def require_current_policy_plan(
+        *,
+        record: PrivilegedOperationRecord,
+        record_store: object,
+        trace_id: str,
+    ) -> None:
+        blocker = current_policy_plan_blocker(record=record, record_store=record_store)
+        if blocker is not None:
+            unavailable = blocker == "privileged_operation_planning_unavailable"
             raise dependencies.common.http_error(
-                status_code=409,
+                status_code=503 if unavailable else 409,
                 trace_id=trace_id,
-                code="privileged_operation_plan_stale",
-                message="The privileged-operation policy plan is stale and must be replanned.",
+                code=blocker,
+                message="Privileged-operation policy planning is unavailable."
+                if unavailable
+                else "The privileged-operation policy plan is stale and must be replanned.",
             )
 
     def read_operation_or_error(
@@ -763,6 +806,13 @@ def register_privileged_operation_routes(
                 request=envelope.request,
                 expires_in_seconds=envelope.expires_in_seconds,
             )
+        except MergeTrainTargetNotReadyError as error:
+            raise dependencies.common.http_error(
+                status_code=422,
+                trace_id=trace_id,
+                code="merge_train_target_not_ready",
+                message=str(error),
+            ) from error
         except (
             PrivilegedOperationPlannerError,
             PrivilegedOperationPlanningStoreError,
@@ -1352,6 +1402,13 @@ def register_privileged_operation_routes(
                 request=envelope.request,
                 expires_in_seconds=envelope.expires_in_seconds,
             )
+        except MergeTrainTargetNotReadyError as error:
+            raise dependencies.common.http_error(
+                status_code=422,
+                trace_id=trace_id,
+                code="merge_train_target_not_ready",
+                message=str(error),
+            ) from error
         except (
             PrivilegedOperationPlannerError,
             PrivilegedOperationPlanningStoreError,
@@ -1457,7 +1514,6 @@ def register_privileged_operation_routes(
                 github_id=identity.github_id,
                 intent=envelope.intent,
                 record_store=record_store,
-                configured_terminal_identity=dependencies.read_configured_terminal_identity(),
                 configured_local_operator_identity=(
                     dependencies.read_configured_local_operator_identity()
                 ),

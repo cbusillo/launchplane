@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_bot_policy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -20,11 +21,8 @@ from control_plane.merge_train_controller_run_once import (
     _apply_queue_block,
 )
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
-from control_plane.merge_train_github import (
-    GitHubMergeTrainClient,
-    MergeTrainGitHubError,
-    RecordingMergeTrainGitHubTransport,
-)
+from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_controller_run_once
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
@@ -111,7 +109,7 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
                     "failure_policy": failure_policy,
                     "enqueue": repository_policy.enqueue.model_copy(
                         update={
-                            "dependency_update_github_user_ids": (42,),
+                            "dependency_update_bots": (dependency_bot_policy(42),),
                             "trusted_automation_github_user_ids": (42,),
                         }
                     ),

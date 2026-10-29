@@ -4,6 +4,70 @@ title: Client Review and Retired Acceptance History
 
 ## Current Client review
 
+### Reviewed conflict integrations
+
+An admin or the Director's authenticated agent can attest that one exact conflict
+integration adds no new Client-visible work. This classifies an immutable merge;
+it records no new Client acceptance, never merges or promotes, grants no access,
+and preserves the truthful visible commit marker. Other visible merges still
+require their ordinary qualification.
+
+`POST /v1/product-review/integration-attestation` supports `dry-run`, `apply`,
+and `readback`. Dry-run resolves the open PR's exact head and base, current
+Client, applicable source acceptance, merge SHA, tree and ordered parents. The
+first parent must be the accepted head. The second parent must be on the base
+branch. Every imported commit must belong to that parent and have qualified
+merged-change evidence, including accepted Client changes, engineering-only
+changes and recorded train batches. The merge must belong to the current PR's
+history. Incomplete history, rejected imports and undelivered requested feedback
+refuse the proof.
+
+Apply repeats that proof and requires its exact `reviewed_evidence_sha256`, an
+engineering statement and a confirming model review bound to the same digest.
+The caller attests the review's provider, model, conclusion and complete report;
+its provider must differ from the author's. The authenticated engineering caller
+is responsible for truthful provenance and weighing the review. Historical
+advisory engineering decisions do not become authority. Scoped agents and
+Clients cannot write this evidence. No new credential or grant is needed.
+
+The record is immutable and identified by its evidence digest. Exact replay
+returns the original; a different statement or review cannot replace it.
+Readback uses the original digest and target identifiers and remains available
+after acceptance advances. Read back lost apply responses before any retry;
+replaying a saved attestation does not prove that current acceptance carries.
+On a carried decision, `decided_at` is when Launchplane saved that carry, while
+`base_branch` is the base first bound to the original decision. Empty additive
+carry-evidence fields are omitted on writes so the preceding image can still
+read ordinary carries. Populated evidence requires the compatibility image.
+
+Carry rereads applicable Client decisions and imported-change evidence, matches
+the exact merge, tree, parents, product, Client, PR, base and source decision,
+and saves the attestation ID with its proof. Exact-tree restoration can remove
+a subsequent zero-net single-parent suffix. Residual visible work, different
+merges, changed Clients or bases and Client rejections retain their gates. The
+existing open-PR sweep publishes the resulting carry independently of preview
+delivery; the attestation endpoint publishes no acceptance itself.
+
+The bounded repository client uses the installed admin helper's existing private
+transport. Request and response files contain review prose and belong in private
+task evidence, with no secrets:
+
+```sh
+uv run python scripts/attest-integration.py dry-run \
+  --operator-helper /installed/launchplane/scripts/launchplane-write-action.py \
+  --request-file /private/request.json --response-file /private/plan.json
+uv run python scripts/attest-integration.py apply \
+  --operator-helper /installed/launchplane/scripts/launchplane-write-action.py \
+  --request-file /private/reviewed-request.json --evidence-file /private/plan.json \
+  --response-file /private/applied.json
+uv run python scripts/attest-integration.py readback \
+  --operator-helper /installed/launchplane/scripts/launchplane-write-action.py \
+  --request-file /private/reviewed-request.json --evidence-file /private/plan.json \
+  --response-file /private/readback.json
+```
+
+### Client and preview decisions
+
 Setting a product's Client resolves the login through the repository-scoped
 Delivery App credential. A `github_credentials_unavailable` response identifies
 the failed stage: `request`, `identity`, `repository_inventory`, or `token_mint`.
@@ -13,11 +77,16 @@ are never included. A failed lookup leaves the profile unchanged; it does not
 fall back to another credential. Service logs include the same failure stage.
 
 Products recorded with `release_on_acceptance: director_standing` do not wait
-for a Client-preview check at merge admission or receive preview-review invitations,
-even when the PR has test notes or an old review label. The Director's standing
-direction supplies acceptance; note validation and engineering checks still
-apply. Production release remains on the gated path
-described in [release-review.md](release-review.md), including its checklist-note validation.
+for a Client-preview check at merge admission or receive preview-review invitations
+when the PR only has test notes. The Director's standing direction supplies
+acceptance; note validation and engineering checks still apply. The product's
+review label is an explicit hold: with it, the change waits for the recorded
+Client's preview review like any other product, and the label still requires
+real test notes. A product without a serving preview cannot record that
+acceptance, so its labeled change stays held until the request is withdrawn
+through [pending request withdrawal](#withdrawing-a-pending-request). Withdrawal
+returns the change to standing acceptance; a saved Client rejection still vetoes it.
+Production release remains on the gated path described in [release-review.md](release-review.md), including its checklist-note validation.
 
 The Client named on the product profile reviews a preview at `/ui/owner-review`.
 Launchplane requests review when a pull request has real `Client test notes`
@@ -62,22 +131,72 @@ Client's acceptance.
 
 Editing the PR body re-plans its preview and review intent without needing a
 push or label change.
+The [shared ready-handoff notes contract](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#ready-handoffs)
+also defines the unanswered-questions subsection and shipping placeholder marker.
+Its validation extends the existing missing-notes gate: preview and release
+Accept stay disabled while questions remain. Preview acceptance rereads and
+validates the notes on the server before saving a decision. Request changes
+remains available. Clearing the questions restores normal notes validation;
+Client repositories also check their committed shipping content in ordinary CI.
 The preview reconciler refreshes the Client-review check independently of
 preview planning and delivery, including a deferred operation, an unknown
 provider outcome, or a failure to recover the original preview proof. The
 publisher rereads the PR and saved decisions, even when there is no new preview
-comment to post. Valid engineering-only notes
+comment to post, or when an open PR's preview is being destroyed. The open-PR
+sweep also refreshes reviews for products without previews or testing lanes;
+failed publication retries through the same reconcile row on a later sweep.
+A pending Client check invites review only when a ready serving preview matches
+the current PR head. Otherwise it reports that the preview is unavailable,
+including the redacted refresh failure reason when one is recorded, and says
+there is nothing for the Client to review yet. The current reconcile outcome is
+used immediately, before feedback completion saves it. Product Ops projects
+these recorded preview failures and their unavailable replacements in its
+existing product warnings; retrying a failed refresh does not clear its warning.
+A ready preview matching the current head clears it, even if another reconcile
+fails. A failed PR read leaves the current head unknown; Ops retains refresh
+attention without claiming that a serving preview is down. A failure carried to
+a replacement commit is described as an earlier refresh failure until the
+replacement works. Cleanup failures do not become refresh failures on reopen.
+Ordinary build waits add no warning. Saved Client decisions publish
+independently of preview reads.
+When its fresh PR read observes a closed change, the publisher can still deliver
+already-requested saved Client feedback. It skips current review projection,
+decision-base binding, acceptance carry and retired-check maintenance, even if
+cleanup replaced its original reason with a retry limit, busy operation or
+recovery failure. **Retry delivery** remains available after closure or merge;
+closed cleanup may also retry saved feedback when it invokes the publisher.
+An unavailable read is not evidence of closure; normal best-effort retry behavior
+remains.
+When a product has no Client and the PR has no review label, only an existing
+Advisory App review check bound to that repository, PR and current head is
+completed neutrally. A PR with no earlier matching check stays silent. A review
+label without a Client still leaves the review pending. These updates create no
+decision or acceptance. Valid engineering-only notes
 publish a neutral check, replacing any earlier missing-notes failure, saying no
 Client preview review is required, without
 recording a Client decision or sending a review invitation. A later review label,
 missing notes, or real test notes restores the corresponding review gate on the
 same head when the check refreshes. Until then, an engineering-only check cannot
 satisfy required Client acceptance. An existing Client rejection stays visible.
-The train independently reads saved current-head decisions for the product's
+Acceptance uses the newest applicable decision for the product's current
+immutable Client ID, product, repository, pull request and current head.
+A changed login with the same ID keeps the decision applicable.
+A former Client's decision stays saved with its feedback, but neither accepts,
+vetoes nor masks the current Client's decision. Carried decisions must also match
+the current base branch. The same Client and target selection applies when
+recording a decision's first base branch or choosing an acceptance to carry.
+The train independently reads the latest saved decision for the product's
 current Client at admission and immediately before merging. A Request changes
-decision blocks even after notes are edited to engineering-only or while its
-GitHub projection is stale. A later Accept on that head clears the veto;
-decisions for another head, product or former Client do not veto this change.
+decision blocks even after a base update or new commits, after notes are edited
+to engineering-only, or while its GitHub projection is stale. Review checks
+also preserve that rejection across heads. Restore Client test notes
+and request review of the current preview to resolve it; a later Accept clears
+the veto. Decisions for another product, pull request or former Client do not
+veto this change. Acceptance remains bound to the reviewed head or proven carry.
+For a Director-standing product, the Director signs in as the recorded Client,
+opens the change's `/ui/owner-review` page and accepts its current serving preview.
+Without the review label, standing acceptance suppresses invitations; it does
+not prevent that explicit decision. A serving preview remains required by the normal review path.
 The consuming product's release acceptance remains required.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
@@ -85,6 +204,8 @@ Launchplane accepts a product-review decision.
 A preview invitation's first visible line names **Change review (preview)** and
 asks whether this one change is exactly right. It links that change's preview
 and explains that Accept approves the change while nothing goes live yet.
+The review page shows the pull request's title and its Client test notes under
+**What to check**, read from the pull request when the page loads.
 The separate release invitation is described in [release-review.md](release-review.md).
 
 A Client does not need an authorization policy role to sign in. When GitHub
@@ -130,77 +251,97 @@ The form explains that new decisions and feedback are shared on the pull request
 
 ## Carried acceptance
 
-Per-change Client acceptance remains required. Release acceptance is a separate
-final check; it does not replace the decision about each change.
+Per-change Client acceptance remains required. Release acceptance checks how
+accepted changes work together. Every carry requires the newest applicable
+decision to be an acceptance by the current Client, with its feedback delivered,
+and the PR to keep the base branch recorded on that decision. A decision without
+a recorded base does not carry. Retargeting the PR invalidates a carry even
+without a new commit.
 
-For a later descendant head, acceptance carries only when every intervening
-commit has one `Client-impact: none` git trailer in its final trailer paragraph.
-`Client-impact: visible`, missing or ambiguous trailers need a new decision,
-even when the final patch happens to match. Agents declare the impact and the
-second-model review checks it against the actual changes. A test-only follow-up
-can therefore carry without asking the Client to accept the same feature twice.
-Launchplane requires a complete, ordered single-parent history from the accepted
-head to the new head (at most 250 commits); incomplete history never carries.
-A merge trailer alone cannot prove it was conflict-free, so unproven merges,
-including conflict-resolving merges, need a new decision. The existing clean
-merge-train refresh proof below continues to apply.
-If recorded train refreshes and invisible commits are mixed between status
-publishes, neither proof covers the whole history and a new decision is needed.
+For a later descendant head, acceptance carries when every PR-side commit has
+one `Client-impact: none` git trailer in its final trailer paragraph. A merge
+from the recorded base branch may resolve conflicts between accepted changes:
+the Client does not have to accept either change again. The merge's `none`
+trailer declares that its resolution only combines those changes, without new
+Client-visible behavior on the PR's side. Agents declare the impact and the
+second-model review checks it against the actual changes. A new Client-visible
+change requires `Client-impact: visible` and the Client's decision.
 
-This carry records reason `client_impact_none` and every commit SHA with its
-`client_impact` trailer value in `carried_from.commits`, in order. The Client sees
-a short note that later commits were marked as having no Client-visible changes
-and their acceptance still applies. The recorded Client, original acceptance
-and delivered feedback remain the source, rather than inventing a new decision.
-The same-current-Client, delivered-feedback and unchanged-base checks below apply.
+Launchplane requires the complete descendant history (at most 250 commits),
+walks the PR's first-parent path back to its accepted head, and pins the recorded
+base branch's current commit. Every merge's other parent and every imported
+commit must belong to that immutable base. Each imported change must be merged
+onto the same base and either have valid engineering-only notes or a delivered
+acceptance by the same current Client for its exact merged head. For a recorded
+train batch, the recorded member heads receive that check individually. Missing,
+ambiguous or incomplete evidence, a foreign parent, or a visible or missing
+PR-side trailer leaves acceptance waiting, unless that merge exactly matches a
+recorded train refresh's result and both parents. Recorded refreshes need no
+trailer and can appear before or after declared invisible commits or conflict
+merges. A test-only follow-up or a sequence
+of such commits mixed with qualified base merges can carry without another
+Client decision. Release acceptance remains the check of how the combined
+changes work together.
 
-The Client accepts a feature, seen on its preview. A base update or rebase may
-change its commit without changing the feature. Launchplane carries the
-acceptance across a recorded train refresh or rewritten history (such as a
-rebase) instead of asking again. This existing unchanged-patch proof carries only
-when all of these hold:
+Within a base integration, a sequence of single-parent commits that restores
+an earlier first-parent commit's exact Git tree contributes no remaining work.
+Launchplane records `restored_trees`: both commit heads, their identical tree SHA
+and every removed commit. It then qualifies the earlier commit normally,
+including its impact declaration. This proof covers file content, paths, modes
+and submodules, even when intermediate commits declared visible changes. It
+never skips a merge or qualifies the restored ancestor by itself. Missing tree
+evidence or any residual visible change leaves the PR waiting.
 
-- The pull request still targets the base branch the acceptance was given on.
-  A decision keeps the pull
-  request's base branch from the first time Launchplane shows it on the pull
-  request; a decision without one does not carry.
-- The pull request's change against its base is the same at both heads: every
-  changed file has the same name, status, and added and removed lines, in order,
-  in source-control comparisons from the same immutable base commit. A recorded
-  train refresh supplies its merged base commit after branch membership is
-  verified; otherwise Launchplane pins the current base branch's commit before
-  comparing either head. Hunk positions are ignored. Outside a recorded train
-  refresh, surrounding context, hunk boundaries and section names must also
-  match: moving identical added lines into a different function needs a fresh
-  Accept. Complete source-control tree evidence must also show the same file
-  modes, so changing an executable bit or symlink does not carry. Train-recorded
-  refreshes can incorporate base context changes without
-  asking again. Any difference in a line the feature adds or removes prevents
-  either kind of carry. A file without a patch
-  (binary or too large) or a list of 300 files or more cannot be compared and
-  does not carry.
-- The newest decision is that acceptance, made by the product's current Client,
-  with its feedback delivered.
-- Outside the train, hunk positions must move only by the base's own line shifts.
-  Both merge bases and their complete comparison must be readable. Overlapping
-  base edits or relocating a hunk to an identical-looking XML block needs a new
-  Accept. Tree modes are read only after the text and position proofs match.
+A linear invisible follow-up records reason `client_impact_none`. A chain made
+only of exact recorded train refreshes retains `merge_train_base_refresh` after
+the same imported-change checks. Other base integration records
+`accepted_base_integration`, the pinned `comparison_base_sha`, each
+PR-side `none` commit in order, and any recorded train refresh IDs. It also
+saves `integrated_changes`: each imported change's number, exact head and
+acceptance record ID or its engineering basis (the parsed notes snapshot bounded
+to the decision-reason limit, or the shared verified-dependency explanation). `batch_record_ids` names the train batches
+whose exact members were checked. These persisted facts explain the carry even
+if a PR's notes or labels later change. Imported base commits are checked
+against their own changes rather than treated as new PR-side work. The recorded
+Client, original acceptance and delivered feedback remain the source.
+Older records default added evidence lists to empty. Legacy train carries may
+omit `comparison_base_sha`; their refresh records supply the merged base.
+To integrate overlapping accepted changes, merge the recorded base into the PR
+with the reviewed Client-impact declaration. Rewritten history, such as a rebase,
+continues to use the strict unchanged-patch proof instead of descendant history.
+It carries only when:
 
-Changed feature patches, including conflict resolutions that change added or
-removed lines, require a new Accept. Missing base evidence or incomplete
-comparisons leave the new head waiting for the Client. A carried acceptance
-also stops applying if the pull request is later retargeted to another base, even
-without a new commit. The carry is saved
-as a new decision record with `carried_from` naming the decision and head it came
-from, the reason, the immutable comparison base, and any train refresh records,
-so it reads as carried, not
-re-decided. The `launchplane/owner-review` check on the new head says
-which earlier acceptance was carried and whether it was a train refresh or an
-unchanged-feature base update;
-the review page shows which version it was carried from, and the ready preview
-comment says the change is accepted rather than asking the Client again. The
-carry is checked when the status is next written: on the ready preview comment
-from the feedback route or the reconciler, and after a decision.
+- Launchplane pins the recorded base branch's current immutable commit before
+  comparing either head. Every changed file has the same name, status, added
+  and removed lines, surrounding context, hunk boundaries, section names and
+  file mode at both heads. Hunk line numbers may change only by the base's own
+  line shifts. Moving a hunk into another function or an identical-looking
+  block needs a new Accept.
+- Both merge bases and their complete comparison are readable. Overlapping
+  base edits, changed feature patches, a patchless binary or oversized file,
+  or a list of 300 files or more leaves acceptance waiting. Tree modes are read
+  only after the text and position proofs match.
+
+Every descendant history, including a recorded train refresh, uses the qualified
+history admission above. A failed history proof never falls back to the
+unchanged-patch proof. Conflict-resolving descendant integrations can therefore
+combine separately accepted patches even when the remaining PR diff changes or
+becomes empty.
+
+The carry is saved as a new decision record with `carried_from` naming its
+original decision and head, reason and evidence. It reads as carried, not
+re-decided. The `launchplane/owner-review` check, review page and ready-preview
+comment explain the carry rather than asking the Client again. It is checked
+when status is next published: on the ready-preview feedback or reconciliation
+route, and after a decision. Missing base evidence or incomplete comparisons
+leave the current head waiting.
+
+The review page's Recorded decision card preserves saved history, including a
+former Client's decision or an older preview version. Its carry explanation
+describes the recorded version and why the acceptance was carried at that time;
+it does not establish that the acceptance applies now. The current Client can
+still record a new decision on a ready preview. The shared review projection
+checks current Client, head and base applicability separately.
 
 The maintained `codex-skills` agent watcher recognizes the Client feedback marker
 from any publisher, then verifies the complete decision and exact comment receipt
@@ -254,11 +395,23 @@ not a Client decision or an authorization grant. Apply requires the reviewed
 plan digest and an original idempotency key. The helper binds saved dry-run
 evidence and follows apply with service readback.
 
+Permanent pre-dispatch eligibility refusals retain HTTP 409 and
+`product_review_withdrawal_refused`. The optional `error.reason` uses the finite
+`ReviewWithdrawalRefusalReason` vocabulary in `product_review_withdrawal.py`;
+`no_pending_labeled_request` means there is no labeled request to withdraw.
+The supported helper projects only known reasons with bounded advice. Older
+consumers and services without reasons retain the generic refusal. Stale plans,
+unsettled delivery and recovery keep their separate codes and original-key
+handling; a refusal reason never authorizes another attempt or label removal.
+
 The service serializes with Client decision saves and refuses withdrawal if
 any Client decision for this product already names the current head. It
 removes only the product's configured review label, confirms the removal,
 and adds a withdrawal entry to the PR history. Its durable operation retains
-the actor, head, reason and Director-decision citation. An uncertain response
+the actor, head, reason and Director-decision citation. Withdrawal changes the
+pending request only; an earlier-head Client rejection still vetoes the change
+and needs the Client's later Accept through the review path above.
+An uncertain response
 keeps the same request, digest and key; read back before recovery. Recovery can
 finish undelivered history after the label is absent, but never removes a label
 again. A pre-dispatch failure can resume the same reviewed operation. If a

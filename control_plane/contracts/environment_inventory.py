@@ -8,6 +8,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.snapshot_protocol import LaneInstance
 
 
 class EnvironmentInventory(BaseModel):
@@ -15,7 +16,7 @@ class EnvironmentInventory(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     context: str
-    instance: str
+    instance: LaneInstance
     artifact_identity: ArtifactIdentityReference | None = None
     source_git_ref: str
     deploy: DeploymentEvidence
@@ -27,7 +28,7 @@ class EnvironmentInventory(BaseModel):
     deployment_record_id: str
     bootstrap_record_id: str = ""
     promotion_record_id: str = ""
-    promoted_from_instance: str = ""
+    promoted_from_instance: LaneInstance = ""
 
     @model_validator(mode="after")
     def _validate_inventory(self) -> "EnvironmentInventory":

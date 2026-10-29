@@ -13,6 +13,7 @@ from control_plane.dokploy.testing_route import (
     observe_testing_route,
     route_document,
     select_testing_route_raw,
+    testing_route_rule,
 )
 
 
@@ -68,6 +69,56 @@ class RoutingRuleTests(unittest.TestCase):
 
 
 class TestingRouteTests(unittest.TestCase):
+    def test_recorded_alias_survives_rebuild_and_keeps_foreign_router_checks(self) -> None:
+        original = self.plan()
+        alias = "retained-testing.example.invalid"
+        payload = original.model_dump()
+        payload["aliases"] = (alias,)
+        for router in payload["template"]["http"]["routers"].values():
+            router["rule"] = testing_route_rule(self.host, (alias,))
+            if "tls" in router:
+                router["tls"]["domains"] = [{"main": self.host}, {"main": alias}]
+        retained = TestingLaneRoute.model_validate(payload)
+        raw = self.apply(retained, self.old)
+        rebuilt = compile_testing_route(
+            product=retained.product,
+            context=retained.context,
+            host=retained.host,
+            aliases=retained.aliases,
+            old_backend=self.old,
+            old_backend_addresses=(self.old_address,),
+            new_backend=self.new,
+            raw=raw,
+            public_entrypoints=retained.public_entrypoints,
+            owned_document=route_document(retained, self.old),
+            recorded_template=retained.template,
+        )
+        self.assertEqual(rebuilt.aliases, retained.aliases)
+        self.assertEqual(
+            observe_testing_route(
+                rebuilt, self.apply(rebuilt, self.new), route_document(rebuilt, self.new)
+            ),
+            self.new,
+        )
+        raw["routers"]["foreign@file"] = {
+            "rule": f"Host(`{alias}`)",
+            "entryPoints": ["websecure"],
+            "service": "foreign@file",
+            "status": "enabled",
+            "priority": 1000000,
+        }
+        with self.assertRaises(ValueError):
+            observe_testing_route(rebuilt, raw, route_document(rebuilt, self.old))
+
+    def test_single_host_receipts_keep_their_historical_serialization(self) -> None:
+        plan = self.plan()
+        self.assertNotIn("aliases", plan.model_dump(mode="json"))
+        historical = plan.model_dump(mode="json")
+        self.assertEqual(TestingLaneRoute.model_validate(historical).digest, plan.digest)
+        for alias in (self.host.upper(), "unsafe`hostname", ""):
+            with self.subTest(alias=alias), self.assertRaises(ValueError):
+                TestingLaneRoute.model_validate({**historical, "aliases": (alias,)})
+
     def test_scoped_observation_ignores_unreferenced_redirects(self) -> None:
         before = select_testing_route_raw(self.raw, self.host, ("web", "websecure"))
         self.raw["middlewares"]["another-lane@file"] = {
@@ -190,15 +241,32 @@ class TestingRouteTests(unittest.TestCase):
                     )
                 applied[section][name + "@file"] = {**observed, "status": "enabled"}
 
-        def plan() -> TestingLaneRoute:
+        def plan(previous: TestingLaneRoute | None = None) -> TestingLaneRoute:
             self.raw = applied
             return self.plan(
                 application_document=document,
                 application_file_name="old-app.yml",
                 application_file_sha256=hashlib.sha256(json.dumps(document).encode()).hexdigest(),
+                **(
+                    {
+                        "recorded_template": previous.template,
+                        "recorded_application_route": previous,
+                        "owned_document": route_document(previous, self.old),
+                    }
+                    if previous is not None
+                    else {}
+                ),
             )
 
-        self.assertEqual(plan().legacy_backend, self.old_address)
+        recorded = plan()
+        self.assertEqual(recorded.legacy_backend, self.old_address)
+        physical_applied = deepcopy(applied)
+        applied = self.apply(recorded, self.old)
+        self.assertEqual(plan(recorded).legacy_routers, recorded.legacy_routers)
+        applied["routers"]["added-alias@docker"] = deepcopy(applied["routers"]["old-http@file"])
+        with self.assertRaises(ValueError):
+            plan(recorded)
+        applied = physical_applied
         document["http"]["routers"]["old-http"]["priority"] = 123
         applied["routers"]["old-http@file"]["priority"] = 123
         self.assertEqual(plan().legacy_backend, self.old_address)
@@ -261,7 +329,11 @@ class TestingRouteTests(unittest.TestCase):
 
     def test_conflicting_alias_behavior_or_physical_backend_still_refuses(self) -> None:
         original = deepcopy(self.raw)
-        changes: tuple[dict[str, Any], ...] = ({"priority": 900}, {"tls": {}}, {"middlewares": []})
+        changes: tuple[dict[str, Any], ...] = (
+            {"priority": 900},
+            {"tls": {}},
+            {"middlewares": ["unknown@docker"]},
+        )
         for change in changes:
             with self.subTest(change=change):
                 self.raw = deepcopy(original)
@@ -289,6 +361,66 @@ class TestingRouteTests(unittest.TestCase):
                     "service": "foreign@docker",
                 }
                 self.plan()
+
+    def test_aliases_share_the_required_csp_without_losing_individual_drift_checks(self) -> None:
+        original = deepcopy(self.raw)
+        for alias_has_csp in (False, True):
+            with self.subTest(alias_has_csp=alias_has_csp):
+                self.raw = deepcopy(original)
+                for name, router in list(self.raw["routers"].items()):
+                    self.raw["routers"]["alias-" + name] = {**deepcopy(router), "middlewares": []}
+                    if alias_has_csp:
+                        self.raw["routers"][name]["middlewares"] = []
+                        self.raw["routers"]["alias-" + name]["middlewares"] = [
+                            "old-connections@docker"
+                        ]
+                plan = self.plan()
+                self.assertEqual(set(plan.legacy_routers), set(self.raw["routers"]))
+                document = route_document(plan, self.new)
+                for router in document["http"]["routers"].values():
+                    self.assertTrue(router["middlewares"])
+                    for reference in router["middlewares"]:
+                        self.assertEqual(
+                            document["http"]["middlewares"][reference.removesuffix("@file")],
+                            {"headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP}},
+                        )
+                self.assertEqual(
+                    observe_testing_route(plan, self.apply(plan, self.new), document), self.new
+                )
+                for name in plan.legacy_routers:
+                    applied = self.apply(plan, self.new)
+                    applied["routers"][name]["middlewares"] = ["foreign@file"]
+                    with self.subTest(router=name), self.assertRaises(ValueError):
+                        observe_testing_route(plan, applied, document)
+
+    def test_aliases_refuse_changed_csp_or_ordered_file_middleware(self) -> None:
+        original = deepcopy(self.raw)
+        for middleware in (
+            {"status": "disabled", "headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP}},
+            {"status": "enabled", "headers": {"contentSecurityPolicy": "connect-src *"}},
+            {
+                "status": "enabled",
+                "headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP},
+                "basicAuth": {"users": []},
+            },
+        ):
+            with self.subTest(middleware=middleware), self.assertRaises(ValueError):
+                self.raw = deepcopy(original)
+                self.raw["middlewares"]["alias-connections@docker"] = middleware
+                self.raw["routers"]["alias@docker"] = {
+                    **deepcopy(self.raw["routers"]["old-https@docker"]),
+                    "middlewares": ["alias-connections@docker"],
+                }
+                self.plan()
+        self.raw = deepcopy(original)
+        self.raw["middlewares"]["headers@file"] = {"status": "enabled", "headers": {}}
+        self.raw["routers"]["old-https@docker"]["middlewares"].append("headers@file")
+        self.raw["routers"]["alias@docker"] = {
+            **deepcopy(self.raw["routers"]["old-https@docker"]),
+            "middlewares": ["headers@file"],
+        }
+        with self.assertRaises(ValueError):
+            self.plan()
 
     def test_only_canonical_internal_challenge_is_exempt_on_application_entrypoints(self) -> None:
         add_proxy_internal_routes(self.raw)

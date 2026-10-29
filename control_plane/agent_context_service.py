@@ -9,10 +9,6 @@ from control_plane.contracts.repo_product_mapping_read_model import (
     RepoProductMappingWorkRequestStore,
     build_repo_product_mapping_service_payload,
 )
-
-from control_plane.contracts.every_code_summary_read_model import (
-    build_every_code_summary_read_model,
-)
 from control_plane.contracts.preview_readiness_read_model import (
     build_preview_readiness_read_model,
 )
@@ -56,6 +52,7 @@ def build_agent_context_service_payload(
     work_request_store: RepoProductMappingWorkRequestStore,
     preview_readiness_store: object,
     tenant_admission_section: AgentContextSection | None = None,
+    product_reference_allowed: Callable[[str], bool] | None = None,
 ) -> AgentContextPayload:
     normalized_repository = repository.strip()
     sections = {
@@ -64,18 +61,8 @@ def build_agent_context_service_payload(
                 generated_at=generated_at,
                 product_store=product_store,  # type: ignore[arg-type]
                 work_request_store=work_request_store,
+                product_reference_allowed=product_reference_allowed,
             )
-        ),
-        "every_code_summary": _available_section(
-            {
-                "summary": build_every_code_summary_read_model(
-                    generated_at=generated_at,
-                    record_store=work_request_store,
-                    repository=normalized_repository,
-                    limit=25,
-                    offset=0,
-                ).model_dump(mode="json")
-            }
         ),
         "preview_readiness": _available_section(
             {

@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import seed_dependency_policy
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -637,9 +638,13 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
                     {
                         "body": "Bumps a dependency.",
                         "labels": [],
-                        "user": {"login": "dependabot[bot]", "type": "Bot"},
+                        "user": {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"},
                         "head": {"sha": PR_HEAD, "repo": {"full_name": "example/site"}},
-                        "base": {"sha": "base", "repo": {"full_name": "example/site"}},
+                        "base": {
+                            "ref": "main",
+                            "sha": "base",
+                            "repo": {"full_name": "example/site"},
+                        },
                     }
                 )
             return value
@@ -647,14 +652,16 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             store = FilesystemRecordStore(Path(temporary))
             seed(store)
+            seed_dependency_policy(store, repository="example/site")
             review = build_release_review(store=store, profile=profile(), read=read)
             assert review.checklist is not None
-            self.assertFalse(checklist_blockers(review.checklist))
+            self.assertFalse(checklist_blockers(review.checklist, profile=profile()))
             self.assertFalse(review.approved)
             self.assertFalse(review.checklist.items[0].client_test_notes_error)
             self.assertTrue(review.checklist.items[0].owner_test_notes)
 
     def test_engineering_notes_allow_client_decision_but_bad_notes_do_not(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
         from control_plane.release_review import checklist_blockers
 
         with TemporaryDirectory() as temporary:
@@ -666,6 +673,12 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
                         False,
                     ),
                     ("Nothing for the Client to test: CI only.", [], False),
+                    (
+                        f"Check the contact page.\n### {OPEN_CLIENT_QUESTIONS}\n- What is the address?",
+                        [],
+                        True,
+                    ),
+                    (f"Check the contact page.\n### {OPEN_CLIENT_QUESTIONS}\n", [], False),
                     ("Nothing for the Client to test", [], True),
                     ("Nothing for the owner to test", [{"name": "owner-review"}], True),
                     ("Nothing for the Client to test: CI only.", [{"name": "owner-review"}], True),
@@ -688,7 +701,9 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
 
                     review = build_release_review(store=store, profile=profile(), read=read)
                     assert review.checklist is not None
-                    self.assertEqual(bool(checklist_blockers(review.checklist)), blocked)
+                    self.assertEqual(
+                        bool(checklist_blockers(review.checklist, profile=profile())), blocked
+                    )
                     self.assertFalse(review.approved)
                     if not blocked:
                         accepted = ReleaseReviewDecisionRecord(

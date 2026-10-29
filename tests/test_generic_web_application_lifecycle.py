@@ -568,6 +568,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
     def test_removed_declaration_removes_only_previously_managed_schedule(self) -> None:
         clock = self.enterContext(patch("control_plane.workflows.ship.datetime", wraps=datetime))
         clock.now.return_value = datetime.now(UTC)
+        self.enterContext(patch("control_plane.timestamps.datetime", clock))
         result, store = self._deploy()
         first_record_id = result.deployment_record_id
         self.assertEqual(result.post_deploy_status, "pass")

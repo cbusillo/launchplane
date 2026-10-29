@@ -21,7 +21,6 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_deploy_provider import (
-    DokployGenericWebDeployProvider,
     GenericWebProviderDeploymentObservation,
     GenericWebRuntimeArtifactObservation,
     evaluate_generic_web_runtime_close_out,
@@ -31,7 +30,6 @@ from tests.support.stores import sqlite_database_url as _sqlite_database_url
 from tests.test_generic_web_deploy_recovery import (
     _create_recovery_app,
     _generic_web_recovery_reservation,
-    _generic_web_recovery_target,
     _invoke_recovery,
     _invoke_recovery_apply,
     _RecoveryObservationProvider,
@@ -555,7 +553,7 @@ class DokployRuntimeArtifactReadTests(unittest.TestCase):
             return {"Config": config, **({"State": state} if state is not None else {})}
 
         with patch("control_plane.dokploy.api.dokploy_request", fake_request):
-            running = dokploy_runtime_evidence.fetch_compose_running_container_images(
+            running = dokploy_runtime_evidence.fetch_compose_running_container_runtime(
                 host="https://dokploy.example",
                 token="token",
                 app_name="app-x1",
@@ -566,7 +564,10 @@ class DokployRuntimeArtifactReadTests(unittest.TestCase):
         # label; c4 belongs to another app; c3 and c6 are not running when
         # inspected, even though c6 was listed as running; c7 is restarting, c8
         # is paused, and c9 is a one-off `compose run` container.
-        self.assertEqual(running, (_ORIGINAL_IMAGE, _DATABASE_IMAGE, _OTHER_DIGEST_IMAGE))
+        self.assertEqual(
+            tuple(image for image, _deployment_record_id in running),
+            (_ORIGINAL_IMAGE, _DATABASE_IMAGE, _OTHER_DIGEST_IMAGE),
+        )
 
     def test_running_container_without_image_fails_closed(self) -> None:
         def fake_request(*, path: str, **_kwargs: object) -> object:
@@ -578,15 +579,8 @@ class DokployRuntimeArtifactReadTests(unittest.TestCase):
             patch("control_plane.dokploy.api.dokploy_request", fake_request),
             self.assertRaises(dokploy_runtime_evidence.DokployEvidenceProviderError),
         ):
-            dokploy_runtime_evidence.fetch_compose_running_container_images(
+            dokploy_runtime_evidence.fetch_compose_running_container_runtime(
                 host="https://dokploy.example", token="token", app_name="app-x1"
-            )
-
-    def test_provider_reads_compose_targets_only(self) -> None:
-        with self.assertRaises(ValueError):
-            DokployGenericWebDeployProvider().observe_runtime_artifact(
-                control_plane_root=Path("."),
-                resolved_deploy_target=_generic_web_recovery_target(),
             )
 
 

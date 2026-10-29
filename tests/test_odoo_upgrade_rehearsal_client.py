@@ -24,6 +24,47 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
 
 
 class RehearsalClientTests(unittest.TestCase):
+    def test_keyless_status_read_does_not_need_an_original_review(self) -> None:
+        code, result, post = self.call(
+            "readback",
+            action="execute",
+            saved_review=False,
+            key="",
+            response_result={
+                "completed": True,
+                "public_route": False,
+                "business_host_frozen": False,
+            },
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(post.call_args.kwargs["idempotency_key"], "")
+
+    def test_readback_sends_the_saved_original_binding_for_every_action(self) -> None:
+        for action in ("prepare", "execute", "simulate-final", "verify", "retire"):
+            with self.subTest(action=action):
+                code, result, post = self.call(
+                    "readback",
+                    action=action,
+                    saved_review=True,
+                    response_result={
+                        "completed": True,
+                        "public_route": False,
+                        "business_host_frozen": False,
+                    },
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(result["status"], "verified")
+                self.assertEqual(post.call_args.kwargs["body"]["reviewed_plan_sha256"], "a" * 64)
+                code, _, post = self.call("readback", action=action, saved_review=False)
+                self.assertNotEqual(code, 0)
+                post.assert_not_called()
+
+    def test_preflight_accepts_added_response_fields(self) -> None:
+        code, result, _, _ = self.preflight(changes={"future_observation": {"new": True}})
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "verified")
+
     def preflight(
         self,
         *,
@@ -193,6 +234,8 @@ class RehearsalClientTests(unittest.TestCase):
         *,
         lost: bool = False,
         changed: bool = False,
+        saved_review: bool = True,
+        reviewed_binding: str = "a" * 64,
         failure: tuple[int, dict[str, Any]] | None = None,
         failure_headers: dict[str, str] | None = None,
         action: str = "prepare",
@@ -200,6 +243,7 @@ class RehearsalClientTests(unittest.TestCase):
         response: dict[str, Any] | None = None,
         request: OdooUpgradeRehearsalRequest | None = None,
         product: str = "fixture-product",
+        key: str = "fixture-key",
     ) -> tuple[int, dict[str, Any], Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/odoo-upgrade-rehearsal.py")
@@ -234,7 +278,7 @@ class RehearsalClientTests(unittest.TestCase):
             "state": "planned" if mode == "dry-run" else "prepared",
             "applied": mode == "apply",
             "action": draft.action,
-            "plan_sha256": "a" * 64,
+            "plan_sha256": reviewed_binding,
             "public_route": False,
             "business_host_frozen": False,
             "resources_preserved": True,
@@ -283,7 +327,7 @@ class RehearsalClientTests(unittest.TestCase):
             payload = root / "intent.json"
             payload.write_text(draft.model_dump_json())
             evidence = root / "review.json"
-            if mode == "apply":
+            if mode == "apply" or (mode == "readback" and saved_review):
                 reviewed_request = draft.model_dump(
                     mode="json", exclude={"mode", "reviewed_plan_sha256"}
                 )
@@ -293,9 +337,9 @@ class RehearsalClientTests(unittest.TestCase):
                             "intent": {
                                 "product": product,
                                 "request": reviewed_request,
-                                "key": "fixture-key",
+                                "key": key,
                             },
-                            "plan": {**result, "plan_sha256": "a" * 64, "applied": False},
+                            "plan": {**result, "plan_sha256": reviewed_binding, "applied": False},
                         }
                     )
                 )
@@ -317,7 +361,7 @@ class RehearsalClientTests(unittest.TestCase):
                 "--evidence-file",
                 str(evidence),
                 "--idempotency-key",
-                "fixture-key",
+                key,
             ]
             if mode == "apply":
                 args += ["--reviewed-dry-run"]
@@ -430,6 +474,7 @@ class RehearsalClientTests(unittest.TestCase):
 
     def test_incomplete_retirement_requires_disposal_and_original_hold_release(self) -> None:
         receipt = {
+            "future_receipt_field": {"new": True},
             "action": "retire-incomplete",
             "state": "retired",
             "completed": True,
@@ -447,6 +492,7 @@ class RehearsalClientTests(unittest.TestCase):
             "shape_sha256": "c" * 64,
             "elapsed_seconds": {},
             "host_disposal": {
+                "future_custody_field": {"new": True},
                 "qualified": True,
                 "disposed": True,
                 "binding_sha256": "d" * 64,
@@ -464,6 +510,8 @@ class RehearsalClientTests(unittest.TestCase):
             code, result, _ = self.call(mode, action="retire-incomplete", response_result=receipt)
             self.assertEqual(code, 0)
             self.assertTrue(result["disposed"])
+            self.assertNotIn("future_receipt_field", result)
+            self.assertNotIn("future_custody_field", result["host_disposal"])
             for field in ("disposed", "original_operation_released", "raw_source_retained"):
                 with self.subTest(mode=mode, missing=field):
                     incomplete = {key: value for key, value in receipt.items() if key != field}
@@ -513,6 +561,27 @@ class RehearsalClientTests(unittest.TestCase):
                     "reconciliation_required" if mode == "apply" else "unavailable",
                 )
                 post.assert_called_once()
+
+    def test_rebuild_readback_sends_the_original_saved_review_binding(self) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        binding = canonical_json_sha256({"fixture": "retired-rebuild-review"})
+        code, _, post = self.call(
+            "readback",
+            action="rebuild-final",
+            saved_review=True,
+            reviewed_binding=binding,
+            response_result={
+                "completed": True,
+                "state": "switched",
+                "public_route": False,
+                "business_host_frozen": False,
+                "resources_preserved": True,
+            },
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(post.call_args.kwargs["body"]["reviewed_plan_sha256"], binding)
+        self.assertEqual(post.call_args.kwargs["idempotency_key"], "fixture-key")
 
     def test_readback_preserves_each_original_key_for_an_uncertain_effect(self) -> None:
         from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalPrerequisite

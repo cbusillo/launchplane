@@ -26,6 +26,7 @@ from unittest.mock import patch
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
+from control_plane import odoo_preview_restore
 from control_plane.dokploy.compose import render_odoo_raw_compose_file
 from control_plane.integration_readback import (
     INTEGRATION_FAMILIES,
@@ -107,6 +108,19 @@ def main(argv):
                 if row["kind"] == kind and row["id"] in argv[3:]:
                     print(json.dumps(row))
             return 42 if os.environ.get("FAKE_METADATA_READ_FAILURE") == "1" else 0
+        if ".Mounts" in template:
+            if os.environ.get("FAKE_READER_MOUNT_READ_FAILURE") == "1":
+                return 42
+            if container_id == "script-runner-id":
+                print(os.environ.get("FAKE_READER_BINDS", "/srv/preview-source-ssh|/root/.ssh|false"))
+            elif container_id == "web-id":
+                print(os.environ.get("FAKE_WEB_BINDS", ""))
+            return 0
+        if ".State.Running" in template:
+            path = state_path(container_id)
+            status = path.read_text().strip() if path.exists() else "running"
+            print("true" if status == "running" else "false")
+            return 0
         if ".State.Status" in template:
             path = state_path(container_id)
             status = path.read_text().strip() if path.exists() else "running"
@@ -195,15 +209,28 @@ def main(argv):
         return 0
     if program[:2] == ["python3", "-u"]:
         log("exec workflow")
+        (state_dir / "workflow-executed").touch()
         log("workflow arguments " + " ".join(program[3:]))
         kept_key = "ODOO_RESTORE_KEPT_INTEGRATIONS"
         log("workflow kept integrations " + exec_environment.get(kept_key, "<unset>"))
+        if "-c" in program[2:4]:
+            program[-1] = program[-1].replace("'/volumes/scripts'", repr(str(state_dir / "modules")))
+            return subprocess.run([sys.executable, *program[1:]], cwd=state_dir / "project", env={
+                **os.environ, "PLATFORM_INSTANCE": "preview", **exec_environment,
+                "PYTHONPATH": str(state_dir / "modules"),
+            }).returncode
         print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
         return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
     if program[:2] == ["python3", "-c"] or program[:3] == ["python3", "-I", "-c"]:
         log("exec qualify" + (" -i" if interactive else ""))
+        if ("IDENTITY_DIRECTORY" in program[-1]
+            and os.environ.get("FAKE_CAPTURE_CLEANUP_FAIL_AFTER_WORKFLOW") == "1"
+            and (state_dir / "workflow-executed").exists()):
+            return 43
         return subprocess.run([sys.executable, *program[1:]],
-                              stdin=None if interactive else subprocess.DEVNULL).returncode
+                              cwd=state_dir / "project",
+                              stdin=None if interactive else subprocess.DEVNULL,
+                              env={**os.environ, **exec_environment}).returncode
     if program[:2] == ["python3", "-"]:
         log("exec readback" + (" -i" if interactive else ""))
         environment = dict(os.environ)
@@ -224,10 +251,6 @@ def main(argv):
 sys.exit(main(sys.argv[1:]))
 """
 
-# Stands in for PostgreSQL: FAKE_ODOO_DB describes ir_config_parameter values and,
-# per table, whether any row matches the catalog's "configured" predicate. A table
-# missing from "tables" does not exist. The real SQL is proved separately against
-# PostgreSQL; this fake only has to answer the program's four query shapes.
 _FAKE_PSYCOPG2 = """\
 import json
 import os
@@ -282,6 +305,9 @@ class _Cursor:
             self.rows = [(key,) for key in params[0] if str(config.get(key) or "").strip()]
         elif query.startswith("SELECT to_regclass"):
             self.rows = [(params[0] in tables,)]
+        elif query.startswith("SELECT attribute.attname"):
+            columns = self.database.get("payment_columns", {"code": "character varying", "state": "character varying"})
+            self.rows = list(columns.items())
         elif "key = 'shopify.shop_url_key'" in query:
             value = str(config.get("shopify.shop_url_key") or "")
             self.rows = [(bool(value) and _store_handle(value) in params[0],)]
@@ -332,10 +358,16 @@ def connect(**_kwargs):
 
 
 def _fake_database(
-    config: dict[str, str] | None = None, tables: dict[str, bool] | None = None
+    config: dict[str, str] | None = None,
+    tables: dict[str, bool] | None = None,
+    payment_columns: dict[str, str] | None = None,
 ) -> str:
     return json.dumps(
-        {"config": {**CONNECTION_ISOLATION_PARAMETERS, **(config or {})}, "tables": tables or {}}
+        {
+            "config": {**CONNECTION_ISOLATION_PARAMETERS, **(config or {})},
+            "tables": tables or {},
+            **({"payment_columns": payment_columns} if payment_columns is not None else {}),
+        }
     )
 
 
@@ -474,6 +506,7 @@ def _render_post_deploy_script(
     instance: str = "testing",
     workflow_environment_overrides: dict[str, str] | None = None,
     clear_preview_fishbowl_source: bool = False,
+    target_ssh_directory: str = "/srv/preview-source-ssh",
 ) -> str:
     schedule_payloads: list[dict[str, object]] = []
 
@@ -505,6 +538,7 @@ def _render_post_deploy_script(
                     ODOO_UPSTREAM_FILESTORE_PATH=/source/filestore
                     """
                 )
+                + f"\nDATA_WORKFLOW_SSH_DIR={target_ssh_directory}\n"
                 + "".join(
                     f"\n{key}={value}"
                     for key, value in (workflow_environment_overrides or {}).items()
@@ -553,6 +587,7 @@ def _render_post_deploy_script(
             target_definition=target_definition,
             env_file=None,
             run_destructive_restore=run_destructive_restore,
+            preview_ssh_source_directory="/srv/preview-source-ssh",
             bootstrap_missing_database=bootstrap_missing_database,
             workflow_environment_overrides=workflow_environment_overrides,
             clear_preview_fishbowl_source=clear_preview_fishbowl_source,
@@ -799,11 +834,37 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertIn("customer_sms/isolation_parameters", refused.stdout)
         self.assertIn("printnode/printnode.api_key", refused.stdout)
         self.assertFalse(refused.web_restarted)
+        from control_plane.copy_readback_diagnostics import (
+            ReadbackPredicate,
+            readback_failure_evidence,
+        )
+
+        evidence = readback_failure_evidence(
+            dokploy_post_deploy.extract_odoo_post_deploy_readback_markers(
+                {"logs": refused.stdout + refused.stderr}
+            )
+        )
+        self.assertEqual(evidence["readback_failed_predicate"], ReadbackPredicate.ISOLATION)
+        self.assertEqual(evidence["readback_failure_kind"], "refused")
 
     def setUp(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.root = Path(temporary_directory.name)
+        (self.root / "project").mkdir()
+        self.enterContext(
+            patch.object(
+                odoo_preview_restore, "PREVIEW_WORKFLOW_SSH_DIRECTORY", self.root / "identity"
+            )
+        )
+        self.enterContext(
+            patch.object(odoo_preview_restore, "preview_source_process_program", return_value="")
+        )
+        self.enterContext(
+            patch.object(
+                dokploy_post_deploy, "DEFAULT_DATA_WORKFLOW_LOCK_PATH", str(self.root / ".lock")
+            )
+        )
         self.enterContext(
             patch.object(dokploy_post_deploy, "ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY", self.root)
         )
@@ -820,6 +881,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         modules = self.root / "modules"
         modules.mkdir()
         (modules / "psycopg2.py").write_text(_FAKE_PSYCOPG2, encoding="utf-8")
+        self._write_preview_workflow()
         (modules / "run_odoo_startup.py").write_text(
             "import os\n"
             "def _load_settings(arguments): return arguments\n"
@@ -862,7 +924,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         (self.root / "database.json").unlink(missing_ok=True)
         for state_file in self.root.glob("*.state"):
             state_file.unlink()
-        for marker in ("web-stopped", "web-started"):
+        for marker in ("web-stopped", "web-started", "workflow-executed"):
             (self.root / marker).unlink(missing_ok=True)
         (self.root / f"{WEB_CONTAINER_ID}.state").write_text(web_status)
         script_path = self.root / "script.sh"
@@ -1185,6 +1247,126 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn("workflow arguments --post-deploy-maintenance", run.docker_log)
 
+    def _write_preview_workflow(self) -> None:
+        (self.root / "modules" / "run_odoo_data_workflows.py").write_text("""
+import os
+from pathlib import Path
+from types import SimpleNamespace
+import psycopg2
+
+def LocalServerSettings() -> SimpleNamespace:
+    return SimpleNamespace(host="database", platform_instance="preview", db_name="example_testing",
+                           data_workflow_lock_file=Path(os.environ["FAKE_DOCKER_STATE"])/".lock")
+
+class OdooDataWorkflowRunner:
+    def __init__(self, local: SimpleNamespace, upstream: object, environment: object) -> None:
+        self.local = local
+        self.os_env = dict(os.environ)
+        Path(self.os_env['DATA_WORKFLOW_SSH_DIR']).mkdir(exist_ok=True)
+    def prepare_credentials_before_registry(self, **arguments: bool) -> None:
+        if os.environ.get("FAKE_PREVIEW_SANITIZER_FAILURE") == "1":
+            raise RuntimeError("synthetic credential refusal")
+    def connect_to_db(self) -> object:
+        return psycopg2.connect()
+    def _connect_with_retry(self, database: str) -> object:
+        return psycopg2.connect()
+    def _prepare_restored_database(self, target_owner: str | None, *, do_sanitize: bool) -> None:
+        assert not any(key.startswith(('ODOO_UPSTREAM_', 'DATA_WORKFLOW_SSH_')) for key in self.os_env)
+
+def main(arguments: list[str]) -> int:
+    runner = OdooDataWorkflowRunner(LocalServerSettings(), None, None)
+    runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
+    runner._prepare_restored_database(None, do_sanitize=True)
+    print("fixture_addon_after_boundary=true")
+    print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
+    return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
+""")
+
+    def test_upstream_preview_restores_even_when_a_partial_database_exists(self) -> None:
+        script = _render_post_deploy_script(
+            None,
+            instance="pr-45",
+            run_destructive_restore=True,
+            bootstrap_missing_database=True,
+            workflow_environment_overrides={"BOOTSTRAP": "false", "NO_SANITIZE": "false"},
+        )
+        for database_present in ("0", "1"):
+            with self.subTest(database_present=database_present):
+                run = self._run(
+                    script,
+                    FAKE_DATABASE_PRESENT=database_present,
+                    FAKE_CONTAINER_PAYLOAD="payload-a",
+                    FAKE_ODOO_DB=_fake_database(),
+                    PLATFORM_INSTANCE="preview",
+                )
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertNotIn("probe database", run.docker_log)
+                self.assertNotIn("workflow arguments --bootstrap", run.docker_log)
+                self.assertNotIn("workflow arguments --post-deploy-maintenance", run.docker_log)
+                self.assertIn("odoo_restore_completed=true", run.stdout.splitlines())
+                self.assertIn("fixture_addon_after_boundary=true", run.stdout.splitlines())
+                self.assertTrue(run.readback_ran, run.docker_log)
+                self.assertTrue(self._held_web_starts(overrides_payload="payload-a"))
+
+        refused = self._run(script, FAKE_PREVIEW_SANITIZER_FAILURE="1")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse(refused.web_restarted)
+        self.assertNotIn("fixture_addon_after_boundary=true", refused.stdout.splitlines())
+
+    def test_preview_programs_cannot_import_pr_modules_before_cleanup(self) -> None:
+        (self.root / "project" / "pathlib.py").write_text(
+            "raise RuntimeError('unmerged PR code executed before cleanup')\n"
+        )
+        with patch.object(
+            odoo_preview_restore, "preview_source_process_program", return_value="import pathlib\n"
+        ):
+            script = _render_post_deploy_script(
+                None, instance="pr-45", run_destructive_restore=True
+            )
+        run = self._run(script)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("fixture_addon_after_boundary=true", run.stdout.splitlines())
+
+    def test_preview_refuses_wrong_or_unreadable_actual_source_mount_before_staging(self) -> None:
+        script = _render_post_deploy_script(None, instance="pr-45", run_destructive_restore=True)
+        for overrides in (
+            {"FAKE_READER_BINDS": "/root/.ssh|/root/.ssh|false"},
+            {"FAKE_READER_BINDS": "/srv/preview-source-ssh|/root/.ssh|true"},
+            {"FAKE_READER_BINDS": "/srv/preview-source-ssh|/home/ubuntu/.ssh|false"},
+            {"FAKE_READER_BINDS": ""},
+            {"FAKE_WEB_BINDS": "/root/.ssh|/root/.ssh|false"},
+            {"FAKE_READER_MOUNT_READ_FAILURE": "1"},
+        ):
+            with self.subTest(overrides=overrides):
+                run = self._run(script, **overrides)
+                self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertNotIn("Normalizing filestore ownership", run.stdout)
+                self.assertNotIn("exec workflow", run.docker_log)
+                self.assertFalse(run.web_restarted)
+
+    def test_stale_provider_env_and_mount_cannot_replace_authoritative_source(self) -> None:
+        run = self._run(
+            _render_post_deploy_script(
+                None,
+                instance="pr-45",
+                run_destructive_restore=True,
+                target_ssh_directory="/root/.ssh",
+            ),
+            FAKE_READER_BINDS="/root/.ssh|/root/.ssh|false",
+        )
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertNotIn("Normalizing filestore ownership", run.stdout)
+        self.assertNotIn("exec workflow", run.docker_log)
+
+    def test_preview_capture_cleanup_failure_keeps_web_stopped(self) -> None:
+        run = self._run(
+            _render_post_deploy_script(None, instance="pr-45", run_destructive_restore=True),
+            FAKE_CAPTURE_CLEANUP_FAIL_AFTER_WORKFLOW="1",
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("fixture_addon_after_boundary=true", run.stdout.splitlines())
+        self.assertFalse(run.web_restarted)
+
     def test_unanswered_database_probe_stops_before_touching_web(self) -> None:
         run = self._run(_render_preview_script(), FAKE_DATABASE_PRESENT="error")
 
@@ -1354,6 +1536,34 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
             run.docker_log.index("exec readback -i"),
             run.docker_log.index(f"start {WEB_CONTAINER_ID}"),
         )
+
+    def test_native20_payment_schema_releases_web_after_successful_readback(self) -> None:
+        run = self._run(
+            _render_preview_script(),
+            FAKE_ODOO_DB=_fake_database(
+                tables={"payment_provider": False},
+                payment_columns={
+                    "code": "character varying",
+                    "active": "boolean",
+                    "is_live": "boolean",
+                },
+            ),
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("integration_readback_ok=true", run.stdout.splitlines())
+        self.assertTrue(run.web_restarted, run.docker_log)
+
+    def test_unknown_payment_schema_keeps_web_stopped_even_with_allowance(self) -> None:
+        run = self._run(
+            _render_script(_policies(allowed=("payment",))),
+            FAKE_ODOO_DB=_fake_database(
+                tables={"payment_provider": False}, payment_columns={"code": "character varying"}
+            ),
+        )
+        self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("Unsupported payment_provider schema", run.stderr)
+        self.assertFalse(run.web_restarted, run.docker_log)
+        self.assertNotIn("write readback-passed", run.docker_log)
 
     def test_protected_store_key_fails_even_with_a_shopify_allowance(self) -> None:
         run = self._run(

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.text_fields import require_text
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 MergeTrainPrFeedbackEvent = Literal[
@@ -52,7 +51,7 @@ class MergeTrainPrFeedbackRecord(BaseModel):
     def _validate_record(self) -> "MergeTrainPrFeedbackRecord":
         if not self.feedback_id.strip():
             raise ValueError("merge train PR feedback requires feedback_id")
-        self.repository = _normalize_repository(self.repository)
+        self.repository = _normalize_repository(self.repository).lower()
         self.base_branch = require_text(
             self.base_branch, "merge train PR feedback requires base_branch"
         )
@@ -108,17 +107,13 @@ def build_merge_train_pr_feedback_id(
 def merge_train_pr_feedback_marker(
     *, repository: str, base_branch: str, pull_request_number: int
 ) -> str:
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "repository": _normalize_repository(repository),
-                "base_branch": require_text(base_branch, "base_branch"),
-                "pull_request_number": pull_request_number,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "repository": _normalize_repository(repository),
+            "base_branch": require_text(base_branch, "base_branch"),
+            "pull_request_number": pull_request_number,
+        }
+    )[:16]
     return f"<!-- launchplane-merge-train:{digest} -->"
 
 
@@ -132,21 +127,17 @@ def _feedback_identity_digest(
     recorded_at: str,
     response_trace_id: str = "",
 ) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            {
-                "repository": _normalize_repository(repository),
-                "base_branch": require_text(base_branch, "base_branch"),
-                "pull_request_number": pull_request_number,
-                "event": event.strip(),
-                "marker": marker.strip(),
-                "recorded_at": require_text(recorded_at, "recorded_at"),
-                "response_trace_id": response_trace_id.strip(),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:16]
+    return nonvalidating_compact_sorted_json_sha256(
+        {
+            "repository": _normalize_repository(repository),
+            "base_branch": require_text(base_branch, "base_branch"),
+            "pull_request_number": pull_request_number,
+            "event": event.strip(),
+            "marker": marker.strip(),
+            "recorded_at": require_text(recorded_at, "recorded_at"),
+            "response_trace_id": response_trace_id.strip(),
+        }
+    )[:16]
 
 
 def _normalize_repository(repository: str) -> str:

@@ -3,6 +3,8 @@
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 import unittest
 from typing import cast
 from unittest.mock import Mock, patch
@@ -26,6 +28,166 @@ from tests.test_client_release_redeploy import _prepare, _replacement_env
 
 
 class EventDeployRedeployTests(unittest.TestCase):
+    def test_reconciliation_during_live_executor_still_drains_until_executor_exits(self) -> None:
+        from control_plane.provider_operations import (
+            ProviderMutationOutcome,
+            ProviderMutationUnknownError,
+            ProviderOperationLease,
+            run_durable_provider_operation,
+        )
+        from tests.test_provider_operations import _FakeAdapter
+
+        started, release = Event(), Event()
+
+        class HeldAdapter(_FakeAdapter):
+            def apply(
+                self, provider_operation_key: str, lease: ProviderOperationLease
+            ) -> ProviderMutationOutcome:
+                lease.checkpoint_effect("test_effect")
+                started.set()
+                if not release.wait(60):
+                    raise TimeoutError("Test executor was not released")
+                raise ProviderMutationUnknownError("Provider response lost")
+
+        adapter = HeldAdapter()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                run_durable_provider_operation,
+                store=self.store,
+                scope="client-release",
+                route_path="/v1/drivers/generic-web/prod-promotion",
+                idempotency_key="live-promotion",
+                request_fingerprint="live-promotion",
+                lease_owner="live-executor",
+                response_trace_id="live-trace",
+                adapter=adapter,
+                heartbeat_interval_seconds=60,
+            )
+            try:
+                self.assertTrue(started.wait(5))
+                original = self.store.read_idempotency_record(
+                    scope="client-release",
+                    route_path="/v1/drivers/generic-web/prod-promotion",
+                    idempotency_key="live-promotion",
+                )
+                assert original is not None
+                self.store.mark_mutation_reconcile_required(
+                    reservation=original, reconciliation_key=original.reconciliation_key
+                )
+                future_time = (
+                    parse_launchplane_mutation_timestamp(
+                        original.lease_expires_at, field_name="expiry"
+                    )
+                    + timedelta(seconds=1)
+                ).isoformat()
+                with patch.object(
+                    self.store, "_database_mutation_timestamp", return_value=future_time
+                ):
+                    _, blockers, dispatch = _prepare(self.store)
+                self.assertEqual(blockers, (original.record_id,))
+                self.assertFalse(dispatch)
+            finally:
+                release.set()
+            result = future.result(timeout=5)
+        self.assertEqual(result.status, "reconcile_required")
+        _, blockers, dispatch = _prepare(self.store)
+        self.assertFalse(blockers)
+        self.assertTrue(dispatch)
+
+    def test_executor_exit_receipt_cannot_exclude_a_later_attempt_with_the_same_owner(self) -> None:
+        original = self.reserve().record
+        assert original is not None
+        held = self.store.mark_mutation_reconcile_required(
+            reservation=original, reconciliation_key=original.reconciliation_key
+        ).record
+        assert held is not None
+        self.store.record_mutation_executor_exit(original)
+        retried = self.store.retry_reconciled_mutation(
+            reservation=held, lease_owner=held.lease_owner
+        ).record
+        assert retried is not None
+        self.store.mark_mutation_reconcile_required(
+            reservation=retried, reconciliation_key=retried.reconciliation_key
+        )
+        self.store.record_mutation_executor_exit(original)
+        _, blockers, dispatch = _prepare(self.store)
+        self.assertEqual(blockers, (original.record_id,))
+        self.assertFalse(dispatch)
+
+    def test_stopped_executor_keeps_unknown_product_outcome_without_blocking_replacement(
+        self,
+    ) -> None:
+        from control_plane.provider_operations import (
+            ProviderMutationUnknownError,
+            run_durable_provider_operation,
+        )
+        from tests.test_provider_operations import _FakeAdapter
+
+        adapter = _FakeAdapter(apply_error=ProviderMutationUnknownError("Provider response lost"))
+        result = run_durable_provider_operation(
+            store=self.store,
+            scope="client-release",
+            route_path="/v1/drivers/generic-web/prod-promotion",
+            idempotency_key="original-promotion",
+            request_fingerprint="original-promotion",
+            lease_owner="original-executor",
+            response_trace_id="original-trace",
+            adapter=adapter,
+        )
+        held = result.record
+        assert held is not None
+        self.assertEqual(held.state, "reconcile_required")
+        reopened = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(reopened.close)
+        _, blockers, dispatch = _prepare(reopened)
+        self.assertFalse(blockers)
+        self.assertTrue(dispatch)
+        self.assertEqual(
+            reopened.read_idempotency_record(
+                scope=held.scope, route_path=held.route_path, idempotency_key=held.idempotency_key
+            ),
+            held,
+        )
+        with self.assertRaises(ServiceDeployDraining):
+            reopened.retry_reconciled_mutation(reservation=held, lease_owner="replacement")
+        self.assertEqual(adapter.apply_calls, 1)
+
+    def test_repair_drain_polls_its_own_fence_until_admitted_work_finishes(self) -> None:
+        from control_plane.service_deploy_drain import prepare, record_dispatch
+
+        forward, _, _ = _prepare(self.store)
+        record_dispatch(self.store, forward.request_fingerprint)
+        with patch.dict("os.environ", _replacement_env()):
+            confirm_startup(self.store)
+            reservation = self.reserve().record
+        assert reservation is not None
+        repair = dict(
+            request_fingerprint="repair",
+            target_type=forward.target_type,
+            target_id=forward.target_id,
+            image_reference=forward.image_reference,
+            deployment_marker="repair-marker",
+            supersedes_deployment_marker=forward.deployment_marker,
+        )
+        for _ in range(2):
+            _, blockers, dispatch = prepare(self.store, **repair)
+            self.assertEqual(blockers, (reservation.record_id,))
+            self.assertFalse(dispatch)
+        self.store.complete_mutation_reservation(
+            completion=complete_launchplane_mutation_reservation(
+                reservation,
+                response_status_code=200,
+                response_trace_id="finished",
+                response_payload={},
+                completed_at=reservation.updated_at,
+            )
+        )
+        _, blockers, dispatch = prepare(self.store, **repair)
+        self.assertFalse(blockers)
+        self.assertTrue(dispatch)
+        record_dispatch(self.store, "repair")
+        self.assertFalse(prepare(self.store, **repair)[2])
+
     def test_rehearsal_drain_preserves_unrelated_admission_and_historical_holds(self) -> None:
         from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
         from control_plane.contracts.privileged_operation_identity import (

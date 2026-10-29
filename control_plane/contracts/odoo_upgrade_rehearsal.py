@@ -13,10 +13,12 @@ from control_plane._odoo_rehearsal_diagnostics import (
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.odoo_rehearsal_business_validation import (
     BusinessValidationReceipt,
 )
+from control_plane.contracts.odoo_rehearsal_timing import RehearsalPhaseTiming
 
 
 ODOO_UPGRADE_REHEARSAL_ROUTE = "/v1/products/{product}/odoo-upgrade-rehearsal"
@@ -25,6 +27,8 @@ REHEARSAL_RELEASED_RESERVATION_HEADERS = {"X-Launchplane-Mutation-Reservation": 
 INCOMPLETE_REHEARSAL_TARGET_SUFFIX = ":incomplete-retirement"
 REHEARSAL_PUBLIC_FAILURE_MESSAGES = {
     "rehearsal_storage_capacity_insufficient": "No rehearsal action started. Requalify storage capacity and review a new operation key.",
+    "rehearsal_rebuild_precheck_refused": "FINAL restoration has not started. Rebuild resources and evidence are retained. Requalify the prerequisite and review a new rebuild operation key.",
+    "rehearsal_rebuild_capacity_insufficient": "FINAL restoration has not started. Prepared rebuild resources are retained. Requalify storage capacity and review a new rebuild operation key.",
     "rehearsal_precheck_refused": "No rehearsal action started. Requalify the prerequisite and review a new operation key.",
 }
 RehearsalAction = Literal[
@@ -35,8 +39,12 @@ RehearsalAction = Literal[
     "verify",
     "retire",
     "retire-incomplete",
+    "abandon-validation",
+    "rebuild-final",
 ]
-RehearsalState = Literal["planned", "prepared", "upgraded", "switched", "verified", "retired"]
+RehearsalState = Literal[
+    "planned", "prepared", "upgraded", "rebuilding", "switched", "verified", "retired"
+]
 RehearsalBackingRole = Literal[
     "database", "filestore", "runner_scratch", "database_scratch", "host_custody"
 ]
@@ -100,6 +108,13 @@ class RehearsalPrerequisite(StrEnum):
     OPERATION_UNAVAILABLE = "rehearsal_operation_unavailable"
 
 
+class FinalRecoveryConsumerConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence: str = Field(min_length=1, max_length=2048, pattern=r"^https://\S+$")
+    preserving_retire_key: str = Field(min_length=1, max_length=256, pattern=r"^\S+$")
+
+
 class OdooUpgradeRehearsalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -112,9 +127,21 @@ class OdooUpgradeRehearsalRequest(BaseModel):
     storage: OdooTestingDrillStorageBudget
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+    consumer_confirmation: FinalRecoveryConsumerConfirmation | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     def intent(self) -> dict[str, object]:
-        return self.model_dump(mode="json", exclude={"mode", "action", "reviewed_plan_sha256"})
+        return self.model_dump(
+            mode="json",
+            exclude={"mode", "action", "reviewed_plan_sha256", "consumer_confirmation"},
+        )
+
+    @model_validator(mode="after")
+    def confirmation_requires_retire(self) -> "OdooUpgradeRehearsalRequest":
+        if self.consumer_confirmation is not None and self.action != "retire":
+            raise ValueError("Final-input confirmation applies only to ordinary retirement.")
+        return self
 
 
 class RehearsalCopyReceipt(BaseModel):
@@ -159,6 +186,10 @@ class IncompleteRehearsalHostResult(BaseModel):
     # A completed later phase disposes the bytes of its recorded recovery
     # snapshots; their receipts stay on the rehearsal record.
     recovery_snapshots: tuple[RehearsalCopyReceipt, ...] = ()
+    retained_snapshots: tuple[RehearsalCopyReceipt, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    recovery_snapshots_preserved: bool = False
     public_route: Literal[False]
     business_host_frozen: Literal[False]
 
@@ -185,9 +216,23 @@ class IncompleteRehearsalRetirementCheckpoint(BaseModel):
     reviewed_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     host_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     host_disposal: IncompleteRehearsalHostResult | None = None
+    consumer_confirmation: FinalRecoveryConsumerConfirmation | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    record_binding_sha256: str = Field(
+        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
+    )
+    record_updated_at: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def bound_disposal(self) -> "IncompleteRehearsalRetirementCheckpoint":
+        if self.consumer_confirmation is not None and (
+            not self.record_binding_sha256
+            or self.record_updated_at is None
+            or self.record_updated_at.utcoffset() is None
+        ):
+            raise ValueError("Confirmed retirement requires its original record binding and time.")
         if self.host_disposal is not None and (
             not self.host_disposal.disposed
             or self.host_disposal.binding_sha256 != self.host_binding_sha256
@@ -209,13 +254,23 @@ class IncompleteRehearsalRetirementReceipt(BaseModel):
     shape_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     copies: tuple[RehearsalCopyReceipt, ...]
     elapsed_seconds: dict[str, float]
+    phase_timings: tuple[RehearsalPhaseTiming, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    measured_window: dict[str, object] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
     business_validations: tuple[BusinessValidationReceipt, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
     resources_preserved: Literal[False]
     public_route: Literal[False]
     business_host_frozen: Literal[False]
-    action: Literal["retire-incomplete"]
+    action: Literal["retire", "retire-incomplete", "abandon-validation"]
+    consumer_confirmation_evidence: str = Field(default="", exclude_if=lambda value: not value)
+    original_outcome: Literal["unknown"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     completed: Literal[True]
     disposed: Literal[True]
     raw_source_retained: Literal[False]
@@ -227,9 +282,39 @@ class IncompleteRehearsalRetirementReceipt(BaseModel):
     def native_disposal(self) -> "IncompleteRehearsalRetirementReceipt":
         if not self.host_disposal.disposed:
             raise ValueError("Retirement requires completed native disposal.")
-        if self.copies != self.host_disposal.recovery_snapshots:
+        if (
+            self.action == "abandon-validation"
+        ) != self.host_disposal.recovery_snapshots_preserved or (
+            self.action == "abandon-validation"
+        ) != (self.original_outcome == "unknown"):
+            raise ValueError(
+                "Abandonment retains recovery custody and an unknown original outcome."
+            )
+        if self.action == "retire":
+            roles = ("source", "final_source", "final_upgrade")
+            prefix = self.rehearsal_id.replace("-", "_") + "_"
+            if (
+                not self.consumer_confirmation_evidence
+                or [copy.database for copy in self.copies] != [prefix + role for role in roles]
+                or self.host_disposal.recovery_snapshots != self.copies[:1]
+                or self.host_disposal.retained_snapshots != self.copies[1:]
+            ):
+                raise ValueError("Ordinary disposal requires confirmed, retained final tuples.")
+        elif self.host_disposal.retained_snapshots or self.consumer_confirmation_evidence:
+            raise ValueError("Final-only retention requires ordinary retirement confirmation.")
+        elif self.copies != self.host_disposal.recovery_snapshots:
             raise ValueError("Retained copy receipts must be exactly the disposed snapshots.")
         return self
+
+
+class AbandonedRehearsalValidation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    original: LaunchplaneIdempotencyRecord
+    validation_count: int = Field(ge=0)
+    attempt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    host_disposal: IncompleteRehearsalHostResult
+    outcome: Literal["unknown"] = "unknown"
 
 
 class OdooUpgradeRehearsalRecord(BaseModel):
@@ -257,14 +342,22 @@ class OdooUpgradeRehearsalRecord(BaseModel):
         default=(), exclude_if=lambda value: not value
     )
     incomplete_retirement: IncompleteRehearsalRetirementCheckpoint | None = None
+    abandoned_validations: tuple[AbandonedRehearsalValidation, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     elapsed_seconds: dict[str, float] = Field(default_factory=dict)
+    phase_timings: tuple[RehearsalPhaseTiming, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     created_at: datetime
     updated_at: datetime
 
     @property
     def binding_sha256(self) -> str:
         return canonical_json_sha256(
-            self.model_dump(mode="json", exclude={"elapsed_seconds", "incomplete_retirement"})
+            self.model_dump(
+                mode="json", exclude={"elapsed_seconds", "phase_timings", "incomplete_retirement"}
+            )
         )
 
 
@@ -341,6 +434,7 @@ class RehearsalChildFailure(BaseModel):
     def failed(self) -> "RehearsalChildFailure":
         if self.exit_status == 0:
             raise ValueError("Child failure requires a nonzero exit status.")
+        self.error_text = ""
         return self
 
 
@@ -366,6 +460,13 @@ class RehearsalRetainedLogs(BaseModel):
     since: datetime
     truncated: bool
 
+    @model_validator(mode="after")
+    def withhold_content(self) -> "RehearsalRetainedLogs":
+        self.files = []
+        self.runtime = []
+        self.truncated = True
+        return self
+
 
 class PendingBusinessValidation(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -381,6 +482,9 @@ class RehearsalHostResult(BaseModel):
     state: RehearsalState
     copies: tuple[RehearsalCopyReceipt, ...]
     elapsed_seconds: dict[str, float]
+    phase_timing: RehearsalPhaseTiming | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     resources_preserved: Literal[True]
     public_route: Literal[False]
     business_host_frozen: Literal[False]
@@ -427,6 +531,8 @@ class RehearsalHostResult(BaseModel):
     refusal_code: Literal[
         "",
         "rehearsal_storage_capacity_insufficient",
+        "rehearsal_rebuild_capacity_insufficient",
+        "rehearsal_rebuild_precheck_refused",
         "rehearsal_precheck_refused",
     ] = ""
     attempt_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")

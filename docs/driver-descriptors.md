@@ -113,7 +113,7 @@ and credentials stay behind the service boundary.
 
 For guidance on adding a new driver type or product-specific driver, see
 [driver-development.md](driver-development.md). For the expected shape of a
-product repo that calls a driver, see
+product repo that publishes artifacts for a driver, see
 [product-repo-contract.md](product-repo-contract.md).
 
 ## Read Endpoints
@@ -586,16 +586,6 @@ registration binds the same declaration to the executable handler. Service
 operations can use `register_operation_route` for that binding and registration
 validation without a second action catalog.
 
-`observation_authorization_allows` accepts only an explicitly declared
-`observation` mode on a bound handler. Missing declarations, unknown modes and
-other effects fail closed before policy evaluation. Neither a method, an action
-suffix nor a request-supplied effect grants observation. The handler chooses the
-mode; requests cannot supply declarations. It preserves the declared target
-scope and matches machine identities against the existing DB-backed
-`launchplane_service.read` permission. Human admins retain the declaration's
-existing action check. Authentication still binds the server-configured identity
-and token label, and the HTTP middleware refreshes active policy on each request.
-
 The Delivery GET uses `operation_observation_is_declared` before its existing
 metadata-read and explicit legacy authorization checks. This preserves the
 current [standing read/plan contract](authorization-authority.md) for the
@@ -607,7 +597,7 @@ The first covered service operation is the Delivery selector GET. Existing
 undeclared driver operations retain their original authorization and gain no
 standing observation access. `inert_evidence`, ordinary `operation`, `access`,
 `credential`, `destructive` and `live_site` effects are representable for later
-mode qualification; none is eligible through this observation helper. Qualified
+mode qualification; none is eligible through this declaration check. Qualified
 planning and ordinary operation remain later slices, with their own behavior
 proof. Reading a record supplies no apply, dispatch, secret-copy or credential
 authority.

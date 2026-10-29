@@ -69,6 +69,10 @@ class ProductionBackupAuthorityReadResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     authority: ProductionBackupAuthorityReadModel
+    policy_configuration: ProductionBackupPolicyRecord | None = Field(
+        default=None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class ProductionBackupAuthorityWriteResponse(BaseModel):
@@ -135,7 +139,24 @@ def register_production_backup_authority_read_routes(
                 else "invalid_request",
                 message=str(error),
             ) from error
-        return ProductionBackupAuthorityReadResponse(trace_id=trace_id, authority=authority)
+        policy = next(
+            (
+                record
+                for record in require_production_backup_authority_store(
+                    record_store
+                ).list_production_backup_policy_records(
+                    product=normalized_product,
+                    context_name=normalized_context,
+                    instance_name=normalized_instance,
+                    promotion_action=promotion_action,
+                )
+                if authority.policy is not None and record.record_id == authority.policy.record_id
+            ),
+            None,
+        )
+        return ProductionBackupAuthorityReadResponse(
+            trace_id=trace_id, authority=authority, policy_configuration=policy
+        )
 
     app.add_api_route(
         PRODUCTION_BACKUP_AUTHORITY_READ_ROUTE,

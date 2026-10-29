@@ -12,10 +12,12 @@ exact `context_instance` testing lane with class `testing` and no sharing reason
 can be delivered. Production, preview, context-wide, shared, worker and service
 credentials cannot use this path. The active key-safety evaluation still applies.
 
-The signed-in administrator uses their existing exact-lane `product_config.plan`
-and `product_config.apply` authority. Nonhuman identities cannot issue a delivery,
-even with those actions. No reusable service credential, enrollment, session,
-lease or authorization grant is created for the local consumer.
+The signed-in administrator or an agent authenticated as `local_operator` uses existing
+exact-lane `product_config.plan` and `product_config.apply` authority. Agent read
+access alone cannot issue a delivery. Worker and service identities cannot issue
+one. Terminal-agent credentials cannot issue a delivery through this operation. No credential, enrollment,
+session, lease or authorization grant is created
+for the local consumer.
 
 ## Prepare before secret entry
 
@@ -30,8 +32,8 @@ For a no-website Compose service, use [private transport preparation](private-te
 to plan the dedicated testing listener and trust references. Activation and live
 transport qualification remain separate from that planner's metadata/readback.
 
-Chris runs the helper himself in a terminal using the qualified Launchplane
-installation. The command contains only non-secret destination metadata:
+An agent or Chris runs the helper using the qualified Launchplane installation.
+The command contains only non-secret destination metadata:
 
 ```sh
 launchplane local-consumer prepare \
@@ -44,18 +46,60 @@ launchplane local-consumer prepare \
 
 The parent must exist, belong to Chris and permit no group/other writes. The new
 directory must not exist or traverse a symlink. It is mode 0700; its recipient
-private key and request are mode 0600. Agents must not run this command for a
-real transfer, inspect the real recipient directory, collect its key or token,
-or include those files in task evidence. Ordinary same-user filesystem access
-is not an isolation boundary against arbitrary code running as Chris. Custody
-here means the supported flow never sends these values to an agent, browser
-plaintext, chat, CLI argument or log. Use fake isolated data for engineering.
+private key and request are mode 0600. Agents may run prepare, deliver and receive
+for this exact testing-only flow under Director decision Q921. Never inspect or
+collect the recipient key or installed token, or include the recipient directory
+in task evidence. Keep it outside repositories and task-evidence directories.
+Ordinary same-user filesystem access is not an isolation boundary against
+arbitrary code running as Chris. Custody here means the supported flow keeps
+these values inside its process and private destination files, never in model
+context, browser plaintext, chat, CLI arguments, output or logs. Use fake isolated
+data for engineering.
 
 The output contains only `request_file` and a SHA-256 recipient fingerprint.
 Preparation carries no credential or service authority and starts no delivery
 timer. The service starts a 15-minute review/delivery window only when the
 credential is ready and its first value-ready dry run is recorded. An expired
 review needs a new private testing generation directory.
+
+## Agent delivery
+
+Use existing agent authentication supplied privately through the named environment
+variable. Never print it or pass its value as an argument. This command performs
+the value-ready dry run and prints only the request fingerprint, plan digest and
+managed version id:
+
+```sh
+launchplane local-consumer deliver \
+  --directory /absolute/private-parent/testing-client-generation-1 \
+  --service-url https://LAUNCHPLANE_ORIGIN \
+  --bearer-token-env LAUNCHPLANE_SERVICE_TOKEN
+```
+
+Compare the fingerprint with prepare's output and review the version and exact
+testing destination. Supply the returned plan digest to issue the encrypted
+package for that same request and caller:
+
+```sh
+launchplane local-consumer deliver \
+  --directory /absolute/private-parent/testing-client-generation-1 \
+  --service-url https://LAUNCHPLANE_ORIGIN \
+  --bearer-token-env LAUNCHPLANE_SERVICE_TOKEN \
+  --reviewed-plan-digest REVIEWED_PLAN_DIGEST
+```
+
+The helper requires the independently configured `--service-url` (or
+`LAUNCHPLANE_SERVICE_URL`) to match the prepared HTTPS service origin before it
+reads authentication or sends anything. The service also requires that origin to
+match its configured public origin for every caller and refuses delivery when
+that bootstrap origin is unavailable. The helper verifies its certificate,
+and excludes redirects and environment proxies. It saves recipient ciphertext as
+`package.json` in the private directory, mode 0600, and prints only the version id
+and package path. It never collects or changes the managed value. A lost response
+retries the same command, directory and digest; existing different package bytes
+are preserved. A refused or not-ready response prints no service response body.
+Use that package path with receive below. Secret entry and server synchronization
+remain separate operations; this flow grants no access to either.
 
 ## Signed-in UI
 
@@ -83,13 +127,13 @@ review needs a new private testing generation directory.
    page can load that original request and dry-run again before exact replay.
 
 The API is `POST /v1/local-consumer-deliveries` with `dry-run` or `apply` and a
-matching stored plan/digest. The original request id and administrator identity
+matching stored plan/digest. The original request id and issuing identity
 bind the receipt. Concurrent original applies converge on one immutable encrypted
 package. Issuance does not rotate the stored credential, sync or deploy anything.
 
 ## Receive and use
 
-Chris runs, without pasting a credential:
+An agent or Chris runs, without pasting a credential:
 
 ```sh
 launchplane local-consumer receive \
@@ -104,8 +148,8 @@ comparison requires the unguessable request id and exact ciphertext; it returns
 only `current` and that package's digest, no credential, record or authorization.
 There is no offline-install fallback.
 
-For a private certificate issuer, Chris can select an already reviewed CA bundle
-with `SSL_CERT_FILE=/absolute/path/to/ca-bundle.pem` for both the receiver and the
+For a private certificate issuer, select an already reviewed CA bundle
+with `SSL_CERT_FILE=/absolute/path/to/ca-bundle.pem` for deliver, receive and the
 testing bridge process. The bundle must cover the Launchplane HTTPS service and
 testing HTTPS/WSS issuer. Both HTTP and WebSocket verification use the same CA
 bundle (the Requests bundle when no override is selected) and stay enabled;

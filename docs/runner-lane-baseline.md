@@ -390,6 +390,18 @@ persisted audit table while distinguishing lifecycle intent in the typed record.
 The workflow still uploads the JSON artifact so admins can inspect the exact
 plan/result packet.
 
+An audit key belongs to its first persisted, normalized lifecycle request,
+including its operation and all request inputs. PostgreSQL and local filesystem
+storage reject a different request under that key, even when its HTTP
+`Idempotency-Key` differs or is absent. The evidence route returns 409 for this
+conflict without replacing the original audit or recording an accepted upload.
+Use a fresh audit key for a different lifecycle request. The original request
+can still advance from planned to terminal evidence, update its observations
+and message, or deliver a retained terminal packet even if no planned packet
+was persisted. Audit recovery posts that original evidence; it never reruns a
+provider mutation. This binding preserves request identity, not authenticated
+actor provenance or a general terminal-status precedence policy.
+
 The current host bootstrap uses a root-owned template that runs the packaged
 service wrapper rather than the interactive runner script:
 

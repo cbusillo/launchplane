@@ -32,6 +32,8 @@ def credential_binding_names(
     product: str,
     context: str,
     specification: TestingApplicationSpecification,
+    *,
+    activation: TestingActivationRecord | None = None,
 ) -> dict[str, str]:
     """The reviewed local intent cannot reinterpret an externally issued credential."""
     profile = store.read_product_profile_record(product)
@@ -52,11 +54,28 @@ def credential_binding_names(
         record_store=store, context_name=context, instance_name="testing"
     )
     local_keys = {item.binding_key for item in specification.local_credentials}
+    external_keys = {item.binding_key for item in specification.external_credentials}
+    if external_keys:
+        from control_plane.discord_identity import capture_identity_inputs
+
+        captured = capture_identity_inputs(store, product, compare_production=False)
+        if external_keys != {captured.binding.binding_key} or captured.binding.context != context:
+            raise ValueError("Reviewed external bindings must match the testing Discord purpose.")
+        if activation is not None:
+            from control_plane.testing_external_capabilities import require_discord_capability
+
+            if len(activation.external_capabilities) != 1:
+                raise ValueError("Native external capability admission is required.")
+            require_discord_capability(store, activation, activation.external_capabilities[0])
     keys = set(local_keys)
     if (
         not local_keys.issubset({item.binding_key for item in requirements})
         or not local_keys.issubset(delivered)
-        or any(item.owner_input is not None for item in requirements if item.binding_key in keys)
+        or any(
+            item.owner_input is not None or item.external_provider is not None
+            for item in requirements
+            if item.binding_key in keys
+        )
     ):
         raise ValueError(
             "Local generation requires declared delivered binding names without external owner input."
@@ -64,6 +83,8 @@ def credential_binding_names(
     names = {key: key for key in keys}
     for key, binding in delivered.items():
         if key not in keys:
+            if key in external_keys:
+                continue
             if not (
                 binding.declared_secret_class == "shared_safe"
                 and binding.sharing_reason is not None
@@ -84,7 +105,9 @@ def generation_bundle(
     specification = record.request.application
     if specification is None:
         raise ValueError("Application credentials require their reviewed specification.")
-    names = credential_binding_names(store, record.product, record.context, specification)
+    names = credential_binding_names(
+        store, record.product, record.context, specification, activation=record
+    )
     values: dict[str, str] = {}
     for item in specification.local_credentials:
         raw = random_secrets.token_bytes(32)
@@ -207,7 +230,9 @@ def runtime_activation_bundle(
     """Only final canonical publication makes the staged versions site-deliverable."""
     specification = record.request.application
     assert specification is not None
-    names = credential_binding_names(store, record.product, record.context, specification)
+    names = credential_binding_names(
+        store, record.product, record.context, specification, activation=record
+    )
     plans = [
         _plan_product_config_secret_write(
             record_store=store,

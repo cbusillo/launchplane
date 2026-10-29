@@ -15,7 +15,7 @@ fixture_dir="$(mktemp -d "$scratch_root/lp-service-compose.XXXXXXXX")"
 project="$(basename "$fixture_dir" | tr '[:upper:].' '[:lower:]-')"
 compose=(docker compose --project-name "$project" --project-directory "$fixture_dir"
   --env-file "$fixture_dir/.env" --file "$fixture_dir/compose.json")
-services=(launchplane launchplane-odoo-workers launchplane-verireel-workers)
+services=(launchplane)
 active_pid=""
 run_interruptible() {
   "$@" <&0 &
@@ -70,16 +70,13 @@ DOCKER_IMAGE_REFERENCE="$image" LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=unused-fixt
     --env-file "$fixture_dir/.env" --file "$repo_root/docker-compose.yml" \
     config --no-env-resolution --format json |
   jq --arg image "$image" --arg postgres_image "$postgres_image" --arg env_file "$fixture_dir/.env" '
-    {services: (.services | with_entries(select(.key == "launchplane" or
-      .key == "launchplane-odoo-workers" or .key == "launchplane-verireel-workers" or
-      .key == "launchplane-browser" or .key == "launchplane-merge-train-workers" or
-      .key == "launchplane-privileged-operation-workers") |
+    {services: (.services | with_entries(
       .value.image = $image | .value.pull_policy = "never" | .value.restart = "no" |
       .value.deploy.replicas = 1 |
       .value.networks = ["qualification"] |
-      if .key == "launchplane-browser" then . else
+      if .value.env_file then
         .value.env_file = [$env_file] | .value.environment.DOCKER_IMAGE_REFERENCE = $image
-      end)),
+      else . end)),
       volumes: .volumes, networks: {qualification: {internal: true}}} |
     .services.postgres = {
       image: $postgres_image, pull_policy: "never", networks: ["qualification"],
@@ -94,6 +91,10 @@ mv "$fixture_dir/compose.next.json" "$fixture_dir/compose.json"
 jq --arg prefix "$project" '.volumes |= with_entries(.value = {name: ($prefix + "-" + .key)})' \
   "$fixture_dir/compose.json" >"$fixture_dir/compose.next.json"
 mv "$fixture_dir/compose.next.json" "$fixture_dir/compose.json"
+
+while IFS= read -r service; do
+  services+=("$service")
+done < <(jq -r '.services | to_entries[] | select(.key != "launchplane" and .value.env_file) | .key' "$fixture_dir/compose.json")
 
 check_private_copy_custody() {
   local mode="$1" service copy_marker_sha256
@@ -111,7 +112,7 @@ if os.environ['QUALIFICATION_COPY_MODE']=='create':
 print(hashlib.sha256(marker.read_bytes()).hexdigest())
 PY
   copy_marker_sha256="$(cat "$fixture_dir/copy-marker.sha256")"
-  for service in launchplane-odoo-workers launchplane-verireel-workers; do
+  for service in "${services[@]:1}"; do
     run_interruptible "${compose[@]}" exec -T -e QUALIFICATION_COPY_SERVICE="$service" \
       -e QUALIFICATION_COPY_SHA256="$copy_marker_sha256" "$service" /app/.venv/bin/python - <<'PY'
 import hashlib,os
@@ -124,15 +125,82 @@ else:
     assert not marker.exists(), 'Unrelated worker can read the Odoo copy volume'
 PY
   done
-  for service in launchplane-merge-train-workers launchplane-privileged-operation-workers; do
-    run_interruptible "${compose[@]}" run --rm --no-deps -T "$service" /app/.venv/bin/python - <<'PY'
+}
+
+check_outbox_progress() {
+  run_interruptible "${compose[@]}" exec -T -e QUALIFICATION_OUTBOX_PHASE="$1" launchplane /app/.venv/bin/python - <<'PY'
+from datetime import UTC, datetime
 import os
-from pathlib import Path
-from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CACHE_DIRECTORY
-marker=Path(os.environ['LAUNCHPLANE_STATE_DIR'])/NATIVE_TESTING_COPY_CACHE_DIRECTORY/'.qualification-copy-custody'
-assert not marker.exists(), 'Unrelated worker can read the Odoo copy volume'
+import time
+from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord, build_outbox_delivery_id
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentRecord, PublicIngressNotificationAttemptRecord,
+    RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
+)
+from control_plane.storage.postgres import PostgresRecordStore
+
+store = PostgresRecordStore(database_url=os.environ["LAUNCHPLANE_DATABASE_URL"])
+phase = os.environ["QUALIFICATION_OUTBOX_PHASE"]
+now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+incident_id = f"qualification-retired-{phase}"
+attempt_id = f"qualification-attempt-{phase}"
+delivery_id = build_outbox_delivery_id(kind="public_ingress_notification", dedupe_key=incident_id)
+try:
+    store.write_public_ingress_incident_record(PublicIngressIncidentRecord(
+        incident_id=incident_id, product="qualification-fixture", context=f"qualification-fixture-{phase}",
+        instance="prod", check_name=RETIRED_PRODUCTION_DELIVERY_LAG_CHECK, check_kind="provider",
+        status="open", opened_at=now, opened_observation_id=phase,
+        latest_observation_id=phase, latest_observed_at=now,
+        failure_code="production_delivery_failed", summary="Retired fixture evidence; no external send",
+    ))
+    attempt = PublicIngressNotificationAttemptRecord(
+        attempt_id=attempt_id, incident_id=incident_id, event="opened",
+        policy_id="qualification-fixture", destination_id="qualification-fixture",
+        destination_kind="discord", delivery_status="skipped", attempted_at=now, observation_id=phase,
+    )
+    store.write_outbox_delivery_record(OutboxDeliveryRecord(
+        delivery_id=delivery_id, kind="public_ingress_notification",
+        aggregate_type="public_ingress_incident", aggregate_id=incident_id, dedupe_key=incident_id,
+        created_at=now, updated_at=now, next_attempt_at=now,
+        payload={"attempt": attempt.model_dump(mode="json"),
+                 "destination": {"kind": "discord", "destination_id": "qualification-fixture"}},
+    ))
+    deadline = time.monotonic() + 120
+    while True:
+        record = store.read_outbox_delivery_record(delivery_id)
+        if record.state == "delivered":
+            break
+        if time.monotonic() >= deadline:
+            raise AssertionError("Normal packaged composition did not drain the outbox")
+        time.sleep(0.2)
+    attempts = store.list_public_ingress_notification_attempt_records(incident_id=incident_id)
+    assert len(attempts) == 1 and attempts[0].delivery_status == "skipped", attempts
+    assert record.action and attempts[0].action, record
+    for completed in store.list_outbox_delivery_records(kind="public_ingress_notification"):
+        assert completed.state == "delivered" and completed.attempt == 1, completed
+        assert not completed.provider_operation_key, completed
+    if phase == "replacement":
+        dispatch_dedupe_key = f"workflow:{incident_id}"
+        dispatch_id = build_outbox_delivery_id(kind="github_workflow_dispatch", dedupe_key=dispatch_dedupe_key)
+        store.write_outbox_delivery_record(OutboxDeliveryRecord(
+            delivery_id=dispatch_id, kind="github_workflow_dispatch",
+            aggregate_type="generic_web_promotion_workflow", aggregate_id=incident_id,
+            dedupe_key=dispatch_dedupe_key, created_at=now, updated_at=now, next_attempt_at=now,
+            payload={"repository": "qualification/fixture", "workflow_id": "fixture.yml", "ref": "main",
+                     "credential_context": "qualification-fixture", "inputs": {}},
+        ))
+        deadline = time.monotonic() + 120
+        while True:
+            dispatch = store.read_outbox_delivery_record(dispatch_id)
+            if dispatch.state == "failed":
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError("Replacement worker did not resume workflow dispatch claims")
+            time.sleep(0.2)
+        assert dispatch.attempt == 1 and not dispatch.provider_operation_key and dispatch.error_code, dispatch
+finally:
+    store.close()
 PY
-  done
 }
 
 check_workers() {
@@ -180,7 +248,7 @@ check_testing_browser() {
     run_interruptible "${compose[@]}" exec -T "$service" /app/.venv/bin/python - <<'PY'
 import time
 from playwright.sync_api import sync_playwright
-from control_plane.workflows.verireel_testing_post_deploy import launch_testing_browser
+from control_plane.testing_browser import launch_testing_browser
 deadline = time.monotonic() + 60
 while True:
     try:
@@ -204,6 +272,7 @@ PY
 
 run_interruptible "${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 120
 check_workers
+check_outbox_progress startup
 check_private_copy_custody create
 check_testing_browser
 before="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
@@ -231,6 +300,7 @@ after="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
 test -n "$after"
 test -z "$(comm -12 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
 check_workers
+check_outbox_progress replacement
 check_private_copy_custody verify
 check_testing_browser
 run_interruptible "${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'

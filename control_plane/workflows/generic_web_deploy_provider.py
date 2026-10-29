@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import hashlib
+import json
 from pathlib import Path
 import re
 from time import monotonic, sleep
-from typing import Literal, Protocol, cast, runtime_checkable
+from typing import Literal, NamedTuple, Protocol, cast, runtime_checkable
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
+from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.deploy_target import (
@@ -52,11 +54,14 @@ from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy.application_runtime import (
     ApplicationRuntimeObservation,
+    application_immutable_image_matches,
     application_runtime_attempt_observed,
     application_runtime_matches,
     application_runtime_settled_spec_matches,
+    application_service_image_matches,
     fetch_application_runtime,
 )
+from control_plane.dokploy.application_runtime_summary import summarize_application_runtime
 
 
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverPlan
@@ -71,6 +76,7 @@ class GenericWebResolvedDeployTarget(BaseModel):
     deployed_target: DeployedTargetReference | None = None
     deploy_timeout_seconds: int = Field(ge=1)
     provider_dispatch_evidence: dict[str, object] = Field(default_factory=dict)
+    release_settings: GenericWebReleaseSettings | None = Field(default=None, exclude=True)
     testing_runtime_digest: str = Field(default="", exclude_if=lambda value: not value)
     testing_runtime_verified_digest: str = Field(default="", exclude=True)
     testing_runtime_values: dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
@@ -108,6 +114,7 @@ class GenericWebApplicationExecutionProvider(Protocol):
 
 
 _GENERIC_WEB_RECONCILIATION_KEY_PREFIX = "generic-web-provider-target:"
+APPLICATION_RUNTIME_FAILURE_EVIDENCE_KEY = "application_runtime_failure"
 _GENERIC_WEB_PROVIDER_SUCCESS_STATUSES = frozenset(
     {"success", "succeeded", "done", "completed", "healthy", "finished"}
 )
@@ -439,19 +446,24 @@ class GenericWebLegacyDeploymentCorrelation(BaseModel):
         return self
 
 
+class GenericWebApplicationRuntimeArtifactProof(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_image: str
+    service_deployment_record_id: str
+    process_ready: bool
+    rollout_settled: bool
+
+
 class GenericWebRuntimeArtifactObservation(BaseModel):
-    """Read-only runtime facts for one exact provider target.
-
-    ``target_artifact_reference`` is the image the provider target is configured
-    to run. ``running_container_images`` lists the configured image of every
-    running container that belongs to the target.
-    """
-
     model_config = ConfigDict(extra="forbid")
 
     target_artifact_reference: str
     running_container_images: tuple[str, ...]
     running_container_deployment_record_ids: tuple[str, ...] = ()
+    application: GenericWebApplicationRuntimeArtifactProof | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _validate_aligned_record_ids(self) -> "GenericWebRuntimeArtifactObservation":
@@ -479,6 +491,7 @@ def evaluate_generic_web_runtime_close_out(
     observation: GenericWebRuntimeArtifactObservation,
     expected_artifact_reference: str,
     expected_deployment_record_id: str = "",
+    expected_provider_reference: str = "",
 ) -> GenericWebRuntimeCloseOutEvidence:
     """Prove that an original deploy's exact image is configured and running.
 
@@ -494,6 +507,13 @@ def evaluate_generic_web_runtime_close_out(
     expected_reference = expected_artifact_reference.strip()
     if not _IMMUTABLE_ARTIFACT_REFERENCE_PATTERN.fullmatch(expected_reference):
         raise ValueError("Runtime close-out requires an immutable original artifact reference.")
+    if observation.application is not None:
+        return _evaluate_application_runtime_close_out(
+            observation=observation,
+            expected_artifact_reference=expected_reference,
+            expected_deployment_record_id=expected_deployment_record_id.strip(),
+            expected_provider_reference=expected_provider_reference.strip(),
+        )
     if observation.target_artifact_reference.strip() != expected_reference:
         raise ValueError("Runtime close-out target artifact does not match the original deploy.")
     expected_repository = _image_repository(expected_reference)
@@ -518,6 +538,50 @@ def evaluate_generic_web_runtime_close_out(
         artifact_reference_sha256=_legacy_correlation_sha256(expected_reference),
         running_container_count=len(running_images),
         matching_container_count=len(repository_images),
+    )
+
+
+def _evaluate_application_runtime_close_out(
+    *,
+    observation: GenericWebRuntimeArtifactObservation,
+    expected_artifact_reference: str,
+    expected_deployment_record_id: str,
+    expected_provider_reference: str,
+) -> GenericWebRuntimeCloseOutEvidence:
+    application = observation.application
+    provider_reference = validate_provider_deploy_reference(
+        artifact_id=expected_artifact_reference,
+        deploy_reference=expected_provider_reference,
+        label="Application runtime close-out",
+    )
+    if (
+        application is None
+        or not provider_reference
+        or not expected_deployment_record_id
+        or observation.target_artifact_reference.strip() != provider_reference
+        or not application.process_ready
+        or not application.rollout_settled
+        or application.service_deployment_record_id != expected_deployment_record_id
+        or not application_service_image_matches(
+            application.service_image, expected_artifact_reference, provider_reference
+        )
+        or not observation.running_container_images
+        or not all(
+            application_immutable_image_matches(image, expected_artifact_reference)
+            for image in observation.running_container_images
+        )
+        or len(observation.running_container_deployment_record_ids)
+        != len(observation.running_container_images)
+        or any(
+            record_id != expected_deployment_record_id
+            for record_id in observation.running_container_deployment_record_ids
+        )
+    ):
+        raise ValueError("Application runtime close-out does not prove this deployment.")
+    return GenericWebRuntimeCloseOutEvidence(
+        artifact_reference_sha256=_legacy_correlation_sha256(expected_artifact_reference),
+        running_container_count=len(observation.running_container_images),
+        matching_container_count=len(observation.running_container_images),
     )
 
 
@@ -627,6 +691,7 @@ def qualify_testing_application_observation(
     deployment_record_id: str,
     wait: bool = False,
     deadline: float | None = None,
+    failure_evidence: dict[str, str] | None = None,
 ) -> GenericWebProviderDeploymentObservation:
     """A provider job is insufficient proof of application testing convergence."""
     if (
@@ -642,6 +707,33 @@ def qualify_testing_application_observation(
         return GenericWebProviderDeploymentObservation(outcome="unknown")
     if wait and deadline is None:
         deadline = monotonic() + target.deploy_timeout_seconds
+
+    def retain_failure(runtime: ApplicationRuntimeObservation) -> None:
+        if failure_evidence is None:
+            return
+        summary = summarize_application_runtime(
+            runtime,
+            expected_image=target.ship_request.artifact_id,
+            observed_at=datetime.now(UTC),
+        )
+        snapshot = {
+            key: summary[key]
+            for key in (
+                "application_id",
+                "expected_image",
+                "observed_at",
+                "rollout_state",
+                "rollout_started_at",
+                "service_image",
+                "service_deployment_record_id",
+                "tasks",
+                "task_count",
+                "task_evidence_complete",
+                "details_truncated",
+            )
+        }
+        failure_evidence.setdefault(APPLICATION_RUNTIME_FAILURE_EVIDENCE_KEY, json.dumps(snapshot))
+
     while True:
         runtime: ApplicationRuntimeObservation | None
         try:
@@ -654,6 +746,7 @@ def qualify_testing_application_observation(
             if observation.deployment_status in {"error", "failed"} and runtime.rollout_settled:
                 # A pull/login failure can end before any service update. This
                 # proves a failed, currently settled effect, never its absence.
+                retain_failure(runtime)
                 return GenericWebProviderDeploymentFailed(observation).observation
             if application_runtime_matches(
                 runtime,
@@ -686,6 +779,7 @@ def qualify_testing_application_observation(
                     )
                     belongs_to_attempt = started <= rollout_started <= finished
                 if belongs_to_attempt:
+                    retain_failure(runtime)
                     return observation.model_copy(
                         update={
                             "deployment_status": "unhealthy",
@@ -714,6 +808,7 @@ def qualify_testing_application_observation(
                     deployment_record_id=deployment_record_id,
                 )
             ):
+                retain_failure(runtime)
                 return observation.model_copy(
                     update={
                         "deployment_status": "unhealthy",
@@ -930,6 +1025,26 @@ class DokployGenericWebDeployProvider:
         prepare_generic_web_testing_runtime(resolved, record_store, profile, lane)
         return resolved
 
+    def read_release_settings(
+        self,
+        *,
+        control_plane_root: Path,
+        target: GenericWebResolvedDeployTarget,
+        keys: frozenset[str],
+    ) -> GenericWebReleaseSettings:
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=target.resolved_target.target_type,
+            target_id=target.resolved_target.target_id,
+        )
+        values = dokploy_api.parse_dokploy_env_text(str(payload.get("env") or ""))
+        return GenericWebReleaseSettings(
+            values={key: values[key] for key in sorted(keys) if key in values},
+            absent_keys=tuple(sorted(keys - values.keys())),
+        )
+
     def preflight_testing_runtime(
         self, *, control_plane_root: Path, target: GenericWebResolvedDeployTarget
     ) -> None:
@@ -1007,11 +1122,21 @@ class DokployGenericWebDeployProvider:
                 deployment_title=deployment_title,
                 before_provider_mutation=checked_mutation,
                 effect_started=effect_started,
-                runtime_environment=resolved_deploy_target.testing_runtime_values
-                if resolved_deploy_target.testing_runtime_digest
-                else None,
-                retired_runtime_keys=resolved_deploy_target.testing_runtime_retired_keys,
+                runtime_environment=(
+                    resolved_deploy_target.release_settings.values
+                    if resolved_deploy_target.release_settings is not None
+                    else resolved_deploy_target.testing_runtime_values
+                    if resolved_deploy_target.testing_runtime_digest
+                    else None
+                ),
+                retired_runtime_keys=(
+                    frozenset(resolved_deploy_target.release_settings.absent_keys)
+                    if resolved_deploy_target.release_settings is not None
+                    else resolved_deploy_target.testing_runtime_retired_keys
+                ),
                 runtime_verified=runtime_verified,
+                strict_runtime_environment=resolved_deploy_target.ship_request.instance
+                == "testing",
                 dispatch_evidence_checkpoint=retain_dispatch,
                 accept_sole_new_deployment=(
                     resolved_deploy_target.resolved_target.target_type == "compose"
@@ -1320,8 +1445,8 @@ class DokployGenericWebDeployProvider:
         resolved_deploy_target: GenericWebResolvedDeployTarget,
     ) -> GenericWebRuntimeArtifactObservation:
         target = resolved_deploy_target.resolved_target
-        if target.target_type != "compose":
-            raise ValueError("Runtime close-out supports compose targets only.")
+        if target.target_type not in {"compose", "application"}:
+            raise ValueError("Runtime close-out requires an application or compose target.")
         host, token = self._read_provider_config(control_plane_root=control_plane_root)
         target_payload = dokploy_api.fetch_dokploy_target_payload(
             host=host,
@@ -1330,10 +1455,19 @@ class DokployGenericWebDeployProvider:
             target_id=target.target_id,
         )
         if (
-            _dokploy_target_payload_id(target_payload=target_payload, target_type="compose")
+            _dokploy_target_payload_id(
+                target_payload=target_payload, target_type=target.target_type
+            )
             != target.target_id.strip()
         ):
             raise ValueError("Runtime close-out target identity is not exact.")
+        if target.target_type == "application":
+            return _observe_application_runtime_artifact(
+                host=host,
+                token=token,
+                target_payload=target_payload,
+                expected_artifact_reference=resolved_deploy_target.ship_request.artifact_id,
+            )
         try:
             running_containers = dokploy_runtime_evidence.fetch_compose_running_container_runtime(
                 host=host,
@@ -1353,6 +1487,84 @@ class DokployGenericWebDeployProvider:
                 record_id for _, record_id in running_containers
             ),
         )
+
+
+class _ApplicationRuntimeConfiguration(NamedTuple):
+    application_id: str
+    app_name: str
+    server_id: str
+    image_reference: str
+
+
+def _application_runtime_configuration(
+    payload: dokploy_api.JsonObject,
+) -> _ApplicationRuntimeConfiguration:
+    application_id, app_name = payload.get("applicationId"), payload.get("appName")
+    server_id = payload.get("serverId")
+    image = _dokploy_target_artifact_reference(target_payload=payload, target_type="application")
+    if (
+        not isinstance(application_id, str)
+        or not application_id
+        or not isinstance(app_name, str)
+        or not app_name
+        or "serverId" not in payload
+        or server_id is not None
+        and not isinstance(server_id, str)
+        or payload.get("sourceType") != "docker"
+        or not image
+    ):
+        raise ValueError("Application runtime close-out configuration is unavailable.")
+    return _ApplicationRuntimeConfiguration(application_id, app_name, server_id or "", image)
+
+
+def _observe_application_runtime_artifact(
+    *,
+    host: str,
+    token: str,
+    target_payload: dokploy_api.JsonObject,
+    expected_artifact_reference: str,
+) -> GenericWebRuntimeArtifactObservation:
+    initial = _application_runtime_configuration(target_payload)
+    try:
+        observed = fetch_application_runtime(
+            host=host, token=token, application_id=initial.application_id
+        )
+    except dokploy_runtime_evidence.DokployEvidenceProviderError as error:
+        raise click.ClickException("Application runtime close-out provider read failed.") from error
+    current = dokploy_api.fetch_dokploy_target_payload(
+        host=host, token=token, target_type="application", target_id=initial.application_id
+    )
+    if (
+        _application_runtime_configuration(current) != initial
+        or observed.application_id != initial.application_id
+        or observed.app_name != initial.app_name
+        or observed.server_id != initial.server_id
+    ):
+        raise ValueError("Application runtime close-out target changed during inspection.")
+    images = tuple(
+        next(
+            (
+                image
+                for image in candidates
+                if application_immutable_image_matches(image, expected_artifact_reference)
+            ),
+            "",
+        )
+        for candidates in observed.running_container_images
+    )
+    if any(not image for image in images):
+        raise ValueError("Application runtime close-out has another running image.")
+    return GenericWebRuntimeArtifactObservation(
+        target_artifact_reference=initial.image_reference,
+        running_container_images=images,
+        running_container_deployment_record_ids=observed.running_container_deployment_record_ids,
+        application=GenericWebApplicationRuntimeArtifactProof(
+            service_image=observed.service_image,
+            service_deployment_record_id=observed.service_deployment_record_id,
+            process_ready=observed.ready,
+            rollout_settled=observed.rollout_settled,
+        ),
+    )
 
 
 def _terminal_deployment_observation(

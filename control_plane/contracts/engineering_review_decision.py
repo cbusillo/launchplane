@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -24,6 +21,7 @@ from control_plane.contracts.repository_evidence import (
     RepositoryTarget,
     RepositoryTargetReference,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 EngineeringReviewDecisionStatus = Literal[
@@ -34,8 +32,6 @@ ENGINEERING_REVIEW_DECISION_CREATE_ACTION = "engineering_review_decision.create"
 ENGINEERING_REVIEW_DECISION_READ_ACTION = "engineering_review_decision.read"
 ENGINEERING_REVIEW_DECISION_PROJECT_ACTION = "engineering_review_decision.project"
 ENGINEERING_REVIEW_STATUS_CONTEXT = ENGINEERING_REVIEW_CHECK_NAME
-
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class EngineeringReviewDecisionRequest(BaseModel):
@@ -170,6 +166,4 @@ def build_engineering_review_decision_binding(
     payload = change_impact_bound_payload(
         payload, version=record.binding_hash_version, domain="engineering-review-decision-v2"
     )
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)

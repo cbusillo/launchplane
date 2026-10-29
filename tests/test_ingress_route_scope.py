@@ -12,6 +12,7 @@ from control_plane.ingress_route_scope import (
     IngressRouteInstanceScopeError,
     validate_ingress_route_instance_scope,
 )
+from tests.test_route_binding_record import _dokploy_target_record
 
 
 def _profile(*, shared_prod_domain: bool = False) -> LaunchplaneProductProfileRecord:
@@ -56,6 +57,31 @@ def _profile(*, shared_prod_domain: bool = False) -> LaunchplaneProductProfileRe
 
 
 class IngressRouteInstanceScopeTests(unittest.TestCase):
+    def test_noop_target_host_scope_is_lane_bound_and_rejects_shared_hosts(self) -> None:
+        profile = _profile()
+        alias = "recovery.example.test"
+        target = _dokploy_target_record(context="example", instance="prod", domains=(alias,))
+        validate_ingress_route_instance_scope(
+            profile=profile,
+            context="example",
+            instance="prod",
+            requested_domains=(alias,),
+            tracked_targets=(target,),
+        )
+        for targets in (
+            (),
+            (target.model_copy(update={"instance": "testing"}),),
+            (target, target.model_copy(update={"instance": "testing"})),
+        ):
+            with self.subTest(targets=targets), self.assertRaises(IngressRouteInstanceScopeError):
+                validate_ingress_route_instance_scope(
+                    profile=profile,
+                    context="example",
+                    instance="prod",
+                    requested_domains=(alias,),
+                    tracked_targets=targets,
+                )
+
     def test_private_testing_scope_requires_its_active_endpoint_and_access_list(self) -> None:
         profile = _profile()
         profile = profile.model_copy(

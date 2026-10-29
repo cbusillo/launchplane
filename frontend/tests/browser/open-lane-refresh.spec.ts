@@ -1,5 +1,6 @@
 import { setClockTime, waitForState, expect, test } from "./state";
 import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 for (const environmentView of [false, true]) {
   test(`open ${environmentView ? "environment" : "workspace"} reads recover without reusing expired proof`, async ({ page }, testInfo) => {
@@ -97,7 +98,7 @@ for (const environmentView of [false, true]) {
     releaseRead!();
     await expect(page.getByText("Evidence read unavailable", { exact: false }).first()).toBeVisible();
     await expect(signal).toContainText("Stale");
-    await page.screenshot({ path: `../tmp/browser-smoke/open-${environmentView ? "environment" : "workspace"}-failed-${testInfo.project.name}.png`, fullPage: true });
+    await page.screenshot({ path: smokeArtifact(`open-${environmentView ? "environment" : "workspace"}-failed-${testInfo.project.name}.png`), fullPage: true });
     // Immediate failures with the same status must keep retrying even if React
     // batches loading and error into one render.
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
@@ -124,7 +125,7 @@ for (const environmentView of [false, true]) {
     // Inventory has its own read lifecycle, including the rail's lane evidence.
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     await expect(page.locator('.rail-product-link[data-active="true"] [data-lane="testing"]')).toHaveAttribute("data-tone", "verified");
-    await page.screenshot({ path: `../tmp/browser-smoke/open-${environmentView ? "environment" : "workspace"}-recovered-${testInfo.project.name}.png`, fullPage: true });
+    await page.screenshot({ path: smokeArtifact(`open-${environmentView ? "environment" : "workspace"}-recovered-${testInfo.project.name}.png`), fullPage: true });
     delayInventory = true;
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     await waitForState(() => Boolean(releaseInventory)).toBe(true);

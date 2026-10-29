@@ -1,7 +1,5 @@
 """Audited engineering updates cannot replace merge authority."""
 
-import hashlib
-import json
 from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
@@ -20,6 +18,7 @@ from control_plane.contracts.merge_train_policy import (
 )
 from control_plane.storage.postgres import DbOnlyMutationRequest
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE = "/v1/work-graph/merge-train/policy/operational"
 MERGE_TRAIN_OPERATIONAL_POLICY_SCOPE = "merge-train-operational-policy"
@@ -161,13 +160,9 @@ def apply_merge_train_operational_update(
             )
         ),
     )
-    fingerprint = hashlib.sha256(
-        json.dumps(
-            {"request": request.model_dump(mode="json", exclude_unset=True), "actor": actor},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    fingerprint = nonvalidating_compact_sorted_json_sha256(
+        {"request": request.model_dump(mode="json", exclude_unset=True), "actor": actor}
+    )
     result = store.compare_and_write_merge_train_policy_record(
         expected_record=before.model_copy(update={"status": "active"}),
         replacement_record=candidate,

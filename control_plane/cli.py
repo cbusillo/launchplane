@@ -1974,14 +1974,7 @@ def _run_compose_post_deploy_update(
         dokploy_source.protected_shopify_store_keys_for_target_definition(target_definition)
     )
     if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
-        override_runtime_store = (
-            PostgresRecordStore(database_url=database_url)
-            if any(
-                item.value.source in {"runtime_environment", "secret_binding"}
-                for item in odoo_override_record.config_parameters
-            )
-            else None
-        )
+        override_runtime_store = PostgresRecordStore(database_url=database_url)
         try:
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
@@ -2003,8 +1996,7 @@ def _run_compose_post_deploy_update(
             )
             raise
         finally:
-            if override_runtime_store is not None:
-                override_runtime_store.close()
+            override_runtime_store.close()
     try:
         dokploy_post_deploy.run_compose_post_deploy_update(
             host=host,
@@ -2692,6 +2684,7 @@ def _read_source_release_tuple_for_promotion(
             f"Ship artifact {request.artifact_id} into {request.context}/{request.from_instance} first."
         ) from None
     return control_plane_release_tuples.require_source_release_tuple_for_promotion(
+        record_store=record_store,
         source_tuple=source_tuple,
         artifact_id=request.artifact_id,
         context_name=request.context,
@@ -2720,6 +2713,7 @@ def _read_source_release_tuple_for_promotion_record(
             f"Write or mint {promotion_record.context}/{promotion_record.from_instance} first."
         ) from None
     return control_plane_release_tuples.require_source_release_tuple_for_promotion(
+        record_store=record_store,
         source_tuple=source_tuple,
         artifact_id=artifact_id,
         context_name=promotion_record.context,
@@ -2946,7 +2940,7 @@ register_ci_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_local_consumer_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_action_pin_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_dependency_health_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
-register_every_code_commands(cast(click.Group, main), store_factory=_store)  # type: ignore[redundant-cast]
+register_every_code_commands(main)
 register_ingress_commands(
     cast(click.Group, main),  # type: ignore[redundant-cast]
     callbacks=IngressCliCallbacks(

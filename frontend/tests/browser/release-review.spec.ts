@@ -3,6 +3,55 @@ import type { Request } from "@playwright/test";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
 import { RELEASE_PROGRESS_REFRESH_MS } from "../../src/OwnerReleaseReviewRoute";
 
+test("A settings-only release shows its saved settings and allows the release request", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=operator");
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("operator");
+  });
+  const checklist = response.review.checklist!;
+  checklist.candidate = { ...checklist.production, runtime_settings: { values: { APP_CHANNEL: "second channel" }, absent_keys: ["OLD_SETTING"] } };
+  checklist.items = [];
+  checklist.shared_sources = [];
+  response.review.no_new_release = false;
+  response.review.checklist_complete = true;
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-operator", github_id: 9003, role: "admin", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.goto("/ui/owner-review?product=example-site");
+  await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toBeVisible();
+  const settings = page.locator("[data-production-settings]");
+  await settings.locator("summary").click();
+  await expect(settings).toContainText("second channel");
+  await expect(settings).toContainText("OLD_SETTING");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("production-release-settings.png"), fullPage: true });
+});
+
+test("The Director request button submits its reason through the shared request route", { tag: "@layout" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=operator");
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("operator");
+  });
+  const requests: { method: string; payload: unknown }[] = [];
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-operator", github_id: 9003, role: "admin", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.route("**/v1/release-review/requests", route => {
+    requests.push({ method: route.request().method(), payload: route.request().postDataJSON() });
+    return route.fulfill({ json: response });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  const ask = page.getByRole("region", { name: "Ask the Client now", exact: true });
+  const reason = "The agreed repairs are ready for release.";
+  await ask.getByRole("textbox").fill(reason);
+  await ask.getByRole("button").click();
+  await expect(ask.getByRole("status")).toBeVisible();
+  expect(requests).toMatchObject([{ method: "POST", payload: { product: response.product, checklist_digest: response.review.checklist_digest, reason } }]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("decided-release-request.png"), fullPage: true });
+});
+
 test("A new invitation has its own progress and formatted linked PR checks", { tag: "@layout" }, async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
@@ -59,6 +108,25 @@ test("A new invitation has its own progress and formatted linked PR checks", { t
   await expect(progress).not.toContainText("Done");
   await page.screenshot({ path: testInfo.outputPath("new-release-accepted.png"), fullPage: true });
   expect(writes).toEqual(["POST"]);
+});
+
+test("A qualified private release uses the service checklist to enable acceptance", async ({ page }) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("products");
+  });
+  response.review.checklist.testing_url = "";
+  response.review.checklist_complete = true;
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.goto("/ui/owner-review?product=example-site");
+  const accept = page.getByRole("button", { name: "Accept release", exact: true });
+  await expect(accept).toBeEnabled();
+  response.review.checklist_complete = false;
+  await page.reload();
+  await expect(accept).toBeDisabled();
 });
 
 test("Invitation notes failures are visible to engineering and clear after correction", async ({ page }, testInfo) => {

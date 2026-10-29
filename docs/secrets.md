@@ -9,6 +9,11 @@ title: Secrets
 
 ## Client credential input
 
+The same form also accepts the Director's service-owned artifact scan credential
+at the [artifact credential path](artifact-security.md#verified-artifact-scanning).
+That fixed service request writes the managed-secret bindings directly; the
+product-requested Client flow below remains a submission for admin application.
+
 An admin can request a credential by setting `owner_input` on one managed-secret
 requirement in the stored product profile. It contains a human-readable `label` and
 `instructions` and requires an explicit product context. An optional instance
@@ -146,6 +151,62 @@ against a preserved restored login. Do not solve that by changing the login.
 
 ## Odoo config-parameter reference agreement
 
+For a new private testing integration, an admin uses the product setup's
+**Declare managed-secret fields**, then the testing lane's **Managed secrets**.
+The **Use a secret in Odoo** review names the required neutral binding when the
+field is missing. Declare that exact name under `runtime_environment`, for
+the exact context and testing instance. Enter the value only in the write-only
+field and explicitly choose **Independent testing credential** after verifying
+the provider account cannot affect any live business system. The normal secret
+dry-run, re-entry and apply retain only encrypted storage and redacted evidence.
+No product code, per-integration field catalog or product PR is needed.
+
+Provider qualification remains separate. The lane must have an explicit
+`dev_store` integration allowance with evidence of its independently isolated
+test account. The testing lane's **Testing integration allowances** panel reviews
+and saves that allowance through the existing service, preserving the other
+allowances. If the review would change another allowance, the panel requires a
+fresh read and review. It retains the original metadata request and operation key after an
+uncertain response, including after reload. A testing class or an
+allowance cannot make a live-capable key safe. Launchplane cannot inspect the
+provider's permissions; the admin verifies them before entry. `pre_live` and
+`read_only_source` do not qualify a private printing/test-account reference.
+
+The panel reviews and saves a reference through
+`POST /v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile`
+with `create_missing: true`. That mode can add a missing parameter only on a
+testing lane, using its already declared, independently supplied, exact-lane
+runtime binding. Default and active-policy integration markers determine which
+allowances are required. Runtime key-safety policy still applies. Existing
+literals are not replaced, and distinct parameters cannot share a lossy neutral
+transport name. The normal `create_missing: false` correction remains available
+for existing references, including production.
+
+Reference creation has a names-only dry-run, exact lane confirmation, reviewed
+digest, atomic authority checks and metadata readback. A first override record
+is created only while it remains absent. Apply requires an `Idempotency-Key`;
+the reference and its completion receipt commit together. After a lost response,
+the browser retains the metadata request and retries that original key, including
+after reload. A replay proves the earlier operation completed; **Read stored Odoo
+references** obtains current metadata separately. Neither operation reads a secret
+version. Existing URL-writer and literal behavior is unchanged.
+Adding a reference preserves the override record's existing apply schedule and
+unrelated intent. A newly created record uses the normal deploy/promotion schedule.
+
+Secret storage, reference metadata, provider runtime sync and Odoo post-deploy
+are separate outcomes. After supported sync and post-deploy, the existing
+testing-lane database integration readback queries the typed payload's secret
+parameter names. Production readback keeps its existing protected-store-key scope.
+PostgreSQL compares nonempty values itself and returns names only. Evidence
+includes `odoo_config_parameter_present` and, on failure,
+`odoo_config_parameter_missing`; the post-deploy result prefixes these with
+`post_deploy_readback_`. Missing and whitespace-only values fail the readback.
+This confirms nonempty database presence, not equality to the supplied key; a
+secret record or provider environment entry alone is insufficient. Legacy names
+that cannot safely appear in a marker retain their earlier readback behavior;
+new reference creation accepts only safe names. No values or secret hashes
+are emitted.
+
 A typed config-parameter's `secret_binding_id` identifies the binding delivered
 under its neutral `ODOO_OVERRIDE_SECRET__CONFIG_PARAM__*` environment key. The
 payload keeps both fields for adapter compatibility. The adapter consumes the
@@ -177,7 +238,10 @@ uv run python scripts/reconcile-odoo-secret-references.py apply <same arguments>
 
 Dry-run saves the value-free review outside the repository. Apply sends that
 review's keys and digest with the lane confirmation, then reads the plan again
-and passes only when every entry is `already_agrees`.
+and passes only when the readback is nonempty, contains exactly the reviewed
+key set and every entry is `already_agrees`. Empty, missing or extra keys leave
+the correction `accepted_unverified`; preserve its trace and inspect the lane
+before considering another apply.
 
 Use the service route
 `/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile`:
@@ -247,7 +311,8 @@ secret, private-key input or process-wide trust change. The receiver's CA bundle
 and real issuer/key provisioning remain the custodian's reviewed steps.
 
 The [testing local-consumer path](testing-local-consumer.md) delivers one exact
-testing bridge binding through a human-reviewed recipient-encrypted envelope.
+testing bridge binding through a reviewed recipient-encrypted envelope issued by
+an administrator or an agent with existing exact-testing-lane authority.
 It exposes no plaintext read and creates no client service credential or grant.
 The local receiver verifies current custody and actual testing-server
 authentication before creating a separate private token file.
@@ -277,9 +342,6 @@ authentication before creating a separate private token file.
   runtime worker commands, host/user metadata, and non-secret operation settings
   from DB-backed runtime-environment records. Private keys, tokens, and
   known-host material must come from managed secret bindings.
-- GitHub workflows should not carry provider credentials such as `DOKPLOY_HOST`,
-  `DOKPLOY_TOKEN`, or project names; they should call Launchplane with OIDC and
-  operation intent.
 - Runner-host hygiene cross-repository evidence uses a dedicated GitHub App.
   Store its non-secret client ID in the documented repository variable and its
   private key in `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY`.
@@ -336,6 +398,13 @@ authentication before creating a separate private token file.
   env. Missing managed bindings are a hard error.
 - Secret status surfaces return metadata only. Launchplane does not expose
   routine plaintext read commands or service endpoints.
+  `GET /v1/secrets/{secret_id}` and context/instance secret inventories expose
+  `current_version_value_origin` from the exact current immutable version,
+  without decryption. A null value means origin is unknown or the current
+  version is missing; a missing version also has an empty current-version
+  timestamp. Neither mutable binding metadata nor another version certifies
+  origin. This diagnostic does not qualify external-resource isolation or change
+  observer/deploy gates.
 - Credentials that only Launchplane's own jobs use for one lane, such as the
   production backup and VeriReel Proxmox SSH keys, live in the
   `launchplane_worker` integration, stored for exactly that lane. They are not
@@ -530,11 +599,11 @@ decryption key state denies the reveal or resolution.
 - Runtime key-safety gates classify managed secret bindings by binding key and
   Launchplane metadata, not by plaintext value. The initial classification
   contract is `prod_only`, `testing`, `preview`, `non_prod`, and `shared_safe`.
-- Deploy-time runtime key-safety reconciliation accepts admin-supplied
-  `LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON` metadata for runtime secret
-  bindings that need Launchplane-managed storage. It writes binding key,
-  `secret_class`, and target-scope metadata only; admins still supply or
-  rotate secret values through product-config managed secret writes.
+- The active DB policy record is the only source of key-safety rules. Deploys
+  do not import rules. Admins change a rule through
+  `POST /v1/runtime-key-safety/policies/apply`, or declare a lane secret's class
+  in product-config; secret values still go through product-config managed
+  secret writes.
 - Shared and production runtime mutations must execute through the deployed
   Launchplane service API or a Launchplane UI path backed by that API. Do not use
   local CLI live-target mutation commands from arbitrary checkouts as a fallback
@@ -590,9 +659,10 @@ decryption key state denies the reveal or resolution.
   without origin metadata keep key-name policy precedence during planning and
   subsequent delivery; merely declaring them `testing` cannot override that rule.
 - The environment managed-secret form stores independently supplied runtime
-  values for a testing lane with class `testing` only for ordinary keys. Integration
-  keys retain their policy requirements; the form does not assert a testing class
-  for them on the writer's behalf. It accepts neither cross-lane
+  values for a testing lane with inferred class `testing` only for ordinary keys.
+  An admin can explicitly choose `testing` for an independently qualified
+  integration key; the form carries that declaration to the existing runtime
+  key-safety evaluator without overriding policy rules. It accepts neither cross-lane
   references nor shared binding destinations. Production entry and the separate
   reference-copy path keep their existing rules; a production-only source cannot
   become a testing credential by copying or relabelling its destination.
@@ -667,11 +737,9 @@ decryption key state denies the reveal or resolution.
   records with `launchplane runtime-key-safety list-policies`, and run a
   metadata-only check with `launchplane runtime-key-safety evaluate` before a
   workflow mutates runtime keys.
-- The Launchplane deploy workflow may reconcile known runtime binding
-  classifications through `POST /v1/runtime-key-safety/policies/apply`. That
-  service path is OIDC-authenticated, DB-backed, additive by binding key, and
-  carries only binding metadata such as class, context, and instance scope. It
-  must not carry secret plaintext or provider env dumps.
+- `POST /v1/runtime-key-safety/policies/apply` is DB-backed, additive by
+  binding key, and carries only binding metadata such as class, context, and
+  instance scope. It must not carry secret plaintext or provider env dumps.
 - Evaluation reads only Launchplane managed secret bindings for the requested
   context and instance. If no active policy record exists, the gate fails closed
   instead of falling back to service-host env or product-local scripts.
@@ -712,7 +780,6 @@ decryption key state denies the reveal or resolution.
     `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST`; request bodies cannot
     override them
   - route-specific webhook ingress secrets such as
-    `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` and
     `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`
 - Treat these as DB-backed Launchplane-owned data instead of live service-host
   env once the shared store is available:
@@ -787,8 +854,9 @@ decryption key state denies the reveal or resolution.
   do not need a runtime key-safety target.
 - Trusted local agents that need to call the deployed service instead of a
   browser session should source `~/.config/launchplane/local-operator.env` and
-  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine Director-agent writes. Exact
-  authority is DB-backed by `local_operators` authz policy rules. Rare privileged
+  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine Director-agent writes under
+  the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission)
+  and endpoint admission. Rare privileged
   Director-agent writes can use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` only when matching
   `local_admins` authz policy rules grant the action. Write requests sent with
   either token must include a reason. Product-config apply also requires a
@@ -862,8 +930,75 @@ prove absence outside that access. Binding metadata is a record like the rest of
 a product environment, and reading is never a stop, so the Director's agents
 read it through the same standing environment read across products
 (cbusillo/repairshopr_api#103). Preview
-and removed-lane bindings and contexts shared ambiguously between products are
-excluded.
+configuration scopes are included; removed-lane bindings and contexts shared
+ambiguously between products are excluded.
+
+### Read coverage and binding selection
+
+The existing product catalog (`GET /v1/product-profiles`) and binding response
+include `coverage`: `population`, `source`, `authorization`, `status` and explicit
+`exclusions`. Catalog coverage is for active products within the requested
+`driver_id`; an empty driver filter includes all drivers. A product-scoped catalog
+reports `scoped` even when its returned subset is empty. It never reveals hidden
+product identities or counts.
+
+Binding `coverage` describes the copy metadata population above. `complete`
+means unbounded source enumeration and authorized records within that stated
+population, not every effective secret or every historical lane. The coverage
+proof includes every configuration target, including the managed preview scope;
+stable-lane authority alone cannot certify complete copy metadata coverage.
+The storage adapter's `collection_read_coverage` attests unbounded profile, secret-record and
+binding enumeration; a limited, unsupported or unknown collection keeps that
+limitation in the response. Adapters without the capability report `unknown`.
+These are current read observations, not an atomic snapshot or runtime proof.
+
+For names-only selection evidence on the same binding endpoint, request
+`include_resolution=true`. `integration` defaults to `runtime_environment` and
+can explicitly select another existing integration without discovering hidden
+integration names. Repeated `scopes` parameters select `global`, `context` and/or
+`context_instance`; omitting them selects all three. For example,
+`?include_resolution=true&integration=launchplane_worker&scopes=context_instance`
+asks the shared selector the same scope question as the exact-lane worker
+resolver. `lane_binding_resolution` states these inputs and reports each stable
+lane declared in the product profile, its selected binding metadata and coverage.
+The managed preview configuration scope is explicitly excluded from this
+selection population, even though copy metadata can include it. Selection reads
+no versions or values.
+
+Selection uses the existing secret resolver's precedence before authorization.
+Each lane's qualification view returns selected rows only when authority covers
+every requested scope; otherwise the whole selection is withheld with `scoped`
+coverage. A hidden higher-precedence source cannot make a readable shadow appear
+or disappear in that view. The ordinary copy `bindings` remain available under
+their existing eligibility and authorization. A context-only reader may request
+only `scopes=context` for a complete answer to that narrower question; that does
+not claim coverage of instance or global delivery sources. Coverage
+depends on authority over every requested scope, even when no binding exists,
+so it cannot reveal whether a hidden source exists. Complete global coverage
+needs the existing Director-agent standing or policy-named administrator authority;
+an allow on the empty context alone cannot prove every global source readable.
+Other selection scopes require that standing or explicit `secret.list` to prove
+complete scope coverage. Environment metadata access still returns authorized
+copy names, but selection stays `scoped` without that proof. Metadata enumeration
+still uses the shared resolver even when selection rows are withheld. Hidden
+context-ownership records cannot change the qualification projection or its
+coverage through inherited product-read rules.
+Existing copy eligibility and grants are unchanged.
+
+All-scope selection is not a delivery claim: site delivery may exclude global
+or context sources, and worker delivery selects exact-instance sources. Declare
+the appropriate scopes when qualifying one of those paths. Historical and
+undeclared lanes and other integrations remain outside the stated population;
+runtime delivery, value validity and health need their own evidence.
+The binding endpoint also accepts inactive products; active-fleet qualification
+starts from the active catalog. `integration` and `scopes` affect only the opt-in
+resolution view and do not filter or broaden copy `bindings` when that view is
+not requested.
+
+Consumers must preserve server coverage and requested selection evidence. Missing
+coverage from an older server or projection is `unknown`; zero client omissions
+does not prove server completeness. A bounded client projection must retain its
+own bound separately and cannot turn partial rows into a complete inventory.
 
 A product-config secret entry can use `copy_from` instead of `value`:
 
@@ -886,12 +1021,13 @@ A product-config secret entry can use `copy_from` instead of `value`:
 ```
 
 The top-level product-config target is the destination lane. The source must be
-a stable lane of that same product, and the destination must be lane-exact
+a configuration scope of that same product, and the destination must be exact
 in `runtime_environment`. The source binding key is the destination binding key;
 renaming a token to bypass integration key safety is not supported. Neither a
 source product nor another secret store can be supplied. Site-shared sources
 may be selected when that source lane has no configured exact binding. Ambiguous,
-disabled, missing or superseded sources are refused. Copies to previews are refused.
+disabled, missing or superseded sources are refused. Copies to the managed
+`preview` scope use the same checks and must pass preview key-safety policy.
 An explicit class on the source must allow the destination lane; a `prod_only`
 source cannot be copied to testing by relabelling its destination `shared_safe`.
 
@@ -923,6 +1059,26 @@ unchanged. Product ownership and source record/binding changes before commit
 abort the copy. Both database-backed and filesystem bundles also abort if the
 reviewed product profile changes before commit. The
 audit records the source secret and version IDs.
+Each immutable managed value version records its service-computed `value_origin`:
+`supplied`, `provider`, `generated`, or unknown for historical values. Copies inherit
+the exact reviewed source version's origin; re-encryption preserves it. Caller
+metadata, binding names, relabels and onboarding updates cannot certify or change
+value origin. The binding's method remains `copy`, so a copy earns neither fresh
+local-generation credit nor the independently supplied key-safety exception.
+The external-resource observer accepts only known supplied/provider versions.
+Generated and unknown values, including copies, remain unavailable. A supported
+product-config value write creates a new version with origin computed by the
+service; historical origin is never inferred from mutable binding metadata.
+Any required secret entry stays in that private value-writing flow, never comments
+or agent evidence.
+Provider adoption reads retained managed history after capturing the provider
+environment. A matching value-backed key in the lane's current or declared
+historical contexts leaves origin unknown, including disabled and retired
+bindings: the provider may still hold an earlier generated value. Empty onboarding
+placeholders without a secret record do not count as prior values. Other exact
+lanes and unrelated contexts do not taint the lane. Adoption still works; a
+product-config supplied-value write is the supported way to establish origin
+when retained history prevents certifying the adopted value.
 Completed retries replay before resolving or decrypting the source. Request,
 response and audit metadata contain no secret value; subsequent live runtime
 sync or deployment remains a separate operation.
@@ -972,3 +1128,8 @@ deployed: the provider copy stays in place and already holds the same value, and
 a later live-target runtime sync delivers it from the managed secret. A
 production secret adopted as `shared_safe` with a sharing reason can then be
 copied to testing by reference, as described above.
+
+## Shared preview settings
+
+See [preview runtime settings](preview-settings.md) for the managed `preview`
+scope, precedence, UI and helper usage, and migration from profile overrides.

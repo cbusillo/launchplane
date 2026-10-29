@@ -17,6 +17,7 @@ import tomllib
 import tokenize
 from typing import Protocol, cast
 from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
+from control_plane.contracts.record_fields import GIT_SHA1_PATTERN
 
 
 MAX_SCANNED_FILE_BYTES = 1_000_000
@@ -31,6 +32,10 @@ ALLOW_REASON_THIN_CONNECTOR_INPUT = "thin_connector_input"
 ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT = "operator_supplied_runtime_input"
 ALLOW_REASON_PRODUCT_OWNED_ADDON = "product_owned_addon"
 ALLOW_REASON_REPO_METADATA_ERGONOMICS = "repo_metadata_ergonomics"
+RENOVATE_METADATA_KEY_PATTERN = re.compile(
+    r"\$schema|extends\[\d+]|(?:packageRules\[\d+]\.)?description"
+    r"|packageRules\[\d+]\.match(?:PackageNames|DepNames|Datasources|Managers|FileNames|UpdateTypes)\[\d+]"
+)
 
 SCAN_MODES = ("full-audit", "changed-files-gate")
 OUTPUT_FORMATS = ("json", "markdown")
@@ -150,7 +155,6 @@ GITHUB_NEEDS_OUTPUT_REFERENCE_PATTERN = re.compile(
 GITHUB_CONTEXT_OR_STEP_OUTPUT_REFERENCE_PATTERN = re.compile(
     r"^(?:github|steps\.[A-Za-z0-9_-]+\.outputs)\.[A-Za-z0-9_.-]+$"
 )
-GIT_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_ROUTE_PATH_FORWARDING_PATTERN = re.compile(
     r"^(?:inputs\.[A-Za-z0-9_.-]+|steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+)$"
 )
@@ -3133,6 +3137,8 @@ def _allow_reason(
     key_text = _semantic_full_key_text(key)
     if _is_codeowners_path(normalized):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
+    if _is_renovate_config_path(normalized) and _is_renovate_metadata_key(key):
+        return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if (
         normalized.startswith("docs/")
         or normalized in {"README.md", "AGENTS.md", "handoff.md", "SECURITY.md", "LICENSE"}
@@ -4049,7 +4055,7 @@ def _launchplane_config_authority_workflow_revision(value: object) -> str:
     if match is None:
         return ""
     revision = match.group("revision")
-    return revision if GIT_COMMIT_SHA_PATTERN.fullmatch(revision) is not None else ""
+    return revision if GIT_SHA1_PATTERN.fullmatch(revision) is not None else ""
 
 
 def _is_launchplane_config_authority_connector(
@@ -4229,6 +4235,14 @@ def _is_repo_metadata_ergonomics_key(key: str) -> bool:
 
 def _is_codeowners_path(path: str) -> bool:
     return path in {".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"}
+
+
+def _is_renovate_config_path(path: str) -> bool:
+    return path in {"renovate.json", ".github/renovate.json"}
+
+
+def _is_renovate_metadata_key(key: str) -> bool:
+    return RENOVATE_METADATA_KEY_PATTERN.fullmatch(key) is not None
 
 
 def _owner_repo_reference_matches(value: str) -> Iterable[re.Match[str]]:

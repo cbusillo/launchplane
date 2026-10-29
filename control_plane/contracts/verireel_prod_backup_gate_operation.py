@@ -18,6 +18,7 @@ from control_plane.contracts.production_backup_gate import (
     ProductionBackupGateRequest,
     ProductionBackupGateWorkerRequest,
 )
+from control_plane.contracts.text_fields import require_text as _normalize_required
 
 VeriReelProdBackupGateOperationStatus = Literal["pending", "running", "pass", "fail", "cancelled"]
 VeriReelProdBackupGateOperationPhase = Literal[
@@ -68,6 +69,12 @@ class VeriReelProdBackupGateOperationRecord(BaseModel):
     error_code: str = ""
     error_message: str = ""
     runner_trace_id: str = ""
+    previous_attempt: VeriReelProdBackupGateOperationRecord | None = None
+    previous_backup: BackupGateRecord | None = None
+    continuation_digest: str = ""
+    continuation_reason: str = ""
+    continuation_actor: str = ""
+    continued_at: str = ""
 
     @model_validator(mode="after")
     def _validate_record(self) -> "VeriReelProdBackupGateOperationRecord":
@@ -202,10 +209,3 @@ def build_cancelled_verireel_prod_backup_gate_record(
             "cancellation_reason": operation.cancellation.reason,
         },
     )
-
-
-def _normalize_required(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized

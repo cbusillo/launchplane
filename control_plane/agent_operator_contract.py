@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.retained_volume_sweep import RETAINED_VOLUME_SWEEP_ROUTE
+from control_plane.contracts.integration_attestation import INTEGRATION_ATTESTATION_ROUTE
+from control_plane.contracts.release_request import RELEASE_REQUEST_ROUTE
 from control_plane.testing_retry import TESTING_RETRY_ROUTE
+from control_plane.client_release_backup_continuation import BACKUP_CONTINUATION_ROUTE
 from control_plane.http_routes.discussion_topics import ROUTE as DISCUSSION_TOPICS_ROUTE
 from control_plane.private_testing_transport import ROUTE as PRIVATE_TESTING_TRANSPORT_ROUTE
 from control_plane.private_testing_activation import ROUTE as PRIVATE_TESTING_ACTIVATION_ROUTE
@@ -16,6 +20,11 @@ from control_plane.contracts.disposable_lane import (
 )
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
 from control_plane.testing_generation_retirement import ROUTE as TESTING_GENERATION_RETIREMENT_ROUTE
+from control_plane.testing_address import ROUTE as TESTING_ADDRESS_ROUTE
+from control_plane.generic_web_deploy_recovery_http import (
+    GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
+    GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE,
+)
 
 import hashlib
 import json
@@ -37,6 +46,7 @@ from control_plane.openapi_export import (
 )
 from control_plane.legacy_preview_reconciliation import LEGACY_PREVIEW_RECONCILIATION_ROUTE
 from control_plane.odoo_website_settings import ODOO_WEBSITE_SETTINGS_ROUTE
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 SCHEMA_VERSION = 1
@@ -74,7 +84,6 @@ _SCHEMA_KEYS = frozenset(
     }
 )
 _SEMANTICALLY_UNORDERED_LIST_KEYS = frozenset({"enum", "required"})
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_PATTERN = re.compile(r"^(unknown|[0-9a-f]{40}|[0-9a-f]{64})$")
 _UNSAFE_STRING_PATTERNS = (
     re.compile(r"https?://", re.IGNORECASE),
@@ -99,6 +108,78 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/aggregate-counts",
+        "Read bounded aggregate counts from a qualified sanitized disposable testing copy with provenance and no data writes.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        INTEGRATION_ATTESTATION_ROUTE,
+        "Record an exact-merge engineering attestation with a confirming independent model review; records no new Client decision and never promotes.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "body",
+        ("reviewed_evidence_sha256", "review"),
+    ),
+    OperationSpec(
+        "POST",
+        RELEASE_REQUEST_ROUTE,
+        "Record a Director request or agreed finish-line release decision and deliver its Client invitation without accepting or deploying.",
+        ("service_api", "browser"),
+        ("request",),
+        "body",
+        ("checklist_digest", "decision_reference"),
+    ),
+    OperationSpec(
+        "POST",
+        BACKUP_CONTINUATION_ROUTE,
+        "Review or requeue only a proved pre-capture failure under the original accepted release; retain failed history and unknown-effect fences.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "body",
+        ("expected_digest",),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/discord-identity",
+        "Identify an exact testing Discord credential through fixed provider reads without changing origin or qualifying isolation.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
+        "Inspect an exact generic-web original without mutation, including completed testing abandonment readback by its retained reference.",
+        ("service_api",),
+        ("dry-run", "readback"),
+        "original",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE,
+        "Recover a reviewed original or abandon only a fenced testing verifier, preserving unknown history without provider mutation.",
+        ("service_api",),
+        ("apply",),
+        "original",
+        ("expected_recovery_digest",),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/shopify-identity",
+        "Read hash-only held testing Shopify identity and compare applied production identity without activation or credential output.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
     OperationSpec(
         "GET",
         "/v1/products/{product}/environments/{environment}/health-history",
@@ -209,35 +290,37 @@ OPERATION_SPECS = (
     ),
     OperationSpec(
         "POST",
+        TESTING_ADDRESS_ROUTE,
+        "Amend the current native Odoo testing lane's canonical hostname from exact retained custody, preserving its copy, original hostname and operation fences; verify both public runtime identities before publishing canonical metadata. Cancel an unpublished amendment under its original request and key to restore the route preimage.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
+    OperationSpec(
+        "POST",
         TESTING_GENERATION_RETIREMENT_ROUTE,
         "Retain an incomplete legacy testing generation and its unknown history without releasing the operation; an isolated successor remains separately qualified.",
         ("service_api",),
-        ("dry-run", "apply", "readback"),
+        ("dry-run", "apply", "readback", "inspect"),
         "apply",
         ("reviewed_plan_sha256",),
     ),
     OperationSpec(
         "POST",
         TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
-        "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate. Reviewed certificate repair preserves the original generation, copy, and queue without retrying.",
+        "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate.",
         ("service_api",),
-        (
-            "dry-run",
-            "apply",
-            "readback",
-            "route-repair-dry-run",
-            "route-repair-apply",
-            "route-repair-readback",
-        ),
+        ("dry-run", "apply", "readback"),
         "apply",
         ("reviewed_plan_sha256",),
     ),
     OperationSpec(
         "POST",
         TESTING_REPLACEMENT_RESOURCES_ROUTE,
-        "Prepare fresh empty Odoo testing resources while preserving the retained target, then qualify their actual backing storage; this never restores data or starts web.",
+        "Prepare fresh empty Odoo testing resources while preserving the retained target, qualify their actual backing storage or release an unused initial preparation; this never restores data or starts web.",
         ("service_api",),
-        ("dry-run", "apply", "readback"),
+        ("dry-run", "apply", "readback", "release"),
         "apply",
         ("reviewed_plan_sha256",),
     ),
@@ -267,6 +350,15 @@ OPERATION_SPECS = (
         ("dry-run", "apply", "reconcile"),
         "apply",
         ("reviewed_plan_digest", "current_artifact_identity", "release_lane_exclusion"),
+    ),
+    OperationSpec(
+        "POST",
+        RETAINED_VOLUME_SWEEP_ROUTE,
+        "Inspect, apply, or read back one reviewed retained-volume retirement sweep without exposing provider bindings.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256", "retirement_record_id", "minimum_age_seconds"),
     ),
     OperationSpec(
         "GET",
@@ -769,7 +861,7 @@ def validate_agent_operator_contract(artifact: Mapping[str, Any]) -> None:
     if artifact["normalization_version"] != NORMALIZATION_VERSION:
         raise AgentOperatorContractError("Unsupported normalization_version")
     digest = artifact["semantic_digest_sha256"]
-    if not isinstance(digest, str) or not _SHA256_PATTERN.fullmatch(digest):
+    if not isinstance(digest, str) or not SHA256_PATTERN.fullmatch(digest):
         raise AgentOperatorContractError("Invalid semantic_digest_sha256")
     provenance = artifact["provenance"]
     if not isinstance(provenance, Mapping):
@@ -845,7 +937,7 @@ def validate_agent_operator_contract(artifact: Mapping[str, Any]) -> None:
         if not operation["identity_dependencies"]:
             raise AgentOperatorContractError("Operation has no identity dependencies")
         fingerprint = operation["schema_fingerprint_sha256"]
-        if not isinstance(fingerprint, str) or not _SHA256_PATTERN.fullmatch(fingerprint):
+        if not isinstance(fingerprint, str) or not SHA256_PATTERN.fullmatch(fingerprint):
             raise AgentOperatorContractError("Invalid operation fingerprint")
     if seen_operations != expected_operations:
         raise AgentOperatorContractError("Operation allow-list is incomplete")

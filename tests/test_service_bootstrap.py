@@ -11,6 +11,7 @@ import uvicorn
 from control_plane import service as control_plane_service
 from control_plane import service_bootstrap
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.drivers import native_routes
 from control_plane.http_app import ResolvedLaunchplaneAuthzPolicy
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -53,6 +54,12 @@ class _ClosableStore:
 
     def close(self) -> None:
         self.closed = True
+
+    @staticmethod
+    def list_runtime_environment_records(
+        **_filters: object,
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return ()
 
 
 class LaunchplaneServiceBootstrapTests(unittest.TestCase):

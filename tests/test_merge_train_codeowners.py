@@ -9,11 +9,8 @@ from control_plane.merge_train import (
     discover_merge_train_stack,
 )
 from control_plane.merge_train_codeowners import individual_landing_snapshots
-from control_plane.merge_train_github import (
-    GitHubMergeTrainSnapshotReader,
-    MergeTrainGitHubError,
-    RecordingMergeTrainGitHubTransport,
-)
+from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader, MergeTrainGitHubError
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate
 from control_plane.merge_train_controller_run_once import _conflict_probe_queue
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy

@@ -21,6 +21,7 @@ from tests.http_app_test_support import (
     _asgi_request,
     _browser_mutation_headers,
     _github_oauth_config,
+    _local_operator_bearer_config,
 )
 from tests.test_product_review import _human
 from tests.test_release_review import github_read, profile, seed
@@ -39,6 +40,7 @@ class _ReleaseReviewHttpFixture(unittest.IsolatedAsyncioTestCase):
             verifier=_RejectingVerifier(),
             record_store_factory=lambda: self.store,
             human_session_manager=self.sessions,
+            bearer_identity_config=_local_operator_bearer_config(),
             authz_policy=LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_humans": [
@@ -98,7 +100,7 @@ class _ReleaseReviewHttpFixture(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def open_urgent(
+    async def request_release(
         self,
         *,
         actor: str = "operator",
@@ -114,7 +116,7 @@ class _ReleaseReviewHttpFixture(unittest.IsolatedAsyncioTestCase):
         return await _asgi_request(
             self.app,
             "POST",
-            "/v1/release-review/urgent-openings",
+            "/v1/release-review/requests",
             headers=_browser_mutation_headers(self.sessions, session),
             payload={
                 "product": "example-site",
@@ -128,6 +130,160 @@ class _ReleaseReviewHttpFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
+    async def test_standing_settings_request_succeeds_without_an_invitation(self) -> None:
+        from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
+        from control_plane.release_review import checklist_digest
+
+        review = build_release_review(store=self.store, profile=profile(), read=github_read)
+        assert review.checklist is not None
+        checklist = review.checklist.model_copy(
+            update={
+                "candidate": review.checklist.candidate.model_copy(
+                    update={
+                        "runtime_settings": GenericWebReleaseSettings(values={"APP_CHANNEL": "new"})
+                    }
+                )
+            }
+        )
+        review = review.model_copy(
+            update={"checklist": checklist, "checklist_digest": checklist_digest(checklist)}
+        )
+        self.store.write_product_profile_record(
+            profile().model_copy(
+                update={"driver_id": "generic-web", "release_on_acceptance": "director_standing"}
+            )
+        )
+        with (
+            patch("control_plane.http_app.current_release_review", return_value=review),
+            patch("control_plane.release_request.publish_release_invitation") as invitation,
+        ):
+            payload: dict[str, object] = {
+                "product": profile().product,
+                "checklist_digest": review.checklist_digest,
+                "source": "director_request",
+                "reason": "Activate the saved settings",
+                "decision_reference": "https://git.example.test/decisions/965",
+            }
+            headers = {"Authorization": "Bearer local-operator-token"}
+            first = await _asgi_request(
+                self.app, "POST", "/v1/release-review/requests", headers=headers, payload=payload
+            )
+            self.assertEqual(first.status_code, 200, first.text)
+            saved = self.store.read_product_profile_record(profile().product).release_request
+            assert saved is not None
+            self.assertEqual(first.json()["release_request"], saved.model_dump(mode="json"))
+            retry = await _asgi_request(
+                self.app, "POST", "/v1/release-review/requests", headers=headers, payload=payload
+            )
+            self.assertEqual(retry.status_code, 200, retry.text)
+            self.assertEqual(retry.json()["release_request"], first.json()["release_request"])
+            invitation.assert_not_called()
+
+    async def test_review_access_uses_existing_scope_without_building_a_checklist(self) -> None:
+        with patch(
+            "control_plane.http_app.current_release_review",
+            side_effect=AssertionError("Checklist must not load"),
+        ):
+            for actor, github_id, status, owner in (
+                ("site-owner", 9001, 200, True),
+                ("operator", 9003, 200, False),
+                ("other", 9999, 403, False),
+            ):
+                with self.subTest(actor=actor):
+                    session = self.sessions.issue(_human(login=actor, github_id=github_id))
+                    result = await _asgi_get(
+                        self.app,
+                        "/v1/release-review/access?product=example-site",
+                        headers={"Cookie": self.sessions.session_cookie_header(session)},
+                    )
+                    self.assertEqual(result.status_code, status, result.text)
+                    if status == 200:
+                        self.assertEqual(
+                            result.json(),
+                            {
+                                "product": profile().product,
+                                "display_name": profile().display_name,
+                                "viewer_is_owner": owner,
+                            },
+                        )
+
+    async def test_client_review_hides_internal_request_provenance(self) -> None:
+        with patch("control_plane.release_request.publish_release_invitation", return_value=True):
+            opened = await self.request_release(reason="Release the agreed work.")
+        self.assertEqual(opened.status_code, 200, opened.text)
+        self.assertIsNotNone(self.store.read_product_profile_record("example-site").release_request)
+        for actor, github_id, visible in (("site-owner", 9001, False), ("operator", 9003, True)):
+            with self.subTest(actor=actor):
+                session = self.sessions.issue(_human(login=actor, github_id=github_id))
+                read = await _asgi_get(
+                    self.app,
+                    "/v1/release-review?product=example-site",
+                    headers={"Cookie": self.sessions.session_cookie_header(session)},
+                )
+                self.assertEqual(read.status_code, 200, read.text)
+                self.assertEqual(read.json().get("release_request") is not None, visible)
+        agent_read = await _asgi_get(
+            self.app,
+            "/v1/release-review?product=example-site",
+            headers={"Authorization": "Bearer local-operator-token"},
+        )
+        self.assertEqual(agent_read.status_code, 200, agent_read.text)
+        self.assertIsNotNone(agent_read.json().get("release_request"))
+
+    async def test_agent_requests_require_a_recorded_decision_and_preserve_it_on_delivery_failure(
+        self,
+    ) -> None:
+        review = build_release_review(store=self.store, profile=profile(), read=github_read)
+        payload: dict[str, object] = {
+            "product": "example-site",
+            "checklist_digest": review.checklist_digest,
+            "source": "finish_line",
+            "reason": "The agreed finish line is complete.",
+            "decision_reference": "https://git.example.test/agreements/7",
+        }
+        headers = {"Authorization": "Bearer local-operator-token"}
+        with patch(
+            "control_plane.release_request.publish_release_invitation",
+            side_effect=click.ClickException("Response lost after delivery."),
+        ) as publish:
+            for source in ("director_request", "finish_line"):
+                refused = await _asgi_request(
+                    self.app,
+                    "POST",
+                    "/v1/release-review/requests",
+                    headers=headers,
+                    payload={**payload, "source": source, "decision_reference": ""},
+                )
+                self.assertEqual(refused.status_code, 400, refused.text)
+            publish.assert_not_called()
+            failed = await _asgi_request(
+                self.app,
+                "POST",
+                "/v1/release-review/requests",
+                headers=headers,
+                payload=payload,
+            )
+            self.assertEqual(failed.status_code, 409, failed.text)
+            request = self.store.read_product_profile_record("example-site").release_request
+            assert request is not None
+            self.assertEqual(request.source, payload["source"])
+            self.assertEqual(request.reason, payload["reason"])
+            self.assertEqual(request.decision_reference, payload["decision_reference"])
+            publish.side_effect = None
+            publish.return_value = True
+            retried = await _asgi_request(
+                self.app,
+                "POST",
+                "/v1/release-review/requests",
+                headers=headers,
+                payload={**payload, "reason": "A later reason must not replace the saved one."},
+            )
+            self.assertEqual(retried.status_code, 200, retried.text)
+            self.assertEqual(retried.json()["release_request"], request.model_dump(mode="json"))
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), ()
+        )
+
     async def test_progress_belongs_to_the_current_release_not_a_previous_invitation(self) -> None:
         from control_plane.client_release import ClientReleaseRunView
         from tests.test_release_review import HEAD
@@ -562,9 +718,9 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
     ) -> None:
         with (
             patch("control_plane.http_app.adopt_release_invitation", return_value=True) as adopt,
-            patch("control_plane.http_app.publish_release_invitation") as publish,
+            patch("control_plane.release_request.publish_release_invitation") as publish,
         ):
-            denied = await self.open_urgent(
+            denied = await self.request_release(
                 actor="site-owner",
                 github_id=9001,
                 reason="Adopt existing request.",
@@ -572,16 +728,33 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
                 adopt_comment_id=600,
             )
             self.assertEqual(denied.status_code, 403)
-            stale = await self.open_urgent(
+            stale = await self.request_release(
                 reason="Adopt existing request.",
                 digest="f" * 64,
                 adopt_issue_number=91,
                 adopt_comment_id=600,
             )
             self.assertEqual(stale.status_code, 409)
+            agent = await _asgi_request(
+                self.app,
+                "POST",
+                "/v1/release-review/requests",
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload={
+                    "product": "example-site",
+                    "checklist_digest": build_release_review(
+                        store=self.store, profile=profile(), read=github_read
+                    ).checklist_digest,
+                    "reason": "Adopt existing request.",
+                    "decision_reference": "https://git.example.test/agreements/7",
+                    "adopt_issue_number": 91,
+                    "adopt_comment_id": 600,
+                },
+            )
+            self.assertEqual(agent.status_code, 403, agent.text)
             adopt.assert_not_called()
             for dry_run in (True, False):
-                result = await self.open_urgent(
+                result = await self.request_release(
                     reason="Adopt existing request.",
                     adopt_issue_number=91,
                     adopt_comment_id=600,
@@ -595,9 +768,9 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
             self.store.list_release_review_decision_records(product="example-site"), ()
         )
 
-    async def test_only_an_admin_with_a_reason_opens_an_urgent_review(self) -> None:
+    async def test_admin_request_records_its_reason_before_using_the_shared_sender(self) -> None:
         with patch(
-            "control_plane.http_app.publish_release_invitation", return_value=True
+            "control_plane.release_request.publish_release_invitation", return_value=True
         ) as invitation:
             for args, status in (
                 ({"actor": "site-owner", "github_id": 9001, "reason": "Urgent."}, 403),
@@ -606,25 +779,26 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
                 ({"reason": "Urgent.", "digest": "f" * 64}, 409),
             ):
                 with self.subTest(args=args):
-                    refused = await self.open_urgent(**args)
+                    refused = await self.request_release(**args)
                     self.assertEqual(refused.status_code, status, refused.text)
             invitation.assert_not_called()
-            opened = await self.open_urgent(reason="  Fixes a login security problem. ")
+            opened = await self.request_release(reason="  Fixes a login security problem. ")
             self.assertEqual(opened.status_code, 200, opened.text)
             self.assertEqual(
-                invitation.call_args.kwargs["urgent_reason"], "Fixes a login security problem."
+                invitation.call_args.kwargs["profile"].release_request.reason,
+                "Fixes a login security problem.",
             )
             self.assertEqual(
-                invitation.call_args.kwargs["urgent_checklist_digest"],
+                invitation.call_args.kwargs["profile"].release_request.checklist_digest,
                 build_release_review(
                     store=self.store, profile=profile(), read=github_read
                 ).checklist_digest,
             )
             invitation.return_value = False
-            unopened = await self.open_urgent(reason="Fixes a login security problem.")
+            unopened = await self.request_release(reason="Fixes a login security problem.")
             self.assertEqual(unopened.status_code, 409, unopened.text)
             invitation.side_effect = click.ClickException("Response lost after delivery.")
-            uncertain = await self.open_urgent(reason="Fixes a login security problem.")
+            uncertain = await self.request_release(reason="Fixes a login security problem.")
             self.assertEqual(uncertain.status_code, 409, uncertain.text)
             self.assertIn("may already be open", uncertain.text)
         # Opening asks the Client; it records no decision and starts nothing.

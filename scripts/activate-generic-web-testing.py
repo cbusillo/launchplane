@@ -15,8 +15,12 @@ from control_plane.contracts.testing_activation import (
     TestingActivationPlan,
     TestingActivationResult,
     TestingActivationRefusedResult,
+    TestingActivationRefusalCode,
 )
+from control_plane.discord_identity import DiscordIdentityResult
+from control_plane.operator_error_evidence import public_error_reference
 from control_plane.testing_activation import ROUTE
+from control_plane.testing_activation_inspection import TestingActivationInspection
 
 
 def save(path: Path, payload: object) -> None:
@@ -36,9 +40,26 @@ def save(path: Path, payload: object) -> None:
         json.dump(payload, output)
 
 
+def external_refusal(raw: bytes) -> DiscordIdentityResult | None:
+    try:
+        payload = json.loads(raw)
+        if (
+            payload.get("error", {}).get("code")
+            == TestingActivationRefusalCode.EXTERNAL_CAPABILITY_UNVERIFIED
+        ):
+            return DiscordIdentityResult.model_validate_json(
+                payload["records"]["discord_identity"], extra="ignore"
+            )
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("dry-run", "apply", "readback", "receipt"))
+    parser.add_argument(
+        "mode", choices=("dry-run", "apply", "refuse", "readback", "receipt", "inspect")
+    )
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--product", required=True)
     parser.add_argument("--request-file", type=Path, required=True)
@@ -49,6 +70,7 @@ def main() -> int:
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
+    retain_original_key = bool(args.idempotency_key.strip())
     submitted = False
     try:
         for path in (args.request_file, args.evidence_file):
@@ -69,21 +91,28 @@ def main() -> int:
             raise ValueError("The request file must be the original planning request.")
         body = draft.model_dump(mode="json")
         path = ROUTE.format(product=args.product)
-        if args.mode == "apply":
+        if args.mode in {"apply", "refuse"}:
             if not args.idempotency_key.strip() or not args.reviewed_dry_run:
                 raise ValueError("Apply requires saved review and the original stable key.")
             evidence = json.loads(args.evidence_file.read_text())
             if evidence["request"] != body or evidence["path"] != path:
                 raise ValueError("The review belongs to another activation.")
             body["reviewed_plan_sha256"] = TestingActivationPlan.model_validate(
-                evidence["result"]
+                evidence["result"], extra="ignore"
             ).plan_sha256
-        if args.mode == "receipt" and not args.idempotency_key.strip():
+        if args.mode in {"receipt", "inspect"} and not args.idempotency_key.strip():
             raise ValueError("Receipt read requires the original activation key.")
-        if args.mode == "dry-run" and args.evidence_file.exists():
-            raise ValueError("Preserve the saved review; choose a fresh evidence path.")
+        output = (
+            args.evidence_file
+            if args.mode == "dry-run"
+            else args.evidence_file.with_name(args.evidence_file.name + "." + args.mode + ".json")
+        )
+        if args.mode in {"dry-run", "inspect", "readback"} and (
+            output.exists() or output.is_symlink()
+        ):
+            raise ValueError("Preserve the saved evidence; choose a fresh evidence path.")
         body["mode"] = args.mode
-        submitted = args.mode == "apply"
+        submitted = args.mode in {"apply", "refuse"}
         response = transport["request_launchplane"](
             service_url=settings["service_url"],
             path=path,
@@ -92,24 +121,23 @@ def main() -> int:
             timeout=900,
             **(
                 {"idempotency_key": args.idempotency_key}
-                if submitted or args.mode == "receipt"
+                if submitted or args.mode in {"receipt", "inspect"}
                 else {}
             ),
         )
         if response["status"] != "accepted":
             raise ValueError("Activation was not accepted.")
         result_model = (
-            TestingActivationRefusedResult
+            TestingActivationInspection
+            if args.mode == "inspect"
+            else TestingActivationRefusedResult
             if response["result"].get("outcome") == "refused"
             else TestingActivationPlan
             if args.mode == "dry-run"
             else TestingActivationResult
         )
-        result = result_model.model_validate(response["result"]).model_dump(mode="json")
-        output = (
-            args.evidence_file
-            if args.mode == "dry-run"
-            else args.evidence_file.with_name(args.evidence_file.name + "." + args.mode + ".json")
+        result = result_model.model_validate(response["result"], extra="ignore").model_dump(
+            mode="json"
         )
         save(
             output,
@@ -134,14 +162,30 @@ def main() -> int:
     except urllib.error.HTTPError as error:
         raw = error.read()
         error.close()
+        observed = external_refusal(raw)
+        if observed is not None:
+            payload = json.loads(raw)
+            print(
+                json.dumps(
+                    {
+                        "status": "rejected",
+                        "trace_id": public_error_reference(
+                            payload.get("trace_id", ""), transport["public_trace_id"]
+                        ),
+                        "external_identity": observed.model_dump(mode="json"),
+                        "retain_original_key": retain_original_key,
+                    }
+                )
+            )
+            return 1
         with urllib.error.HTTPError(
             error.url, error.code, error.reason, error.headers, io.BytesIO(raw)
         ) as replay:
             transport["emit_http_error_payload"](
-                operation="testing-activation", request={"mode": args.mode}, exc=replay
+                operation="testing-activation",
+                request={"mode": args.mode, "retain_original_key": retain_original_key},
+                exc=replay,
             )
-        if submitted:
-            print(json.dumps({"retain_original_key": True}))
     except (
         ValueError,
         KeyError,
@@ -154,7 +198,7 @@ def main() -> int:
             json.dumps(
                 {
                     "status": "outcome_unknown" if submitted else "unverified",
-                    "retain_original_key": submitted,
+                    "retain_original_key": retain_original_key,
                 }
             )
         )

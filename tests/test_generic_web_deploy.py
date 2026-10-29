@@ -1,4 +1,6 @@
 from collections.abc import Callable
+from dataclasses import replace
+import json
 from pathlib import Path
 from typing import cast
 import unittest
@@ -6,6 +8,9 @@ from unittest.mock import Mock, patch
 
 import click
 
+from control_plane.production_delivery_monitor import _is_rollback_deployment
+from control_plane.generic_web_source_qualification import GenericWebSourceSnapshot
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -93,10 +98,68 @@ def _source_of_truth() -> DokploySourceOfTruth:
 
 
 class _GenericWebDeployStore:
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretRecord, ...]:
+        return ()
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        return ()
+
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return ()
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord:
+        raise FileNotFoundError("No target environment")
+
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
         self.deployments: list[DeploymentRecord] = []
         self.inventories: list[EnvironmentInventory] = []
+        self.provider_targets = {
+            (lane.context, lane.instance): ProviderTargetRecord(
+                context=lane.context,
+                instance=lane.instance,
+                provider_id="fake-cloud",
+                target_category="service",
+                provider_target_type="managed-service",
+                target_id="target-123",
+                display_name="sellyouroutboard-testing-app",
+                updated_at=profile.updated_at,
+            )
+            for lane in profile.lanes
+        }
+        self.held_reservations: tuple[LaunchplaneIdempotencyRecord, ...] = ()
+
+    def read_generic_web_source_snapshot(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> GenericWebSourceSnapshot:
+        inventory = self.read_environment_inventory(
+            context_name=context_name, instance_name=instance_name
+        )
+        return GenericWebSourceSnapshot(
+            self.read_product_profile_record(product),
+            inventory,
+            self.read_deployment_record(inventory.deployment_record_id),
+            self.provider_targets[(context_name, instance_name)],
+            self.held_reservations,
+        )
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -592,6 +655,149 @@ class _LegacyFakeGenericWebDeployProvider(_FakeGenericWebDeployProvider):
 
 
 class GenericWebDeployTests(unittest.TestCase):
+    def test_source_outage_keeps_prior_and_testing_failure_records(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        for instance in ("testing", "prod"):
+            with self.subTest(instance=instance):
+                profile = _profile()
+                profile = profile.model_copy(
+                    update={"lanes": (profile.lanes[0].model_copy(update={"instance": instance}),)}
+                )
+                store = _GenericWebDeployStore(profile)
+                provider = _FakeGenericWebDeployProvider()
+                record_id = "retained-outage-attempt"
+
+                def deploy() -> GenericWebDeployResult:
+                    return execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=_request(instance),
+                        deploy_provider=provider,
+                        deployment_record_id=record_id,
+                    )
+
+                if instance == "prod":
+                    deploy()
+                    prior = store.read_deployment_record(record_id)
+                    store.write_deployment_record(
+                        prior.model_copy(
+                            update={
+                                "deploy": prior.deploy.model_copy(
+                                    update={"status": "pending", "finished_at": ""}
+                                ),
+                            }
+                        )
+                    )
+                before = tuple(provider.runtime_identities)
+                with patch(
+                    "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
+                    side_effect=LaneMovementRefused("source_order_unavailable"),
+                ):
+                    if instance == "testing":
+                        with self.assertRaises(LaneMovementRefused):
+                            deploy()
+                    else:
+                        result = deploy()
+                        self.assertEqual(result.deploy_status, "fail")
+                self.assertEqual(tuple(provider.runtime_identities), before)
+                self.assertEqual(store.read_deployment_record(record_id).deploy.status, "fail")
+
+    def test_failed_candidate_task_evidence_survives_runtime_history_churn(self) -> None:
+        from control_plane.dokploy.application_runtime import ApplicationTaskObservation
+
+        store = _GenericWebDeployStore(_profile())
+        provider = _FakeGenericWebDeployProvider(
+            observation=GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_status="done",
+                deployment_id="provider-job",
+                started_at="2026-10-20T03:08:20Z",
+                finished_at="2026-10-20T03:08:25Z",
+            )
+        )
+        execute = provider.execute_artifact_deploy
+        record_id = "failed-candidate"
+
+        def fail_candidate(**kwargs: object) -> None:
+            execute(**kwargs)  # type: ignore[arg-type]
+            assert provider.application_runtime is not None
+            runtime = provider.application_runtime
+            provider.application_runtime = replace(
+                runtime,
+                rollout_state="rollback_completed",
+                running_container_images=(),
+                running_container_deployment_record_ids=(),
+                running_container_health=(),
+                tasks=(
+                    ApplicationTaskObservation(
+                        image=runtime.service_image,
+                        deployment_record_id=record_id,
+                        state="failed",
+                        task_id="candidate-task",
+                        desired_state="shutdown",
+                        container_id_present=True,
+                        error="task: non-zero exit (23)",
+                        exit_code=23,
+                    ),
+                ),
+            )
+
+        def observe_then_churn(**_kwargs: object) -> ApplicationRuntimeObservation:
+            assert provider.application_runtime is not None
+            observed = provider.application_runtime
+            provider.application_runtime = replace(observed, tasks=())
+            return observed
+
+        with (
+            patch.object(provider, "execute_artifact_deploy", side_effect=fail_candidate),
+            patch.object(
+                provider, "observe_testing_application_runtime", side_effect=observe_then_churn
+            ),
+        ):
+            result = execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+                deploy_provider=provider,
+                deployment_record_id=record_id,
+            )
+        saved = store.deployments[0]
+        from control_plane.workflows.generic_web_deploy_provider import (
+            APPLICATION_RUNTIME_FAILURE_EVIDENCE_KEY,
+        )
+
+        evidence = json.loads(
+            saved.post_deploy_update.evidence[APPLICATION_RUNTIME_FAILURE_EVIDENCE_KEY]
+        )
+        self.assertNotIn("environment_keys", str(evidence))
+        self.assertNotIn("containers", evidence)
+        self.assertEqual(evidence["tasks"][0]["deployment_record_id"], record_id)
+        self.assertEqual(evidence["tasks"][0]["task_id"], "candidate-task")
+        self.assertEqual(evidence["tasks"][0]["exit_code"], 23)
+        self.assertIn("non-zero exit", evidence["tasks"][0]["error"])
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertTrue(result.provider_failure_proved)
+        self.assertFalse(store.inventories)
+
+    def test_refused_deployment_retains_rollback_intent_before_provider_effect(self) -> None:
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback):
+                store = _GenericWebDeployStore(_profile())
+                result = execute_generic_web_deploy(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=_request().model_copy(
+                        update={"deploy_reference": "ghcr.io/other/image:wrong"}
+                    ),
+                    deploy_provider=_FakeGenericWebDeployProvider(),
+                    deployment_record_id="explicit-operation-rollback",
+                    rollback=rollback,
+                )
+                self.assertEqual(result.deploy_status, "fail")
+                self.assertFalse(result.provider_effect_attempted)
+                self.assertEqual(_is_rollback_deployment(store.deployments[0]), rollback)
+
     def test_application_runtime_wait_uses_only_budget_remaining_after_provider_job(self) -> None:
         from dataclasses import replace
 
@@ -808,6 +1014,8 @@ class GenericWebDeployTests(unittest.TestCase):
                     ):
                         self.assertEqual(deploy(old, 3, rollback=True).deploy_status, "pass")
                         self.assertEqual(deploy(new, 4).deploy_status, "pass")
+                self.assertTrue(_is_rollback_deployment(store.read_deployment_record("deploy-3")))
+                self.assertFalse(_is_rollback_deployment(store.read_deployment_record("deploy-4")))
                 self.assertEqual(
                     [identity.source_git_ref for identity in provider.runtime_identities],
                     [old, new, old, new],

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from traceback import walk_tb
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
@@ -18,9 +19,11 @@ from unittest.mock import Mock, patch
 from urllib.error import URLError
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane import http_error_evidence
 from control_plane.dokploy import testing_route_transport as transport, compose
 from control_plane.dokploy import testing_route as routing
 from control_plane.dokploy import native_copy_stream
+from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.native_copy_stream import (
     NativeSourceAuthorizationDenied,
     NativeSourceUnavailable,
@@ -44,6 +47,88 @@ from tests.test_odoo_testing_native_source import Connection
 
 
 class TestingRouteTransportTests(unittest.TestCase):
+    program_filename = "<testing-route-host>"
+    plan: TestingLaneRoute
+    client: transport.DokployTestingRouteTransport
+    route_file: Path
+    raw: dict[str, Any]
+    new_identity: RuntimeIdentity
+
+    def test_address_amendment_uses_fenced_writer_without_changing_runtime(self) -> None:
+        payload = self.plan.model_dump()
+        list(payload["template"]["http"]["routers"].values())[-1]["priority"] += 5
+        before = TestingLaneRoute.model_validate(payload)
+        self.raw = self.fixture.apply(before, before.new_backend)
+        self.route_file.write_text(json.dumps(route_document(before, before.new_backend)))
+        self.plan = routing.amend_testing_route_address(before, "canonical.invalid")
+        self.client.payload.update(
+            host=self.plan.host, aliases=self.plan.aliases, old_project=self.candidate_project
+        )
+        self.client.public_aliases = self.plan.aliases
+        self.client.old_runtime_identity = self.new_identity
+        self.identity = self.new_identity
+        self.containers["retired"] = {
+            "Id": "retired",
+            "Name": "/retired-web",
+            "State": {"Status": "exited"},
+            "Mounts": [],
+            "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}},
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": "retired",
+                    "com.docker.compose.service": "web",
+                    "traefik.http.routers.retired.rule": f"Host(`{self.plan.host}`)",
+                    "traefik.http.routers.retired.entrypoints": "websecure",
+                }
+            },
+        }
+        self.client.payload["address_recipients"] = {
+            "hostname": self.plan.host,
+            "projects": ["retired"],
+            "entrypoints": self.plan.public_entrypoints,
+            "priority": min(
+                item["priority"] for item in self.plan.template["http"]["routers"].values()
+            ),
+        }
+        self.raw["tcpRouters"] = {
+            "foreign@file": {
+                "rule": f"HostSNI(`{self.plan.host}`)",
+                "entryPoints": ["websecure"],
+                "status": "enabled",
+            }
+        }
+        with self.assertRaises(NativeSourceUnavailable):
+            self.publish(self.plan.new_backend, self.plan.old_backend, address_preimage=before)
+        self.raw.pop("tcpRouters")
+        self.publish(self.plan.new_backend, self.plan.old_backend, address_preimage=before)
+        self.assertEqual(
+            observe_testing_route(self.plan, self.raw, json.loads(self.route_file.read_text())),
+            before.new_backend,
+        )
+        self.assertEqual(self.containers["retired"]["State"]["Status"], "exited")
+
+    def test_fenced_writer_preserves_only_the_recorded_public_alias(self) -> None:
+        alias = "retained-testing.example.invalid"
+        payload = self.plan.model_dump()
+        payload["aliases"] = (alias,)
+        for router in payload["template"]["http"]["routers"].values():
+            router["rule"] = routing.testing_route_rule(self.plan.host, (alias,))
+            if "tls" in router:
+                router["tls"]["domains"] = [{"main": self.plan.host}, {"main": alias}]
+        self.plan = TestingLaneRoute.model_validate(payload)
+        self.client.public_aliases = (alias,)
+        self.client.payload["aliases"] = (alias,)
+        self.publish(self.plan.new_backend, self.plan.old_backend)
+        document = json.loads(self.route_file.read_text())
+        self.assertEqual(
+            observe_testing_route(self.plan, self.raw, document), self.plan.new_backend
+        )
+        for router in document["http"]["routers"].values():
+            self.assertTrue(host_rule_may_match(router["rule"], alias))
+        self.client.payload["aliases"] = ("different.example.invalid",)
+        with self.assertRaises((ValueError, native_copy_stream.NativeSourceUnavailable)):
+            self.publish(self.plan.old_backend, self.plan.new_backend)
+
     def setUp(self, *, initialize_fence: bool = True) -> None:
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -115,6 +200,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             },
         }
         namespace = self.plan.new_backend.removeprefix("http://").split(":")[0]
+        self.candidate_project: str | None = namespace + "-abc123"
         self.containers["new"] = {
             "Id": "new",
             "Name": "/" + namespace + "-web-1",
@@ -122,8 +208,9 @@ class TestingRouteTransportTests(unittest.TestCase):
             "Mounts": [],
             "Config": {
                 "Labels": {
-                    "com.docker.compose.project": namespace,
+                    "com.docker.compose.project": self.candidate_project,
                     "com.docker.compose.service": "web",
+                    "traefik.enable": "false",
                 },
                 "Env": [
                     "PLATFORM_INSTANCE=testing",
@@ -212,6 +299,8 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.lose_writer_reply = False
         self.remote_modes: list[str] = []
         self.original_run = subprocess.run
+        self.original_popen = subprocess.Popen
+        self.docker_stdio: Any = None
         self.enterContext(patch.object(transport, "_read_remote", side_effect=self.remote))
         self.client = transport.DokployTestingRouteTransport(
             host="https://provider.invalid",
@@ -250,7 +339,10 @@ class TestingRouteTransportTests(unittest.TestCase):
         result = b""
         proxy_id = self.containers["proxy"]["Id"]
         if command[1:3] == ["ps", "-aq"]:
-            result = "\n".join(item["Id"] for item in self.containers.values()).encode()
+            result = "\n".join(
+                item["Id"] if "--no-trunc" in command else item["Id"][:12]
+                for item in self.containers.values()
+            ).encode()
         elif command[1] == "inspect":
             result = json.dumps(
                 [
@@ -333,6 +425,13 @@ class TestingRouteTransportTests(unittest.TestCase):
         opener = Mock()
         opener.open.side_effect = URLError("Docker bridge is unreachable from the host")
 
+        def start(arguments: Any, **options: Any) -> Any:
+            if arguments == ["docker", "system", "dial-stdio"]:
+                if self.docker_stdio is None:
+                    raise AssertionError("The native service fixture is missing")
+                return self.docker_stdio()
+            return self.original_popen(arguments, **options)
+
         def dispatch() -> None:
             if (
                 kwargs["payload"]["mode"] in {"publish", "publish_v2"}
@@ -342,6 +441,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("subprocess.run", side_effect=self.command),
+                patch("subprocess.Popen", side_effect=start),
                 patch("urllib.request.build_opener", return_value=opener),
                 patch.object(
                     sys,
@@ -356,7 +456,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             ):
                 try:
                     exec(
-                        compile(kwargs["program"], "<testing-route-host>", "exec"),
+                        compile(kwargs["program"], self.program_filename, "exec"),
                         {"__name__": "__main__"},
                     )
                 except SystemExit:
@@ -368,7 +468,13 @@ class TestingRouteTransportTests(unittest.TestCase):
                 if frame["type"] == "denied":
                     raise NativeSourceAuthorizationDenied("fixture denied")
                 if frame["type"] == "failed":
-                    raise NativeSourceUnavailable("fixture unavailable")
+                    native_copy_stream._read_program(
+                        Connection(frame),
+                        program=kwargs["program"],
+                        payload=kwargs["payload"],
+                        timeout_seconds=5,
+                        receive=kwargs["receive"],
+                    )
                 kwargs["receive"](frame)
 
         guard = kwargs.get("dispatch_guard")
@@ -377,7 +483,51 @@ class TestingRouteTransportTests(unittest.TestCase):
         else:
             guard(dispatch)
 
-    def publish(self, backend: str | None, expected: str | None) -> None:
+    def test_failed_native_reads_preserve_actual_program_sites_without_private_values(self) -> None:
+        program = transport.testing_route_host_program()
+        original = self.command
+        observed: list[list[int]] = []
+        for failed_command in ("ps", "inspect"):
+            private = "private-native-error-sentinel-" + failed_command
+            failure = RuntimeError(private)
+
+            def command(arguments: list[str], **kwargs: Any) -> Any:
+                if arguments[1] == failed_command:
+                    raise failure
+                return original(arguments, **kwargs)
+
+            with patch.object(self, "command", side_effect=command):
+                with self.assertRaises(native_copy_stream.NativeProgramFailed) as raised:
+                    self.client.read()
+            try:
+                raise ValueError("private-wrapper-sentinel") from raised.exception
+            except ValueError as wrapped:
+                with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+                    http_error_evidence.log_handled_error_cause(wrapped, "native-route-test")
+            text = logs.records[-1].getMessage()
+            native = json.loads(text)["native_programs"][0]
+            expected = [
+                line
+                for frame, line in walk_tb(failure.__traceback__)
+                if frame.f_code.co_filename == self.program_filename
+            ][-native_copy_stream.NATIVE_PROGRAM_SOURCE_SITE_LIMIT :]
+            self.assertTrue(expected)
+            self.assertEqual(native["lines"], expected)
+            self.assertEqual(native["sha"], hashlib.sha256(program.encode()).hexdigest())
+            self.assertNotIn(private, text)
+            self.assertNotIn("private-wrapper-sentinel", text)
+            self.assertFalse(raised.exception.has_diagnostic)
+            self.assertEqual(self.effect_count, 0)
+            observed.append(native["lines"])
+        self.assertNotEqual(*observed)
+
+    def publish(
+        self,
+        backend: str | None,
+        expected: str | None,
+        *,
+        address_preimage: TestingLaneRoute | None = None,
+    ) -> None:
         execution = self.client.execution_intent(
             self.plan, backend, operation_id="fixture:" + str(expected)
         )
@@ -402,6 +552,8 @@ class TestingRouteTransportTests(unittest.TestCase):
             execution=execution,
             execution_key=execution.key(attempt=1),
             writer_attempt=writer,
+            desired_compose_project=self.candidate_project,
+            address_preimage=address_preimage,
         )
         frame = self.client.read()
         observe_testing_route(
@@ -457,6 +609,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             execution=attempt.execution,
             execution_key=attempt.key,
             writer_attempt=attempt,
+            desired_compose_project=self.candidate_project,
         )
 
     def test_a_lost_initializer_reply_is_observed_without_another_send(self) -> None:
@@ -699,7 +852,16 @@ class TestingRouteTransportTests(unittest.TestCase):
 
     def test_candidate_alias_must_be_unique_running_web_and_the_admitted_runtime(self) -> None:
         original = deepcopy(self.containers["new"])
-        for problem in ("missing", "shared", "stopped", "identity", "project"):
+        for problem in (
+            "missing",
+            "shared",
+            "stopped",
+            "identity",
+            "project",
+            "suffix",
+            "unsuffixed",
+            "service",
+        ):
             with self.subTest(problem=problem):
                 self.containers["new"] = deepcopy(original)
                 self.containers.pop("foreign", None)
@@ -715,14 +877,41 @@ class TestingRouteTransportTests(unittest.TestCase):
                         "PLATFORM_INSTANCE=testing",
                         "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + self.identity.model_dump_json(),
                     ]
-                else:
+                elif problem in {"project", "suffix", "unsuffixed"}:
                     self.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = (
                         "foreign"
+                        if problem == "project"
+                        else self.plan.new_backend.removeprefix("http://").split(":")[0]
+                        + ("-def456" if problem == "suffix" else "")
                     )
+                else:
+                    self.containers["new"]["Config"]["Labels"]["com.docker.compose.service"] = "db"
                 with self.assertRaises(NativeSourceUnavailable):
                     self.publish(self.plan.new_backend, self.plan.old_backend)
                 self.assertEqual(self.effect_count, 0)
                 self.assertFalse(self.route_file.exists())
+
+    def test_recorded_project_cannot_cross_the_candidate_namespace(self) -> None:
+        self.candidate_project = "foreign-project"
+        self.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = (
+            self.candidate_project
+        )
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish(self.plan.new_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
+
+    def test_legacy_project_requires_exact_unsuffixed_custody(self) -> None:
+        self.candidate_project = None
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish(self.plan.new_backend, self.plan.old_backend)
+        self.assertEqual(self.effect_count, 0)
+        self.assertFalse(self.route_file.exists())
+        self.containers["new"]["Config"]["Labels"]["com.docker.compose.project"] = (
+            self.plan.new_backend.removeprefix("http://").split(":")[0]
+        )
+        self.publish(self.plan.new_backend, self.plan.old_backend)
+        self.assertTrue(self.route_file.exists())
 
     def test_alias_ownership_covers_every_proxy_network_and_dns_spelling(self) -> None:
         original = deepcopy(self.containers)
@@ -1037,6 +1226,23 @@ class TestingRouteTransportTests(unittest.TestCase):
                 self.assertEqual(frame["old_availability"], "unknown")
                 self.assertFalse(self.client.unavailable_predecessor_matches(frame))
 
+    def test_route_observation_binds_the_unhealthy_running_original_process(self) -> None:
+        self.unavailable_route(preserve_file=True)
+        self.containers["old"]["State"].update(
+            Status="running", StartedAt="fixture-old-start", Health={"Status": "unhealthy"}
+        )
+        frame = self.client.read()
+        self.assertEqual(frame["old_availability"], "stopped")
+        self.assertEqual(
+            frame["old_web_process"],
+            {
+                "id": self.containers["old"]["Id"],
+                "status": "running",
+                "started_at": self.containers["old"]["State"]["StartedAt"],
+                "health": "unhealthy",
+            },
+        )
+
     def test_changed_unavailable_listener_excludes_forward_before_writer_dispatch(self) -> None:
         self.unavailable_route()
         attempt = self.fenced_attempt(self.plan.new_backend)
@@ -1179,7 +1385,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             self.client.read()
         self.assertEqual(self.effect_count, 0)
 
-    def declared_two_listener_route(self) -> None:
+    def declared_two_listener_route(self, *, repeat_labels: bool = False) -> None:
         self.unavailable_route()
         self.raw["middlewares"]["redirect-to-https@file"] = {
             "status": "enabled",
@@ -1191,6 +1397,10 @@ class TestingRouteTransportTests(unittest.TestCase):
             domain_certificate_type="none",
             isolated_testing=True,
         )
+        if repeat_labels:
+            declaration = yaml.safe_load(configured)
+            declaration["services"]["web"]["labels"] *= 2
+            configured = yaml.safe_dump(declaration)
         frame = self.client.read()
         self.plan = compile_unavailable_testing_route(
             product=self.plan.product,
@@ -1218,6 +1428,37 @@ class TestingRouteTransportTests(unittest.TestCase):
         self.publish(self.plan.new_backend, None)
         self.publish(None, self.plan.new_backend)
         self.assertFalse(self.route_file.exists())
+
+    def test_identical_repeated_labels_preserve_unavailable_route_and_its_inverse(self) -> None:
+        self.declared_two_listener_route(repeat_labels=True)
+        self.publish(self.plan.new_backend, None)
+        self.publish(None, self.plan.new_backend)
+        self.assertFalse(self.route_file.exists())
+
+    def test_contradictory_repeated_label_refuses_unavailable_route(self) -> None:
+        self.unavailable_route()
+        frame = self.client.read()
+        labels = [
+            "traefik.enable=true",
+            "traefik.docker.network=dokploy-network",
+            f"traefik.http.routers.testing.rule=Host(`{self.plan.host}`)",
+            "traefik.http.routers.testing.entrypoints=websecure",
+            "traefik.http.routers.testing.tls=true",
+            "traefik.http.routers.testing.tls=false",
+        ]
+        with self.assertRaises(ValueError):
+            compile_unavailable_testing_route(
+                product=self.plan.product,
+                context=self.plan.context,
+                host=self.plan.host,
+                new_backend=self.plan.new_backend,
+                raw=frame["raw"],
+                file_content=None,
+                observation_sha256="c" * 64,
+                static_configuration=self.static,
+                configured_compose=yaml.safe_dump({"services": {"web": {"labels": labels}}}),
+            )
+        self.assertEqual(self.effect_count, 0)
 
     def test_recorded_unavailable_template_needs_its_current_tls_resolver(self) -> None:
         for router in self.plan.template["http"]["routers"].values():

@@ -123,6 +123,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         child_only_in_base: bool = False,
         root_refreshed_after_child_landing: bool = False,
         interrupt_root_checkpoint: bool = False,
+        mixed_repository: bool = False,
     ) -> None:
         graph = _StackTransport()
         if deeper:
@@ -462,6 +463,8 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             state_dir = Path(directory) / "state"
             payload = build_test_merge_train_policy_record().model_dump(mode="json")
             target = payload["policy"]["policies"][0]
+            if mixed_repository:
+                target["repository"] = target["repository"].swapcase()
             target["github_token"] = {
                 "github_app": {
                     "app_id": 42,
@@ -907,6 +910,11 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_checkpointed_indirect_child_receives_landing_annotations(self) -> None:
         await self._recovery(checkpointed=True, moved=True, indirectly_merged=True)
+
+    async def test_mixed_case_policy_keeps_historical_child_annotations(self) -> None:
+        await self._recovery(
+            checkpointed=True, moved=True, indirectly_merged=True, mixed_repository=True
+        )
 
     async def test_missing_middle_checkpoint_recovers_absent_leaf_annotations(self) -> None:
         await self._recovery(checkpointed=False, moved=False, deeper=True, indirectly_merged=True)

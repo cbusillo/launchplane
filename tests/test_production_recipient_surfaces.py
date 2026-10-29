@@ -18,6 +18,8 @@ from httpx2 import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
 from control_plane.action_effects import action_effect
+from control_plane.dokploy.api import JsonObject
+from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
 from control_plane.contracts.production_recipient import (
     ProductionRecipientPlan,
     RecipientRecoveryRequest,
@@ -27,8 +29,19 @@ from control_plane.production_recipient_recovery import RECOVERY_ROUTE
 from control_plane.http_routes.production_recipient import register_production_recipient_routes
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.production_recipient import ROUTE, plan
-from control_plane.production_recipient_resources import RESOURCE_PROGRAM, resource_spec
-from control_plane.service_auth import LocalAdminIdentity, TerminalAgentIdentity
+from control_plane.production_recipient_resources import (
+    RESOURCE_LIBRARY,
+    RESOURCE_PROGRAM,
+    inspect_resources,
+    resource_spec,
+)
+from control_plane.service_auth import (
+    LaunchplaneAuthzPolicy,
+    LocalAdminIdentity,
+    LocalOperatorIdentity,
+    LocalOperatorPolicyRule,
+    TerminalAgentIdentity,
+)
 from tests import test_odoo_testing_resources as resources_support
 from tests import test_production_recipient as recipient_support
 
@@ -43,6 +56,7 @@ class HostProgramTests(unittest.TestCase):
         self.addCleanup(recipient.doCleanups)
         record = recipient.adapter.current()
         record = record.model_copy(update={"app_name": record.namespace})
+        self.record = record
         self.spec: dict[str, Any] = {**resource_spec(record), "prepare": True}
 
     def run_program(self) -> tuple[int, str]:
@@ -80,6 +94,83 @@ class HostProgramTests(unittest.TestCase):
         self.assertEqual(self.fixture.containers, original)
         self.assertEqual(data.read_text(), "recoverable old production")
         self.assertFalse(any(call[:2] == ["volume", "create"] for call in self.fixture.calls))
+
+    def test_materialized_source_replays_without_overwriting_files_or_following_symlinks(
+        self,
+    ) -> None:
+        namespace: dict[str, Any] = {}
+        exec(compile(RESOURCE_LIBRARY, "<production-resources>", "exec"), namespace)
+        namespace["COMPOSE_ROOT"] = self.fixture.root
+        spec = {
+            **self.spec,
+            "materialize": True,
+            "compose_source": json.dumps({"services": {"app": {}}}),
+        }
+        directory = self.fixture.root / spec["project"] / "code"
+        path = directory / "docker-compose.yml"
+        with redirect_stdout(io.StringIO()):
+            namespace["qualify_source"](spec)
+            unrelated = directory / ".env"
+            unrelated.write_text("preserved")
+            namespace["qualify_source"]({**spec, "materialize": False})
+            self.assertEqual(path.read_text(), spec["compose_source"])
+            self.assertEqual(unrelated.read_text(), "preserved")
+            path.write_text("foreign source")
+            with self.assertRaises(ValueError):
+                namespace["qualify_source"](spec)
+            self.assertEqual(path.read_text(), "foreign source")
+            path.unlink()
+            path.symlink_to(unrelated)
+            with self.assertRaises(ValueError):
+                namespace["qualify_source"](spec)
+            self.assertEqual(unrelated.read_text(), "preserved")
+            path.unlink()
+            with self.assertRaises(ValueError):
+                namespace["qualify_source"]({**spec, "materialize": False})
+            self.assertFalse(path.exists())
+
+    def test_materialized_source_evidence_survives_the_schedule_marker_reader(self) -> None:
+        namespace: dict[str, Any] = {}
+        exec(compile(RESOURCE_LIBRARY, "<production-resources>", "exec"), namespace)
+        namespace["COMPOSE_ROOT"] = self.fixture.root
+        document = json.loads(self.record.compose_source)
+        for volume in document["volumes"].values():
+            volume["external"] = True
+        spec = {**self.spec, "materialize": True, "compose_source": json.dumps(document)}
+        output = io.StringIO()
+        with (
+            patch.object(
+                sys, "argv", ["program", base64.b64encode(json.dumps(spec).encode()).decode()]
+            ),
+            patch("subprocess.run", side_effect=self.fixture.docker),
+            patch("socket.socket", return_value=Mock()),
+            redirect_stdout(output),
+        ):
+            namespace["main"]()
+        evidence = extract_odoo_post_deploy_readback_markers(
+            cast(JsonObject, {"logs": output.getvalue().splitlines()})
+        )
+        with (
+            patch(
+                "control_plane.production_recipient_resources.source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture-token"),
+            ),
+            patch(
+                "control_plane.production_recipient_resources.api.fetch_dokploy_target_payload",
+                return_value={"serverId": self.record.request.destination_server_id},
+            ),
+            patch(
+                "control_plane.production_recipient_resources.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("dokploy-server", "lookup", "", "server"),
+            ),
+            patch(
+                "control_plane.production_recipient_resources.post_deploy.run_manual_data_schedule",
+                return_value=evidence,
+            ),
+        ):
+            inspect_resources(
+                self.fixture.root, self.record, prepare=True, materialize=True, checkpoint=Mock()
+            )
 
     def test_missing_or_foreign_or_needed_volume_is_not_adopted_or_deleted(self) -> None:
         self.spec["prepare"] = False
@@ -161,6 +252,7 @@ class HttpBoundaryTests(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.identity: Any = LocalAdminIdentity("admin", "fixture")
         self.allowed = True
+        self.policy: LaunchplaneAuthzPolicy | None = None
         self.allowed_effects = {"read", "plan", "write"}
         self.requested: list[dict[str, Any]] = []
         self.mutate = AsyncMock()
@@ -168,6 +260,8 @@ class HttpBoundaryTests(unittest.TestCase):
 
         def authorize(**kwargs: Any) -> bool:
             self.requested.append(kwargs)
+            if self.policy is not None:
+                return self.policy.allows(**kwargs)
             return self.allowed and action_effect(kwargs["action"]) in self.allowed_effects
 
         dependencies = ReadRouteDependencies(
@@ -190,6 +284,45 @@ class HttpBoundaryTests(unittest.TestCase):
             run_provider_mutation=self.mutate,
         )
         self.app = app
+
+    def read_consumers(self, query: str = "") -> Any:
+        from tests.support.http import request
+
+        return asyncio.run(
+            request(
+                self.app,
+                "GET",
+                f"/v1/products/{self.fixture.product}/production-recipient/consumer-reads?context={self.fixture.context}{query}",
+            )
+        )
+
+    def test_consumer_read_requires_source_authority_and_rejects_overrides(self) -> None:
+        with patch(
+            "control_plane.http_routes.production_recipient.qualify_consumer_reads"
+        ) as qualify:
+            self.allowed = False
+            self.assertEqual(self.read_consumers().status_code, 403)
+            self.allowed = True
+            for query in ("&sql=SELECT+1", "&password=sentinel", "&context=other"):
+                self.assertEqual(self.read_consumers(query).status_code, 400)
+        qualify.assert_not_called()
+        self.mutate.assert_not_called()
+
+    def test_consumer_read_is_uncached_value_free_and_has_no_mutation_dispatch(self) -> None:
+        from control_plane.contracts.production_consumer_reads import ProductionConsumerReadResult
+
+        result = ProductionConsumerReadResult(
+            observed_at="service-start", completed_at="service-end"
+        )
+        with patch(
+            "control_plane.http_routes.production_recipient.qualify_consumer_reads",
+            return_value=result,
+        ):
+            response = self.read_consumers()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(response.json()["result"], result.model_dump(mode="json"))
+        self.mutate.assert_not_called()
 
     def post(self, body: dict[str, Any], route: str = ROUTE) -> Any:
         async def send() -> Any:
@@ -316,6 +449,51 @@ class HttpBoundaryTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 403, response.text)
         self.mutate.assert_not_awaited()
         self.assertEqual(self.post(self.fixture.body.model_dump(mode="json")).status_code, 403)
+        self.mutate.assert_not_awaited()
+        self.assertEqual(self.fixture.effects, [])
+
+    def test_scoped_rollback_rule_admits_inverse_and_rollback_recovery_only(self) -> None:
+        from control_plane.production_recipient_inverse import INVERSE_ROUTE
+        from control_plane.production_recipient_release_recovery import RELEASE_RECOVERY_ROUTE
+
+        self.identity = LocalOperatorIdentity("operator", "rollback-token")
+        self.policy = LaunchplaneAuthzPolicy(
+            schema_version=3,
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    subjects=(self.identity.subject,),
+                    token_labels=(self.identity.token_label,),
+                    products=(self.fixture.product,),
+                    contexts=(self.fixture.context,),
+                    instances=("prod",),
+                    actions=("generic_web_rollback.execute",),
+                ),
+            ),
+        )
+        common = {
+            "context": self.fixture.context,
+            "preparation_plan_sha256": "a" * 64,
+            "reason": "review",
+            "mode": "apply",
+            "reviewed_plan_sha256": "b" * 64,
+        }
+        requests = (
+            (INVERSE_ROUTE, {**common, "publication_sha256": "c" * 64}),
+            (
+                RELEASE_RECOVERY_ROUTE,
+                {**common, "decision_record_id": "accepted", "kind": "rollback"},
+            ),
+        )
+        for route, body in requests:
+            with self.subTest(route=route):
+                response = self.post(body, route)
+                self.assertEqual(response.status_code, 503, response.text)
+                denied = self.post({**body, "context": "other-context"}, route)
+                self.assertEqual(denied.status_code, 403, denied.text)
+        promotion = self.post(
+            {**common, "decision_record_id": "accepted", "kind": "promote"}, RELEASE_RECOVERY_ROUTE
+        )
+        self.assertEqual(promotion.status_code, 403, promotion.text)
         self.mutate.assert_not_awaited()
         self.assertEqual(self.fixture.effects, [])
 

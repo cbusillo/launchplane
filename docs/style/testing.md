@@ -3,21 +3,12 @@ title: Testing Style
 ---
 
 - Add targeted unit tests for storage, contracts, and workflow mapping.
-- A test stays only if it fails when the product is broken and passes when
-  someone makes an intended change. A version, toolchain, or dependency bump,
-  or an edit to a workflow step's wording, should need no test edit.
-- Do not assert a literal defined elsewhere (versions, pins, image digests,
-  hashes, counts, operation tables). Check agreement with the one source, or
-  keep a byte-exact gate only on a real generated artifact or immutable
-  evidence.
-- Do not assert workflow, action, config, or docs text. Run the embedded script
-  with inputs and check what it does, or enforce a rule that holds for every
-  workflow (fork isolation, pinned actions, permissions).
+- Follow the shared [Tests rule](https://github.com/cbusillo/codex-skills/blob/main/instructions/global.md#tests).
+- Do not assert documentation text in tests.
 - CI's `repository_pins` job runs the shared
   [change-detector scanner](https://github.com/cbusillo/codex-skills/blob/main/skills/references/test-quality.md)
   as warnings only. Triage its annotations on tests you add or change.
-- Verification code must not depend on working-tree state; read live state
-  only on the path that acts on it.
+- Read live state only on the path that acts on it.
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
 - When a fixture follows a record written with the current clock, derive its
   timestamps from that persisted record. A distant future date only delays the
@@ -60,20 +51,74 @@ Use `.github/github.json` for the lint and type-check commands and inspection
 configuration. `qualityGate.test.local` is the focused command template;
 `qualityGate.test.localSafety` takes whole safety module names, and
 `qualityGate.test.ci` names the complete suite for CI only. For a documentation
-or metadata change with no affected code, record why behavior tests or IDE inspection do not apply; do not add tests that
-assert instruction wording or config text.
+or metadata change with no affected code, record why behavior tests or IDE inspection do not apply.
+
+Use `qualityGate.inspection.lanes` for native JetBrains routing and inspect
+each product's files separately. TypeScript compiler validation remains in
+`qualityGate.build.frontend`; headless WebStorm does not report compiler errors.
 
 For frontend changes, use `qualityGate.build.frontend` for frontend unit, type,
 and build validation, with browser smoke for UI changes as described below.
 
-The full sharded suite remains CI's required gate before merge. Wait for green
-current-head CI before the checked `gh-pr.py ready` handoff; a local test pass
-does not replace that evidence. The trial does not change CI workflows or
-required checks.
+The approved [Q778 Launchplane pilot](https://github.com/cbusillo/direction/issues/98#issuecomment-6388120133)
+runs focused ordinary PR checks and the full suite on train candidates. Wait for
+green current-head PR CI and a weighed review before the checked `gh-pr.py ready`
+handoff. `pr-ci-gate` screens focused source heads only in batch planning, recovery and
+lineage reads; default and direct readers require full checks. It never
+satisfies the protected branch's required `ci-gate`. Candidate validation and live landing
+still require the full `ci-gate` on the exact candidate SHA. Focused source heads
+cannot use the single-entry head-check reuse path. Controllers without focused
+source screening support hold these PRs pending rather than merging them.
+CodeQL, Security, Client acceptance and Ready metadata remain unchanged.
+
+For a protected-branch fallback or a newly individual-routed PR, dispatch the
+CI workflow on its exact source branch through the installed GitHub
+`github_workflow_babysit.py dispatch --repo OWNER/REPO --workflow ci.yml --ref BRANCH`
+helper. Manual CI always runs the full suite and publishes `ci-gate` for that
+head; it never uses focused selection or verified-tree reuse. Wait for that
+run and the unchanged independent required checks before landing. If a manual
+full run fails, re-run its failed jobs in that same run; a separate dispatch
+does not supersede the earlier full-gate failure. A rerun of the earlier focused
+PR run keeps its selection; use the manual full run.
+
+The same manual full run supports a canonical train candidate when its push
+execution is missing. Confirm the exact ref and SHA and complete execution
+inventory first. Train dispatch uses the verified protected first-parent
+comparison used by a train push; construction refs remain refused. The candidate
+must contain this workflow support. A repair on main makes an older candidate
+stale; let the controller replace it before dispatching its new exact ref.
+Keep and watch the original dispatched run on uncertainty rather than dispatching
+again. Candidate observation follows [the full-gate policy](../merge-train-policy.md#candidate-validation).
+
+`control_plane.ci_selection` reads only committed comparison and merge trees.
+For a same-repository PR targeting the default branch, it follows Python imports
+through callers and test helpers and selects whole affected test modules,
+including the production-source authorization scanner for backend changes.
+Selections touching the canonical PostgreSQL inventory or configured native
+route-reader rehearsal retain the service-backed full path. A source dependency
+that reaches an operational script also retains full CI. The focused job
+executes `qualityGate.test.local` with the selected whole modules. Documentation-only changes need no unrelated Python tests;
+existing static, frontend validation and image/security checks still run.
+Focused PRs defer browser smoke to the full candidate, including backend-only
+changes; a green focused gate is not browser evidence.
+CODEOWNERS paths and changes to the ownership rules retain full PR validation.
+Forks, stacked PRs, unsupported paths (including frontend, dependency, workflow
+and packaging changes), unmapped Python changes, invalid syntax and unprovable
+history and broad selections beyond the focused-job module budget retain full testing. The conservative fallback costs more CI; it never
+qualifies an unknown selection as focused.
+
+New train candidates run the complete unit, PostgreSQL and browser jobs. Their
+aggregate rejects failed, skipped, cancelled or missing broad jobs. The existing
+exact-SHA proof may reuse a successful full main run for a train base or no-op;
+focused results never supply that proof. Generated train PRs continue
+to delegate to that exact push. Main's existing identical-tree reuse and the
+scheduled full run remain in place. The pilot removes repeated pre-train broad
+coverage for supported source changes; it does not remove test inventory.
 
 Each gate checks the change's entire contribution; missing or unprovable
 history fails. An already protected candidate proves an empty contribution,
-but its scanner/audit and independent required gates still run. The
+but its scanner/audit and independent required gates still run. PR comment checks
+exclude protected changes newer than the event base. The
 [CI comment step](../../.github/workflows/ci.yml) and
 [transitional config-authority workflow](../../.github/workflows/reusable-product-repo-config-authority.yml)
 own event-range selection and validation.
@@ -105,10 +150,11 @@ generated surfaces or observed failures; the complete 12-shard suite runs only
 in CI, including for safety-classified changes.
 
 `qualityGate.test.ci` names the all-shard equivalent of CI's plan/run/aggregate
-sequence; CI does not invoke that exact command. Same-repository CI plans once
-and runs the complete inventory across 12 shards, with the coverage aggregate
-required by `ci-gate`; fork PRs run the complete inventory through unsharded
-unittest discovery. Both require green CI before `ready` and merge. Reproduce
+sequence; CI does not invoke that exact command. Full same-repository CI plans
+once and runs the complete inventory across 12 shards, with the coverage
+aggregate required by `ci-gate`; fork PRs run the complete inventory through
+unsharded unittest discovery. Focused PR CI uses the pilot selection above.
+Ready requires green current-head PR checks; merge requires full candidate CI. Reproduce
 an individual shard using the frozen plan and the diagnostic commands below,
 rather than substituting a new host-local plan.
 
@@ -143,8 +189,10 @@ It verifies the exact checked-in schema head
 and critical indexes/types, and runs focused two-connection concurrency tests
 for mutation reservation/replay/conflict, reconciliation-key fencing, atomic
 business-write completion and rollback, operation claims, stale lease holders,
-lease recovery, and active-operation partial uniqueness. Same-repo CI provides
-the URL via a PostgreSQL service container with an IPv4-only dynamic host port,
+lease recovery, and active-operation partial uniqueness. Schema validation batches
+catalog reads while checking fresh metadata on every verification, including after
+a previous passing check. Same-repo CI provides the URL via a PostgreSQL service
+container with an IPv4-only dynamic host port,
 preventing the runner from selecting an IPv6 mapping for an IPv4 connection;
 fork PRs keep the SQLite/unittest path only. Same-repo CI partitions the existing
 integration inventory into one job per workflow matrix entry using the unittest
@@ -329,31 +377,35 @@ Run the deterministic admin-journey smoke separately from the frontend unit,
 type, OpenAPI, and production-build gate:
 
 ```bash
-pnpm --dir frontend exec playwright install chromium
-pnpm --dir frontend test:browser
-pnpm --dir frontend exec node --test tests/browser-support/server-isolation.test.mjs
+(cd frontend && pnpm exec playwright install chromium webkit)
+(cd frontend && pnpm test:browser)
+(cd frontend && pnpm exec node --test tests/browser-support/server-isolation.test.mjs)
 ```
 
 The Playwright suite starts its own Vite development server on an OS-assigned
 loopback port. Playwright captures the listener URL from Vite's startup output
 and passes it to workers; overlapping runner jobs never reuse another job's
-server. The isolation test holds two focused browser probes open together using
-the smoke configuration and checks that their origins differ. It runs as part
-of `test:browser`; the standalone command above is for focused diagnosis.
-It writes only task-local test artifacts.
+server. Each smoke server process also owns its temporary dependency-optimizer
+caches, removed when that process exits after teardown or startup failure.
+The isolation test holds two focused browser probes open together, proves their
+actual caches and origins differ, and checks that one server's cleanup preserves
+its peer's serving cache.
+It runs as part of `test:browser`; the standalone command above is for focused
+diagnosis. Its scratch folders live under the OS temp directory and are removed
+after the run.
 
-CI uses a bounded worker count in `frontend/playwright.config.ts`, including
-self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
-budget. Local runs retain Playwright's default concurrency; use its `--workers`
-option for a measured diagnostic comparison.
+Local runs default to two workers and CI shards retain their four-worker cap
+in `frontend/playwright.config.ts`, including self-hosted candidate lanes.
+Shared-host CPU count is not a per-job browser budget. Use `--workers=1` to
+reduce a local diagnostic run further; do not increase concurrency on a shared host.
 
-CI divides the unchanged suite into two jobs with Playwright's built-in
-`--shard` option. Each job retains four workers, zero retries, the isolation
-probe and browser diagnostics. `BROWSER_SMOKE_SHARD=1/2` (or `2/2`) selects a
-partition through `pnpm --dir frontend test:browser`; without that variable,
+CI partitions the unchanged suite across the [browser matrix](../../.github/workflows/ci.yml)
+with Playwright's built-in `--shard` option. Each job retains four workers, zero
+retries, the isolation probe and browser diagnostics. `BROWSER_SMOKE_SHARD` carries
+the job's one-based index and matrix total through `(cd frontend && pnpm test:browser)`; without it,
 the local command still runs the whole browser suite and checks all screenshots.
-Sharded runs write Playwright JSON reports under `tmp/browser-smoke/reports`.
-After both jobs succeed, CI downloads their evidence into a freshly cleared
+Sharded runs write Playwright JSON reports under the artifact folder's `reports/`.
+After all shard jobs succeed, CI downloads their evidence into a freshly cleared
 directory, independently discovers the complete current suite and requires
 each discovered test to pass exactly once across the reports. Missing,
 duplicated, skipped, retried or failed tests and report errors fail the gate.
@@ -361,14 +413,13 @@ The combined evidence must also pass the existing complete screenshot check.
 Artifact names identify the shard within the current workflow run. Re-running
 failed jobs replaces that shard's evidence and retains successful siblings
 from the same immutable head; re-running only evidence verification can reuse
-both successful artifacts. Downloads remain scoped to the current workflow
+the successful shard artifacts. Downloads remain scoped to the current workflow
 run and use a freshly cleared directory, so another head's proof cannot enter.
 `ci-gate` requires both browser execution and evidence verification, including
-on forks. This reduces the browser critical path without reducing coverage;
-it adds one runner job and an evidence job, so shared runner contention and
-the other CI lanes still bound the whole-run saving.
+on forks. Sharding uses additional runner jobs and an evidence job, so shared
+runner contention and the other CI lanes still bound the whole-run saving.
 
-Browser smoke runs in every CI run that needs fresh proof, including main pushes. The verified-tree
+Browser smoke runs in every full CI run that needs fresh proof, including main pushes. The verified-tree
 shortcut above can reuse a previously successful tree; it does not selectively
 skip browser coverage. Keep that reuse rather than duplicating a full browser
 run for the same tree.
@@ -394,31 +445,38 @@ behind an explicit release gate until the test observes the intermediate
 screen, rather than consuming one response and assuming only one request.
 Development remounts can read a session more than once.
 
-`pnpm --dir frontend check:browser-timing` rejects sleeps, timer aliases,
+`(cd frontend && pnpm check:browser-timing)` rejects sleeps, timer aliases,
 test-specific timeouts/retries and unmanaged clock/context creation. Both
 frontend validation and browser smoke run this check. Shared Playwright
 failure deadlines live in `playwright-deadlines.mjs`: they bound a broken test,
 not successful synchronization. Do not add a sleep, retry or larger timeout
 to hide a flake.
 
+Assertions retain their 10-second watchdog and each test its 30-second
+watchdog, including actions and navigation. Server startup retains its
+two-minute watchdog. CI's 15-minute browser-job limit also bounds setup,
+isolation probes and execution. These limits fail incomplete work; they never
+turn it into a pass.
+
 The server-isolation harness uses a watchdog derived from the shared server
 startup and test deadlines. Its peer wait includes the peer's cold server
 startup; it cannot assume both independent servers become ready together.
-Ordinary browser assertion, test and server deadlines are unchanged.
-
-Use Playwright's built-in repetition with zero retries to qualify the complete
-suite under representative sibling host load. Record the revision, worker
-count, load samples and pass/fail totals on the owning issue or PR. For example:
-
-```bash
-CI=true pnpm --dir frontend exec playwright test --repeat-each=5 --workers=4 --retries=0
-```
-
-Use a focused repetition for diagnosis:
+Use CI for full-suite qualification of this shared-host investigation. The full
+manual local command remains supported; it runs the unsharded suite and checks
+all screenshots. For local diagnosis, use a short focused run with zero retries
+and at most a few browser workers. For example:
 
 ```bash
-CI=true pnpm --dir frontend exec playwright test sidebar-freshness --repeat-each=30
+(cd frontend && pnpm exec playwright test backup-credentials product-setup --repeat-each=2 --workers=2)
 ```
+
+Use the smallest load that reproduces the failure. Do not deliberately saturate
+the shared host. Stop every owned load generator as soon as its run ends and
+check that no owned load processes remain before another run. Record the
+revision, worker count, host load and pass/fail totals on the owning issue or PR.
+Under [Q967](https://github.com/cbusillo/launchplane/issues/3754#issuecomment-6447670525),
+an upstream symbol request is deferred unless a stall reproduces on an idle
+host; that requires a new Director question with the exact proposed text.
 
 The suite uses only repo-local
 development fixtures. Product-detail journeys use `?fixture=products`; product
@@ -446,19 +504,27 @@ required by `frontend/scripts/assert-browser-smoke-artifacts.mjs` are retained
 as representative layout tests, alongside focused responsive and spacing cases.
 Unmarked journeys retain desktop coverage; narrow-width defects in those
 journeys are an accepted coverage tradeoff (Q175, #3384). Check actual selection with
-`pnpm --dir frontend exec playwright test --list --project=desktop` and
-`pnpm --dir frontend exec playwright test --list --project=narrow`.
+`(cd frontend && pnpm exec playwright test --list --project=desktop)` and
+`(cd frontend && pnpm exec playwright test --list --project=narrow)`.
 
 The core admin journeys check route-heading and keyboard focus behavior, reject
 duplicate document IDs and horizontal overflow, and fail on unexpected
 mutation requests, console errors, uncaught page errors, failed requests, or
 HTTP error responses.
 
-Screenshots, traces, and failure evidence are written under
-`tmp/browser-smoke/`. CI uploads that directory from the dedicated browser
-job. Every run clears prior evidence first and verifies the complete desktop and
-narrow screenshot set before passing. These screenshots are review evidence
-rather than pixel-diff baselines, so intentional visual changes do not require
+Screenshots, traces, and failure evidence go to a per-checkout folder under the
+OS temp directory, outside the checkout, so a finished worktree holds no smoke
+output. `pnpm test:browser` prints the folder when it ends.
+`BROWSER_SMOKE_ARTIFACT_DIR` overrides it; a relative value resolves against
+the checkout. A smoke run owns the folder it creates and replaces everything in
+it on the next run, so do not keep other files there. It refuses to clear a
+folder it did not create; point the override at a new or empty folder. CI sets
+it to a workspace folder in the top-level workflow env and uploads that folder
+from the dedicated browser job. Vite's per-server optimizer caches and the
+isolation test's scratch folders also live under the OS temp directory. Every
+run clears prior evidence first and verifies the complete desktop and narrow
+screenshot set before passing. These screenshots are review evidence rather
+than pixel-diff baselines, so intentional visual changes do not require
 snapshot churn.
 
 The browser job runs Vite and Chromium together inside a per-job Docker container
@@ -468,14 +534,18 @@ observer; OS-assigned Vite ports still isolate overlapping suite processes.
 The digest-pinned Playwright image supplies browser system libraries. Browser
 execution runs inside the container, with private shared memory and the job's
 actual UID/GID so artifacts remain writable by subsequent runner jobs. The host
-installs frontend dependencies; the container uses the job's Node executable
+installs frontend dependencies and exports the manifest-selected pnpm with
+`corepack pack`, reusing its cache or filling a missing entry on the host.
+The container hydrates its own cache from that read-only temporary archive with
+Corepack network access disabled. Cleanup removes the archive after success or failure.
+The container uses the job's Node executable
 and the image's Chromium. Every frontend CI job selects a pnpm store under its
 own checkout before cache restore and install. The helper publishes a relative
 cache target so runner slots share cache versions and archives; each restore
 still writes only its own checkout. The new cache-key namespace resets the old
 shared-home entries. Sibling restores cannot overwrite an install's objects. Checkout cleanup
 owns this generated directory; jobs never clear the shared home store. The same
-setup applies to validation, fork validation, both browser shards and evidence
+setup applies to validation, fork validation, browser shards and evidence
 verification. The wrapper verifies that its namespace differs from
 the host and removes only its captured container ID, including after failures.
 The workflow owns the image pin. Match the
@@ -483,8 +553,8 @@ image's Playwright version to the frontend dependency when updating it. Preserve
 the same suite, diagnostics, timeouts and zero retries when qualifying changes
 under normal sibling CI load.
 
-Development fixtures remain excluded from production authority. `pnpm --dir
-frontend validate` still runs the independent production build and
+Development fixtures remain excluded from production authority.
+`(cd frontend && pnpm validate)` still runs the independent production build and
 `assert-production-fixtures.mjs` scan; browser smoke does not weaken or replace
 that proof. Deployed OIDC smoke remains a separate non-destructive evidence
 layer because it validates service authentication and deployment wiring rather
@@ -492,8 +562,7 @@ than deterministic UI behavior.
 
 Workflows are checked where they execute: CI runs them, `security.yml` runs
 actionlint over every workflow, and `tests/test_github_actions_security.py`
-holds the rules that apply to all of them. Do not add a test that re-reads one
-workflow to check that it says what it says. Workflow tests take one of three
+holds the rules that apply to all of them. Workflow tests take one of three
 forms:
 
 - Run an embedded script step with inputs (through `tests/support/workflows.py`
@@ -524,3 +593,18 @@ forms:
 - When moving a test between these paths, retain the behavior assertion and
   document any intentional coverage replacement in the change description; do
   not delete behavior tests merely because the support implementation changed.
+
+### Timing history across verified trees
+
+Skipping test execution on a verified tree must preserve its measured planning
+inputs whenever its history artifact exists. The validated coverage aggregate
+is published as `unittest-timing-history`; main imports it from successful push
+CI for the verified source SHA and saves it in the default-branch cache. Full
+main runs publish their own aggregate. Publication is advisory and bounded to
+five minutes outside `ci-gate`; missing history warns and leaves a complete cold
+plan. The existing Python timing reader validates history before it is frozen.
+
+Inspect the frozen plan's `timing_source_counts` to distinguish exact measured
+costs, parent estimates and default fallback before comparing candidate wall
+time, per-shard execution and runner waits. Timing hints never replace discovered
+test inventory or frozen-plan coverage checks.

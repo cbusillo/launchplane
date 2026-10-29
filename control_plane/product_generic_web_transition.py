@@ -1,7 +1,5 @@
 """Review a profile's shared-web driver declarations without replacing runtime state."""
 
-import hashlib
-import json
 import re
 from typing import Literal
 
@@ -17,6 +15,7 @@ from control_plane.workflows.generic_web_deploy import product_profile_uses_gene
 from control_plane.workflows.generic_web_post_deploy import (
     generic_web_post_deploy_executor_for_profile,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 class GenericWebLaneDeclaration(BaseModel):
@@ -97,14 +96,6 @@ def build_generic_web_transition_plan(
         for lane in lanes
     ):
         raise ValueError("The testing verification extension requires the recorded testing lane.")
-    if legacy_profile and any(
-        lane.instance == "testing"
-        and lane.generic_web_extensions.verification_extension != "verireel-testing"
-        for lane in lanes
-    ):
-        raise ValueError(
-            "The existing lane qualification must have a supported shared-web declaration."
-        )
     preview = profile.preview
     if request.preview is not None:
         updates = request.preview.model_dump(exclude_unset=True, exclude={"generic_web_extensions"})
@@ -154,9 +145,7 @@ def build_generic_web_transition_plan(
         "preview": preview_declaration.model_dump(mode="json"),
         "reason": request.reason,
     }
-    digest = hashlib.sha256(
-        json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(fingerprint)
     return (
         ProductGenericWebTransitionPlan(
             product=profile.product,

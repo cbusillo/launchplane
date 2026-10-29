@@ -4,6 +4,7 @@ import json
 from tempfile import TemporaryDirectory
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.production_backup_authority import ProductionBackupAuthorityWriteEnvelope
@@ -118,6 +119,211 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
             f"/v1/production-backup-authority/proposals/{operation_id}/decision",
             headers=_browser_mutation_headers(self.sessions, self.session),
             payload={"decision": decision, "source_event_id": f"ui:{decision}:{operation_id}"},
+        )
+
+    async def read_proposals(self) -> Any:
+        return await http_get(
+            self.app,
+            "/v1/production-backup-authority/proposals?product=example-product&context=example-product&instance=prod",
+            headers=_browser_mutation_headers(self.sessions, self.session),
+        )
+
+    async def assert_stale_proposal(self, operation_id: str) -> None:
+        before = self.store.read_privileged_operation_record(operation_id)
+        events = self.store.list_privileged_operation_event_records(operation_id=operation_id)
+        policies = self.store.list_production_backup_policy_records()
+        targets = self.store.list_production_backup_target_records()
+        response = await self.read_proposals()
+        self.assertEqual(response.status_code, 200, response.text)
+        proposal = next(
+            item for item in response.json()["proposals"] if item["operation_id"] == operation_id
+        )
+        self.assertFalse(proposal["can_approve"])
+        self.assertTrue(proposal["can_decline"])
+        self.assertTrue(proposal["approval_unavailable_reason"])
+        self.assertEqual(self.store.read_privileged_operation_record(operation_id), before)
+        self.assertEqual(
+            self.store.list_privileged_operation_event_records(operation_id=operation_id), events
+        )
+        self.assertEqual(self.store.list_production_backup_policy_records(), policies)
+        self.assertEqual(self.store.list_production_backup_target_records(), targets)
+        refused = await self.decide(operation_id)
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "backup_proposal_conflict")
+        self.assertEqual(self.store.read_privileged_operation_record(operation_id), before)
+        self.assertEqual((await self.decide(operation_id, "decline")).status_code, 200)
+        historical = await self.read_proposals()
+        declined = next(
+            item for item in historical.json()["proposals"] if item["operation_id"] == operation_id
+        )
+        self.assertEqual(declined["status"], "cancelled")
+        self.assertFalse(declined["can_approve"])
+        self.assertFalse(declined["can_decline"])
+
+    async def test_supported_authority_apply_narrows_approval_without_read_writes(self) -> None:
+        operation_id = await self.propose()
+        current = (await self.read_proposals()).json()["proposals"][0]
+        self.assertTrue(current["can_approve"])
+        payload = self.draft.model_dump(mode="json")
+        dry_run = await http_request(
+            self.app,
+            "POST",
+            "/v1/production-backup-authority/apply",
+            headers=_browser_mutation_headers(self.sessions, self.session)
+            | {"Idempotency-Key": "backup-authority-dry-run"},
+            payload=payload,
+        )
+        self.assertEqual(dry_run.status_code, 200, dry_run.text)
+        applied = await http_request(
+            self.app,
+            "POST",
+            "/v1/production-backup-authority/apply",
+            headers=_browser_mutation_headers(self.sessions, self.session)
+            | {"Idempotency-Key": "backup-authority-apply"},
+            payload=payload
+            | {
+                "mode": "apply",
+                "reviewed_authority_digest": dry_run.json()["result"]["authority_digest"],
+            },
+        )
+        self.assertEqual(applied.status_code, 200, applied.text)
+        await self.assert_stale_proposal(operation_id)
+
+    async def test_protection_review_boundary_narrows_approval_without_read_writes(self) -> None:
+        for window in ("policy", "target"):
+            with self.subTest(window=window):
+                authority = self.draft.model_dump(mode="json")
+                boundary = datetime.now(timezone.utc) + timedelta(days=1)
+                item = authority["policy"] if window == "policy" else authority["targets"][0]
+                item["review_after"] = boundary.isoformat()
+                item["record_id"] = ""
+                item.pop("policy_digest", None)
+                item.pop("target_digest", None)
+                self.payload["request"]["authority"] = authority
+                self.payload["source_event_id"] = f"review-boundary-{window}"
+                operation_id = await self.propose()
+                with patch(
+                    "control_plane.privileged_operation_registry.datetime", wraps=datetime
+                ) as clock:
+                    clock.now.return_value = boundary - timedelta(microseconds=1)
+                    response = await self.read_proposals()
+                    current = next(
+                        item
+                        for item in response.json()["proposals"]
+                        if item["operation_id"] == operation_id
+                    )
+                    self.assertTrue(current["can_approve"])
+                    clock.now.return_value = boundary
+                    await self.assert_stale_proposal(operation_id)
+
+    def replace_human_rules(self, rules: list[dict[str, Any]]) -> None:
+        active = self.store.list_authz_policy_records(status="active", limit=2)[0]
+        policy = active.policy.model_dump(mode="json") | {"github_humans": rules}
+        replacement = type(active)(
+            record_id=f"test-policy-{active.revision + 1}",
+            revision=active.revision + 1,
+            source=active.source,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            policy=LaunchplaneAuthzPolicy.model_validate(policy),
+        )
+        result = self.store.compare_and_write_authz_policy_record(
+            expected_record=active, replacement_record=replacement
+        )
+        self.assertEqual(result.status, "written")
+
+    def administrator_rule(self) -> dict[str, Any]:
+        return {
+            "managed_set_id": "test.administrators",
+            "managed_rule_id": "director",
+            "github_ids": [_github_human_identity().github_id],
+            "roles": ["admin"],
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": ["authz_policy_grant.write"],
+        }
+
+    async def test_policy_administrator_approves_without_a_lane_rule_after_policy_changes(
+        self,
+    ) -> None:
+        operation_id = await self.propose()
+        self.replace_human_rules([self.administrator_rule()])
+        approved = await self.decide(operation_id)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.replace_human_rules(
+            [self.administrator_rule(), *self.policy.model_dump(mode="json")["github_humans"]]
+        )
+        completed = execute_approved_privileged_operations_once(record_store=self.store)
+        self.assertEqual(completed[0].status, "executed", completed)
+        self.assertEqual((await self.decide(operation_id)).status_code, 200)
+        self.assertEqual(
+            self.store.list_production_backup_policy_records()[0].policy_digest,
+            self.draft.policy.policy_digest,
+        )
+
+    async def test_policy_administrator_revocation_blocks_worker_write(self) -> None:
+        operation_id = await self.propose()
+        self.replace_human_rules([self.administrator_rule()])
+        approved = await self.decide(operation_id)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.replace_human_rules(self.policy.model_dump(mode="json")["github_humans"])
+        completed = execute_approved_privileged_operations_once(record_store=self.store)
+        self.assertEqual(completed[0].status, "execution_failed", completed)
+        self.assertEqual(self.store.list_production_backup_policy_records(), ())
+
+    async def test_policy_administrator_is_rechecked_inside_the_atomic_write(self) -> None:
+        from itertools import chain, repeat
+        from unittest.mock import patch
+
+        operation_id = await self.propose()
+        self.replace_human_rules([self.administrator_rule()])
+        approved = await self.decide(operation_id)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        active = self.store.list_authz_policy_records(status="active", limit=2)[0]
+        removed = _policy_record(self.policy)
+        with patch(
+            "control_plane.privileged_operation_worker.read_active_authz_policy_record",
+            side_effect=chain([active], repeat(removed)),
+        ):
+            completed = execute_approved_privileged_operations_once(record_store=self.store)
+        self.assertEqual(completed[0].status, "execution_failed", completed)
+        assert completed[0].execution is not None
+        self.assertEqual(completed[0].execution.failure_code, "approval_policy_admin_drift")
+        self.assertEqual(self.store.list_production_backup_policy_records(), ())
+
+    async def test_missing_immutable_approval_rule_is_not_reported_as_a_stale_proposal(
+        self,
+    ) -> None:
+        operation_id = await self.propose()
+        rules = self.policy.model_dump(mode="json")["github_humans"]
+        rules[0]["github_ids"] = []
+        self.replace_human_rules(rules)
+        for decision in ("approve", "decline"):
+            response = await self.decide(operation_id, decision)
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(self.store.list_production_backup_policy_records(), ())
+
+    async def test_unsupported_administrator_policy_refuses_before_recording_approval(self) -> None:
+        from unittest.mock import patch
+
+        operation_id = await self.propose()
+        legacy_rule = self.administrator_rule()
+        legacy_rule.pop("managed_set_id")
+        legacy_rule.pop("managed_rule_id")
+        legacy = _policy_record(
+            LaunchplaneAuthzPolicy.model_validate(
+                {"schema_version": 1, "github_humans": [legacy_rule]}
+            )
+        )
+        self.assertTrue(legacy.policy.names_administrator(_github_human_identity()))
+        with patch(
+            "control_plane.backup_policy_proposals.read_active_authz_policy_record",
+            return_value=legacy,
+        ):
+            response = await self.decide(operation_id)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(
+            self.store.read_privileged_operation_record(operation_id).status, "planned"
         )
 
     async def test_inert_durable_redacted_then_single_human_click_executes(self) -> None:
@@ -421,3 +627,30 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
             response = await self.decide(operation_id)
         self.assertEqual(response.status_code, 503, response.text)
         self.assertNotIn("private policy diagnostics", response.text)
+
+    async def test_unavailable_plan_disables_approval_without_hiding_decline_or_history(
+        self,
+    ) -> None:
+        operation_id = await self.propose()
+        before = self.store.read_privileged_operation_record(operation_id)
+        events = self.store.list_privileged_operation_event_records(operation_id=operation_id)
+        with patch(
+            "control_plane.storage.postgres.PostgresRecordStore.list_production_backup_policy_records",
+            side_effect=LookupError("private provider diagnostics"),
+        ):
+            response = await self.read_proposals()
+            self.assertEqual(response.status_code, 200, response.text)
+            proposal = response.json()["proposals"][0]
+            self.assertFalse(proposal["can_approve"])
+            self.assertTrue(proposal["can_decline"])
+            self.assertTrue(proposal["approval_unavailable_reason"])
+            self.assertNotIn("private provider diagnostics", response.text)
+            self.assertEqual(self.store.read_privileged_operation_record(operation_id), before)
+            self.assertEqual(
+                self.store.list_privileged_operation_event_records(operation_id=operation_id),
+                events,
+            )
+            self.assertEqual((await self.decide(operation_id, "decline")).status_code, 200)
+            historical = await self.read_proposals()
+            self.assertEqual(historical.status_code, 200, historical.text)
+            self.assertEqual(historical.json()["proposals"][0]["status"], "cancelled")

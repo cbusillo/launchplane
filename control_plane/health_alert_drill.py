@@ -15,6 +15,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
 )
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressNotificationDriverSet,
@@ -106,6 +107,10 @@ def _routing(
         ),
         None,
     )
+    if lane is not None:
+        lane = split_ingress_monitoring_lane(
+            profile, lane, read_split_ingress_binding(store, profile, lane)
+        )
     check = (
         next(
             (check for check in lane.health_monitoring.checks if check.name == scope.check_name),

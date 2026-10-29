@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.merge_readiness import MergeReadinessStructuralCandidateStatus
+from control_plane.contracts.record_fields import required_token
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 MergeTrainStructuralCandidateStatus = MergeReadinessStructuralCandidateStatus
@@ -63,8 +63,8 @@ class MergeTrainStructuralSubject(BaseModel):
 
     @model_validator(mode="after")
     def _validate_subject(self) -> "MergeTrainStructuralSubject":
-        object.__setattr__(self, "product", _required_token(self.product, "product"))
-        object.__setattr__(self, "system", _required_token(self.system, "system"))
+        object.__setattr__(self, "product", required_token(self.product, "product"))
+        object.__setattr__(self, "system", required_token(self.system, "system"))
         return self
 
 
@@ -80,11 +80,11 @@ class MergeTrainStructuralEntryBinding(BaseModel):
 
     @model_validator(mode="after")
     def _validate_binding(self) -> "MergeTrainStructuralEntryBinding":
-        object.__setattr__(self, "head_sha", _required_token(self.head_sha, "head_sha"))
+        object.__setattr__(self, "head_sha", required_token(self.head_sha, "head_sha"))
         object.__setattr__(
             self,
             "head_tree_sha",
-            _required_token(self.head_tree_sha, "head_tree_sha"),
+            required_token(self.head_tree_sha, "head_tree_sha"),
         )
         subjects = tuple(
             sorted(set(self.affected_subjects), key=lambda item: (item.product, item.system))
@@ -121,7 +121,7 @@ class MergeTrainRollingStep(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         if self.kind == "no_op_already_contained":
             if self.result_sha != self.parent_sha or self.result_tree_sha != self.parent_tree_sha:
@@ -152,7 +152,7 @@ class MergeTrainStackCollapseRootProof(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         object.__setattr__(self, "collapsed_root_tree_sha", self.collapsed_root_tree_sha.strip())
         return self
@@ -191,7 +191,7 @@ class MergeTrainStructuralProvenance(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         if not self.entries or not self.steps:
             raise ValueError("Structural provenance requires entries and rolling steps")
@@ -271,11 +271,11 @@ class MergeTrainStructuralDeltaFingerprint(BaseModel):
 
     @model_validator(mode="after")
     def _validate_fingerprint(self) -> "MergeTrainStructuralDeltaFingerprint":
-        object.__setattr__(self, "head_sha", _required_token(self.head_sha, "head_sha"))
+        object.__setattr__(self, "head_sha", required_token(self.head_sha, "head_sha"))
         object.__setattr__(
             self,
             "head_tree_sha",
-            _required_token(self.head_tree_sha, "head_tree_sha"),
+            required_token(self.head_tree_sha, "head_tree_sha"),
         )
         paths = tuple(sorted({_normalize_changed_path(path) for path in self.changed_paths}))
         subjects = tuple(
@@ -316,11 +316,11 @@ class MergeTrainStructuralEntryObservation(BaseModel):
 
     @model_validator(mode="after")
     def _validate_observation(self) -> "MergeTrainStructuralEntryObservation":
-        object.__setattr__(self, "head_sha", _required_token(self.head_sha, "head_sha"))
+        object.__setattr__(self, "head_sha", required_token(self.head_sha, "head_sha"))
         object.__setattr__(
             self,
             "head_tree_sha",
-            _required_token(self.head_tree_sha, "head_tree_sha"),
+            required_token(self.head_tree_sha, "head_tree_sha"),
         )
         if self.current_delta is not None and (
             self.current_delta.head_sha != self.head_sha
@@ -338,7 +338,7 @@ class MergeTrainOwnerEvidenceBinding(BaseModel):
 
     @model_validator(mode="after")
     def _validate_binding(self) -> "MergeTrainOwnerEvidenceBinding":
-        object.__setattr__(self, "event_id", _required_token(self.event_id, "event_id"))
+        object.__setattr__(self, "event_id", required_token(self.event_id, "event_id"))
         object.__setattr__(
             self,
             "binding_sha256",
@@ -372,7 +372,7 @@ class MergeTrainCombinedCandidateOwnerReview(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         if not self.evidence_bindings:
             raise ValueError("Combined-candidate Owner evidence requires exact L1 event bindings")
@@ -428,7 +428,7 @@ class MergeTrainStructuralEvaluationInput(BaseModel):
             object.__setattr__(
                 self,
                 field_name,
-                _required_token(str(getattr(self, field_name)), field_name),
+                required_token(str(getattr(self, field_name)), field_name),
             )
         _validate_observation_positions(self.entries)
         return self
@@ -534,14 +534,14 @@ def _validate_observation_positions(
 
 
 def _normalize_repository(value: str) -> str:
-    normalized = _required_token(value, "repository").lower()
+    normalized = required_token(value, "repository").lower()
     if normalized.count("/") != 1 or not all(normalized.split("/", 1)):
         raise ValueError("repository must use owner/name")
     return normalized
 
 
 def _normalize_changed_path(value: str) -> str:
-    normalized = _required_token(value, "changed_path").replace("\\", "/")
+    normalized = required_token(value, "changed_path").replace("\\", "/")
     while normalized.startswith("./"):
         normalized = normalized[2:]
     parts = normalized.split("/")
@@ -551,7 +551,7 @@ def _normalize_changed_path(value: str) -> str:
 
 
 def _required_sha256(value: str, field_name: str) -> str:
-    normalized = _required_token(value, field_name).lower()
+    normalized = required_token(value, field_name).lower()
     if len(normalized) != 64 or any(
         character not in "0123456789abcdef" for character in normalized
     ):
@@ -559,18 +559,5 @@ def _required_sha256(value: str, field_name: str) -> str:
     return normalized
 
 
-def _required_token(value: str, field_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{field_name} must be non-empty")
-    return normalized
-
-
 def _canonical_sha256(payload: object) -> str:
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)

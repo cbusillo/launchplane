@@ -4,6 +4,7 @@ import os
 from urllib.parse import urlsplit
 import unittest
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -100,7 +101,6 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     OdooTargetReplacementStageError,
     _deploy_step_failure,
     _failure_stage,
-    _merge_required_odoo_install_modules,
     _read_lane,
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
@@ -143,6 +143,7 @@ def _site_environment(values: dict[str, str]) -> SiteRuntimeEnvironment:
 
 
 _UPSTREAM_RESTORE_ENV = {
+    "DATA_WORKFLOW_SSH_DIR": "/fixture/restore-ssh",
     "ODOO_FILESTORE_PATH": "/volumes/data/filestore",
     "ODOO_UPSTREAM_HOST": "source.example.test",
     "ODOO_UPSTREAM_USER": "restore",
@@ -688,12 +689,6 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     "uncertain" if hold_uncertain_effects else None,
                 )
                 self.assertEqual(store.environment_inventories, [])
-
-    def test_merge_required_odoo_install_modules_prepends_and_dedupes(self) -> None:
-        self.assertEqual(
-            _merge_required_odoo_install_modules("cm_website, disable_odoo_online, website"),
-            "launchplane_settings,disable_odoo_online,cm_website,website",
-        )
 
     def test_required_runtime_identity_evidence_records_exact_match(self) -> None:
         expected_runtime_identity = RuntimeIdentity(
@@ -1905,6 +1900,16 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(health_url, "https://internal.example.test/web/health")
 
     def test_apply_recreates_target_in_place_and_writes_breadcrumb_inventory(self) -> None:
+        clock = [datetime.now(timezone.utc)]
+        durations = {
+            phase: timedelta(seconds=seconds)
+            for phase, seconds in (
+                ("provider_deploy", 3),
+                ("post_deploy", 5),
+                ("readiness", 7),
+                ("runtime_identity", 11),
+            )
+        }
         store = _Store(
             target_record=_target_record(),
             target_id_record=_target_id_record(),
@@ -2042,6 +2047,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             persisted_env = env_text
 
         def _wait_for_deploy(**_: object) -> None:
+            clock[0] += durations["provider_deploy"]
             deployment_records.insert(0, {"deploymentId": "deploy-456", "status": "done"})
 
         post_deploy_result = OdooPostDeployResult(
@@ -2077,7 +2083,23 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "changed": "true",
             }
 
+        def timed_post_deploy(**_: object) -> OdooPostDeployResult:
+            clock[0] += durations["post_deploy"]
+            return post_deploy_result
+
+        def timed_readiness(**_: object) -> OdooVerificationResult:
+            clock[0] += durations["readiness"]
+            return _verification_result()
+
+        def timed_identity(**kwargs: Any) -> object:
+            clock[0] += durations["runtime_identity"]
+            return _matching_runtime_identity_healthcheck(**kwargs)
+
         with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.utc_now_timestamp",
+                side_effect=lambda: clock[0].isoformat(),
+            ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
@@ -2121,15 +2143,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ) as wait_deploy,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
-                return_value=post_deploy_result,
+                side_effect=timed_post_deploy,
             ) as post_deploy,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
-                return_value=_verification_result(),
+                side_effect=timed_readiness,
             ) as verify_readiness,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.wait_for_runtime_identity_healthcheck_with_retry",
-                side_effect=_matching_runtime_identity_healthcheck,
+                side_effect=timed_identity,
             ) as verify_runtime_identity,
         ):
             ensure_domain.side_effect = _ensure_domain
@@ -2252,6 +2274,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         self.assertGreaterEqual(len(store.deployment_records), 2)
         final_deployment = store.deployment_records[-1]
+        for phase, duration in durations.items():
+            started = datetime.fromisoformat(final_deployment.runtime_source[f"{phase}_started_at"])
+            finished = datetime.fromisoformat(
+                final_deployment.runtime_source[f"{phase}_finished_at"]
+            )
+            self.assertEqual(finished - started, duration, phase)
+        self.assertEqual(datetime.fromisoformat(final_deployment.deploy.finished_at), clock[0])
         self.assertEqual(final_deployment.deploy.status, "pass")
         self.assertEqual(
             final_deployment.post_deploy_update.evidence,
@@ -3291,6 +3320,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         route_writes: list[dict[str, object]] | None = None,
         revoke_on_pending: bool = False,
         provider_extra_env: tuple[str, ...] = (),
+        ordinary_deploy: bool = False,
+        before_apply: Callable[[_Store], None] | None = None,
     ) -> tuple[OdooStableTargetReplacementApplyResult, Mock, Mock, _Store]:
         profile = _opw_profile_with_prelaunch_policy(enabled=True)
         if live:
@@ -3380,6 +3411,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         persisted_env = ""
         resolved_env = dict(_UPSTREAM_RESTORE_ENV)
+        volume_prefix = f"opw_{test_instance}" if ordinary_deploy else "opw_prod"
+        volumes = {
+            "ODOO_DATA_VOLUME": f"{volume_prefix}_odoo_data",
+            "ODOO_LOG_VOLUME": f"{volume_prefix}_odoo_logs",
+            "ODOO_DB_VOLUME": f"{volume_prefix}_odoo_db",
+        }
+        if ordinary_deploy:
+            resolved_env.update(volumes)
 
         def _fetch_target_payload(**_: object) -> JsonValue:
             return {
@@ -3394,9 +3433,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     (
                         *_DATABASE_ENV_LINES,
                         *provider_extra_env,
-                        "ODOO_DATA_VOLUME=opw_prod_odoo_data",
-                        "ODOO_LOG_VOLUME=opw_prod_odoo_logs",
-                        "ODOO_DB_VOLUME=opw_prod_odoo_db",
+                        *(f"{key}={value}" for key, value in volumes.items()),
                     )
                 ),
             }
@@ -3516,14 +3553,16 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 side_effect=_matching_runtime_identity_healthcheck,
             ),
         ):
+            if before_apply is not None:
+                before_apply(store)
             result = execute_odoo_stable_target_replacement_apply(
                 control_plane_root=Path("."),
                 record_store=store,
                 request=OdooStableTargetReplacementApplyRequest(
                     product="odoo-tenant-opw",
                     instance=test_instance,
-                    allow_empty_data=True,
-                    data_source_mode="upstream_restore",
+                    allow_empty_data=not ordinary_deploy,
+                    data_source_mode="existing" if ordinary_deploy else "upstream_restore",
                     confirmation="restore opw upstream",
                 ),
                 dokploy_request=cast(DokployRequest, _request),
@@ -3531,6 +3570,77 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             )
 
         return result, post_deploy, verify, store
+
+    def test_source_outage_before_production_dispatch_creates_no_failed_delivery(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+        from control_plane.workflows import odoo_stable_target_replacement as replacement
+
+        for check in ("require_forward_lane_build", "require_forward_build"):
+            with self.subTest(check=check):
+                captured: list[_Store] = []
+                identity = (
+                    "LAUNCHPLANE_RUNTIME_IDENTITY_JSON="
+                    + json.dumps(
+                        {
+                            "product": "odoo-tenant-opw",
+                            "context": "opw",
+                            "instance": "prod",
+                            "artifact_id": "old-artifact",
+                            "source_git_ref": "old-source",
+                        }
+                    ),
+                )
+                with (
+                    patch.object(
+                        replacement,
+                        check,
+                        side_effect=LaneMovementRefused("source_order_unavailable"),
+                    ) as source_check,
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
+                    ) as dispatch,
+                    self.assertRaises(LaneMovementRefused),
+                ):
+                    self._apply_upstream_restore(
+                        override_record=None,
+                        post_deploy_results=(),
+                        live=True,
+                        ordinary_deploy=True,
+                        before_apply=captured.append,
+                        provider_extra_env=identity if check == "require_forward_build" else (),
+                    )
+                source_check.assert_called_once()
+                dispatch.assert_not_called()
+                store = captured[0]
+                self.assertEqual(store.deployment_records, [])
+                self.assertEqual(store.environment_inventories, [])
+                self.assertEqual(store.backup_records, {})
+
+    def test_source_outage_before_testing_dispatch_keeps_failed_record(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        captured: list[_Store] = []
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.require_forward_lane_build",
+                side_effect=LaneMovementRefused("source_order_unavailable"),
+            ),
+            self.assertRaises(LaneMovementRefused),
+        ):
+            self._apply_upstream_restore(
+                override_record=None,
+                post_deploy_results=(),
+                test_instance="testing",
+                ordinary_deploy=True,
+                before_apply=captured.append,
+            )
+        record = captured[0].deployment_records[-1]
+        self.assertEqual(record.deploy.status, "fail")
+        assert record.failure is not None
+        self.assertEqual(
+            record.failure.code,
+            LaneMovementRefused("source_order_unavailable").record_failure().code,
+        )
 
     def test_restore_intent_survives_failures_without_override_evidence(self) -> None:
         from control_plane.testing_restore_prerequisite import incomplete_testing_restore
@@ -3750,6 +3860,41 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     self.assertEqual(store.odoo_instance_override_record, override)
                     post_deploy.assert_called_once()
 
+    def test_completed_testing_generation_deploy_omits_recorded_restore_inputs(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+
+        fresh = generation().model_copy(
+            update={
+                "product": "odoo-tenant-opw",
+                "context": "opw",
+                "target_id": "compose-opw",
+                "completed_at": generation().prepared_at,
+            }
+        )
+        source = {
+            key: value
+            for key, value in _UPSTREAM_RESTORE_ENV.items()
+            if key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+        }
+        result, post_deploy, _, store = self._apply_upstream_restore(
+            override_record=None,
+            post_deploy_results=(
+                OdooPostDeployResult(
+                    context=fresh.context,
+                    instance=fresh.instance,
+                    phase="deploy",
+                    post_deploy_status="pass",
+                ),
+            ),
+            test_instance="testing",
+            fresh_generation=fresh,
+            provider_extra_env=tuple(f"{key}={value}" for key, value in source.items()),
+            ordinary_deploy=True,
+        )
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertFalse(post_deploy.call_args.kwargs["run_destructive_restore"])
+        self.assertFalse(source.keys() & store.last_provider_env.keys())
+
     def test_fresh_restore_finishes_only_with_sanitized_post_deploy_readback(self) -> None:
         from tests.test_odoo_testing_restore import generation
 
@@ -3809,6 +3954,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         test_instance="testing",
                         fresh_generation=fresh,
                         route_writes=route_writes,
+                        provider_extra_env=tuple(
+                            f"{key}={value}"
+                            for key, value in _UPSTREAM_RESTORE_ENV.items()
+                            if key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+                        ),
                     )
                     self.assertEqual(result.deploy_status, "pass")
                     self.assertEqual(store.odoo_instance_override_record, override)
@@ -3830,8 +3980,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         post_deploy.call_args.kwargs["fresh_testing_generation"], fresh
                     )
                     post_deploy.assert_called_once()
-                    self.assertTrue(
-                        post_deploy.call_args.kwargs["fresh_restore_source_environment"]
+                    self.assertEqual(
+                        post_deploy.call_args.kwargs["fresh_restore_source_environment"],
+                        {
+                            key: value
+                            for key, value in _UPSTREAM_RESTORE_ENV.items()
+                            if key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+                        },
                     )
                     self.assertFalse(
                         any(
@@ -4051,6 +4206,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             }
 
         with (
+            patch("control_plane.dokploy.host_package.ensure_schedule_host_package"),
             patch(
                 "control_plane.dokploy.post_deploy.run_manual_data_schedule",
                 side_effect=run_schedule,

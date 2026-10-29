@@ -19,6 +19,9 @@ from control_plane.dokploy.application_runtime import (
     ApplicationTaskObservation,
 )
 from control_plane.http_app import idempotency_request_fingerprint
+from control_plane.http_routes.mutation_support import idempotency_scope
+from control_plane.service_auth import LaunchplaneAuthzPolicy, configured_local_operator_identity
+from tests.support.disposable_lanes import record_safety
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_source_qualification import (
     GenericWebSourceUnqualified,
@@ -29,10 +32,6 @@ from control_plane.release_review import release_version, ReleaseEvidenceUnavail
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
     resolve_generic_web_promotion_inputs,
-)
-from control_plane.workflows.verireel_app_maintenance import (
-    _request_internal_smoke_maintenance_api,
-    VeriReelAppMaintenanceRequest,
 )
 from tests.test_generic_web_promotion import _store_with_production
 from control_plane.generic_web_deploy_provider_adapter import (
@@ -87,12 +86,14 @@ from control_plane.workflows.generic_web_execution import (
     evidence_digest,
     execution_receipt,
     observe_execution,
+    require_receipt_extension,
 )
 from control_plane.workflows.generic_web_application_snapshot import (
     ApplicationLifecycleSnapshot,
     generic_web_provider_deployment_record_id,
 )
 from tests.test_generic_web_deploy_recovery import (
+    _recovery_bearer_config,
     _create_recovery_app,
     _generic_web_recovery_original_deploy,
     _generic_web_recovery_reservation,
@@ -109,8 +110,36 @@ from control_plane.generic_web_testing_settlement import settle_testing_pre_imag
 
 
 class OriginalExecutionTests(unittest.TestCase):
-    def test_real_post_image_transport_errors_keep_current_source_unqualified(self) -> None:
-        for failure in ("product_transport", "product_server", "canary_server"):
+    def test_recorded_execution_proof_cannot_be_rewritten(self) -> None:
+        entry = ExecutionEntry(
+            kind="schedule_run",
+            name="maintenance",
+            target_id="schedule-1",
+            payload_digest=evidence_digest({}),
+            acknowledgement="identified",
+            deployment_id="job-1",
+            status="running",
+            terminal="done",
+        )
+        recorded = ExecutionReceipt(entries=(entry,))
+        require_receipt_extension(recorded, recorded)
+        require_receipt_extension(
+            ExecutionReceipt(entries=(entry.model_copy(update={"terminal": ""}),)), recorded
+        )
+        for field, replacement in (
+            ("acknowledgement", "rejected"),
+            ("deployment_id", "job-2"),
+            ("status", "done"),
+            ("terminal", ""),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                require_receipt_extension(
+                    recorded,
+                    ExecutionReceipt(entries=(entry.model_copy(update={field: replacement}),)),
+                )
+
+    def test_real_unresolved_application_effects_keep_current_source_unqualified(self) -> None:
+        for failure in ("product_transport", "product_server", "canary_server", "quiesce_lost"):
             with (
                 self.subTest(failure=failure),
                 TemporaryDirectory() as directory,
@@ -122,7 +151,7 @@ class OriginalExecutionTests(unittest.TestCase):
                 fixture = _store_with_production()
                 profile = fixture.profile
                 lane = profile.lanes[0]
-                if failure == "canary_server":
+                if failure in {"canary_server", "quiesce_lost"}:
                     lane = lane.model_copy(
                         update={
                             "generic_web_extensions": _extensions().model_copy(
@@ -152,14 +181,14 @@ class OriginalExecutionTests(unittest.TestCase):
                     store.write_deployment_record(record)
                 for inventory in fixture.inventories.values():
                     store.write_environment_inventory(inventory)
-                release_version(store=store, profile=profile, instance="testing")
-                provider_type = (
-                    _LifecycleDeployProvider
-                    if failure == "canary_server"
-                    else _FakeGenericWebDeployProvider
+                baseline = store.read_environment_inventory(
+                    context_name=lane.context, instance_name="testing"
                 )
-                provider = provider_type(
-                    target_id="fixture-target",
+                baseline_record = store.read_deployment_record(baseline.deployment_record_id)
+                assert baseline_record.deployed_target is not None
+                provider = _LifecycleDeployProvider(
+                    target_id=baseline_record.deployed_target.target_id,
+                    target_name=baseline_record.deploy.target_name,
                     observation=GenericWebProviderDeploymentObservation(
                         outcome="present",
                         deployment_status="success",
@@ -210,6 +239,25 @@ class OriginalExecutionTests(unittest.TestCase):
                         updated_at=provider.observation.started_at,
                     )
                 )
+                if failure == "quiesce_lost":
+                    with store._session_factory() as read_session:
+                        pending = store._environment_inventory_row(
+                            baseline.model_copy(update={"context": "uncommitted-observation"})
+                        )
+                        read_session.add(pending)
+                        store._disposable_authority_context.session = read_session
+                        try:
+                            qualified_generic_web_source_inventory(
+                                store=store, profile=profile, lane=lane
+                            )
+                            self.assertIn(pending, read_session.new)
+                        finally:
+                            store._disposable_authority_context.session = None
+                release_version(store=store, profile=profile, instance="testing")
+                resolve_generic_web_promotion_inputs(
+                    record_store=store,
+                    request=GenericWebProdPromotionRequest(product=profile.product),
+                )
                 calls: list[str] = []
 
                 def response_lost(*_args: object, **_kwargs: object) -> Any:
@@ -235,16 +283,8 @@ class OriginalExecutionTests(unittest.TestCase):
                     def executor(
                         root: Path, records: object, context: Any, guard: Any
                     ) -> PostDeployUpdateEvidence:
-                        _request_internal_smoke_maintenance_api(
-                            base_url="https://fixture.invalid",
-                            secret="fixture-only",
-                            request=VeriReelAppMaintenanceRequest(
-                                action="grant-sponsored",
-                                intent="stable-testing-remote-e2e-grant-sponsored",
-                                email="fixture@example.com",
-                            ),
-                            execution_guard=guard,
-                        )
+                        guard.begin_exchange("fixture_request")
+                        response_lost()
                         return PostDeployUpdateEvidence(attempted=True, status="pass")
 
                     patches.enter_context(
@@ -253,20 +293,28 @@ class OriginalExecutionTests(unittest.TestCase):
                             return_value=executor,
                         )
                     )
-                    patches.enter_context(
-                        patch(
-                            "control_plane.workflows.verireel_app_maintenance.urlopen",
-                            side_effect=response_lost,
-                        )
-                    )
                 else:
-                    schedules: dict[str, api.JsonObject] = {}
+                    schedules: dict[str, api.JsonObject] = (
+                        {
+                            item.name: schedule_payload(
+                                item, target.resolved_target.target_id, enabled=True
+                            )
+                            for item in lane.generic_web_extensions.schedules
+                        }
+                        if failure == "quiesce_lost"
+                        else {}
+                    )
 
                     def upsert(**kwargs: Any) -> api.JsonObject:
                         guard = kwargs.get("provider_mutation_guard")
                         with guard() if callable(guard) else nullcontext():
                             payload = dict(kwargs["schedule_payload"])
                             schedules[str(payload["name"])] = payload
+                            if failure == "quiesce_lost":
+                                calls.append(failure)
+                                raise click.ClickException(
+                                    "Schedule write response lost after dispatch."
+                                )
                             return {**payload, "scheduleId": payload["name"]}
 
                     patches.enter_context(
@@ -304,7 +352,24 @@ class OriginalExecutionTests(unittest.TestCase):
                 current = store.read_environment_inventory(
                     context_name=lane.context, instance_name="testing"
                 )
-                held = store.read_deployment_record(current.deployment_record_id)
+                assert outcome.record is not None
+                held = store.read_deployment_record(
+                    adapter._deployment_record_id(
+                        build_provider_operation_key(
+                            scope=outcome.record.scope,
+                            route_path=outcome.record.route_path,
+                            idempotency_key=outcome.record.idempotency_key,
+                            request_fingerprint=outcome.record.request_fingerprint,
+                            reconciliation_key=outcome.record.reconciliation_key,
+                        )
+                    )
+                )
+                if failure == "quiesce_lost":
+                    self.assertEqual(current, baseline)
+                    self.assertEqual(
+                        store.read_deployment_record(baseline_record.record_id), baseline_record
+                    )
+                    self.assertEqual(provider.runtime_identities, [])
                 self.assertTrue(
                     any(
                         not entry.terminal
@@ -320,6 +385,25 @@ class OriginalExecutionTests(unittest.TestCase):
                         record_store=store,
                         request=GenericWebProdPromotionRequest(product=profile.product),
                     )
+
+                if failure == "quiesce_lost":
+                    from sqlalchemy import update
+                    from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+                    with store._engine.begin() as connection:
+                        connection.execute(
+                            update(LaunchplaneIdempotencyRow)
+                            .where(LaunchplaneIdempotencyRow.record_id == outcome.record.record_id)
+                            .values(lease_owner="drifted-raw-column")
+                        )
+                    self.assertIn(
+                        outcome.record.record_id,
+                        {item.record_id for item in store.list_held_provider_target_reservations()},
+                    )
+                    with self.assertRaises(ValueError):
+                        store.list_held_provider_target_reservations(
+                            provider_target_key=outcome.record.provider_target_key
+                        )
 
     def test_durable_terminal_run_does_not_reobserve_later_cron_history(self) -> None:
         entry = ExecutionEntry(
@@ -873,12 +957,14 @@ class OriginalExecutionTests(unittest.TestCase):
 
 
 class ExecutionRecoveryTests(unittest.TestCase):
+    database_url = ""
+
     def setUp(self) -> None:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.store = PostgresRecordStore(
-            database_url=f"sqlite+pysqlite:///{self.root / 'records.db'}"
+            database_url=self.database_url or f"sqlite+pysqlite:///{self.root / 'records.db'}"
         )
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
@@ -1769,12 +1855,10 @@ class ExecutionRecoveryTests(unittest.TestCase):
                     outcome = self.run_normal(self.normal_adapter(), key)
                 self.assertEqual(outcome.status, "reconcile_required")
                 saved = self.normal_record(outcome)
-                self.assertEqual(
+                with self.assertRaises(GenericWebSourceUnqualified):
                     qualified_generic_web_source_inventory(
                         store=self.store, profile=self.profile, lane=self.profile.lanes[0]
-                    ).deployment_record_id,
-                    saved.record_id,
-                )
+                    )
                 if newer:
                     apply_deployment_evidence(
                         record_store=self.store,
@@ -1968,7 +2052,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 self.assertEqual(completed.response_payload["result"]["deploy_status"], "fail")
 
     def test_legacy_missing_record_with_required_executor_is_not_image_only(self) -> None:
-        self.profile = _profile()
+        self.profile = _profile(driver_id="odoo")
         self.store.write_product_profile_record(self.profile)
         reservation = _write_generic_web_recovery_reservation(
             self.store,
@@ -1996,12 +2080,8 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 return_value=self.provider,
             ),
             patch(
-                "control_plane.generic_web_deploy_provider_adapter.generic_web_post_deploy_executor_for_profile",
-                return_value=executor,
-            ),
-            patch(
-                "control_plane.workflows.generic_web_post_deploy.generic_web_post_deploy_executor_for_profile",
-                return_value=executor,
+                "control_plane.workflows.odoo_generic_web_post_deploy.execute_odoo_generic_web_post_deploy",
+                new=executor,
             ),
         ):
             status, result = _invoke_recovery(
@@ -2421,16 +2501,17 @@ class ExecutionRecoveryTests(unittest.TestCase):
         qualified: bool = False,
         snapshot: ApplicationLifecycleSnapshot | None = None,
         idempotency_key: str = "",
+        scope: str = "",
     ) -> str:
-        reservation = _write_generic_web_recovery_reservation(
-            self.store,
-            _generic_web_recovery_reservation(
-                original_deploy=self.request,
-                idempotency_key=idempotency_key or phase,
-                state="running",
-                provider_effect_phase=phase,
-            ),
+        reservation = _generic_web_recovery_reservation(
+            original_deploy=self.request,
+            idempotency_key=idempotency_key or phase,
+            state="running",
+            provider_effect_phase=phase,
         )
+        if scope:
+            reservation = reservation.model_copy(update={"scope": scope})
+        reservation = _write_generic_web_recovery_reservation(self.store, reservation)
         operation = build_provider_operation_key(
             scope=reservation.scope,
             route_path=reservation.route_path,
@@ -2897,6 +2978,12 @@ class ExecutionRecoveryTests(unittest.TestCase):
     def test_healthy_image_terminal_unqualified_settles_once_without_inventory_success(
         self,
     ) -> None:
+        self.check_terminal_unqualified_settlement(own=False)
+
+    def test_own_terminal_failure_settles_without_renewed_disposable_qualification(self) -> None:
+        self.check_terminal_unqualified_settlement(own=True)
+
+    def check_terminal_unqualified_settlement(self, *, own: bool) -> None:
         phase = "post_deploy_finished"
         entry = ExecutionEntry(
             kind="product_executor",
@@ -2906,8 +2993,20 @@ class ExecutionRecoveryTests(unittest.TestCase):
             acknowledgement="completed",
             terminal="executor_completed",
         )
-        record_id = self.prepare(phase, ExecutionReceipt(entries=(entry,)))
+        scope = ""
+        if own:
+            self.app = _create_recovery_app(
+                root=self.root, store=self.store, authz_policy=LaunchplaneAuthzPolicy()
+            )
+            identity = configured_local_operator_identity(_recovery_bearer_config())
+            assert identity is not None
+            scope = idempotency_scope(identity)
+        record_id = self.prepare(phase, ExecutionReceipt(entries=(entry,)), scope=scope)
         lane = self.profile.lanes[0]
+        if own:
+            record_safety(
+                self.store, self.profile.product, lane.context, lane.instance, data="only_copy"
+            )
         with (
             patch(
                 "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",

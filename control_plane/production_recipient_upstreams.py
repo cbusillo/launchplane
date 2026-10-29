@@ -7,6 +7,7 @@ from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.integration_allowances import canonical_sha256
 from control_plane.runtime_environments import site_delivered_secret_bindings_from_store
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_activation_compose import environment_mapping
 
 
 def upstream_connections(
@@ -44,9 +45,9 @@ def upstream_connections(
             or upstream.keys["password"] != binding.binding_key
         ):
             raise ValueError("The upstream requires its exact managed production read-only source.")
-        environment = document["services"][upstream.service].get("environment", {})
-        if isinstance(environment, list):
-            environment = dict(item.split("=", 1) for item in environment)
+        environment = environment_mapping(
+            document["services"][upstream.service].get("environment", {})
+        )
         settings = {role: str(environment.get(key, "")) for role, key in upstream.keys.items()}
         if (
             any(not value or len(value) > 4096 for value in settings.values())
@@ -67,9 +68,9 @@ def upstream_connections(
             )
         # The local writer cannot be reclassified as an upstream by repeating its
         # credential under another key. This comparison stays inside the service.
-        local = document["services"][record.request.database_service].get("environment", {})
-        if isinstance(local, list):
-            local = dict(item.split("=", 1) for item in local)
+        local = environment_mapping(
+            document["services"][record.request.database_service].get("environment", {})
+        )
         if settings["password"] in local.values():
             raise ValueError("A local database credential cannot be an upstream credential.")
         result.append(

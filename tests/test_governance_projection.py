@@ -19,6 +19,10 @@ from control_plane.contracts.ordinary_agent_session_lifecycle import OrdinaryAge
 from control_plane.governance_projection import build_governance_projection
 from control_plane.governance_projection import LiveGovernanceCurrentReadinessProvider
 from control_plane.merge_admission import MergeAdmissionEvaluation
+from control_plane.contracts.merge_train_controller_state import (
+    build_merge_train_controller_state_record,
+)
+from control_plane.storage.filesystem import _merge_train_controller_storage_id
 from tests.test_merge_readiness import _evaluate as _merge_readiness
 from tests.test_merge_admission_records import _guard_records
 from tests.test_merge_train_admission import _stack_collapse_record
@@ -89,6 +93,41 @@ class GovernanceProjectionTests(unittest.TestCase):
                 evaluated_at=NOW,
                 github_token_source=MergeTrainGitHubTokenSource(env_var="GH_TOKEN"),
             )
+            repository = controller_state.repository.swapcase()
+            alias = build_merge_train_controller_state_record(
+                repository=repository,
+                base_branch=controller_state.base_branch,
+                policy_key=controller_state.policy_key,
+                policy_sha256=controller_state.policy_sha256,
+                updated_at=NOW,
+            ).model_copy(
+                update={
+                    "repository": repository,
+                    "controller_key": f"merge-train-controller:{repository.replace('/', ':')}:{controller_state.base_branch}",
+                    "active_action": "land_batch",
+                    "active_phase": "merge_batch_entries",
+                }
+            )
+            path = store._write_model(
+                "launchplane_merge_train_controller_states",
+                _merge_train_controller_storage_id(alias.controller_key),
+                alias,
+            )
+            before = path.read_bytes()
+            token, factory = Mock(), Mock()
+            blocked = LiveGovernanceCurrentReadinessProvider(
+                github_token=token, evaluator_factory=factory
+            )(
+                store=store,
+                repository_evidence=evidence,
+                base_branch="main",
+                evaluated_at=NOW,
+                github_token_source=MergeTrainGitHubTokenSource(env_var="GH_TOKEN"),
+            )
+            self.assertEqual(blocked.availability, "unavailable")
+            token.assert_not_called()
+            factory.assert_not_called()
+            self.assertEqual(path.read_bytes(), before)
 
         self.assertEqual(result.availability, "available")
         self.assertIsNotNone(result.result)
@@ -258,6 +297,7 @@ class GovernanceProjectionTests(unittest.TestCase):
         store.list_merge_train_batch_landing_plan_records.return_value = (landing_record,)
         store.list_merge_train_batch_candidate_records.return_value = (candidate_record,)
         store.list_merge_train_controller_state_records.return_value = (controller_state,)
+        store.list_merge_train_controller_state_alias_records.return_value = ()
         token = Mock(return_value="test-token")
         evaluator = Mock()
         evaluator.evaluate.return_value = MergeAdmissionEvaluation(

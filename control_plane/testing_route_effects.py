@@ -3,12 +3,14 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
+from time import monotonic, sleep
 from typing import Any
 from uuid import uuid4
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_rebuild import REBUILD_ROUTE, REBUILD_SCOPE
 from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+from control_plane.dokploy.testing_route import TestingRoutePending
 from control_plane.dokploy.testing_route_execution import (
     TestingRouteExecutionCustody,
     TestingRouteExecutionIntent,
@@ -36,6 +38,7 @@ ROUTE_INITIALIZER_RECEIPT = REBUILD_ROUTE + ":route-initializer"
 ROUTE_WRITER_RECEIPT = REBUILD_ROUTE + ":route-writer"
 ROUTE_PREPARING = "testing-route-preparing"
 ROUTE_WRITING = "testing-route-writing"
+ROUTE_RELOAD_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -397,6 +400,30 @@ class TestingRouteEffects:
         # this CAS advances the attempt. Its initializer cannot publish a route.
         return ProviderObservation("absent", retry_safe=True)
 
+    def observe_for_abort(self, effect_phase: str, attempt_number: int) -> ProviderObservation:
+        if self.inverse:
+            raise ValueError("Abort settlement belongs only to the original forward effect.")
+        self.recovery_guard()
+        attempt = self.original_writer(attempt_number)
+        if attempt is None:
+            if effect_phase not in {"", ROUTE_PREPARING}:
+                return ProviderObservation("unknown")
+            outcome = "excluded"
+        elif self.writer_was_busy(attempt_number):
+            outcome = "excluded"
+        else:
+            outcome = self.settle(attempt)
+        if outcome not in {"applied", "excluded", "retired"}:
+            return ProviderObservation("unknown")
+        return ProviderObservation(
+            "present",
+            200,
+            {
+                "abort_writer_outcome": outcome,
+                **({"route_write_not_started": True} if outcome == "excluded" else {}),
+            },
+        )
+
     def apply(self, lease: ProviderOperationLease) -> ProviderMutationOutcome:
         controller = self.controller
         controller.guard()
@@ -485,6 +512,25 @@ class TestingRouteEffects:
             if self.inverse:
                 raise NativeSourceUnavailable("The excluded inverse may retry on its current root.")
             return ProviderMutationOutcome(200, {"route_write_not_started": True})
-        if outcome != "applied" or not self.present():
+        if outcome != "applied":
             raise NativeSourceUnavailable("The original route writer requires observation.")
+        self.wait_for_applied_route(lease)
         return ProviderMutationOutcome(200)
+
+    def wait_for_applied_route(self, lease: ProviderOperationLease) -> None:
+        deadline = monotonic() + ROUTE_RELOAD_TIMEOUT_SECONDS
+        while True:
+            self.recovery_guard()
+            lease.assert_current()
+            try:
+                if not self.present():
+                    raise NativeSourceUnavailable("The original route writer requires observation.")
+            except TestingRoutePending:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise NativeSourceUnavailable(
+                        "The original route writer requires observation."
+                    ) from None
+                sleep(min(1.0, remaining))
+            else:
+                return

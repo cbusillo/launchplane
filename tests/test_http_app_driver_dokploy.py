@@ -14,6 +14,8 @@ from unittest.mock import patch
 
 from click import ClickException
 
+from control_plane import dokploy as control_plane_dokploy
+
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -2270,7 +2272,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                         "deploymentId": "deployment-123",
                         "applicationId": "app-123",
                         "status": "done",
-                        "errorMessage": "",
+                        "errorMessage": "Cookie: [\n'session_id=made-up-cookie'\n]\nstatus=502",
                         "createdAt": "2026-07-11T17:33:15Z",
                         "startedAt": "2026-07-11T17:33:15Z",
                         "finishedAt": "2026-07-11T17:33:18Z",
@@ -2279,11 +2281,17 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                 ) as latest_deployment_mock,
                 patch(
                     "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_deployment_logs",
-                    return_value=(
-                        "starting deployment",
-                        "SMTP_PASSWORD=smtp-secret deployment complete",
-                    ),
+                    wraps=control_plane_dokploy.fetch_dokploy_deployment_logs,
                 ) as deployment_logs_mock,
+                patch(
+                    "control_plane.dokploy.api.dokploy_request",
+                    return_value={
+                        "logs": [
+                            "starting deployment",
+                            "SMTP_PASSWORD=smtp-secret deployment complete",
+                        ]
+                    },
+                ),
                 patch(
                     "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs"
                 ) as runtime_logs_mock,
@@ -2323,12 +2331,13 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         runtime_logs_mock.assert_not_called()
         payload = response.json()
         self.assertEqual(payload["request"]["source"], "deployment")
+        deployment = dict(payload["deployment"])
+        self.assertIn("status=502", deployment.pop("error_message"))
         self.assertEqual(
-            payload["deployment"],
+            deployment,
             {
                 "deployment_id": "deployment-123",
                 "status": "done",
-                "error_message": "",
                 "created_at": "2026-07-11T17:33:15Z",
                 "started_at": "2026-07-11T17:33:15Z",
                 "finished_at": "2026-07-11T17:33:18Z",
@@ -2338,6 +2347,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["logs"]["lines"][0], "starting deployment")
         self.assertIn("SMTP_PASSWORD=[redacted]", payload["logs"]["lines"][1])
         self.assertNotIn("smtp-secret", json.dumps(payload))
+        self.assertNotIn("made-up-cookie", json.dumps(payload))
         self.assertNotIn("secret-token", json.dumps(payload))
 
     async def test_tracked_target_logs_rejects_deployment_not_bound_to_target(self) -> None:
@@ -2429,8 +2439,8 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs",
-                    return_value=("API_TOKEN=plain-secret-value",),
+                    "control_plane.dokploy.api.dokploy_request",
+                    return_value={"logs": ["API_TOKEN=plain-secret-value"]},
                 ),
             ):
                 app = create_launchplane_fastapi_app(
@@ -2452,7 +2462,7 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["logs"]["lines"], ["API_TOKEN=[redacted]"])
+        self.assertTrue(any("API_TOKEN=" in line for line in payload["logs"]["lines"]))
         self.assertNotIn("plain-secret-value", json.dumps(payload))
 
     async def test_tracked_target_logs_normalizes_uppercase_path_values(self) -> None:
@@ -2912,7 +2922,9 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                     "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_deployment_logs",
                     side_effect=ClickException(
                         "Dokploy API GET /api/deployment.readLogs failed (500): "
-                        "DATABASE_URL=postgresql://user:provider-secret@example/db"
+                        "DATABASE_URL=postgresql://user:provider-secret@example/db\n"
+                        "Cookie: 'session_id=made-up-cookie' +\n 'other=made-up-other'\n"
+                        "status=502"
                     ),
                 ),
             ):
@@ -2940,6 +2952,8 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("deployment-log-read", payload["error"]["message"])
         self.assertIn("DATABASE_URL=[redacted]", payload["error"]["message"])
         self.assertNotIn("provider-secret", json.dumps(payload))
+        self.assertNotIn("made-up-", json.dumps(payload))
+        self.assertIn("status=502", payload["error"]["message"])
 
     async def test_tracked_target_logs_validates_query_values(self) -> None:
         app = create_launchplane_fastapi_app(

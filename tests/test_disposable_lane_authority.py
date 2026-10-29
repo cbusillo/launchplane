@@ -16,7 +16,9 @@ from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.auth import scoped_agent_transport
+from tests.support.application_resources import ApplicationResourceFixture
 from tests.support.disposable_lanes import record_safety
+from tests.support.down_lanes import record_lane_health
 from control_plane.disposable_lanes import disposable_lane_observation_sha256
 from tests.support.http import request
 from tests.support.profiles import _generic_site_profile_payload
@@ -111,6 +113,57 @@ class _DisposableRuntimeAuthorityFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
+    async def test_down_lane_runtime_recovery_rechecks_without_running_copy_safety(self) -> None:
+        record_lane_health(self.store, "example-site", self.context, datetime.now(timezone.utc))
+        record_safety(
+            self.store,
+            "example-site",
+            self.context,
+            "testing",
+            usage="unknown",
+            data="unknown",
+        )
+
+        def apply(**arguments: Any) -> dict[str, object]:
+            arguments["before_provider_mutation"]()
+            return {}
+
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+            side_effect=apply,
+        ) as driver:
+            self.assertEqual(await self.sync(), 202)
+            driver.assert_called_once()
+
+    async def test_down_lane_keeps_the_supported_separation_step_available(self) -> None:
+        record_lane_health(self.store, "example-site", self.context, datetime.now(timezone.utc))
+        record_safety(
+            self.store,
+            "example-site",
+            self.context,
+            "testing",
+            production_resources="separation_ready",
+        )
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+            return_value={},
+        ) as driver:
+            self.assertEqual(await self.sync(), 202)
+            driver.assert_called_once()
+
+    def testing_application(self) -> ProviderTargetRecord:
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"target_type": "application"})
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        ).model_copy(update={"provider_target_type": "application"})
+        self.store.write_provider_target_record(provider)
+        return provider
+
     async def test_bounded_observer_records_actor_and_leaves_lane_config_unchanged(self) -> None:
         initial = self.store.read_product_profile_record("example-site")
         inspected = await self.observe()
@@ -574,9 +627,20 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
                 clock.return_value = started + timedelta(seconds=2)
                 return OdooTestingUsage("unused", False, False)
 
-            with patch("control_plane.http_app.read_odoo_testing_usage", side_effect=expired):
+            from control_plane.contracts.application_resource_observation import (
+                ApplicationResourceObservation,
+            )
+
+            with (
+                patch("control_plane.http_app.read_odoo_testing_usage", side_effect=expired),
+                patch(
+                    "control_plane.dokploy.application_resources.collect_application_resource_observation",
+                    return_value=ApplicationResourceObservation(),
+                ),
+            ):
                 response = await self.observe(
                     mode="collect",
+                    include_application_resources=True,
                     lifetime_seconds=1,
                     expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
                 )
@@ -744,6 +808,169 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             ("unknown", "unknown"),
         )
 
+    async def test_existing_application_collection_reports_storage_without_qualifying_it(
+        self,
+    ) -> None:
+        provider = self.testing_application()
+        fixture = ApplicationResourceFixture(Path(self.temporary.name) / "provider")
+        (fixture.data / "private-state").write_text("synthetic-state")
+        payload = {
+            "applicationId": provider.target_id,
+            "appName": fixture.application,
+            "serverId": "recorded-server",
+            "mounts": [{"type": "volume", "volumeName": "owned-state"}],
+        }
+
+        inspected = await self.observe()
+        clock = [datetime.now(timezone.utc)]
+
+        def delayed_resources(**arguments: Any) -> None:
+            clock[0] += timedelta(seconds=2)
+            fixture.native_read(**arguments)
+
+        with (
+            patch.object(
+                self.store, "disposable_lane_observation_time", side_effect=lambda: clock[0]
+            ),
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://provider.invalid", "synthetic-provider-token"),
+            ),
+            patch("control_plane.dokploy.api.fetch_dokploy_target_payload", return_value=payload),
+            patch(
+                "control_plane.dokploy.native_copy_stream._read_remote",
+                side_effect=delayed_resources,
+            ) as reader,
+        ):
+            response = await self.observe(
+                mode="collect",
+                expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+                include_application_resources=True,
+                lifetime_seconds=1,
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        result = response.json()["result"]
+        self.assertEqual(result["application_resources"]["nonempty_volume_count"], 1)
+        self.assertFalse(result["application_resources"]["service_quiescent"])
+        self.assertEqual((result["data"], result["production_resources"]), ("unknown", "unknown"))
+        self.assertFalse(result["provider_mutation"])
+        evidence = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert evidence is not None
+        self.assertEqual(evidence.observed_at, clock[0])
+        self.assertEqual(evidence.expires_at, clock[0] + timedelta(seconds=1))
+        reader.assert_called_once()
+        self.assertEqual(reader.call_args.kwargs["server_id"], payload["serverId"])
+        self.assertEqual(reader.call_args.kwargs["payload"]["application"], payload["appName"])
+        self.assertNotIn("synthetic-provider-token", response.text)
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
+        ) as driver:
+            self.assertEqual(await self.sync(), 409)
+            driver.assert_not_called()
+
+    async def test_changed_application_inventory_keeps_unknown_and_projects_its_category(
+        self,
+    ) -> None:
+        provider = self.testing_application()
+        fixture = ApplicationResourceFixture(Path(self.temporary.name) / "provider")
+        fixture.change_containers = True
+        payload = {
+            "applicationId": provider.target_id,
+            "appName": fixture.application,
+            "serverId": "recorded-server",
+            "mounts": [{"type": "volume", "volumeName": "owned-state"}],
+        }
+        inspected = await self.observe()
+        with (
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://provider.invalid", "synthetic-provider-token"),
+            ),
+            patch("control_plane.dokploy.api.fetch_dokploy_target_payload", return_value=payload),
+            patch(
+                "control_plane.dokploy.native_copy_stream._read_remote",
+                side_effect=fixture.native_read,
+            ),
+        ):
+            response = await self.observe(
+                mode="collect",
+                expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+                include_application_resources=True,
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        result = response.json()["result"]
+        resource = result["application_resources"]
+        self.assertEqual(resource["changed_component"], "container_membership")
+        self.assertEqual(resource["status"], "unknown")
+        self.assertIsNone(resource["referenced_volume_count"])
+        self.assertEqual((result["data"], result["production_resources"]), ("unknown", "unknown"))
+        self.assertFalse(result["provider_mutation"])
+        self.assertNotIn(payload["appName"], response.text)
+        self.assertNotIn("synthetic-provider-token", response.text)
+
+    async def test_application_resource_denial_preserves_protection_without_further_reads(
+        self,
+    ) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        provider = self.testing_application()
+        record_safety(
+            self.store,
+            "example-site",
+            self.context,
+            "testing",
+            usage="in_use",
+            data="only_copy",
+            production_resources="shared",
+        )
+        before = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        inspected = await self.observe()
+        with (
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://provider.invalid", "synthetic-provider-token"),
+            ),
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                return_value={
+                    "applicationId": provider.target_id,
+                    "appName": "owned-application",
+                    "serverId": "recorded-server",
+                    "mounts": [],
+                },
+            ) as target_reader,
+            patch(
+                "control_plane.dokploy.native_copy_stream._read_remote",
+                side_effect=NativeSourceAuthorizationDenied("synthetic-private-detail"),
+            ) as reader,
+        ):
+            response = await self.observe(
+                mode="collect",
+                include_application_resources=True,
+                expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+            )
+        self.assertEqual(response.status_code, 403, response.text)
+        reader.assert_called_once()
+        target_reader.assert_called_once()
+        self.assertEqual(
+            self.store.read_disposable_lane_safety("example-site", self.context, "testing"), before
+        )
+        self.assertNotIn("synthetic-private", response.text)
+
+    async def test_application_resource_option_keeps_existing_identity_boundary(self) -> None:
+        inspected = await self.observe()
+        with (
+            scoped_agent_transport(),
+            patch("control_plane.dokploy.native_copy_stream._read_remote") as reader,
+        ):
+            response = await self.observe(
+                mode="collect",
+                include_application_resources=True,
+                expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+            )
+        self.assertEqual(response.status_code, 403, response.text)
+        reader.assert_not_called()
+
     async def test_collect_does_not_confuse_other_lane_or_provider_kinds_with_production_alias(
         self,
     ) -> None:
@@ -837,75 +1064,14 @@ class DisposableRuntimeAuthorityTests(_DisposableRuntimeAuthorityFixture):
             data_evidence="agent:reproducible-test-copy",
             isolation_evidence="agent:inspected-independent-resources",
         )
-        self.assertEqual(recorded.status_code, 202, recorded.text)
+        self.assertEqual(recorded.status_code, 409, recorded.text)
         evidence = self.store.read_disposable_lane_safety(profile.product, preview.context, "pr-1")
         assert evidence is not None
         self.assertEqual(
             (evidence.usage, evidence.data, evidence.production_resources),
-            ("unused", "reproducible", "isolated"),
+            ("unknown", "unknown", "unknown"),
         )
         self.assertEqual(self.store.read_preview_record(preview.preview_id), preview)
-
-        self.assertTrue(recorded.json()["result"]["reconcile_requested"])
-        self.assertTrue(self.store.list_product_reconcile_requests(product=profile.product))
-        from control_plane.disposable_lanes import (
-            require_disposable_lane,
-            DisposableLaneSafetyUnknown,
-        )
-
-        with self.assertRaises(DisposableLaneSafetyUnknown):
-            require_disposable_lane(
-                self.store, product=profile.product, context=preview.context, instance="pr-1"
-            )
-        require_disposable_lane(
-            self.store,
-            product=profile.product,
-            context=preview.context,
-            instance="pr-1",
-            preview_cleanup=True,
-        )
-        safe_facts = dict(
-            usage="unused",
-            data="reproducible",
-            production_resources="isolated",
-            usage_evidence="observed usage",
-            data_evidence="observed data",
-            isolation_evidence="observed resources",
-        )
-        scope = dict(context=preview.context, instance="pr-1", preview_id=preview.preview_id)
-        for field, value in (
-            ("usage", "in_use"),
-            ("data", "only_copy"),
-            ("production_resources", "shared"),
-        ):
-            with self.subTest(field=field):
-                clearing = await self.observe(**scope)
-                cleared = await self.observe(
-                    mode="clear",
-                    expected_observation_sha256=clearing.json()["result"]["observation_sha256"],
-                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
-                    **scope,
-                )
-                self.assertEqual(cleared.status_code, 202, cleared.text)
-                protected = await self.observe(
-                    **scope,
-                    mode="record",
-                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
-                    **{**safe_facts, field: value},
-                )
-                self.assertEqual(protected.status_code, 202, protected.text)
-                refused = await self.observe(
-                    **scope,
-                    mode="record",
-                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
-                    **safe_facts,
-                )
-                self.assertEqual(refused.status_code, 409, refused.text)
-                evidence = self.store.read_disposable_lane_safety(
-                    profile.product, preview.context, "pr-1"
-                )
-                assert evidence is not None
-                self.assertEqual(getattr(evidence, field), value)
 
     async def test_clear_rechecks_owned_preview_identity_and_binding(self) -> None:
         from control_plane.contracts.preview_record import PreviewRecord

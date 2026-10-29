@@ -19,21 +19,8 @@ from control_plane import live_target_runtime as control_plane_live_target_runti
 from control_plane import secrets as control_plane_secrets
 from control_plane.notifications import public_discord_url_error, public_url_error
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.every_code_notifications import (
-    EveryCodeNotificationAttemptRecord,
-    EveryCodeNotificationDestination,
-    EveryCodeNotificationPolicyRecord,
-)
-from control_plane.contracts.every_code_work_request import (
-    EveryCodeWorkRequestRecord,
-    EveryCodeWorkRequestStatusUpdate,
-    apply_every_code_work_request_status,
-    requeue_every_code_work_request,
-)
-from control_plane.every_code_notifications_delivery import (
-    deliver_every_code_blocked_notifications,
-    deliver_every_code_discord_notification,
-)
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -79,7 +66,6 @@ from control_plane.contracts.runner_lane_registration import (
     RunnerLaneRegistrationRequest,
     plan_runner_lane_registration,
 )
-from control_plane.every_code_github_webhook import handle_every_code_github_webhook_request
 from control_plane.generic_web_preview_authz import (
     GenericWebPreviewAuthzPlanRequest,
     generic_web_preview_rules,
@@ -87,7 +73,6 @@ from control_plane.generic_web_preview_authz import (
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
-    GitHubActionsIdentity,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LocalAdminPolicyRule,
@@ -240,62 +225,6 @@ class _FakeOAuth2Session:
         return _FakeGitHubResponse(self.payloads[url.split("?", 1)[0]])
 
 
-class _FlakyEveryCodeNotificationStore:
-    def __init__(self) -> None:
-        self.policies: list[EveryCodeNotificationPolicyRecord] = []
-        self.attempts: list[EveryCodeNotificationAttemptRecord] = []
-        self.fail_delivered_write = False
-
-    def list_every_code_notification_policy_records(
-        self,
-        *,
-        repository: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[EveryCodeNotificationPolicyRecord, ...]:
-        records = [
-            policy
-            for policy in self.policies
-            if (not repository or policy.repository in {"", repository})
-            and (not status or policy.status == status)
-        ]
-        return tuple(records[:limit] if limit is not None else records)
-
-    def write_every_code_notification_policy_record(
-        self, record: EveryCodeNotificationPolicyRecord
-    ) -> object:
-        self.policies.append(record)
-        return record.policy_id
-
-    def list_every_code_notification_attempt_records(
-        self,
-        *,
-        request_id: str = "",
-        event: str = "",
-        destination_kind: str = "",
-        limit: int | None = None,
-    ) -> tuple[EveryCodeNotificationAttemptRecord, ...]:
-        records = [
-            attempt
-            for attempt in self.attempts
-            if (not request_id or attempt.request_id == request_id)
-            and (not event or attempt.event == event)
-            and (not destination_kind or attempt.destination_kind == destination_kind)
-        ]
-        return tuple(records[:limit] if limit is not None else records)
-
-    def write_every_code_notification_attempt_record(
-        self, record: EveryCodeNotificationAttemptRecord
-    ) -> object:
-        if self.fail_delivered_write and record.delivery_status == "delivered":
-            raise RuntimeError("attempt write unavailable")
-        self.attempts = [
-            attempt for attempt in self.attempts if attempt.attempt_id != record.attempt_id
-        ]
-        self.attempts.append(record)
-        return record.attempt_id
-
-
 def _local_admin_policy(
     *,
     actions: tuple[str, ...],
@@ -312,38 +241,6 @@ def _local_admin_policy(
                 actions=actions,
             ),
         )
-    )
-
-
-def _every_code_worker_policy(*, extra_actions: tuple[str, ...] = ()) -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "github_actions": [
-                {
-                    "repository": "cbusillo/launchplane",
-                    "workflow_refs": [
-                        "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
-                    ],
-                    "event_names": ["workflow_dispatch"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": [
-                        "every_code_work_request.read",
-                        "every_code_work_request.claim",
-                        "every_code_work_request.update",
-                        *extra_actions,
-                    ],
-                }
-            ]
-        }
-    )
-
-
-def _every_code_worker_identity() -> GitHubActionsIdentity:
-    return _identity(
-        repository="cbusillo/launchplane",
-        workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
-        event_name="workflow_dispatch",
     )
 
 
@@ -741,300 +638,6 @@ def _write_dokploy_managed_secrets(*, store: PostgresRecordStore) -> None:
         binding_key="DOKPLOY_TOKEN",
         actor="test",
     )
-
-
-def _github_webhook_body_signature(body_bytes: bytes, secret: str) -> str:
-    signature = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
-    return f"sha256={signature}"
-
-
-def _github_webhook_signature(payload: Mapping[str, object], secret: str) -> str:
-    body_bytes = json.dumps(payload).encode("utf-8")
-    return _github_webhook_body_signature(body_bytes, secret)
-
-
-def _every_code_github_issue_labeled_payload(
-    *,
-    label: str = "every-code",
-    action: str = "labeled",
-    repository: str = "cbusillo/code",
-    issue_number: int = 123,
-    issue_url: str = "",
-    closed_at: str = "",
-    state_reason: str = "",
-) -> dict[str, object]:
-    resolved_issue_url = (
-        issue_url.strip() or f"https://github.com/{repository}/issues/{issue_number}"
-    )
-    issue_payload = {
-        "number": issue_number,
-        "html_url": resolved_issue_url,
-        "title": "Wire local automation",
-    }
-    if closed_at.strip():
-        issue_payload["closed_at"] = closed_at
-    if state_reason.strip():
-        issue_payload["state_reason"] = state_reason
-    return {
-        "action": action,
-        "label": {"name": label},
-        "repository": {"full_name": repository},
-        "issue": issue_payload,
-        "sender": {"login": "cbusillo"},
-    }
-
-
-def _every_code_github_pull_request_closed_payload(
-    *,
-    repository: str = "cbusillo/code",
-    pr_number: int = 26,
-    merged: bool = True,
-    closed_at: str = "2026-05-06T16:20:00Z",
-    body: str = "",
-) -> dict[str, object]:
-    return {
-        "action": "closed",
-        "repository": {"full_name": repository},
-        "pull_request": {
-            "number": pr_number,
-            "html_url": f"https://github.com/{repository}/pull/{pr_number}",
-            "merged": merged,
-            "closed_at": closed_at,
-            "body": body,
-        },
-        "sender": {"login": "cbusillo"},
-    }
-
-
-def _seed_every_code_work_request_record(
-    state_dir: Path,
-    *,
-    request_id: str = "every-code-cbusillo-code-123-test",
-) -> EveryCodeWorkRequestRecord:
-    record = EveryCodeWorkRequestRecord(
-        request_id=request_id,
-        source="manual",
-        state="queued",
-        repository="cbusillo/code",
-        issue_number=123,
-        issue_url="https://github.com/cbusillo/code/issues/123",
-        issue_title="Wire local automation",
-        trigger_label="every-code",
-        trigger_actor="cbusillo",
-        queued_at="2026-05-05T22:00:00Z",
-        updated_at="2026-05-05T22:00:00Z",
-    )
-    FilesystemRecordStore(state_dir).write_every_code_work_request_record(record)
-    return record
-
-
-def _claim_every_code_work_request_record(
-    record_store: Any,
-    request_id: str,
-    *,
-    host: str = "Chris-Studio",
-) -> EveryCodeWorkRequestRecord:
-    record = record_store.claim_every_code_work_request_record(
-        request_id=request_id,
-        host=host,
-        claimed_at="2026-05-05T22:01:00Z",
-    )
-    if record is None:
-        raise AssertionError(f"Every Code work request {request_id} was not queued")
-    return cast(EveryCodeWorkRequestRecord, record)
-
-
-def _every_code_claim_fixture_response(
-    record: EveryCodeWorkRequestRecord,
-) -> tuple[int, dict[str, Any]]:
-    return (
-        202,
-        {
-            "records": {"request_id": record.request_id, "state": record.state},
-            "result": {"request": record.model_dump(mode="json")},
-        },
-    )
-
-
-def _claim_every_code_work_request_in_filesystem(
-    state_dir: Path,
-    request_id: str,
-    *,
-    host: str = "Chris-Studio",
-) -> tuple[int, dict[str, Any]]:
-    record = _claim_every_code_work_request_record(
-        FilesystemRecordStore(state_dir),
-        request_id,
-        host=host,
-    )
-    return _every_code_claim_fixture_response(record)
-
-
-def _claim_every_code_work_request_in_postgres(
-    database_url: str,
-    request_id: str,
-    *,
-    host: str = "Chris-Studio",
-) -> tuple[int, dict[str, Any]]:
-    store = PostgresRecordStore(database_url=database_url)
-    try:
-        record = _claim_every_code_work_request_record(store, request_id, host=host)
-    finally:
-        store.close()
-    return _every_code_claim_fixture_response(record)
-
-
-def _update_every_code_work_request_status_record(
-    record_store: Any,
-    request_id: str,
-    *,
-    state: Literal["running", "done", "blocked"] = "running",
-    host: str = "Chris-Studio",
-    updated_at: str = "2026-05-05T22:02:00Z",
-    result_pr_url: str = "",
-    result_summary: str = "",
-    error_message: str = "",
-) -> EveryCodeWorkRequestRecord:
-    record = record_store.read_every_code_work_request_record(request_id)
-    updated = apply_every_code_work_request_status(
-        record,
-        EveryCodeWorkRequestStatusUpdate(
-            state=state,
-            host=host,
-            updated_at=updated_at,
-            fencing_token=record.fencing_token,
-            result_pr_url=result_pr_url,
-            result_summary=result_summary,
-            error_message=error_message,
-        ),
-    )
-    record_store.write_every_code_work_request_record(updated)
-    return updated
-
-
-def _every_code_status_fixture_response(
-    record: EveryCodeWorkRequestRecord,
-) -> tuple[int, dict[str, Any]]:
-    return (
-        202,
-        {
-            "records": {"request_id": record.request_id, "state": record.state},
-            "result": {"request": record.model_dump(mode="json"), "notifications": []},
-        },
-    )
-
-
-def _update_every_code_work_request_status_in_filesystem(
-    state_dir: Path,
-    request_id: str,
-    *,
-    state: Literal["running", "done", "blocked"] = "running",
-    host: str = "Chris-Studio",
-    updated_at: str = "2026-05-05T22:02:00Z",
-    result_pr_url: str = "",
-    result_summary: str = "",
-    error_message: str = "",
-) -> tuple[int, dict[str, Any]]:
-    record = _update_every_code_work_request_status_record(
-        FilesystemRecordStore(state_dir),
-        request_id,
-        state=state,
-        host=host,
-        updated_at=updated_at,
-        result_pr_url=result_pr_url,
-        result_summary=result_summary,
-        error_message=error_message,
-    )
-    return _every_code_status_fixture_response(record)
-
-
-def _update_every_code_work_request_status_in_postgres(
-    database_url: str,
-    request_id: str,
-    *,
-    state: Literal["running", "done", "blocked"] = "running",
-    host: str = "Chris-Studio",
-    updated_at: str = "2026-05-05T22:02:00Z",
-    result_pr_url: str = "",
-    result_summary: str = "",
-    error_message: str = "",
-) -> tuple[int, dict[str, Any]]:
-    store = PostgresRecordStore(database_url=database_url)
-    try:
-        record = _update_every_code_work_request_status_record(
-            store,
-            request_id,
-            state=state,
-            host=host,
-            updated_at=updated_at,
-            result_pr_url=result_pr_url,
-            result_summary=result_summary,
-            error_message=error_message,
-        )
-    finally:
-        store.close()
-    return _every_code_status_fixture_response(record)
-
-
-def _every_code_github_pr_comment_payload(
-    *,
-    repository: str = "cbusillo/code",
-    pr_number: int = 26,
-    body: str = "Please tighten this wording before merge.",
-    comment_id: int = 1001,
-    issue_body: str = "",
-    sender: str = "cbusillo",
-    sender_type: str = "User",
-) -> dict[str, object]:
-    return {
-        "action": "created",
-        "repository": {"full_name": repository},
-        "issue": {
-            "number": pr_number,
-            "html_url": f"https://github.com/{repository}/pull/{pr_number}",
-            "body": issue_body,
-            "pull_request": {"url": f"https://api.github.com/repos/{repository}/pulls/{pr_number}"},
-        },
-        "comment": {
-            "id": comment_id,
-            "node_id": f"IC_kwDO_test_{comment_id}",
-            "html_url": f"https://github.com/{repository}/pull/{pr_number}#issuecomment-{comment_id}",
-            "body": body,
-            "author_association": "OWNER",
-            "user": {"login": sender, "type": sender_type},
-        },
-        "sender": {"login": sender, "type": sender_type},
-    }
-
-
-def _every_code_github_issue_comment_payload(
-    *,
-    repository: str = "cbusillo/code",
-    issue_number: int = 123,
-    issue_author: str = "Mbanks89",
-    sender: str = "Mbanks89",
-    body: str = "/preview ok",
-    comment_id: int = 2001,
-) -> dict[str, object]:
-    return {
-        "action": "created",
-        "repository": {"full_name": repository},
-        "issue": {
-            "number": issue_number,
-            "html_url": f"https://github.com/{repository}/issues/{issue_number}",
-            "title": "Wire local automation",
-            "user": {"login": issue_author},
-        },
-        "comment": {
-            "id": comment_id,
-            "node_id": f"IC_kwDO_issue_{comment_id}",
-            "html_url": f"https://github.com/{repository}/issues/{issue_number}#issuecomment-{comment_id}",
-            "body": body,
-            "author_association": "CONTRIBUTOR",
-            "user": {"login": sender, "type": "User"},
-        },
-        "sender": {"login": sender, "type": "User"},
-    }
 
 
 def _invoke_app(
@@ -1442,372 +1045,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         payload={"product": "verireel"},
                     )
                     self.assertEqual(status, 404)
-
-    def test_every_code_blocked_status_posts_discord_notification(self) -> None:
-        secret = "launchplane-every-code-webhook-secret"
-        sent_payloads: list[tuple[str, dict[str, object]]] = []
-
-        def send_discord(webhook_url: str, payload: dict[str, object]) -> None:
-            sent_payloads.append((webhook_url, payload))
-
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
-                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: (
-                        "test-master-key"
-                    ),
-                },
-                clear=True,
-            ),
-        ):
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                secret_result = control_plane_secrets.write_secret_value(
-                    record_store=store,
-                    scope="context_instance",
-                    integration="every-code-notifications",
-                    name="discord webhook",
-                    plaintext_value="https://discord.com/api/webhooks/test/webhook",
-                    binding_key="DISCORD_WEBHOOK",
-                    context_name="launchplane",
-                    instance_name="every-code",
-                    actor="test",
-                    source_label="test",
-                )
-                store.write_every_code_notification_policy_record(
-                    EveryCodeNotificationPolicyRecord(
-                        policy_id="every-code-notification-discord",
-                        repository="cbusillo/code",
-                        status="enabled",
-                        created_at="2026-06-14T18:10:00Z",
-                        updated_at="2026-06-14T18:10:00Z",
-                        source="test",
-                        destinations=(
-                            EveryCodeNotificationDestination(
-                                destination_id="discord",
-                                kind="discord",
-                                discord_webhook_secret=str(secret_result["secret_id"]),
-                            ),
-                        ),
-                    )
-                )
-            finally:
-                store.close()
-
-            webhook_payload = _every_code_github_issue_labeled_payload()
-            store = PostgresRecordStore(database_url=database_url)
-            try:
-                create_status, create_payload = handle_every_code_github_webhook_request(
-                    json.dumps(webhook_payload).encode("utf-8"),
-                    "issues",
-                    "delivery-blocked-notify",
-                    _github_webhook_signature(webhook_payload, secret),
-                    store,
-                    root,
-                    "notification-test",
-                )
-            finally:
-                store.close()
-            request_id = str(cast(dict[str, object], create_payload["records"])["request_id"])
-            claim_status, _claim_payload = _claim_every_code_work_request_in_postgres(
-                database_url,
-                request_id,
-            )
-            store = PostgresRecordStore(database_url=database_url)
-            try:
-                blocked_record = _update_every_code_work_request_status_record(
-                    store,
-                    request_id,
-                    state="blocked",
-                    error_message="Every Code bot auth actor mismatch.",
-                )
-                notification_attempts = deliver_every_code_blocked_notifications(
-                    record_store=store,
-                    request=blocked_record,
-                    attempted_at="2026-05-05T22:03:00Z",
-                    discord_sender=send_discord,
-                )
-                attempts = store.list_every_code_notification_attempt_records(
-                    request_id=request_id,
-                    event="work_request_blocked",
-                )
-            finally:
-                store.close()
-
-        self.assertEqual(create_status, 202)
-        self.assertEqual(claim_status, 202)
-        self.assertEqual(blocked_record.state, "blocked")
-        self.assertEqual(len(sent_payloads), 1)
-        webhook_url, discord_payload = sent_payloads[0]
-        self.assertEqual(webhook_url, "https://discord.com/api/webhooks/test/webhook")
-        self.assertIn("embeds", discord_payload)
-        self.assertEqual(notification_attempts[0].delivery_status, "delivered")
-        self.assertEqual(attempts[0].delivery_status, "delivered")
-
-    def test_every_code_blocked_status_records_discord_failure(self) -> None:
-        secret = "launchplane-every-code-webhook-secret"
-
-        def send_discord(_webhook_url: str, _payload: dict[str, object]) -> None:
-            raise RuntimeError("discord unavailable")
-
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
-                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: (
-                        "test-master-key"
-                    ),
-                },
-                clear=True,
-            ),
-        ):
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                secret_result = control_plane_secrets.write_secret_value(
-                    record_store=store,
-                    scope="context_instance",
-                    integration="every-code-notifications",
-                    name="discord webhook",
-                    plaintext_value="https://discord.com/api/webhooks/test/webhook",
-                    binding_key="DISCORD_WEBHOOK",
-                    context_name="launchplane",
-                    instance_name="every-code",
-                    actor="test",
-                    source_label="test",
-                )
-                store.write_every_code_notification_policy_record(
-                    EveryCodeNotificationPolicyRecord(
-                        policy_id="every-code-notification-discord",
-                        repository="cbusillo/code",
-                        status="enabled",
-                        created_at="2026-06-14T18:10:00Z",
-                        updated_at="2026-06-14T18:10:00Z",
-                        source="test",
-                        destinations=(
-                            EveryCodeNotificationDestination(
-                                destination_id="discord",
-                                kind="discord",
-                                discord_webhook_secret=str(secret_result["secret_id"]),
-                            ),
-                        ),
-                    )
-                )
-            finally:
-                store.close()
-
-            webhook_payload = _every_code_github_issue_labeled_payload(issue_number=124)
-            store = PostgresRecordStore(database_url=database_url)
-            try:
-                create_status, create_payload = handle_every_code_github_webhook_request(
-                    json.dumps(webhook_payload).encode("utf-8"),
-                    "issues",
-                    "delivery-blocked-notify-failed",
-                    _github_webhook_signature(webhook_payload, secret),
-                    store,
-                    root,
-                    "notification-test",
-                )
-            finally:
-                store.close()
-            request_id = str(cast(dict[str, object], create_payload["records"])["request_id"])
-            claim_status, _claim_payload = _claim_every_code_work_request_in_postgres(
-                database_url,
-                request_id,
-            )
-            store = PostgresRecordStore(database_url=database_url)
-            try:
-                blocked_record = _update_every_code_work_request_status_record(
-                    store,
-                    request_id,
-                    state="blocked",
-                    error_message="Every Code bot claim comment failed.",
-                )
-                notification_attempts = deliver_every_code_blocked_notifications(
-                    record_store=store,
-                    request=blocked_record,
-                    attempted_at="2026-05-05T22:03:00Z",
-                    discord_sender=send_discord,
-                )
-                attempts = store.list_every_code_notification_attempt_records(
-                    request_id=request_id,
-                    event="work_request_blocked",
-                )
-            finally:
-                store.close()
-
-        self.assertEqual(create_status, 202)
-        self.assertEqual(claim_status, 202)
-        self.assertEqual(blocked_record.state, "blocked")
-        self.assertEqual(notification_attempts[0].delivery_status, "failed")
-        self.assertIn("discord unavailable", notification_attempts[0].error_message)
-        self.assertEqual(attempts[0].delivery_status, "failed")
-        self.assertIn("discord unavailable", attempts[0].error_message)
-
-    def test_every_code_discord_delivery_keeps_pending_marker_on_attempt_write_failure(
-        self,
-    ) -> None:
-        store = _FlakyEveryCodeNotificationStore()
-        policy_record = EveryCodeNotificationPolicyRecord(
-            policy_id="every-code-notification-discord",
-            repository="cbusillo/code",
-            status="enabled",
-            created_at="2026-06-14T18:10:00Z",
-            updated_at="2026-06-14T18:10:00Z",
-            source="test",
-            destinations=(
-                EveryCodeNotificationDestination(
-                    destination_id="discord",
-                    kind="discord",
-                    discord_webhook_secret="secret-discord-webhook",
-                ),
-            ),
-        )
-        store.write_every_code_notification_policy_record(policy_record)
-        request_record = EveryCodeWorkRequestRecord(
-            request_id="every-code-cbusillo-code-123-test",
-            source="github_issue_label",
-            state="blocked",
-            repository="cbusillo/code",
-            issue_number=123,
-            issue_url="https://github.com/cbusillo/code/issues/123",
-            trigger_label="every-code",
-            queued_at="2026-06-14T18:00:00Z",
-            updated_at="2026-06-14T18:10:00Z",
-            claimed_at="2026-06-14T18:01:00Z",
-            claimed_by_host="Chris-Studio",
-            started_at="2026-06-14T18:10:00Z",
-            finished_at="2026-06-14T18:10:00Z",
-            error_message="Every Code bot claim comment failed.",
-        )
-        sent_payloads: list[tuple[str, dict[str, object]]] = []
-
-        def send_discord(webhook_url: str, payload: dict[str, object]) -> None:
-            sent_payloads.append((webhook_url, payload))
-
-        store.fail_delivered_write = True
-        first_attempt = deliver_every_code_discord_notification(
-            notification_store=store,
-            secret_resolver=lambda _secret_id: "https://discord.com/api/webhooks/test/webhook",
-            request=request_record,
-            policy=policy_record,
-            destination=policy_record.destinations[0],
-            attempted_at="2026-06-14T18:11:00Z",
-            discord_sender=send_discord,
-        )
-        second_attempt = deliver_every_code_discord_notification(
-            notification_store=store,
-            secret_resolver=lambda _secret_id: "https://discord.com/api/webhooks/test/webhook",
-            request=request_record,
-            policy=policy_record,
-            destination=policy_record.destinations[0],
-            attempted_at="2026-06-14T18:12:00Z",
-            discord_sender=send_discord,
-        )
-
-        self.assertEqual(len(sent_payloads), 1)
-        self.assertEqual(first_attempt.delivery_status, "pending")
-        self.assertEqual(second_attempt.delivery_status, "pending")
-        self.assertEqual(store.attempts[0].delivery_status, "pending")
-
-    def test_every_code_blocked_notification_requeues_get_distinct_attempts(self) -> None:
-        store = _FlakyEveryCodeNotificationStore()
-        policy_record = EveryCodeNotificationPolicyRecord(
-            policy_id="every-code-notification-discord",
-            repository="cbusillo/code",
-            status="enabled",
-            created_at="2026-06-14T18:00:00Z",
-            updated_at="2026-06-14T18:00:00Z",
-            destinations=(
-                EveryCodeNotificationDestination(
-                    destination_id="discord",
-                    kind="discord",
-                    discord_webhook_secret="secret-every-code-discord",
-                ),
-            ),
-        )
-        store.write_every_code_notification_policy_record(policy_record)
-        first_blocked_request = EveryCodeWorkRequestRecord(
-            request_id="every-code-cbusillo-code-123-test",
-            source="github_issue_label",
-            state="blocked",
-            repository="cbusillo/code",
-            issue_number=123,
-            issue_url="https://github.com/cbusillo/code/issues/123",
-            trigger_label="every-code",
-            queued_at="2026-06-14T18:00:00Z",
-            updated_at="2026-06-14T18:10:00Z",
-            claimed_at="2026-06-14T18:01:00Z",
-            claimed_by_host="Chris-Studio",
-            started_at="2026-06-14T18:10:00Z",
-            finished_at="2026-06-14T18:10:00Z",
-            error_message="Every Code bot auth actor mismatch.",
-        )
-        requeued_request = requeue_every_code_work_request(
-            first_blocked_request,
-            queued_at="2026-06-14T18:00:00Z",
-            trigger_actor="cbusillo",
-        )
-        second_blocked_request = requeued_request.model_copy(
-            update={
-                "state": "blocked",
-                "updated_at": "2026-06-14T18:10:00Z",
-                "claimed_at": "2026-06-14T18:21:00Z",
-                "claimed_by_host": "Chris-Studio",
-                "started_at": "2026-06-14T18:25:00Z",
-                "finished_at": "2026-06-14T18:10:00Z",
-                "error_message": "Every Code bot auth actor mismatch again.",
-            }
-        )
-        sent_payloads: list[tuple[str, dict[str, object]]] = []
-
-        def send_discord(webhook_url: str, payload: dict[str, object]) -> None:
-            sent_payloads.append((webhook_url, payload))
-
-        first_attempt = deliver_every_code_discord_notification(
-            notification_store=store,
-            secret_resolver=lambda _secret_id: "https://discord.com/api/webhooks/test/webhook",
-            request=first_blocked_request,
-            policy=policy_record,
-            destination=policy_record.destinations[0],
-            attempted_at="2026-06-14T18:11:00Z",
-            discord_sender=send_discord,
-        )
-        repeated_attempt = deliver_every_code_discord_notification(
-            notification_store=store,
-            secret_resolver=lambda _secret_id: "https://discord.com/api/webhooks/test/webhook",
-            request=first_blocked_request,
-            policy=policy_record,
-            destination=policy_record.destinations[0],
-            attempted_at="2026-06-14T18:12:00Z",
-            discord_sender=send_discord,
-        )
-        second_attempt = deliver_every_code_discord_notification(
-            notification_store=store,
-            secret_resolver=lambda _secret_id: "https://discord.com/api/webhooks/test/webhook",
-            request=second_blocked_request,
-            policy=policy_record,
-            destination=policy_record.destinations[0],
-            attempted_at="2026-06-14T18:31:00Z",
-            discord_sender=send_discord,
-        )
-
-        self.assertEqual(len(sent_payloads), 2)
-        self.assertEqual(first_attempt.delivery_status, "delivered")
-        self.assertEqual(repeated_attempt.attempt_id, first_attempt.attempt_id)
-        self.assertNotEqual(second_attempt.attempt_id, first_attempt.attempt_id)
-        self.assertEqual(second_attempt.delivery_status, "delivered")
-        self.assertEqual(len(store.attempts), 2)
 
     def test_public_webhook_url_guard_rejects_non_public_ip_literals(self) -> None:
         self.assertEqual(
@@ -2828,6 +2065,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertNotIn("test:discord-blue-onboarding", json.dumps(payload, sort_keys=True))
 
     def test_generic_web_onboarding_dry_run_binds_apply_and_repository_identity(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -2902,38 +2142,133 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
             )
+            applied_request: dict[str, object] = {
+                "schema_version": 1,
+                "product": "launchplane",
+                "mode": "apply",
+                "reviewed_plan_sha256": plan_sha256,
+                "resolved_target_id": "app-demo-web",
+                "generic_web": generic_web,
+            }
+            store = PostgresRecordStore(database_url=database_url)
+            adopted_target = DokployTargetRecord(
+                context="demo-web-testing",
+                instance="testing",
+                target_type="application",
+                project_name="generated-project",
+                target_name="generated-target",
+                updated_at="2026-10-23T00:00:00Z",
+                source_label="test:adopted",
+            )
+            adopted_id = DokployTargetIdRecord(
+                context=adopted_target.context,
+                instance=adopted_target.instance,
+                target_id="app-demo-web",
+                updated_at=adopted_target.updated_at,
+                source_label=adopted_target.source_label,
+            )
+            store.write_dokploy_target_record(adopted_target)
+            store.write_dokploy_target_id_record(adopted_id)
+            store.write_provider_target_record(
+                ProviderTargetRecord.from_dokploy_records(
+                    target_record=adopted_target,
+                    target_id_record=adopted_id,
+                )
+            )
+            write_bundle = PostgresRecordStore.write_product_authority_bundle
+
+            with patch.object(
+                PostgresRecordStore,
+                "read_dokploy_target_id_record",
+                side_effect=FileNotFoundError("fixture missing identity"),
+            ):
+                missing_status, missing_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-onboarding/apply",
+                    payload=applied_request,
+                    headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+                )
+            self.assertEqual(missing_status, 400, missing_payload)
+            self.assertFalse(store.list_product_profile_records())
+
+            def race_target(current_store: PostgresRecordStore, bundle: Any) -> None:
+                concurrent = adopted_target.model_copy(update={"target_name": "concurrent-target"})
+                store.write_dokploy_target_record(concurrent)
+                store.write_provider_target_record(
+                    ProviderTargetRecord.from_dokploy_records(
+                        target_record=concurrent,
+                        target_id_record=adopted_id,
+                    )
+                )
+                write_bundle(current_store, bundle)
+
+            with patch.object(PostgresRecordStore, "write_product_authority_bundle", race_target):
+                race_status, race_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-onboarding/apply",
+                    payload=applied_request,
+                    headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+                )
+            self.assertEqual(race_status, 409, race_payload)
+            self.assertFalse(store.list_product_profile_records())
+            store.close()
             apply_status, apply_payload = _invoke_app(
                 app,
                 method="POST",
                 path="/v1/product-onboarding/apply",
-                payload={
-                    "schema_version": 1,
-                    "product": "launchplane",
-                    "mode": "apply",
-                    "reviewed_plan_sha256": plan_sha256,
-                    "resolved_target_id": "app-demo-web",
-                    "generic_web": generic_web,
-                },
+                payload=applied_request,
                 headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
             )
             replay_status, replay_payload = _invoke_app(
                 app,
                 method="POST",
                 path="/v1/product-onboarding/apply",
-                payload={
-                    "schema_version": 1,
-                    "product": "launchplane",
-                    "mode": "apply",
-                    "reviewed_plan_sha256": plan_sha256,
-                    "resolved_target_id": "app-demo-web",
-                    "generic_web": generic_web,
-                },
+                payload=applied_request,
                 headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
+                first_lookup = True
+                read_receipt = PostgresRecordStore.read_idempotency_record
+
+                def delayed_receipt(
+                    current_store: PostgresRecordStore,
+                    *,
+                    scope: str,
+                    route_path: str,
+                    idempotency_key: str,
+                ) -> LaunchplaneIdempotencyRecord | None:
+                    nonlocal first_lookup
+                    if first_lookup and route_path == "/v1/product-onboarding/apply":
+                        first_lookup = False
+                        return None
+                    return read_receipt(
+                        current_store,
+                        scope=scope,
+                        route_path=route_path,
+                        idempotency_key=idempotency_key,
+                    )
+
+                with patch.object(PostgresRecordStore, "read_idempotency_record", delayed_receipt):
+                    raced_status, raced_payload = _invoke_app(
+                        app,
+                        method="POST",
+                        path="/v1/product-onboarding/apply",
+                        payload=applied_request,
+                        headers={"Idempotency-Key": "generic-web-onboarding-demo-web"},
+                    )
+                self.assertEqual(raced_status, 202, raced_payload)
+                self.assertEqual(raced_payload["original_trace_id"], apply_payload["trace_id"])
+                self.assertEqual(raced_payload["result"], apply_payload["result"])
                 profiles = store.list_product_profile_records()
                 profile = store.read_product_profile_record("demo-web")
+                registered_target = store.read_dokploy_target_record(
+                    context_name="demo-web-testing", instance_name="testing"
+                )
+                self.assertEqual(registered_target.target_name, "concurrent-target")
+                self.assertEqual(registered_target.project_name, adopted_target.project_name)
                 runtime_environments = store.list_runtime_environment_records(
                     context_name="demo-web-preview"
                 )
@@ -6492,7 +5827,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(
             apply_response["error"]["code"], "authz_policy_schema_v3_transition_denied"
         )
-        self.assertIn("ordinary_enable_scope_not_singleton", apply_response["error"]["message"])
+        self.assertIn("ordinary_authority_retired", apply_response["error"]["message"])
 
     def test_managed_authz_reconcile_rejects_admin_human_session(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

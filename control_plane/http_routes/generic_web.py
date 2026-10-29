@@ -11,6 +11,9 @@ from pathlib import Path as FilePath
 from typing import Annotated, Any, Protocol, cast
 
 import click
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from control_plane.generic_web_source_qualification import GenericWebPromotionAdmissionRefused
+from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
 from fastapi import Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
@@ -20,6 +23,7 @@ from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployRecoveryDryRunResponse,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.promotion_record import promotion_failure
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -33,6 +37,7 @@ from control_plane.release_review import (
     require_unchanged_production_artifact,
 )
 from control_plane.generic_web_deploy_http import (
+    director_agent_can_deploy_testing,
     GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
     GenericWebDeployEnvelope,
     GenericWebDeployProductMismatchError,
@@ -136,7 +141,6 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
-    director_agent_identity,
 )
 from control_plane.storage.postgres import OutboxWithIdempotencyRequest, PostgresRecordStore
 from control_plane.workflows.generic_web_deploy import (
@@ -333,6 +337,17 @@ def build_generic_web_write_route_handlers(
                 code="promotion_intent_invalid",
                 message="Product-owned promotion intent does not match current evidence.",
             )
+
+    def promotion_admission_error(
+        error: GenericWebPromotionAdmissionRefused, trace_id: str
+    ) -> StarletteHTTPException:
+        _log_masked_promotion_error(error, trace_id=trace_id)
+        return dependencies.http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code=error.failure_code,
+            message=promotion_failure(error.failure_code).description,
+        )
 
     def require_product_promotion_target_snapshot(
         *,
@@ -1032,6 +1047,13 @@ def build_generic_web_write_route_handlers(
                         except asyncio.CancelledError:
                             continue
                     records, result = refresh_task.result()
+            except PreviewMemoryCapacityRefused as error:
+                raise dependencies.http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code=error.code,
+                    message=error.public_message(),
+                ) from None
             except (ValueError, click.ClickException) as error:
                 raise dependencies.http_error(
                     status_code=400,
@@ -1236,11 +1258,7 @@ def build_generic_web_write_route_handlers(
             instances=(lane.instance,),
         )
         standing_testing_permission = (
-            not explicitly_authorized
-            and isinstance(identity, LocalOperatorIdentity)
-            and director_agent_identity(identity)
-            and lane.instance == "testing"
-            and lane.generic_web_cutover is None
+            not explicitly_authorized and director_agent_can_deploy_testing(identity, lane)
         )
         if not explicitly_authorized and not standing_testing_permission:
             raise dependencies.http_error(
@@ -1579,6 +1597,8 @@ def build_generic_web_write_route_handlers(
                     code="not_found",
                     message=f"No Launchplane route for {_GENERIC_WEB_PROD_PROMOTION_ROUTE}.",
                 ) from error
+            except GenericWebPromotionAdmissionRefused as error:
+                raise promotion_admission_error(error, trace_id) from error
             except (ValueError, click.ClickException) as error:
                 _log_masked_promotion_error(error, trace_id=trace_id)
                 raise dependencies.http_error(
@@ -1603,6 +1623,8 @@ def build_generic_web_write_route_handlers(
                 code="not_found",
                 message=f"No Launchplane route for {_GENERIC_WEB_PROD_PROMOTION_ROUTE}.",
             ) from error
+        except GenericWebPromotionAdmissionRefused as error:
+            raise promotion_admission_error(error, trace_id) from error
         except (ValueError, click.ClickException) as error:
             _log_masked_promotion_error(error, trace_id=trace_id)
             raise dependencies.http_error(

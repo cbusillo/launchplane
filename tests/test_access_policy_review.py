@@ -74,6 +74,43 @@ class AccessPolicyReviewTests(unittest.TestCase):
             login_for_id=lambda _: "fixture-person",
         )
 
+    def test_stale_policy_review_withholds_rules_and_admin_is_a_role_gain(self) -> None:
+        before_rule = GitHubHumanPolicyRule(
+            managed_set_id="review.subjects",
+            managed_rule_id="subject",
+            github_ids=(789,),
+            roles=("read_only",),
+            actions=("operations.read",),
+        )
+        before = LaunchplaneAuthzPolicy(
+            schema_version=_policy().schema_version, github_humans=(before_rule,)
+        )
+        after = before.model_copy(
+            update={"github_humans": (before_rule.model_copy(update={"roles": ("admin",)}),)}
+        )
+        effect = _role_effects(after.github_humans[0], before, after, lambda _: "fixture-person")[0]
+        self.assertEqual(
+            (effect.before, effect.after, effect.state), ("read_only", "admin", "gained")
+        )
+        request = ManagedAuthzPolicySetProposalInput(
+            managed_set_id="review.subjects",
+            desired_policy=LaunchplaneAuthzPolicy(schema_version=before.schema_version),
+            reason="fixture",
+        )
+        store = Mock()
+        store.list_authz_policy_records.return_value = (_policy_record(before),)
+        evidence = plan_managed_authz_policy_set(store, request)
+        self.assertEqual(
+            build_access_policy_review(
+                record_store=store, request=request, evidence=evidence
+            ).state,
+            "available",
+        )
+        store.list_authz_policy_records.return_value = (_policy_record(after),)
+        review = build_access_policy_review(record_store=store, request=request, evidence=evidence)
+        self.assertEqual(review.state, "unavailable")
+        self.assertEqual(review.rules, ())
+
     def test_removing_only_role_names_principal_and_loss(self) -> None:
         review = self.review()
         self.assertEqual(review.state, "available")
@@ -103,6 +140,24 @@ class AccessPolicyReviewTests(unittest.TestCase):
     def test_unknown_team_membership_is_not_a_claim_of_entire_role_loss(self) -> None:
         effect = self.review(group_overlap=True).rules[0].role_effects[0]
         self.assertEqual(effect.state, "unknown")
+
+    def test_detailed_policy_read_fault_is_unavailable_without_rule_display(self) -> None:
+        from sqlalchemy.exc import OperationalError
+
+        for error in (
+            OSError("Policy file cannot be read"),
+            OperationalError(None, None, OSError("Policy table cannot be read")),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch(
+                    "control_plane.access_policy_review.plan_managed_authz_policy_reconcile",
+                    side_effect=error,
+                ),
+            ):
+                review = self.review()
+            self.assertEqual(review.state, "unavailable")
+            self.assertEqual(review.rules, ())
 
     def test_public_account_label_is_id_bound_and_uses_no_credentials(self) -> None:
         _public_github_account_login.cache_clear()

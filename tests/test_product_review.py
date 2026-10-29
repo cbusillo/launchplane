@@ -12,6 +12,8 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_review_status import OwnerReviewStatusPublisher
+from control_plane.release_review import PullRequestNotes
+from control_plane.client_test_notes import client_test_notes
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -106,6 +108,89 @@ class ProductReviewDecisionContractTests(unittest.TestCase):
 
 
 class ProductReviewDecisionStorageTests(unittest.TestCase):
+    def test_carry_storage_preserves_old_empty_shape_and_populated_rollback_evidence(self) -> None:
+        import json
+        from sqlalchemy import text
+        from control_plane.contracts.product_review import (
+            ProductReviewCarry,
+            ProductReviewCarryCommit,
+        )
+
+        source = _decision(record_id="source-acceptance", decided_at="2026-10-27T00:00:00Z")
+        head = "b" * 40
+        ordinary = source.model_copy(
+            update={
+                "record_id": "ordinary-carry",
+                "head_sha": head,
+                "base_branch": "main",
+                "carried_from": ProductReviewCarry(
+                    record_id=source.record_id,
+                    head_sha=source.head_sha,
+                    reason="client_impact_none",
+                    commits=(ProductReviewCarryCommit(sha=head, client_impact="none"),),
+                ),
+            }
+        )
+        populated = source.model_copy(
+            update={
+                "record_id": "attested-carry",
+                "head_sha": head,
+                "base_branch": "main",
+                "carried_from": ProductReviewCarry.model_validate(
+                    {
+                        "record_id": source.record_id,
+                        "head_sha": source.head_sha,
+                        "reason": "accepted_base_integration",
+                        "comparison_base_sha": "c" * 40,
+                        "integration_attestation_ids": ("reviewed-integration",),
+                        "restored_trees": (
+                            {
+                                "head_sha": head,
+                                "ancestor_sha": "d" * 40,
+                                "tree_sha": "e" * 40,
+                                "commit_shas": (head,),
+                            },
+                        ),
+                    }
+                ),
+            }
+        )
+        with TemporaryDirectory() as temporary:
+            filesystem = FilesystemRecordStore(state_dir=Path(temporary) / "files")
+            database = PostgresRecordStore(
+                database_url=sqlite_database_url(Path(temporary) / "state.db")
+            )
+            self.addCleanup(database.close)
+            database.ensure_schema()
+            for store in (filesystem, database):
+                with self.subTest(store=type(store).__name__):
+                    store.write_product_review_decision_record(ordinary)
+                    store.write_product_review_decision_record(populated)
+                    records = {
+                        record.record_id: record
+                        for record in store.list_product_review_decision_records(
+                            repository=source.repository,
+                            pull_request_number=source.pull_request_number,
+                        )
+                    }
+                    self.assertEqual(records[ordinary.record_id], ordinary)
+                    self.assertEqual(records[populated.record_id], populated)
+                    if isinstance(store, FilesystemRecordStore):
+                        raw = store._record_path(
+                            "launchplane_product_review_decisions", ordinary.record_id
+                        ).read_text()
+                    else:
+                        with store._engine.connect() as connection:
+                            raw = connection.execute(
+                                text(
+                                    "SELECT payload FROM launchplane_product_review_decisions WHERE record_id = :id"
+                                ),
+                                {"id": ordinary.record_id},
+                            ).scalar_one()
+                    payload = json.loads(raw)
+                    self.assertNotIn("restored_trees", payload["carried_from"])
+                    self.assertNotIn("integration_attestation_ids", payload["carried_from"])
+
     def _assert_newest_first_for_one_pull_request(self, store: object) -> None:
         assert isinstance(store, FilesystemRecordStore | PostgresRecordStore)
         store.write_product_review_decision_record(
@@ -159,6 +244,11 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(temporary_directory.cleanup)
         self.store = FilesystemRecordStore(state_dir=Path(temporary_directory.name))
         self.publisher = Mock(spec=OwnerReviewStatusPublisher)
+        self.pull_request_notes = PullRequestNotes(
+            title="Update the repair price",
+            client_test_notes="Check the repair price.",
+            client_test_notes_error="",
+        )
         self.session_manager = HumanSessionManager(
             config=_github_oauth_config(),
             session_store=InMemoryHumanSessionStore(),
@@ -179,6 +269,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: self.store,
             human_session_manager=self.session_manager,
             owner_review_status_publisher=self.publisher,
+            product_review_notes_reader=lambda *_: self.pull_request_notes,
         )
 
     async def _get(self, app: FastAPI, human: GitHubHumanIdentity) -> Response:
@@ -325,6 +416,11 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_owner_reviews_preview_and_decision_becomes_latest(self) -> None:
         self._write_product()
+        self.pull_request_notes = PullRequestNotes(
+            title="Show the repair price",
+            client_test_notes="Open the price list.",
+            client_test_notes_error="",
+        )
         app = self._app()
         owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
 
@@ -341,12 +437,55 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             before.json()["pull_request_url"], "https://github.com/every/example-site/pull/42"
         )
         self.assertIsNone(before.json()["latest_decision"])
+        self.assertEqual(before.json()["pull_request_title"], "Show the repair price")
+        self.assertEqual(before.json()["client_test_notes"], "Open the price list.")
         self.assertEqual(written.status_code, 200)
         latest = after.json()["latest_decision"]
         self.assertEqual(latest["decision"], "changes_requested")
         self.assertEqual(latest["reason"], "The price is wrong.")
         self.assertEqual(latest["owner_github_login"], "site-owner")
         self.assertEqual(latest["head_sha"], "abcdef1234567890abcdef1234567890abcdef12")
+
+    async def test_invalid_notes_block_acceptance_until_questions_are_answered(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+
+        self._write_product()
+        app = self._app()
+        owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
+        for notes in (
+            "",
+            f"Check the contact page.\n### {OPEN_CLIENT_QUESTIONS}\n- What is the address?",
+            f"Nothing for the Client to test: CI only.\n### {OPEN_CLIENT_QUESTIONS}\n- Confirm the address.",
+        ):
+            with self.subTest(notes=notes):
+                self.pull_request_notes = PullRequestNotes(
+                    title="Contact page",
+                    client_test_notes=notes,
+                    client_test_notes_error=client_test_notes(notes).error,
+                )
+                read = await self._get(app, owner)
+                self.assertTrue(read.json()["client_test_notes_error"])
+                refused = await self._post(app, owner, decision="accepted")
+                self.assertEqual(refused.status_code, 409)
+                self.assertEqual(refused.json()["error"]["code"], "client_test_notes_required")
+                self.assertFalse(
+                    self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                    )
+                )
+        requested = await self._post(
+            app, owner, decision="changes_requested", reason="Please fill in the facts."
+        )
+        self.assertEqual(requested.status_code, 200)
+        self.pull_request_notes = PullRequestNotes(
+            title="Contact page",
+            client_test_notes=f"Check the contact page.\n### {OPEN_CLIENT_QUESTIONS}\n",
+            client_test_notes_error="",
+        )
+        read = await self._get(app, owner)
+        self.assertFalse(read.json()["client_test_notes_error"])
+        accepted = await self._post(app, owner, decision="accepted")
+        self.assertEqual(accepted.status_code, 200)
 
     async def test_owner_is_recognized_by_github_id_after_a_login_rename(self) -> None:
         self._write_product()
@@ -359,6 +498,33 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["latest_decision"]["decision"], "accepted")
+
+    async def test_director_standing_client_can_accept_after_an_older_head_rejection(self) -> None:
+        self._write_product()
+        self.store.write_product_profile_record(
+            _profile().model_copy(update={"release_on_acceptance": "director_standing"})
+        )
+        self.store.write_product_review_decision_record(
+            _decision(record_id="earlier-rejection", decided_at="2026-09-20T10:00:00Z").model_copy(
+                update={
+                    "head_sha": "1" * 40,
+                    "decision": "changes_requested",
+                    "reason": "The page needs correction.",
+                }
+            )
+        )
+        owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
+        app = self._app()
+
+        response = await self._post(app, owner, decision="accepted")
+        readback = await self._get(app, owner)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(readback.json()["latest_decision"]["decision"], "accepted")
+        self.assertEqual(
+            readback.json()["latest_decision"]["head_sha"],
+            self._reviewed_preview()["reviewed_head_sha"],
+        )
 
     async def test_saved_decision_link_reads_history_only_for_the_visible_pull_request(
         self,

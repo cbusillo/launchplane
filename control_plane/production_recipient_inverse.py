@@ -451,6 +451,7 @@ def run_recipient_inverse(
     key: str,
     trace: str,
     validate_release: Callable[[], None],
+    allow_mutation: bool = True,
 ) -> str:
     adapter = RecipientInverseAdapter(root, store, record, trace, validate_release)
     outcome = run_durable_provider_operation(
@@ -468,5 +469,6 @@ def run_recipient_inverse(
         lease_owner=trace + "-inverse",
         response_trace_id=trace,
         adapter=adapter,
+        allow_mutation=allow_mutation,
     )
     return outcome.record.record_id if outcome.record is not None else ""

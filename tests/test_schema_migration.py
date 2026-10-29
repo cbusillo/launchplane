@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -8,6 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
@@ -18,6 +20,22 @@ from control_plane.contracts.product_owner import (
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.migrations.versions import (
+    e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
+    e8d2f6a0b4c7_drop_preview_enablement as retired_preview,
+    e9e3a7b1c5d8_join_retirement_paths as retirement_join,
+    b81ca763d924_add_discussion_topics as discussion_topics,
+    da72490fce13_join_topics_retirement as topics_join,
+    f0a4c8e2b6d9_canonical_public_host_fences as public_host_fences,
+    f1b5d9a3c7e0_join_public_host_fences as public_host_join,
+    f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
+    f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
+    a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
+    c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
+    b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
+    f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
+    c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
+)
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
     LEGACY_CURRENT_SCHEMA_REVISION,
@@ -39,10 +57,165 @@ from control_plane.storage.schema_migration import (
     main as migrate_main,
     schema_migration_action,
     SCHEMA_MIGRATION_TARGET_REVISION,
+    schema_migration_target,
 )
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_additive_attestation_migration_preserves_held_delivery_tables(self) -> None:
+        with TemporaryDirectory() as temporary:
+            url = f"sqlite+pysqlite:///{Path(temporary) / 'migration.db'}"
+            command.upgrade(alembic_config(url), integration_attestations.down_revision)
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            held_before = set(retired_delivery.RETIRED_TABLES) & set(
+                inspect(engine).get_table_names()
+            )
+            self.assertTrue(held_before)
+            command.upgrade(alembic_config(url), SCHEMA_MIGRATION_TARGET_REVISION)
+            self.assertTrue(held_before <= set(inspect(engine).get_table_names()))
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            self.assertEqual(
+                store.list_integration_attestation_records(
+                    repository="example/product", pull_request_number=1
+                ),
+                (),
+            )
+
+    def test_preceding_target_reads_additive_schema_without_downgrading_it(self) -> None:
+        with TemporaryDirectory() as temporary:
+            url = f"sqlite+pysqlite:///{Path(temporary) / 'compatibility.db'}"
+            command.upgrade(alembic_config(url), integration_attestations.down_revision)
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            before = set(inspect(engine).get_table_names())
+            self.assertTrue(set(retired_delivery.RETIRED_TABLES) & before)
+            self.assertNotIn("launchplane_integration_attestations", before)
+            command.upgrade(alembic_config(url), integration_attestations.revision)
+            self.assertEqual(
+                schema_migration_action(
+                    current_revision=integration_attestations.revision,
+                    target_revision=integration_attestations.down_revision,
+                ),
+                "compatible_ahead",
+            )
+            self.assertTrue(before <= set(inspect(engine).get_table_names()))
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            store.verify_schema()
+
+    def test_migration_preserves_existing_application_loggers(self) -> None:
+        application_logger = logging.getLogger("control_plane.merge_train_controller_run_once")
+        original_disabled = application_logger.disabled
+        self.addCleanup(setattr, application_logger, "disabled", original_disabled)
+        application_logger.disabled = False
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'records.sqlite3'}"
+            )
+
+            command.upgrade(alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
+
+        self.assertFalse(application_logger.disabled)
+
+    def test_delivery_preview_join_preserves_explicit_topics_route(self) -> None:
+        for current, target in (
+            (retired_delivery.revision, discussion_topics.revision),
+            (discussion_topics.revision, retired_delivery.revision),
+            (retired_delivery.revision, retired_preview.revision),
+            (retired_preview.revision, retired_delivery.revision),
+            (retirement_join.revision, discussion_topics.revision),
+            (discussion_topics.revision, retirement_join.revision),
+        ):
+            with self.subTest(current=current, target=target):
+                self.assertEqual(
+                    schema_migration_target(current_revision=current, target_revision=target),
+                    topics_join.revision,
+                )
+
+    def test_existing_hostname_held_join_can_add_approved_topics(self) -> None:
+        self.assertEqual(
+            schema_migration_target(
+                current_revision=public_host_join.revision, target_revision=topics_join.revision
+            ),
+            compatibility_join.revision,
+        )
+        self.assertEqual(
+            schema_migration_action(
+                current_revision=public_host_join.revision, target_revision=topics_join.revision
+            ),
+            "upgrade",
+        )
+
+    def test_hostname_only_database_does_not_infer_delivery_drop_approval(self) -> None:
+        script = ScriptDirectory.from_config(alembic_config("sqlite://"))
+        for current in (
+            public_host_fences.revision,
+            topics_hostnames.revision,
+            archive_hostnames_join.revision,
+            preview_hostnames_join.revision,
+            idle_hostnames_join.revision,
+        ):
+            with self.subTest(current=current):
+                target = schema_migration_target(
+                    current_revision=current,
+                    target_revision=SCHEMA_MIGRATION_TARGET_REVISION,
+                )
+                applied_revisions = {
+                    revision.revision for revision in script.iterate_revisions(target, "base")
+                }
+                self.assertNotIn(retired_delivery.revision, applied_revisions)
+                self.assertEqual(
+                    schema_migration_action(current_revision=current),
+                    "current" if current == target else "upgrade",
+                )
+            for revision in (
+                retired_delivery.revision,
+                retirement_join.revision,
+                topics_join.revision,
+            ):
+                with self.subTest(current=current, explicit_target=revision):
+                    self.assertEqual(
+                        schema_migration_target(current_revision=current, target_revision=revision),
+                        idle_compatibility_join.revision,
+                    )
+                    self.assertEqual(
+                        schema_migration_action(current_revision=current, target_revision=revision),
+                        "upgrade",
+                    )
+
+    def test_future_source_revision_is_not_an_approved_bootstrap_target(self) -> None:
+        for revision in (
+            public_host_fences.revision,
+            public_host_join.revision,
+            topics_hostnames.revision,
+            compatibility_join.revision,
+        ):
+            with self.subTest(target=revision):
+                engine = MagicMock()
+                engine.url.get_backend_name.return_value = "postgresql"
+                with (
+                    patch(
+                        "control_plane.storage.schema_migration._build_engine", return_value=engine
+                    ) as build,
+                    patch(
+                        "control_plane.storage.schema_migration.schema_stamp_revision_for_engine",
+                        return_value="",
+                    ),
+                    patch(
+                        "control_plane.storage.schema_migration._current_revision",
+                        side_effect=("", revision),
+                    ),
+                    patch("control_plane.storage.schema_migration.command.upgrade") as upgrade,
+                    self.assertRaises(ValueError),
+                ):
+                    migrate_schema(
+                        database_url="postgresql://local/rehearsal", target_revision=revision
+                    )
+                build.assert_not_called()
+                upgrade.assert_not_called()
+
     def test_prepared_retirement_refuses_unreconciled_later_migration(self) -> None:
         with patch(
             "control_plane.storage.schema_invariants.ScriptDirectory.get_current_head",
@@ -1130,6 +1303,7 @@ class SchemaMigrationTests(unittest.TestCase):
                     ),
                     patch("control_plane.storage.schema_migration.command.stamp") as stamp,
                     patch("control_plane.storage.schema_migration.command.upgrade") as upgrade,
+                    patch("control_plane.storage.schema_migration.PostgresRecordStore"),
                 ):
                     migrated_revision = migrate_schema(
                         database_url="postgresql+psycopg://launchplane:test@postgres/launchplane"
@@ -1152,7 +1326,7 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertEqual(
             schema_migration_action(
                 current_revision=AUTHZ_COMPATIBILITY_FLOOR_REVISION,
-                target_revision=EXPECTED_ALEMBIC_HEAD_REVISION,
+                target_revision=retirement_join.revision,
             ),
             "upgrade",
         )
@@ -1163,7 +1337,7 @@ class SchemaMigrationTests(unittest.TestCase):
 
         for argv, expected in (
             ([], SCHEMA_MIGRATION_TARGET_REVISION),
-            (["--target-revision", EXPECTED_ALEMBIC_HEAD_REVISION], EXPECTED_ALEMBIC_HEAD_REVISION),
+            (["--target-revision", retirement_join.revision], retirement_join.revision),
         ):
             with (
                 self.subTest(argv=argv),

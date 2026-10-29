@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const frontendRoot = path.resolve(new URL("..", import.meta.url).pathname);
@@ -71,10 +71,11 @@ function selectUiOperations(openapi, manifestKey, method, selectedPaths) {
         `Canonical OpenAPI operation id drift for ${routePath}: expected ${operationId}, got ${pathItem[method].operationId ?? "missing"}.`,
       );
     }
-    if (Object.hasOwn(selectedPaths, routePath)) {
+    if (selectedPaths[routePath]?.[method]) {
       throw new Error(`Canonical OpenAPI selects the UI route more than once: ${routePath}`);
     }
     selectedPaths[routePath] = {
+      ...selectedPaths[routePath],
       ...(pathItem.parameters ? { parameters: pathItem.parameters } : {}),
       [method]: pathItem[method],
     };
@@ -109,12 +110,12 @@ function hoistInlineSchemaDefinitions(value, inlineSchemas) {
   }
   if (isObject(value.$defs)) {
     for (const [schemaName, schema] of Object.entries(value.$defs)) {
+      hoistInlineSchemaDefinitions(schema, inlineSchemas);
       const existingSchema = inlineSchemas[schemaName];
       if (existingSchema && JSON.stringify(existingSchema) !== JSON.stringify(schema)) {
         throw new Error(`Canonical OpenAPI defines conflicting inline schema: ${schemaName}`);
       }
       inlineSchemas[schemaName] = schema;
-      hoistInlineSchemaDefinitions(schema, inlineSchemas);
     }
     delete value.$defs;
   }
@@ -213,7 +214,14 @@ async function main() {
   const { inputPath, outputPath } = parseArgs(process.argv.slice(2));
   const openapi = JSON.parse(await readFile(inputPath, "utf-8"));
   const uiSchema = buildUiSchema(openapi);
-  await writeFile(outputPath, `${JSON.stringify(uiSchema, null, 2)}\n`, "utf-8");
+  const staging = await mkdtemp(path.join(path.dirname(outputPath), ".openapi-"));
+  try {
+    const stagedPath = path.join(staging, "schema.json");
+    await writeFile(stagedPath, `${JSON.stringify(uiSchema, null, 2)}\n`, "utf-8");
+    await rename(stagedPath, outputPath);
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
 }
 
 main().catch((error) => {

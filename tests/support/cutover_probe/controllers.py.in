@@ -7,12 +7,13 @@ from odoo.http import request
 class CutoverPages(http.Controller):
     @http.route("/fixture-submit", type="http", auth="public", methods=["POST"], csrf=False)
     def submit(self, message=""):
-        request.env["ir.config_parameter"].sudo().set_param("cutover.fixture.accepted", message)
+        request.env.cr.execute("INSERT INTO ir_config_parameter(key,value) VALUES (%s,%s) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", ("cutover.fixture.accepted", message))
         return request.make_response("Accepted", headers=[("Content-Type", "text/plain")])
 
     @http.route(["/", "/contact", "/prices"], type="http", auth="public", website=True, csrf=False)
     def page(self, **_values):
-        version = request.env["ir.config_parameter"].sudo().get_param("cutover.fixture.version")
+        request.env.cr.execute("SELECT value FROM ir_config_parameter WHERE key=%s", ("cutover.fixture.version",))
+        version = request.env.cr.fetchone()[0]
         html = (
             '<html><head><title>Cutover fixture</title>'
             '<link rel="stylesheet" href="/cutover_probe/static/site.css">'

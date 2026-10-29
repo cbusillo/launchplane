@@ -31,8 +31,9 @@ intent, `reviewed_plan_sha256` and an `Idempotency-Key` header. The service
 rechecks the plan and product/lane ownership, uses the existing atomic override
 compare-and-swap, and reads the record back. Concurrent changes require a fresh
 plan. The apply response's readback is intent readback; it is not Odoo readback
-or live activation. This operation is exposed through the service API; it has
-no protected workflow or installed helper binding.
+or live activation. The supported agent route uses the installed
+`launchplane-write-action.py` helper commands `odoo-website-settings-dry-run`
+and `odoo-website-settings-apply` through the service API.
 
 To withdraw pending intent, send `website_settings: null` through the same
 dry-run/reviewed-apply path. This preserves the applied/attempted snapshot and
@@ -41,6 +42,20 @@ applied values for the new candidate, so withdrawal cannot hide an active settin
 To switch collection off, prepare explicit disabled settings for acceptance.
 Withdrawal remains available without a testing candidate
 and on a two-slot lane; preparing new settings on that unsupported driver is refused.
+
+When the qualified release checklist needs only the Client's acceptance, changed
+prepared settings automatically open the existing Client release request. No
+Director click is needed, including settings-only releases on the same build and
+engineering releases carrying prepared settings. The intent must match the current
+artifact, its settings digest must differ from verified production settings, and
+the checklist's stale-intent, readback and other blockers still apply.
+The request directs the Client to the prepared indexing, analytics and cookie
+consent choices on the release page; those settings are not active on testing.
+Settings content uses the invitation's existing delivery receipts, so a new
+settings choice notifies once and the same choices on a later build do not ping
+again. Missing or withdrawn intent supplies no new trigger. Pure engineering-only
+releases keep their [existing invitation rules](release-review.md).
+Publishing a request records no acceptance and starts no production action.
 
 The Client release checklist compares recorded production values with these
 exact candidate choices, identifies kept/changed fields, and includes their
@@ -69,7 +84,15 @@ manual recovery reuses its verified snapshot. Rollback selects the production sn
 artifacts without a website snapshot disable CM indexing and native analytics
 across the database, without depending on the unverified new selector; they do
 not retain forward-release settings. Collection-only historical rollback preserves existing cookie and third-party controls. Successful readback retains the actually
-applied snapshot separately from pending intent, so subsequent review compares
+applied snapshot separately from pending intent. A verified collection-only
+rollback receipt remains recovery evidence, rather than a configured website
+snapshot in release review. The historical baseline therefore retains its
+accepted identity through the drill, allowing the second backup and re-promotion
+under the same acceptance. Re-promotion applies the accepted candidate settings.
+An accepted rollback restores that baseline even when it had no configured
+settings and the artifact is unchanged. Manual same-artifact recovery continues
+to reuse its verified applied snapshot.
+For configured website snapshots, subsequent review compares
 against production's applied settings. A failed maintenance retains its exact attempted snapshot as unverified, outside the production checklist; the existing maintenance or durable operation retry must verify it before a new release review.
 
 The stopped-web stable-target replacement driver supports native application.
@@ -104,6 +127,16 @@ Git-blob metadata in `artifacts.json` with the generated module. Values still
 come only from the accepted runtime payload. The runtime must provide the native
 startup shell/config functions covered by the legacy fixture; qualify the actual
 testing and retained rollback images before live activation.
+
+The canonical consumer supports legacy and typed string-parameter APIs. Copied
+websites remain excluded while their addon is scheduled for upgrade or removal;
+Odoo's base-only website model does not enable website settings. The generated
+program and immutable source fixture must advance together.
+
+Odoo 20 defaults its HTTP listener to loopback. The runtime environment record
+must supply `ODOO_HTTP_INTERFACE` for the container listener that the private
+proxy reaches. Verify readiness from that private proxy, not only from inside
+the web container. This is a runtime input, not an artifact build setting.
 
 Native Odoo consent behavior remains Essential only / Accept all. These fields
 are an application contract, not proof of Client consent acceptance, personal-

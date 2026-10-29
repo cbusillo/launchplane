@@ -332,6 +332,7 @@ export function ManagedSecretsChangePanel({
   const secretInputs = useRef(new Map<string, HTMLInputElement>());
   const [ownerFields, setOwnerFields] = useState<OwnerSecretInputField[]>([]);
   const [ownerSources, setOwnerSources] = useState(new Map<string, string>());
+  const [testingClasses, setTestingClasses] = useState<Record<string, "testing" | "">>({});
   const [ownerRefresh, setOwnerRefresh] = useState(0);
   const [ownerLoadError, setOwnerLoadError] = useState("");
   useEffect(() => {
@@ -365,10 +366,11 @@ export function ManagedSecretsChangePanel({
   const selectedSecrets = selectedIdentities.flatMap((identity) => {
     const secret = secretsByIdentity.get(identity);
     return secret
-      ? [{ bindingKey: secret.binding_key, integration: secret.integration, identity }]
+      ? [{ bindingKey: secret.binding_key, integration: secret.integration, identity,
+        secretClass: testingClasses[identity] || undefined }]
       : [];
   });
-  const selectionKey = productConfigSelectionKey(selectedIdentities.map(identity => `${identity}:${ownerSources.get(identity) || ""}`));
+  const selectionKey = productConfigSelectionKey(selectedIdentities.map(identity => `${identity}:${ownerSources.get(identity) || ""}:${testingClasses[identity] || ""}`));
   const planMatchesSelection = Boolean(planResult && selectionKey === plannedSelectionKey);
   const operationBusy = isOperationBusy(planOperation.state) || isOperationBusy(applyOperation.state);
   const draftLocked = productConfigDraftLocked(planOperation.state, applyOperation.state, reenterOriginalApply);
@@ -470,6 +472,7 @@ export function ManagedSecretsChangePanel({
     }
     setSelectedIdentities([]);
     setOwnerSources(new Map());
+    setTestingClasses({});
     setReason("");
     setLocalError("");
     setPlanResult(null);
@@ -546,6 +549,19 @@ export function ManagedSecretsChangePanel({
                 );
               }}
             >
+              {config.environment === "testing" && secret.integration === "runtime_environment" ? <label>
+                Credential class for {secret.binding_key}
+                <select value={testingClasses[identity] || ""} disabled={!selectedIdentities.includes(identity)} onChange={event => {
+                  const value = event.target.value === "testing" ? "testing" : "";
+                  setTestingClasses(current => ({ ...current, [identity]: value }));
+                  setPlanResult(null);
+                  setConfirmed(false);
+                }}>
+                  <option value="">Use lane and policy rules</option>
+                  <option value="testing">Independent testing credential</option>
+                </select>
+                <small>Choose testing only after verifying the account cannot change a live business system. Launchplane cannot verify the provider's permissions. Integration allowances are recorded separately.</small>
+              </label> : null}
               {submitted ? <label>
                 <input type="checkbox" checked={ownerSources.has(identity)} disabled={!selectedIdentities.includes(identity) || draftLocked} onChange={event => {
                   const input = secretInputs.current.get(identity);

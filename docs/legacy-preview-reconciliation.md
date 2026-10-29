@@ -189,6 +189,114 @@ the same context. Every call, including replay, checks current authorization.
 Testing-lane `product_retirement` authority does not authorize preview writes.
 This feature creates no grant, new caller identity or policy exception.
 
+## Unrecorded Odoo resources with retained original intent
+
+An interrupted snapshot Odoo preview can have a provider compose and original
+durable reservation without a preview lifecycle record. A new refresh leaves
+the original held when its native restore receipt, physical storage binding
+and database witness cannot prove custody. Completed operation status alone
+does not prove data ownership. Keep that original key and its retained intent.
+
+For this case, request a service-issued Odoo destroy plan for the exact existing
+preview. Submit it through the ordinary preview-apply service operation with
+`preserve_original_reservation_id` naming the original refresh reservation.
+This optional apply-envelope field does not change the issued plan or its
+fingerprint. The new destroy's retained intent includes the selector, so the
+same operation can recover after a service restart. Existing caller authority,
+executor locks, recovery grace, target ownership and provider quiescence still
+apply. Another held operation, an existing lifecycle record, known use, an only
+copy report, shared production resources or a target alias refuses admission.
+
+The original operation can outlive its issued plan's expiry. Only a
+framework-qualified retry of that exact preserving destroy, with its current
+lease, retained intent and nonempty effect checkpoint, may continue after
+expiry. It still rebuilds and compares current plan authority and rechecks
+preservation custody before effects. A fresh expired plan or another operation
+cannot use that continuation; retain the original key.
+
+After capture, the durable runner still requires positive provider retry safety.
+An admitted original retry rechecks admission and verifies its complete retained
+copy, then continues teardown without repeating capture or rewinding its checkpoint.
+This applies before and after expiry. Missing copies cannot be silently recaptured
+after a destructive checkpoint. Unknown effects stay held; an empty pre-effect
+checkpoint keeps ordinary retry and expiry handling.
+
+An older original without a clean snapshot can use its retained, scoped server
+schedule binding. If that binding is absent, the preserving operation captures
+and retains the same binding before effects. Missing or conflicting server
+evidence refuses preservation; old intents are not rewritten.
+
+The service qualifies an unserved plain preview with exclusively owned data,
+log and database volumes. Unexpected data, addon files, sessions, logs,
+additional databases, writable mounts or consumers remain held. Existing
+read-only runner bind mounts outside the data volumes are neither copied nor
+deleted; the runner is never started. Docker host-gateway aliases do not change
+storage custody. Other host aliases and privileged runtime shapes remain held.
+It stops that preview's unserved application containers under its durable
+provider lease. If its exclusively owned database is stopped, it starts only
+that database for the bounded dump after storage and capacity qualification.
+Memory headroom is checked again after startup. On completion or a reported
+failure it stops a database that it started; a previously running database stays
+running. Verifier removal and that database stop each have their own bounded
+cleanup window outside the work budget. Process death or transport loss retains the original operation's
+uncertainty fence and requires same-key recovery; it never restarts the application.
+The existing memory floor and disk reserve remain in force. It captures a
+bounded PostgreSQL dump and full filestore archive inside the same Docker
+host, hashes both and verifies every archived attachment. It restores the dump
+into a temporary database container using the already-local database image,
+no network, ports, application keys or original volumes, and verifies the
+restored schema before publishing the retained copy. Only exclusively owned
+verification fixtures are cleaned up.
+
+Completed copies live privately under the clean-snapshot state root's
+`retained-previews/<preservation-id>` directory. The receipt binds immutable
+original intent, provider identity and physical volume creation/backing
+identities. It records archive hashes, filestore inventory and successful
+restore verification. Copies have no automatic expiry. They preserve unknown
+legacy data; this operation does not qualify that data for later disposal.
+No runtime environment, license or credential file is exported.
+
+The same original-bound operation also handles an empty four-service overlay
+recipient. Its web must already be stopped; its idle runner is stopped through
+the existing leased preservation path. A stopped database uses that path's
+bounded startup, memory checks and cleanup. Pending and published receipt
+inspection only reads custody; it never starts or stops a database. Full
+same-key continuation requalifies the database before destruction. Start
+capacity is required only when starting the database; an unavailable policy
+still refuses that start. Plain backup capture retains its capacity gate.
+A verification that may start a database uses the current lease's unchanged
+effect checkpoint under the short mutation dispatch guard. Later teardown
+retries keep their advanced phase; they do not restart capture. Unguarded
+verification can read a running database but cannot start a stopped one.
+A read-only transaction must positively establish that
+only the empty `postgres` database remains, with no other client connections
+or prepared transactions. The running database's custody is checked before
+stopping an idle runner, then connections and use are checked again after
+quiescence. Additional databases or private files in the data,
+addon, log, overlay upper or work directories refuse qualification. Exact
+mounts, exclusive consumers, volume creation/backing identities and the
+original snapshot pin must agree. The shared lower and its matching snapshot
+receipt remain in place. This case publishes an empty-recipient custody
+receipt rather than copying the shared lower or claiming a database restore.
+Every later destructive checkpoint rechecks that custody while the provider
+target exists; after provider absence the receipt verifies against the immutable
+original snapshot identity and hashes without requiring shared cache bytes to outlive normal
+snapshot retirement. Teardown never removes that shared lower. Interrupted receipt publication resumes only
+under its matching pending ownership and the existing same-key recovery path.
+It neither repairs historical restore-start evidence nor writes a disposable
+safety report or a preview lifecycle record before successful destruction.
+
+Every subsequent destructive checkpoint and lifecycle adoption verifies the
+retained copy. Reopened applications, changed storage or changed original
+filestore block deletion. Only preservation phases with positive source and
+execution readback can resume an interrupted capture under its original key.
+Other uncertain phases retain the normal provider-observation fence. After
+provider absence, the complete copy remains verifiable without deleted source
+containers. Actual successful destroy writes the normal destroyed lifecycle;
+it never fabricates one to authorize an earlier action. The event reconciler
+can then build the still-open PR's current verified artifact from its clean
+snapshot through its ordinary fresh-preview path.
+
 ## Bounded service helper
 
 The producer's public agent/admin contract projects the operation. The bounded

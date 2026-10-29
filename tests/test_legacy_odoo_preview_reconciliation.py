@@ -253,7 +253,7 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
             datetime.now(timezone.utc),
             pr_number=number,
             compose_name=f"example-site-preview-pr-{number}",
-            compose_id="compose-1",
+            compose_id=f"${{created.composeId:example-site-preview-pr-{number}}}",
         )
         operation.adapter._execute_apply = provider_result
         with patch.object(operation.adapter, "capture_schedule_binding"):

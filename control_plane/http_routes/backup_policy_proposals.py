@@ -4,7 +4,11 @@ from typing import Annotated, Literal
 from fastapi import Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from control_plane.backup_policy_proposals import decide_backup_policy
+from control_plane.backup_policy_proposals import (
+    BackupPolicyDecisionAuthorizationError,
+    decide_backup_policy,
+    require_current_backup_policy_plan,
+)
 from control_plane.contracts.backup_policy_proposal import BackupPolicyHumanEvidence
 from control_plane.contracts.privileged_operation import (
     PrivilegedOperationRecord,
@@ -27,6 +31,7 @@ class BackupPolicyProposalReview(BaseModel):
     protection: BackupPolicyHumanEvidence
     can_approve: bool
     can_decline: bool
+    approval_unavailable_reason: str | None = None
 
 
 class BackupPolicyProposalListResponse(BaseModel):
@@ -76,16 +81,28 @@ def register_backup_policy_proposal_routes(
             )
 
     def review(
-        record: PrivilegedOperationRecord, identity: LaunchplaneIdentity
+        record: PrivilegedOperationRecord, identity: LaunchplaneIdentity, record_store: object
     ) -> BackupPolicyProposalReview:
         assert isinstance(record.evidence, BackupPolicyHumanEvidence)
         human_admin = isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
+        can_approve = human_admin and record.status == "planned"
+        approval_unavailable_reason = None
+        if can_approve:
+            try:
+                require_current_backup_policy_plan(record_store=record_store, record=record)
+            except (TypeError, ValueError, LookupError, PrivilegedOperationPlannerError):
+                can_approve = False
+                approval_unavailable_reason = (
+                    "Approval is unavailable because backup protection changed or could not be "
+                    "checked. Refresh, or ask an agent for a new proposal."
+                )
         return BackupPolicyProposalReview(
             operation_id=record.operation_id,
             status=record.status,
             protection=record.evidence,
-            can_approve=human_admin and record.status == "planned",
+            can_approve=can_approve,
             can_decline=human_admin and record.status == "planned",
+            approval_unavailable_reason=approval_unavailable_reason,
         )
 
     def list_backup_policy_proposals(
@@ -122,6 +139,7 @@ def register_backup_policy_proposal_routes(
                             record_store=store, operation_id=record.operation_id
                         ),
                         identity,
+                        store,
                     )
                     for record in records
                     if isinstance(record.evidence, BackupPolicyHumanEvidence)
@@ -173,6 +191,13 @@ def register_backup_policy_proposal_routes(
                 code="backup_proposal_missing",
                 message="Backup proposal was not found.",
             ) from error
+        except BackupPolicyDecisionAuthorizationError as error:
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Current immutable human authority is required to decide backup proposals.",
+            ) from error
         except (TypeError, LookupError) as error:
             raise dependencies.http_error(
                 status_code=503,
@@ -188,7 +213,7 @@ def register_backup_policy_proposal_routes(
                 message="The proposal or its authority changed. Refresh and request a new proposal if needed.",
             ) from error
         return BackupPolicyDecisionResponse(
-            trace_id=trace_id, proposal=review(result.record, identity)
+            trace_id=trace_id, proposal=review(result.record, identity, record_store)
         )
 
     app.add_api_route(

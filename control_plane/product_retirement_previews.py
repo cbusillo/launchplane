@@ -202,7 +202,7 @@ def retire_product_previews(adapter: object, lease: object, operation_key: str) 
     )
     from control_plane.provider_operations import ProviderOperationLease
     from control_plane.dokploy import source as dokploy_source
-    from control_plane.workflows.preview_resource_destroy import destroy_dokploy_preview_resource
+    from control_plane.workflows.preview_resource_destroy import destroy_dokploy_resource
 
     runner = cast(DokployProductRetirementAdapter, adapter)
     active_lease = cast(ProviderOperationLease, lease)
@@ -292,6 +292,7 @@ def retire_product_previews(adapter: object, lease: object, operation_key: str) 
                 control_plane_root=runner._control_plane_root,
                 target_id=ids[0],
                 observed_at=runner._requested_at,
+                capture_volume_custody=False,
             )
             if (
                 planned is None
@@ -331,6 +332,7 @@ def retire_product_previews(adapter: object, lease: object, operation_key: str) 
                     control_plane_root=runner._control_plane_root,
                     target_id=planned.target_id,
                     observed_at=runner._requested_at,
+                    capture_volume_custody=False,
                 )
                 if fresh.state != "absent" and not _observation_allows_reconciliation(
                     planned=planned, current=fresh
@@ -340,7 +342,7 @@ def retire_product_previews(adapter: object, lease: object, operation_key: str) 
                     active_lease, f"preview:{preview_plan.preview.preview_id}:{phase}"
                 )
 
-            result = destroy_dokploy_preview_resource(
+            result = destroy_dokploy_resource(
                 host=host,
                 token=token,
                 resource_type="application",

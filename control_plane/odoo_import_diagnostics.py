@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 from urllib.parse import urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
@@ -20,6 +20,7 @@ from control_plane import odoo_runtime_reads as reads
 from control_plane.odoo_diagnostic_identity import DIAGNOSTIC_IDENTITY_UNAVAILABLE
 from control_plane.odoo_runtime_source_grants import runtime_grants
 from control_plane.odoo_source_probe import GrantStatus
+from control_plane.odoo_source_prerequisite_programs import FailureStage
 from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -34,8 +35,14 @@ from control_plane.runtime_key_safety import ALLOWED_SECRET_CLASSES_BY_ENVIRONME
 from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
 from control_plane.contracts.runtime_identity import (
     runtime_identity_from_health_payload,
-    RUNTIME_IDENTITY_ENV_KEY,
 )
+
+if TYPE_CHECKING:
+    from control_plane.odoo_runtime_source_prerequisites import (
+        PrerequisiteStore,
+        SourceConsumerEvidence,
+    )
+
 
 SOURCE_PREFIXES = {
     name: next(
@@ -78,6 +85,7 @@ class SourceDiagnostic(BaseModel):
     parameters: tuple[ParameterAgreement, ...] = ()
     managed_connection_grants: Literal["read_only", "unsafe", "unknown"] = "unknown"
     applied_connection_grants: GrantStatus = "unknown"
+    failure_stage: FailureStage | None = None
 
 
 class ImportDiagnosticResult(BaseModel):
@@ -351,8 +359,14 @@ def _run_managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsaf
 def runtime_origin_grants(
     connection: reads.OdooRuntimeConnection,
     selected: dict[str, SourceAuthority],
-    environment: dict[str, str],
-) -> dict[str, GrantStatus]:
+    *,
+    store: DiagnosticStore,
+    product: str,
+    control_plane_root: Path,
+    database_url: str | None,
+) -> dict[str, "SourceConsumerEvidence"]:
+    from control_plane.odoo_runtime_source_prerequisites import SourceConsumerEvidence, SourceName
+
     keys = {
         name: (
             source.binding.binding_id,
@@ -364,7 +378,10 @@ def runtime_origin_grants(
         for name, source in selected.items()
     }
     active = {}
-    results: dict[str, GrantStatus] = {name: "unknown" for name in selected}
+    results = {
+        name: SourceConsumerEvidence(source=cast(SourceName, name), failure_stage="capacity")
+        for name in selected
+    }
     with _PROBE_LOCK:
         now = time.monotonic()
         for expired in [key for key, until in _FAILED_PROBES.items() if until <= now]:
@@ -385,20 +402,10 @@ def runtime_origin_grants(
             runtime_grants(
                 connection,
                 tuple(active),
-                observed_identity=environment.get(RUNTIME_IDENTITY_ENV_KEY, ""),
-                prefixes=SOURCE_PREFIXES,
-                fields=GRANT_FIELDS,
-                environment_keys={
-                    name: {
-                        field: (
-                            config_parameter_secret_env_key(prefix + ".password")
-                            if field == "password"
-                            else config_parameter_runtime_key(prefix + "." + field)
-                        )
-                        for field in (*FIELDS, "password")
-                    }
-                    for name, prefix in SOURCE_PREFIXES.items()
-                },
+                store=cast("PrerequisiteStore", store),
+                product=product,
+                control_plane_root=control_plane_root,
+                database_url=database_url,
             )
         )
         return results
@@ -406,7 +413,7 @@ def runtime_origin_grants(
         with _PROBE_LOCK:
             for name, key in active.items():
                 _ACTIVE_PROBES.discard(key)
-                if results[name] == "unknown":
+                if results[name].grants == "unknown":
                     _FAILED_PROBES[key] = time.monotonic() + 60
 
 
@@ -564,31 +571,26 @@ def diagnose_runtime_source_grants(
                 sources.append(SourceDiagnostic(source=source_name))
                 continue
             try:
-                settings = {
-                    **source.settings,
-                    "password": _decrypt_secret_value(
-                        source.version.ciphertext, source.version.key_id
-                    ),
-                }
-                if all(
-                    parameter_agreement(
-                        key,
-                        settings[key],
-                        environment.get(
-                            config_parameter_secret_env_key(prefix + ".password")
-                            if key == "password"
-                            else config_parameter_runtime_key(prefix + "." + key),
-                            "",
-                        ),
-                    )
-                    == "match"
-                    for key in (*GRANT_FIELDS, "password")
+                password = _decrypt_secret_value(source.version.ciphertext, source.version.key_id)
+                if password and hmac.compare_digest(
+                    password.encode(),
+                    environment.get(
+                        config_parameter_secret_env_key(prefix + ".password"), ""
+                    ).encode(),
                 ):
                     selected[name] = source
-                sources.append(SourceDiagnostic(source=source_name, binding="selected"))
             except Exception:
                 sources.append(SourceDiagnostic(source=source_name))
-        grants = runtime_origin_grants(connection, selected, environment)
+                continue
+            sources.append(SourceDiagnostic(source=source_name, binding="selected"))
+        grants = runtime_origin_grants(
+            connection,
+            selected,
+            store=store,
+            product=product,
+            control_plane_root=control_plane_root,
+            database_url=database_url,
+        )
         reads.assert_selection_current(store, selection)
         if import_authority(store, product).private_snapshot != authority.private_snapshot:
             return unknown_result()
@@ -611,8 +613,13 @@ def diagnose_runtime_source_grants(
             runtime="verified",
             sources=tuple(
                 result.model_copy(
-                    update={"applied_connection_grants": grants.get(result.source, "unknown")}
+                    update={
+                        "applied_connection_grants": grants[result.source].grants,
+                        "failure_stage": grants[result.source].failure_stage,
+                    }
                 )
+                if result.source in grants
+                else result
                 for result in sources
             ),
         )

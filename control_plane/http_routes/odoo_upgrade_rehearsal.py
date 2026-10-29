@@ -117,10 +117,11 @@ def register_odoo_upgrade_rehearsal_routes(
                 refuse(403, "authorization_denied")
             if not idempotency_key.strip() or not body.reviewed_plan_sha256:
                 refuse(400, "review_required")
-        if (
+        if body.mode == "readback" and (
             body.action == "validate-business"
-            and body.mode == "readback"
-            and (not idempotency_key.strip() or not body.reviewed_plan_sha256)
+            and not idempotency_key.strip()
+            or idempotency_key.strip()
+            and not body.reviewed_plan_sha256
         ):
             refuse(400, "original_review_required")
         if body.mode != "apply" and not dependencies.authorization_allows(
@@ -155,11 +156,15 @@ def register_odoo_upgrade_rehearsal_routes(
             principal = previous.principal
         adapter = OdooRehearsalAdapter(root, record_store, product, body, principal, trace)
         try:
-            if body.action == "retire-incomplete":
+            if body.action in {"retire-incomplete", "abandon-validation"} or (
+                body.action == "retire" and body.consumer_confirmation is not None
+            ):
                 from control_plane.odoo_incomplete_rehearsal_retirement import (
                     IncompleteRehearsalRetirement,
                 )
 
+                if body.consumer_confirmation is not None and not idempotency_key.strip():
+                    refuse(400, "idempotency_key_required")
                 retirement = IncompleteRehearsalRetirement(adapter, idempotency_key)
                 if body.mode == "apply":
                     return await run_provider_mutation(

@@ -1,5 +1,3 @@
-"""Regression for author-fixed candidate blocks, including unchanged-head refusal."""
-
 from __future__ import annotations
 
 import unittest
@@ -22,13 +20,30 @@ from control_plane.merge_train import MergeTrainBlockResult, build_merge_train_d
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
     _advance_from_live_snapshot,
+    _explore_nonpassing_base_candidates,
 )
+from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
+    MergeTrainBaseCheckObservation,
     MergeTrainGitHubError,
 )
-from control_plane.merge_train_setup_recovery_receipt import read_setup_recovery_receipt, receipt_id
+from control_plane.github_required_checks import CheckRequirement
+from control_plane.merge_train_candidate_failures import (
+    CandidateCheckFailure,
+    CandidateCheckFailures,
+)
+from control_plane.merge_train_base_retest_receipt import (
+    BaseRetestReceipt,
+    read_base_retest_receipt,
+    reserve_base_retest,
+)
+from control_plane.merge_train_setup_recovery_receipt import (
+    read_setup_recovery_receipt,
+    receipt_id,
+    reserve_setup_recovery,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
@@ -260,6 +275,91 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             },
         }
 
+    def test_red_base_stack_planning_preserves_unrelated_recorded_block_recovery(self) -> None:
+        root = self.other
+        child = root.model_copy(
+            update={
+                "number": 3,
+                "head_sha": "stack-child-head",
+                "head_ref": "feature/stack-child",
+                "base_ref": root.head_ref,
+                "base_sha": root.head_sha,
+            }
+        )
+        repair = root.model_copy(
+            update={
+                "number": 4,
+                "head_sha": "repair-head",
+                "head_ref": "feature/repair",
+                "created_at": "2026-10-18T00:04:00Z",
+            }
+        )
+        self.snapshot = self.snapshot.model_copy(
+            update={"pull_requests": (root, self.current, child, repair)}
+        )
+        trial = build_merge_train_dry_run_result(
+            policy=self.policy, snapshot=self.snapshot, batch_landing=True, new_candidate=True
+        )
+        failed = build_merge_train_batch_candidate(
+            dry_run_result=trial,
+            base_sha=self.snapshot.base_sha,
+            policy_sha256=self.policy_digest,
+            created_at=self.record.updated_at,
+        ).model_copy(
+            update={
+                "candidate_sha": "failed-current-group",
+                "status": "failed",
+                "required_checks_status": "fail",
+            }
+        )
+        parent = build_merge_train_batch_candidate_record(
+            candidate=failed,
+            source="service:controller:batch-candidate-failed:exploration",
+            updated_at=self.record.updated_at,
+        )
+        self.store.write_merge_train_batch_candidate_record(parent)
+        with patch.object(self.client, "ensure_repository_label", return_value=True):
+            result = _explore_nonpassing_base_candidates(
+                stack_collapse_store=self.store,
+                candidate_store=self.store,
+                github_client=self.client,
+                active_candidate_record=parent,
+                policy=self.policy,
+                policy_sha256=self.policy_digest,
+                snapshot=self.snapshot,
+                held_out=(),
+                details={"base_checks_status": "fail"},
+                recorded_at=self.lease.record.updated_at,
+                trace_id="exploration",
+                mutate=True,
+                lease=self.lease,
+            )
+        assert result is not None
+        payloads = build_feedback_payloads(response={"result": result})
+        self.assertEqual(
+            self.mutations,
+            [],
+            f"Recovery effect escaped in {result['controller_action']}; "
+            f"feedback reached {[row['pull_request_number'] for row in payloads]}",
+        )
+        self.assertIn(self.target.blocked_label, self.current.labels)
+        self.assertEqual(result["controller_action"], "plan_stack_collapse")
+        plan = next(
+            record
+            for record in self.store.list_merge_train_stack_collapse_plan_records(status="active")
+            if record.record_id == result["merge_train_stack_collapse_plan_record_id"]
+        )
+        self.assertEqual(
+            [entry.pull_request_number for entry in plan.plan.entries], [root.number, child.number]
+        )
+        recovery = self.advance(mutate=True)
+        self.assertEqual(recovery["controller_action"], "recover_candidate_block")
+        self.assertEqual(len(self.mutations), 1)
+        feedback = build_feedback_payloads(response={"result": recovery})
+        self.assertEqual([row["pull_request_number"] for row in feedback], [self.current.number])
+        self.assertEqual(feedback[0]["event"], "waiting")
+        self.assertTrue(feedback[0]["message"])
+
     def test_same_head_missing_store_block_recovers_once_with_durable_proof(self) -> None:
         self.setup_missing_store_failure()
         result = self.advance(mutate=True)
@@ -473,6 +573,28 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 self.advance(mutate=True)["controller_action"], "recover_candidate_block"
             )
             self.assertEqual(len(self.mutations), 1)
+
+    def test_changed_setup_evidence_during_recheck_preserves_block(self) -> None:
+        from control_plane import merge_train_github_setup_failure_recovery as recovery
+
+        self.setup_missing_store_failure()
+        original = recovery.read_setup_failure_recovery
+        reads = 0
+
+        def changed(*args: Any, **kwargs: Any) -> Any:
+            nonlocal reads
+            proof = original(*args, **kwargs)
+            assert proof is not None
+            reads += 1
+            return proof if reads == 1 else proof.model_copy(update={"job_id": proof.job_id + 1})
+
+        with patch.object(recovery, "read_setup_failure_recovery", side_effect=changed):
+            self.assertNotEqual(
+                self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+            )
+        self.assertGreaterEqual(reads, 2)
+        self.assertEqual(self.mutations, [])
+        self.assertEqual(self.advance(mutate=True)["controller_action"], "recover_candidate_block")
 
     def test_unreviewed_or_spent_recovery_does_not_fetch_causal_evidence(self) -> None:
         self.setup_missing_store_failure()
@@ -700,6 +822,334 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             lease=self.lease,
             snapshot=self.snapshot,
         )
+
+    def setup_base_retest(self) -> None:
+        new_base = "d" * 40
+        self.current = self.old.model_copy(
+            update={"base_sha": self.old.base_sha, "labels": (self.target.blocked_label,)}
+        )
+        self.snapshot = self.snapshot.model_copy(
+            update={"base_sha": new_base, "pull_requests": (self.current,)}
+        )
+        self.comments[0]["body"] = (
+            f"Review result: weighed\nHead: {self.current.head_sha}\n\nFindings addressed."
+        )
+        requirement = CheckRequirement(name="ci-gate", app_id=self.writer_app_id)
+        self.enterContext(
+            patch.object(
+                self.client,
+                "read_candidate_check_failures",
+                return_value=CandidateCheckFailures(
+                    checks=(
+                        CandidateCheckFailure(
+                            name="ci-gate",
+                            conclusion="failure",
+                            url="",
+                            identity_name="ci-gate",
+                        ),
+                    ),
+                    attribution_requirements=(requirement,),
+                ),
+            )
+        )
+        self.enterContext(
+            patch.object(
+                self.client,
+                "read_base_check_observation",
+                return_value=MergeTrainBaseCheckObservation("pass"),
+            )
+        )
+        self.enterContext(
+            patch.object(self.client, "read_setup_failure_recovery", return_value=None)
+        )
+        prefix = f"/repos/{self.target.repository}"
+        self.setup_responses = {
+            f"{prefix}/branches/{self.target.base_branch}": {"commit": {"sha": new_base}}
+        }
+
+    def test_base_retest_uses_branch_ref_when_pull_request_base_lags(self) -> None:
+        self.setup_base_retest()
+        result = self.advance(mutate=True)
+        self.assertEqual(result["controller_action"], "recover_candidate_block")
+        self.assertEqual(result["reason_code"], "candidate_block_new_base_retest")
+        self.assertEqual(len(self.mutations), 1)
+        self.assertIsNotNone(
+            read_base_retest_receipt(
+                self.store,
+                self.target.repository,
+                self.current.number,
+                self.current.head_sha,
+            )
+        )
+
+    def test_base_retest_allows_unrelated_repository_policy_edit(self) -> None:
+        self.setup_base_retest()
+        other = build_test_merge_train_policy(repository="example/other").policies[0]
+        changed_other = other.model_copy(update={"enqueue_label": "other-ready"})
+        self.policy = self.policy.model_copy(update={"policies": (self.target, changed_other)})
+        current = MergeTrainPolicyRecord(
+            record_id="unrelated-edit",
+            source="test",
+            updated_at="2026-10-18T00:04:00Z",
+            policy=self.policy,
+        )
+        self.store.write_merge_train_policy_record(current)
+        self.policy_digest = current.policy_sha256
+
+        self.assertEqual(
+            self.advance(mutate=True)["reason_code"], "candidate_block_new_base_retest"
+        )
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_base_retest_refuses_relevant_target_policy_edit(self) -> None:
+        self.setup_base_retest()
+        self.target = self.target.model_copy(update={"enqueue_label": "changed-ready"})
+        self.policy = self.policy.model_copy(update={"policies": (self.target,)})
+        current = MergeTrainPolicyRecord(
+            record_id="target-edit",
+            source="test",
+            updated_at="2026-10-18T00:04:00Z",
+            policy=self.policy,
+        )
+        self.store.write_merge_train_policy_record(current)
+        self.policy_digest = current.policy_sha256
+
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        self.assertEqual(self.mutations, [])
+
+    def test_base_retest_ref_change_after_checkpoint_preserves_hold(self) -> None:
+        self.setup_base_retest()
+        prefix = f"/repos/{self.target.repository}"
+
+        def move_ref(**_: object) -> None:
+            self.setup_responses[f"{prefix}/branches/{self.target.base_branch}"] = {
+                "commit": {"sha": "e" * 40}
+            }
+
+        self.lease.checkpoint.side_effect = move_ref
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        self.assertEqual(self.mutations, [])
+
+    def test_no_effect_reservation_rebinds_after_the_branch_moves(self) -> None:
+        self.setup_base_retest()
+        prefix = f"/repos/{self.target.repository}"
+        later_base = "e" * 40
+
+        def move_ref(**_: object) -> None:
+            self.setup_responses[f"{prefix}/branches/{self.target.base_branch}"] = {
+                "commit": {"sha": later_base}
+            }
+
+        self.lease.checkpoint.side_effect = move_ref
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        self.assertEqual(self.mutations, [])
+        self.lease.checkpoint.side_effect = None
+        self.snapshot = self.snapshot.model_copy(update={"base_sha": later_base})
+        result = self.advance(mutate=True)
+        self.assertEqual(result["reason_code"], "candidate_block_new_base_retest")
+        self.assertEqual(len(self.mutations), 1)
+        receipt = read_base_retest_receipt(
+            self.store, self.target.repository, self.current.number, self.current.head_sha
+        )
+        assert receipt is not None
+        self.assertEqual(receipt.retest_base_sha, later_base)
+
+    def test_base_move_during_required_check_read_preserves_the_hold(self) -> None:
+        self.setup_base_retest()
+        prefix = f"/repos/{self.target.repository}"
+
+        def move_ref(**_: object) -> MergeTrainBaseCheckObservation:
+            self.setup_responses[f"{prefix}/branches/{self.target.base_branch}"] = {
+                "commit": {"sha": "e" * 40}
+            }
+            return MergeTrainBaseCheckObservation("pass")
+
+        with patch.object(self.client, "read_base_check_observation", side_effect=move_ref):
+            self.assertNotEqual(
+                self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+            )
+        self.assertEqual(self.mutations, [])
+
+    def test_same_reservation_replays_after_an_interrupted_delete(self) -> None:
+        self.setup_base_retest()
+        ordinary_request = self.request
+        interrupted = False
+
+        def interrupt_delete(*, method: str, path: str, body: object = None) -> object:
+            nonlocal interrupted
+            if method == "DELETE" and not interrupted:
+                interrupted = True
+                raise MergeTrainGitHubError("interrupted")
+            return ordinary_request(method=method, path=path, body=body)
+
+        self.transport.request.side_effect = interrupt_delete
+        with self.assertRaises(MergeTrainGitHubError):
+            self.advance(mutate=True)
+        self.assertEqual(self.mutations, [])
+        self.assertEqual(
+            self.advance(mutate=True)["reason_code"], "candidate_block_new_base_retest"
+        )
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_causal_setup_does_not_read_an_unavailable_base_budget(self) -> None:
+        self.setup_missing_store_failure()
+        self.snapshot = self.snapshot.model_copy(update={"base_sha": "d" * 40})
+        with patch(
+            "control_plane.merge_train_block_recovery.read_base_retest_receipt",
+            side_effect=ValueError("unavailable"),
+        ) as read_base_budget:
+            self.assertEqual(
+                self.advance(mutate=True)["reason_code"],
+                "candidate_block_unrelated_setup_reviewed",
+            )
+            read_base_budget.assert_not_called()
+        self.assertEqual(len(self.mutations), 1)
+
+    def seed_setup_reservation(self, *, earlier_failure: bool) -> None:
+        self.setup_missing_store_failure()
+        evidence = self.client.read_setup_failure_recovery(candidate=self.record.candidate)
+        assert evidence is not None
+        source = (
+            self.record.model_copy(update={"record_id": "earlier-failure"})
+            if earlier_failure
+            else self.record
+        )
+        reserve_setup_recovery(
+            store=self.store,
+            candidate=source,
+            policy=self.target,
+            evidence=evidence,
+            recorded_at=self.record.updated_at,
+        )
+
+    def test_spent_setup_budget_does_not_block_an_independent_base_retest(self) -> None:
+        self.seed_setup_reservation(earlier_failure=True)
+        self.setup_base_retest()
+        self.assertEqual(
+            self.advance(mutate=True)["reason_code"], "candidate_block_new_base_retest"
+        )
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_unresolved_setup_reservation_cannot_switch_to_base_recovery(self) -> None:
+        self.seed_setup_reservation(earlier_failure=False)
+        self.setup_base_retest()
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        self.assertEqual(self.mutations, [])
+        self.assertIsNone(
+            read_base_retest_receipt(
+                self.store, self.target.repository, self.current.number, self.current.head_sha
+            )
+        )
+
+    def test_spent_base_budget_does_not_block_valid_causal_setup(self) -> None:
+        self.setup_missing_store_failure()
+        source = self.record.model_copy(update={"record_id": "earlier-failure"})
+        reserve_base_retest(
+            store=self.store,
+            candidate=source,
+            policy=self.target,
+            receipt=BaseRetestReceipt(
+                failed_record_id=source.record_id,
+                failed_base_sha=source.candidate.base_sha,
+                head_sha=self.current.head_sha,
+                applied_label_event_id=self.label_event["id"],
+                retest_base_sha="d" * 40,
+                required_checks=(CheckRequirement("ci-gate", self.writer_app_id),),
+            ),
+            recorded_at=self.record.updated_at,
+        )
+        self.snapshot = self.snapshot.model_copy(update={"base_sha": "e" * 40})
+        self.assertEqual(
+            self.advance(mutate=True)["reason_code"],
+            "candidate_block_unrelated_setup_reviewed",
+        )
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_base_retest_never_removes_a_later_label_event(self) -> None:
+        self.setup_base_retest()
+        self.events = [
+            self.label_event,
+            {**self.label_event, "id": 51, "event": "unlabeled"},
+            {**self.label_event, "id": 52},
+        ]
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        self.assertEqual(self.mutations, [])
+
+    def test_a_later_controller_failure_cannot_spend_another_base_retest(self) -> None:
+        self.setup_base_retest()
+        retest_base = self.snapshot.base_sha
+        self.assertEqual(
+            self.advance(mutate=True)["reason_code"], "candidate_block_new_base_retest"
+        )
+        later_base = "e" * 40
+        self.current = self.current.model_copy(update={"labels": (self.target.blocked_label,)})
+        self.snapshot = self.snapshot.model_copy(
+            update={"base_sha": later_base, "pull_requests": (self.current,)}
+        )
+        prefix = f"/repos/{self.target.repository}"
+        self.setup_responses[f"{prefix}/branches/{self.target.base_branch}"] = {
+            "commit": {"sha": later_base}
+        }
+        assert self.record.block_intent is not None
+        later = self.record.model_copy(
+            update={
+                "record_id": f"{self.record.record_id}-later",
+                "candidate": self.record.candidate.model_copy(update={"base_sha": retest_base}),
+                "block_intent": self.record.block_intent.model_copy(
+                    update={"prior_label_event_id": 51, "applied_label_event_id": 52}
+                ),
+            }
+        )
+        self.store.write_merge_train_batch_candidate_record(later)
+        self.events = [
+            self.label_event,
+            {**self.label_event, "id": 51, "event": "unlabeled"},
+            {**self.label_event, "id": 52},
+        ]
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_base_retest_rechecks_the_current_policy(self) -> None:
+        self.setup_base_retest()
+        current = MergeTrainPolicyRecord(
+            record_id="newer-policy",
+            source="test",
+            updated_at="2026-10-18T00:05:00Z",
+            policy=self.policy.model_copy(
+                update={
+                    "policies": (self.target.model_copy(update={"blocked_label": "another-hold"}),)
+                }
+            ),
+        )
+        self.store.write_merge_train_policy_record(current)
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        self.assertEqual(self.mutations, [])
+
+    def test_base_retest_rejects_unknown_required_evidence(self) -> None:
+        self.setup_base_retest()
+        with patch.object(
+            self.client,
+            "read_base_check_observation",
+            return_value=MergeTrainBaseCheckObservation("unknown"),
+        ):
+            self.assertNotEqual(
+                self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+            )
+        self.assertEqual(self.mutations, [])
 
     def test_unconfirmed_abandoned_intent_cannot_claim_a_later_label(self) -> None:
         assert self.record.block_intent is not None

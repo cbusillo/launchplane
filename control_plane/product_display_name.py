@@ -1,7 +1,5 @@
 """Review a display-name change without replacing product authority."""
 
-import hashlib
-import json
 import re
 import unicodedata
 from typing import Literal
@@ -9,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 class ProductDisplayNameRequest(BaseModel):
@@ -58,9 +57,7 @@ def build_display_name_plan(
         "display_name": request.display_name,
         "reason": request.reason,
     }
-    digest = hashlib.sha256(
-        json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(fingerprint)
     return (
         ProductDisplayNamePlan(
             product=profile.product,

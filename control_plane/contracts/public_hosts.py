@@ -1,6 +1,21 @@
 import re
 from urllib.parse import urlparse
 
+_DNS_CASE_TRANSLATION = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def canonical_dns_hostname(value: str) -> str:
+    return value.strip().rstrip(".").translate(_DNS_CASE_TRANSLATION)
+
+
+def retained_hostname_identity(value: str) -> str:
+    authority = value.strip().split("://", 1)[-1]
+    authority = re.split(r"[/#?]", authority, maxsplit=1)[0].rsplit("@", 1)[-1]
+    hostname = (
+        authority[1:].split("]", 1)[0] if authority.startswith("[") else authority.split(":", 1)[0]
+    )
+    return canonical_dns_hostname(hostname)
+
 
 def normalize_public_hosts(value: object) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)) or len(value) > 64:

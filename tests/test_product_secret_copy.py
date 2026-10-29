@@ -14,6 +14,7 @@ from httpx2 import Response
 
 from control_plane import secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_config import (
@@ -23,6 +24,7 @@ from control_plane.product_config import (
 from control_plane.product_config_http import ProductConfigApplyEnvelope
 from control_plane.service_auth import (
     BearerIdentityConfig,
+    GitHubHumanPolicyRule,
     LaunchplaneAuthzPolicy,
     LocalOperatorPolicyRule,
 )
@@ -33,7 +35,13 @@ from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
     SecretCopySourceConflictError,
 )
-from tests.http_app_test_support import _asgi_request, _RejectingVerifier
+from tests.http_app_test_support import (
+    _asgi_request,
+    _github_human_identity,
+    _github_oauth_config,
+    _RejectingVerifier,
+)
+from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from tests.support.auth import _local_operator_policy
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import _sqlite_database_url, _write_runtime_key_safety_policy
@@ -96,6 +104,173 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
         self.app = self.make_app()
+
+    def test_copy_to_preview_uses_the_existing_secret_path_and_stays_isolated(self) -> None:
+        from control_plane.runtime_environments import (
+            resolve_preview_runtime_environment_from_store,
+        )
+
+        from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
+
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="preview-copy-policy",
+                status="active",
+                source="test",
+                updated_at="2026-10-26T00:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="REPAIRSHOPR_TOKEN",
+                        secret_class="shared_safe",
+                        allowed_contexts=(self.profile.preview.context,),
+                        allowed_instances=("preview",),
+                    ),
+                ),
+            )
+        )
+        self.payload["instance"] = "preview"
+        result = apply_product_config_bundle(
+            record_store=self.store,
+            payload=self.payload,
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        safety = result["runtime_key_safety"]
+        assert isinstance(safety, dict)
+        self.assertEqual(safety["status"], "pass")
+        preview = resolve_preview_runtime_environment_from_store(
+            record_store=self.store,
+            context_name=self.profile.preview.context,
+            template_values={},
+        )
+        self.assertEqual(preview.values["REPAIRSHOPR_TOKEN"], "source-only-test-token")
+        preview_records = self.store.list_secret_records(instance_name="preview")
+        self.assertEqual(len(preview_records), 1)
+        self.assertNotEqual(preview_records[0].secret_id, self.source.secret_id)
+        self.assertEqual(self.store.read_secret_record(self.source.secret_id), self.source)
+
+    async def test_preview_configuration_uses_existing_http_read_and_apply_routes(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductSecretConfigRequirement
+
+        self.profile.preview.context = "example-preview"
+        self.profile.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(
+                binding_key="APP_PASSWORD",
+                context=self.profile.preview.context,
+                instance="preview",
+            ),
+        )
+        self.store.write_product_profile_record(self.profile)
+        headers = {"Authorization": "Bearer test-operator-token"}
+        config = await _asgi_request(
+            self.app,
+            "GET",
+            "/v1/products/example-site/environments/preview/config-status",
+            headers=headers,
+        )
+        self.assertEqual(config.status_code, 200, config.text)
+        self.assertEqual(config.json()["config_status"]["environment"], "preview")
+        payload: dict[str, object] = {
+            "mode": "dry-run",
+            "reason": "Preview configuration",
+            "managed_secrets": [
+                {
+                    "binding_key": "APP_PASSWORD",
+                    "integration": "runtime_environment",
+                    "value": "preview-only-test-password",
+                }
+            ],
+        }
+        route = "/v1/products/example-site/environments/preview/config/apply"
+        dry_run = await _asgi_request(self.app, "POST", route, headers=headers, payload=payload)
+        self.assertEqual(dry_run.status_code, 202, dry_run.text)
+        applied = await _asgi_request(
+            self.app,
+            "POST",
+            route,
+            headers={**headers, "Idempotency-Key": "preview-config-once"},
+            payload={**payload, "mode": "apply", "confirmation": "APPLY example-site/preview"},
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertNotIn("preview-only-test-password", dry_run.text + applied.text)
+        self.assertEqual(self.store.read_secret_record(self.source.secret_id), self.source)
+        self.assertFalse(self.store.list_runtime_environment_records(instance_name="testing"))
+        self.assertFalse(self.store.list_runtime_environment_records(instance_name="prod"))
+
+    def test_preview_config_refuses_opaque_payloads_collisions_and_shared_destinations(
+        self,
+    ) -> None:
+        from control_plane.product_config import ProductConfigError
+        from control_plane.contracts.odoo_post_deploy_payload import (
+            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        )
+
+        for additions in (
+            {
+                "secrets": [
+                    {
+                        "binding_key": ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+                        "value": "opaque",
+                        "secret_class": "preview",
+                    }
+                ]
+            },
+            {
+                "runtime_env": {"env": {"SETTING": "public"}},
+                "secrets": [
+                    {"binding_key": "SETTING", "value": "private", "secret_class": "preview"}
+                ],
+            },
+            {"secrets": [{"binding_key": "APP_PASSWORD", "scope": "context", "value": "private"}]},
+        ):
+            with self.subTest(additions=additions), self.assertRaises(ProductConfigError):
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload={
+                        "product": self.profile.product,
+                        "context": self.profile.preview.context,
+                        "instance": "preview",
+                        **additions,
+                    },
+                    mode="apply",
+                    actor="fixture",
+                    source_label="test",
+                )
+            self.assertFalse(self.store.list_secret_records(instance_name="preview"))
+            self.assertFalse(self.store.list_runtime_environment_records(instance_name="preview"))
+
+    def test_disabled_preview_binding_does_not_block_plain_settings(self) -> None:
+        payload = {
+            "product": self.profile.product,
+            "context": self.profile.preview.context,
+            "instance": "preview",
+        }
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                **payload,
+                "secrets": [
+                    {"binding_key": "SETTING", "value": "private", "secret_class": "preview"}
+                ],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        binding = self.store.list_secret_bindings(instance_name="preview")[0]
+        self.store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={**payload, "runtime_env": {"env": {"SETTING": "public"}}},
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        self.assertEqual(
+            self.store.list_runtime_environment_records(instance_name="preview")[0].env,
+            {"SETTING": "public"},
+        )
 
     def make_app(self, *, source_read: bool = True, standing_read: bool = False) -> FastAPI:
         actions: tuple[str, ...] = (
@@ -181,8 +356,66 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(binding.declared_secret_class, "shared_safe")
         self.assertEqual(binding.value_source, "copy")
+        record = self.store.read_secret_record(binding.secret_id)
+        self.assertEqual(
+            self.store.read_secret_version(record.current_version_id).value_origin, "supplied"
+        )
         assert binding.sharing_reason is not None
         self.assertEqual(binding.sharing_reason.kind, "read_only_source")
+
+    def test_copy_origin_is_service_owned_and_propagates_without_fresh_generation_credit(
+        self,
+    ) -> None:
+        template = self.store.read_secret_version(self.source.current_version_id)
+        for origin in ("supplied", "provider", "generated", None):
+            with self.subTest(origin=origin):
+                source_version = template.model_copy(
+                    update={
+                        "version_id": secrets._version_id(secret_id=self.source.secret_id),
+                        "value_origin": origin,
+                    }
+                )
+                self.store.write_secret_version(source_version)
+                self.store.write_secret_record(
+                    self.source.model_copy(update={"current_version_id": source_version.version_id})
+                )
+                requested = {
+                    **self.payload["secrets"][0],
+                    "copy_from": {
+                        **self.payload["secrets"][0]["copy_from"],
+                        "version_id": source_version.version_id,
+                    },
+                }
+                for depth in range(2):
+                    entry = {**requested, "value_origin": "supplied"}
+                    apply_product_config_bundle(
+                        record_store=self.store,
+                        payload={**self.payload, "secrets": [entry]},
+                        mode="apply",
+                        actor="fixture",
+                        source_label="test",
+                    )
+                    destination = next(
+                        binding
+                        for binding in self.store.list_secret_bindings(limit=None)
+                        if binding.instance == "testing"
+                    )
+                    self.assertEqual(destination.value_source, "copy")
+                    target_record = self.store.read_secret_record(destination.secret_id)
+                    self.assertEqual(
+                        self.store.read_secret_version(
+                            target_record.current_version_id
+                        ).value_origin,
+                        origin,
+                    )
+                    requested = {
+                        **entry,
+                        "copy_from": {
+                            "context": "example-site",
+                            "instance": "testing",
+                            "version_id": target_record.current_version_id,
+                        },
+                    }
 
     async def test_read_role_cannot_replace_explicit_secret_copy_source_grant(self) -> None:
         app = self.make_app(source_read=False, standing_read=True)
@@ -211,7 +444,9 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
-    def _environment_read_app(self, *, products: tuple[str, ...]) -> FastAPI:
+    def _environment_read_app(
+        self, *, products: tuple[str, ...], instances: tuple[str, ...] = ("prod", "testing")
+    ) -> FastAPI:
         """No secret actions: the standing environment read for ``products`` only."""
         profile_rule = _local_operator_policy(actions=("product_profile.read",)).local_operators[0]
         config_rule = (
@@ -222,7 +457,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         read_rule = (
             _local_operator_policy(actions=("product_environment.read",), products=products)
             .local_operators[0]
-            .model_copy(update={"instances": ("prod", "testing")})
+            .model_copy(update={"instances": instances})
         )
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -255,6 +490,138 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202, response.text)
         self.assertNotIn("source-only-test-token", response.text)
 
+    async def test_named_administrator_can_qualify_global_selection(self) -> None:
+        human = _github_human_identity()
+        self.write_binding(name="GLOBAL_SOURCE", key="GLOBAL_KEY", scope="global")
+        for administrator in (False, True):
+            with self.subTest(administrator=administrator):
+                rules = [
+                    GitHubHumanPolicyRule(
+                        github_ids=(human.github_id,),
+                        roles=("admin",),
+                        products=("example-site", "launchplane"),
+                        contexts=("launchplane", "example-site"),
+                        actions=("product_profile.read", "secret.list"),
+                    ),
+                    GitHubHumanPolicyRule(
+                        github_ids=(human.github_id,),
+                        roles=("admin",),
+                        products=("launchplane",),
+                        contexts=("example-site",),
+                        actions=("secret.list",),
+                        instances=("*",),
+                    ),
+                ]
+                if administrator:
+                    rules.append(
+                        GitHubHumanPolicyRule(
+                            github_ids=(human.github_id,),
+                            roles=("admin",),
+                            products=("launchplane",),
+                            contexts=("launchplane",),
+                            actions=("authz_policy_grant.write",),
+                        )
+                    )
+                manager = HumanSessionManager(
+                    config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+                )
+                session = manager.issue(human)
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(
+                        schema_version=2, github_humans=tuple(rules)
+                    ),
+                    record_store_factory=lambda: self.store,
+                    human_session_manager=manager,
+                )
+                with patch.object(
+                    self.store, "read_secret_version", side_effect=AssertionError("No values")
+                ):
+                    response = await _asgi_request(
+                        app,
+                        "GET",
+                        "/v1/products/example-site/secret-bindings?include_resolution=true",
+                        headers={"Cookie": manager.session_cookie_header(session)},
+                    )
+                self.assertEqual(response.status_code, 200, response.text)
+                resolution = response.json()["lane_binding_resolution"]
+                self.assertEqual(
+                    resolution["coverage"]["status"], "complete" if administrator else "scoped"
+                )
+                for lane in resolution["lanes"]:
+                    self.assertEqual(
+                        "GLOBAL_SOURCE" in {binding["name"] for binding in lane["bindings"]},
+                        administrator,
+                    )
+                narrower = await _asgi_request(
+                    app,
+                    "GET",
+                    "/v1/products/example-site/secret-bindings?include_resolution=true&scopes=context&scopes=context_instance",
+                    headers={"Cookie": manager.session_cookie_header(session)},
+                )
+                self.assertEqual(narrower.status_code, 200, narrower.text)
+                self.assertEqual(
+                    narrower.json()["lane_binding_resolution"]["coverage"]["status"], "complete"
+                )
+                selected_lane = next(
+                    lane
+                    for lane in narrower.json()["lane_binding_resolution"]["lanes"]
+                    if (lane["context"], lane["instance"])
+                    == (self.source.context, self.source.instance)
+                )
+                self.assertIn(
+                    self.source.name, {binding["name"] for binding in selected_lane["bindings"]}
+                )
+
+    @scoped_agent_test
+    async def test_copy_coverage_requires_authority_over_every_configuration_target(self) -> None:
+        self.write_binding(
+            name="PREVIEW_TOKEN", key="PREVIEW_KEY", scope="context_instance", instance="preview"
+        )
+        profile_rule = _local_operator_policy(actions=("product_profile.read",)).local_operators[0]
+        for actions, instances, expected in (
+            ((action,), instances, expected)
+            for action in ("secret.list", "product_environment.read")
+            for instances, expected in (
+                (("prod", "testing"), "scoped"),
+                (("prod", "testing", "preview"), "complete"),
+            )
+        ):
+            with self.subTest(actions=actions, instances=instances):
+                read_rule = _local_operator_policy(actions=actions).local_operators[0]
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(
+                        schema_version=2,
+                        local_operators=(
+                            profile_rule,
+                            read_rule,
+                            read_rule.model_copy(update={"instances": instances}),
+                        ),
+                    ),
+                    record_store_factory=lambda: self.store,
+                    bearer_identity_config=BearerIdentityConfig(
+                        local_operator_token="test-operator-token",
+                        local_operator_subject="local-owner-agent",
+                        local_operator_token_label="local-owner-write",
+                    ),
+                )
+                response = await _asgi_request(
+                    app,
+                    "GET",
+                    "/v1/products/example-site/secret-bindings",
+                    headers={"Authorization": "Bearer test-operator-token"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["coverage"]["status"], expected)
+                self.assertIn(
+                    self.source.name, {row["name"] for row in response.json()["bindings"]}
+                )
+                self.assertEqual(
+                    "PREVIEW_TOKEN" in {row["name"] for row in response.json()["bindings"]},
+                    "preview" in instances,
+                )
+
     @scoped_agent_test
     async def test_environment_read_on_another_product_neither_lists_nor_copies(self) -> None:
         app = self._environment_read_app(products=("other-site",))
@@ -266,6 +633,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["bindings"], [])
+        self.assertEqual(response.json()["coverage"]["status"], "scoped")
         response = await self.post(app=app)
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
@@ -365,6 +733,414 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("foreign-secret", response.text)
         self.assertNotIn("other-site", response.text)
         self.assertNotIn("source-only-test-token", response.text)
+
+    def write_binding(
+        self,
+        *,
+        name: str,
+        key: str,
+        scope: SecretScope,
+        integration: str = "runtime_environment",
+        instance: str = "",
+    ) -> None:
+        secrets.write_secret_value(
+            record_store=self.store,
+            scope=scope,
+            integration=integration,
+            name=name,
+            binding_key=key,
+            context_name="" if scope == "global" else "example-site",
+            instance_name=instance,
+            plaintext_value=f"synthetic-value-{name}",
+        )
+
+    async def test_selection_reports_global_context_and_instance_sources_without_values(
+        self,
+    ) -> None:
+        self.write_binding(name="GLOBAL_ONLY", key="GLOBAL_KEY", scope="global")
+        self.write_binding(name="CONTEXT_TOKEN", key="REPAIRSHOPR_TOKEN", scope="context")
+        self.write_binding(
+            name="REMOVED_LANE", key="OLD_KEY", scope="context_instance", instance="removed"
+        )
+        self.write_binding(
+            name="PREVIEW_SOURCE", key="PREVIEW_KEY", scope="context_instance", instance="preview"
+        )
+        with patch.object(
+            self.store, "read_secret_version", side_effect=AssertionError("No ciphertext reads")
+        ):
+            response = await _asgi_request(
+                self.app,
+                "GET",
+                "/v1/products/example-site/secret-bindings?include_resolution=true",
+                headers={"Authorization": "Bearer test-operator-token"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        resolution = payload["lane_binding_resolution"]
+        self.assertEqual(resolution["coverage"]["status"], "complete")
+        lanes = {lane["instance"]: lane for lane in resolution["lanes"]}
+        self.assertEqual(set(lanes), {lane.instance for lane in self.profile.lanes})
+        self.assertEqual(
+            {binding["name"] for binding in lanes["prod"]["bindings"]},
+            {self.source.name, "GLOBAL_ONLY"},
+        )
+        self.assertEqual(
+            {binding["name"] for binding in lanes["testing"]["bindings"]},
+            {"CONTEXT_TOKEN", "GLOBAL_ONLY"},
+        )
+        self.assertNotIn("GLOBAL_ONLY", json.dumps(payload["bindings"]))
+        self.assertNotIn("REMOVED_LANE", response.text)
+        self.assertNotIn("synthetic-value", response.text)
+        self.assertNotIn("source-only-test-token", response.text)
+
+    @scoped_agent_test
+    async def test_selection_does_not_use_lane_read_to_expose_a_global_source(self) -> None:
+        app = self._environment_read_app(products=("example-site",))
+        url = "/v1/products/example-site/secret-bindings?include_resolution=true&scopes=global"
+        before = await _asgi_request(
+            app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+        )
+        self.write_binding(name="HIDDEN_GLOBAL", key="HIDDEN_KEY", scope="global")
+        response = await _asgi_request(
+            app,
+            "GET",
+            url,
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        resolution = response.json()["lane_binding_resolution"]
+        self.assertEqual(resolution["coverage"]["status"], "scoped")
+        self.assertEqual(before.json()["lane_binding_resolution"], resolution)
+        self.assertNotIn("HIDDEN_GLOBAL", response.text)
+        self.assertNotIn("HIDDEN_KEY", response.text)
+
+    @scoped_agent_test
+    async def test_guessed_integration_does_not_reveal_hidden_source_existence(self) -> None:
+        app = self._environment_read_app(products=("example-site",))
+        url = "/v1/products/example-site/secret-bindings?include_resolution=true&integration=other_integration&scopes=context_instance"
+        before = await _asgi_request(
+            app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+        )
+        self.write_binding(
+            name="HIDDEN_OTHER",
+            key="OTHER_KEY",
+            scope="context_instance",
+            instance="testing",
+            integration="other_integration",
+        )
+        after = await _asgi_request(
+            app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+        )
+        self.assertEqual(after.status_code, 200, after.text)
+        self.assertEqual(
+            before.json()["lane_binding_resolution"], after.json()["lane_binding_resolution"]
+        )
+        self.assertEqual(after.json()["lane_binding_resolution"]["coverage"]["status"], "scoped")
+        self.assertNotIn("HIDDEN_OTHER", after.text)
+        self.assertNotIn("OTHER_KEY", after.text)
+
+    @scoped_agent_test
+    async def test_copy_coverage_does_not_reveal_hidden_binding_existence(self) -> None:
+        app = self._environment_read_app(products=("other-site",))
+        url = "/v1/products/example-site/secret-bindings"
+        self.store.write_secret_record(self.source.model_copy(update={"status": "disabled"}))
+        before = await _asgi_request(
+            app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+        )
+        self.store.write_secret_record(self.source)
+        after = await _asgi_request(
+            app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+        )
+        self.assertEqual(after.status_code, 200, after.text)
+        self.assertEqual(before.json()["coverage"], after.json()["coverage"])
+        self.assertEqual(after.json()["coverage"]["status"], "scoped")
+
+    async def test_director_standing_catalog_reports_complete_without_explicit_service_grant(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(schema_version=2),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="test-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
+        response = await _asgi_request(
+            app,
+            "GET",
+            "/v1/product-profiles",
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["coverage"]["status"], "complete")
+        self.assertEqual(response.json()["profiles"][0]["product"], self.profile.product)
+
+    async def test_selection_applies_explicit_integration_and_scope_inputs(self) -> None:
+        self.write_binding(
+            name="GLOBAL_WORKER", key="WORKER_KEY", scope="global", integration="launchplane_worker"
+        )
+        self.write_binding(
+            name="LANE_WORKER",
+            key="WORKER_KEY",
+            scope="context_instance",
+            instance="testing",
+            integration="launchplane_worker",
+        )
+        response = await _asgi_request(
+            self.app,
+            "GET",
+            "/v1/products/example-site/secret-bindings?include_resolution=true&integration=launchplane_worker&scopes=context_instance",
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        resolution = response.json()["lane_binding_resolution"]
+        self.assertEqual(resolution["selection_scopes"], ["context_instance"])
+        self.assertEqual(resolution["integration"], "launchplane_worker")
+        self.assertEqual(
+            [binding["name"] for lane in resolution["lanes"] for binding in lane["bindings"]],
+            ["LANE_WORKER"],
+        )
+        self.assertNotIn("GLOBAL_WORKER", response.text)
+        self.assertEqual(response.json()["bindings"][0]["name"], self.source.name)
+
+    async def test_coverage_preserves_unknown_and_limited_source_bounds(self) -> None:
+        for capability, expected, catalog_expected in (
+            (None, "unknown", "unknown"),
+            (lambda _: "limited", "limited", "limited"),
+            (
+                lambda collection: None if collection == "secret_records" else "complete",
+                "unknown",
+                "complete",
+            ),
+            (lambda _: {}, "unknown", "unknown"),
+            (lambda _: "unsupported", "unsupported", "unsupported"),
+        ):
+            with (
+                self.subTest(expected=expected),
+                patch.object(self.store, "collection_read_coverage", capability),
+                patch.object(self.store, "list_secret_records", return_value=()),
+                patch.object(
+                    self.store, "read_secret_version", side_effect=AssertionError("No values")
+                ),
+            ):
+                response = await _asgi_request(
+                    self.app,
+                    "GET",
+                    "/v1/products/example-site/secret-bindings?include_resolution=true",
+                    headers={"Authorization": "Bearer test-operator-token"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["coverage"]["status"], expected)
+                self.assertEqual(response.json()["bindings"], [])
+                self.assertEqual(
+                    response.json()["lane_binding_resolution"]["coverage"]["status"], expected
+                )
+                for lane in response.json()["lane_binding_resolution"]["lanes"]:
+                    self.assertEqual(lane["coverage"]["status"], expected)
+                    self.assertEqual(lane["bindings"], [])
+                catalog = await _asgi_request(
+                    self.app,
+                    "GET",
+                    "/v1/product-profiles",
+                    headers={"Authorization": "Bearer test-operator-token"},
+                )
+                self.assertEqual(catalog.status_code, 200, catalog.text)
+                self.assertEqual(catalog.json()["coverage"]["status"], catalog_expected)
+
+    @scoped_agent_test
+    async def test_catalog_reports_scoped_coverage_without_hidden_product_metadata(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=("local-owner-agent",),
+                        token_labels=("local-owner-write",),
+                        products=("example-site", "launchplane"),
+                        contexts=("*",),
+                        actions=("agent.read",),
+                    ),
+                ),
+            ),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="test-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
+        before = await _asgi_request(
+            app,
+            "GET",
+            "/v1/product-profiles",
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(
+                _generic_site_profile_payload("unreadable-site")
+            )
+        )
+        response = await _asgi_request(
+            app,
+            "GET",
+            "/v1/product-profiles",
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            [item["product"] for item in response.json()["profiles"]], ["example-site"]
+        )
+        self.assertEqual(response.json()["coverage"]["status"], "scoped")
+        self.assertEqual(before.json()["coverage"], response.json()["coverage"])
+        self.assertNotIn("unreadable-site", response.text)
+
+    @scoped_agent_test
+    async def test_hidden_winner_never_falls_back_to_an_authorized_shadow(self) -> None:
+        profile_rule = _local_operator_policy(actions=("product_profile.read",)).local_operators[0]
+        cases: tuple[tuple[SecretScope, str], ...] = (
+            ("context", "runtime_environment"),
+            ("global", "runtime_environment"),
+            ("context", "other_integration"),
+        )
+        for index, (scope, integration) in enumerate(cases):
+            with self.subTest(scope=scope, integration=integration):
+                visible_name = f"VISIBLE_{index}"
+                key = f"SHARED_{index}"
+                self.write_binding(name=visible_name, key=key, scope=scope, integration=integration)
+                list_rule = _local_operator_policy(
+                    actions=("secret.list",),
+                    contexts=("" if scope == "global" else "example-site",),
+                ).local_operators[0]
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(
+                        schema_version=2, local_operators=(profile_rule, list_rule)
+                    ),
+                    record_store_factory=lambda: self.store,
+                    bearer_identity_config=BearerIdentityConfig(
+                        local_operator_token="test-operator-token",
+                        local_operator_subject="local-owner-agent",
+                        local_operator_token_label="local-owner-write",
+                    ),
+                )
+                higher_scope: SecretScope = "context" if scope == "global" else "context_instance"
+                url = f"/v1/products/example-site/secret-bindings?include_resolution=true&integration={integration}&scopes={scope}&scopes={higher_scope}"
+                with patch.object(
+                    self.store, "read_secret_version", side_effect=AssertionError("No values")
+                ):
+                    before = await _asgi_request(
+                        app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+                    )
+                self.write_binding(
+                    name=f"HIDDEN_{index}",
+                    key=key,
+                    scope=higher_scope,
+                    integration=integration,
+                    instance="prod" if higher_scope == "context_instance" else "",
+                )
+                with patch.object(
+                    self.store, "read_secret_version", side_effect=AssertionError("No values")
+                ):
+                    after = await _asgi_request(
+                        app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+                    )
+                self.assertEqual(before.status_code, 200, before.text)
+                self.assertEqual(after.status_code, 200, after.text)
+                self.assertEqual(
+                    before.json()["lane_binding_resolution"],
+                    after.json()["lane_binding_resolution"],
+                )
+                self.assertTrue(
+                    all(
+                        not lane["bindings"]
+                        for lane in after.json()["lane_binding_resolution"]["lanes"]
+                    )
+                )
+                self.assertEqual(
+                    after.json()["lane_binding_resolution"]["coverage"]["status"], "scoped"
+                )
+                self.assertEqual(before.json()["bindings"], after.json()["bindings"])
+                if scope == "context":
+                    narrower = await _asgi_request(
+                        app,
+                        "GET",
+                        f"/v1/products/example-site/secret-bindings?include_resolution=true&integration={integration}&scopes=context",
+                        headers={"Authorization": "Bearer test-operator-token"},
+                    )
+                    self.assertEqual(
+                        narrower.json()["lane_binding_resolution"]["coverage"]["status"], "complete"
+                    )
+                    self.assertTrue(
+                        all(
+                            visible_name in {binding["name"] for binding in lane["bindings"]}
+                            for lane in narrower.json()["lane_binding_resolution"]["lanes"]
+                        )
+                    )
+
+    @scoped_agent_test
+    async def test_ambiguous_context_does_not_change_inherited_role_coverage(self) -> None:
+        self.write_binding(name="CONTEXT_SHADOW", key="SHARED_KEY", scope="context")
+        profiles = self.store.list_product_profile_records()
+        foreign = self.profile.model_copy(update={"product": "foreign-site"})
+        context_app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=tuple(
+                    LocalOperatorPolicyRule(
+                        subjects=("local-owner-agent",),
+                        token_labels=("local-owner-write",),
+                        products=("example-site", "launchplane"),
+                        contexts=("*",),
+                        actions=("agent.read",),
+                        instances=instances,
+                    )
+                    for instances in ((), ("*",))
+                ),
+            ),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="test-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
+        context_url = (
+            "/v1/products/example-site/secret-bindings?include_resolution=true&scopes=context"
+        )
+        before = await _asgi_request(
+            context_app, "GET", context_url, headers={"Authorization": "Bearer test-operator-token"}
+        )
+        with patch.object(
+            self.store, "list_product_profile_records", return_value=(*profiles, foreign)
+        ):
+            response = await _asgi_request(
+                self._environment_read_app(products=("example-site",)),
+                "GET",
+                "/v1/products/example-site/secret-bindings?include_resolution=true",
+                headers={"Authorization": "Bearer test-operator-token"},
+            )
+            after = await _asgi_request(
+                context_app,
+                "GET",
+                context_url,
+                headers={"Authorization": "Bearer test-operator-token"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["bindings"], [])
+        self.assertEqual(response.json()["lane_binding_resolution"]["coverage"]["status"], "scoped")
+        self.assertNotIn(self.source.name, response.text)
+        self.assertNotIn("foreign-site", response.text)
+        self.assertEqual(
+            before.json()["lane_binding_resolution"], after.json()["lane_binding_resolution"]
+        )
+        self.assertEqual(before.json()["coverage"], after.json()["coverage"])
+        self.assertEqual(before.json()["coverage"]["status"], "scoped")
+        self.assertEqual(before.json()["lane_binding_resolution"]["coverage"]["status"], "scoped")
 
     def test_copy_bundle_rechecks_product_and_context_ownership(self) -> None:
         for alter_profile in (True, False):
@@ -629,7 +1405,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         list_rule = (
             _local_operator_policy(actions=("secret.list",))
             .local_operators[0]
-            .model_copy(update={"instances": ("prod", "testing")})
+            .model_copy(update={"instances": ("prod",)})
         )
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -646,7 +1422,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         response = await _asgi_request(
             app,
             "GET",
-            "/v1/products/example-site/secret-bindings",
+            "/v1/products/example-site/secret-bindings?include_resolution=true&scopes=context_instance",
             headers={"Authorization": "Bearer test-operator-token"},
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -654,6 +1430,13 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             [item["binding_key"] for item in response.json()["bindings"]], ["REPAIRSHOPR_TOKEN"]
         )
         self.assertNotIn("SITE_PASSWORD", response.text)
+        lanes = {
+            lane["instance"]: lane for lane in response.json()["lane_binding_resolution"]["lanes"]
+        }
+        self.assertEqual(lanes["prod"]["coverage"]["status"], "complete")
+        self.assertEqual(lanes["prod"]["bindings"][0]["binding_key"], "REPAIRSHOPR_TOKEN")
+        self.assertEqual(lanes["testing"]["coverage"]["status"], "scoped")
+        self.assertEqual(lanes["testing"]["bindings"], [])
 
     def test_filesystem_copy_commits_without_nested_lock_deadlock(self) -> None:
         root = Path(self.directory.name) / "file-state"

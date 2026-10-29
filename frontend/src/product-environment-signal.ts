@@ -1,4 +1,4 @@
-import type { DataProvenance, ProductEnvironmentDetail, ProductEnvironmentSummary, ProductSiteOverview } from "./generated/openapi.ts";
+import type { DataProvenance, ProductEnvironmentDetail, ProductEnvironmentSummary, ProductIncidentSummary, ProductSiteOverview } from "./generated/openapi.ts";
 
 function expireProvenance(provenance: DataProvenance, now: number): DataProvenance {
   return ["verified", "recorded"].includes(provenance.freshness_status) && Date.parse(provenance.stale_after) < now
@@ -17,7 +17,7 @@ function expireEvidence<T extends Evidence>(evidence: T, now: number): T {
 function publicTopologyEvidence(topology: Topology): Evidence[] {
   const recorded = topology.provider_recorded;
   return [recorded, recorded.ingress, recorded.tls,
-    topology.observed.ingress, ...topology.observed.tls_domains];
+    topology.observed.ingress, ...topology.observed.tls_domains.filter(domain => !domain.advisory)];
 }
 
 function publicTopologyApplicable(topology: Topology): boolean {
@@ -64,7 +64,7 @@ export function expireEnvironmentEvidence<T extends ProductEnvironmentSummary | 
   topology.trust_state = expiredAggregate(topology.trust_state, publicExpired || placementExpired);
   topology.observed.trust_state = expiredAggregate(topology.observed.trust_state,
     placementExpired || publicTopologyApplicable(topology) &&
-    [topology.observed.ingress, ...topology.observed.tls_domains].some(evidence => evidence.trust_state === "stale"));
+    [topology.observed.ingress, ...topology.observed.tls_domains.filter(domain => !domain.advisory)].some(evidence => evidence.trust_state === "stale"));
   return {
     ...environment, provenance,
     trust_state: provenance.freshness_status === "stale" ? "stale" : expiredAggregate(environment.trust_state, topology.trust_state === "stale"),
@@ -124,18 +124,49 @@ function readable(value: string | null | undefined): string {
   return (value ?? "").replaceAll("_", " ").trim();
 }
 
-// Every cause that makes a lane red, worded from its own evidence. The tone is
-// danger exactly when this is non-empty, so a red lane can always say why.
+function productionDeliveryWarning(environment: ProductEnvironmentSummary, incident: ProductIncidentSummary): boolean {
+  return environment.environment === "prod" && incident.failure_layer === "provider" &&
+    incident.severity === "warning";
+}
+
+function runtimeVerificationGap(environment: ProductEnvironmentSummary, now: number, { requireChecks = true } = {}): string | null {
+  const placement = environment.topology.observed.placement;
+  if (placement.runtime_identity_status !== "match" || placement.trust_state !== "verified")
+    return "The running production release is not verified";
+  const checks = environment.health_monitoring.checks.filter(check => check.probe_effective && !check.advisory);
+  if (requireChecks && !checks.length || checks.some(check =>
+    check.status !== "pass" || check.trust_state !== "verified" || Date.parse(check.provenance.stale_after) < now))
+    return "Current production health is not verified";
+  return checks.length && environment.provenance.freshness_status !== "verified"
+    ? "Current production evidence is not verified" : null;
+}
+
+export function operationalWarningReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
+  return operationalSignal(environment, now).warningReasons;
+}
+
 export function operationalAttentionReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
-  if (!environment) return [];
+  return operationalSignal(environment, now).attentionReasons;
+}
+
+export function environmentReleaseHealthy(environment: ProductEnvironmentSummary | null, now = Date.now()): boolean {
+  return operationalSignal(environment, now).releaseHealthy;
+}
+
+function operationalSignal(environment: ProductEnvironmentSummary | null, now: number): {
+  tone: SignalTone; attentionReasons: string[]; warningReasons: string[]; releaseHealthy: boolean;
+} {
+  if (!environment) return { tone: "missing", attentionReasons: [], warningReasons: [], releaseHealthy: false };
   environment = expireEnvironmentEvidence(environment, now);
   const reasons = new Set<string>();
+  const warnings = new Set<string>();
   const incidents = environment.health_monitoring.open_incidents;
-  for (const incident of incidents) {
-    const severity = readable(incident.severity) || "Open";
-    reasons.add(`${severity[0].toUpperCase()}${severity.slice(1)} incident open: ${readable(incident.failure_code) || "unknown failure"}`);
-  }
   for (const check of environment.health_monitoring.checks.filter(check => check.probe_effective)) {
+    if (check.advisory) {
+      if (check.status !== "pass" || check.trust_state !== "verified" || check.incident_status === "open")
+        warnings.add(check.summary?.trim() || `Recovery check ${check.name} is not verified`);
+      continue;
+    }
     if (check.status === "fail") {
       reasons.add(check.summary?.trim() || `Health check ${check.name} failed: ${readable(check.failure_code) || "unknown failure"}`);
     } else if (check.incident_status === "open" && !incidents.some(incident => incident.check_name === check.name)) {
@@ -147,13 +178,57 @@ export function operationalAttentionReasons(environment: ProductEnvironmentSumma
   healthWarnings(environment).filter(warning => warning.severity === "error")
     .forEach(warning => reasons.add(warning.detail));
   environment.topology.observed.tls_domains.filter(domain => negativeTlsStates.has(domain.status))
-    .forEach(domain => reasons.add(`TLS for ${domain.domain_name}: ${readable(domain.status)}`));
-  return [...reasons];
+    .forEach(domain => (domain.advisory ? warnings : reasons)
+      .add(`TLS for ${domain.domain_name}: ${readable(domain.status)}`));
+  const runtimeTone = environmentRuntimeTone(environment, now);
+  const runtimeGap = runtimeVerificationGap(environment, now);
+  if (environment.environment === "prod" && environment.health_monitoring.monitoring_intent !== "prelaunch" && runtimeGap)
+    reasons.add(runtimeGap);
+  const blockingIncidents = incidents.filter(incident => {
+    const recovery = incident.severity === "warning" && (
+      environment.health_monitoring.checks.some(check => check.advisory && check.name === incident.check_name && check.kind === incident.check_kind) ||
+      incident.check_kind === "tls" && environment.topology.observed.tls_domains.some(domain =>
+        domain.incident_id === incident.incident_id && domain.advisory));
+    if (recovery) warnings.add(`Recovery path: ${readable(incident.failure_code)}`);
+    return !recovery;
+  });
+  const releaseHealthy = reasons.size === 0 && runtimeGap === null &&
+    (!publicTopologyApplicable(environment.topology) || environment.health_monitoring.checks.some(check =>
+      check.probe_effective && !check.advisory && check.kind === "public_http")) &&
+    environment.topology.observed.trust_state === "verified" &&
+    blockingIncidents.every(incident => productionDeliveryWarning(environment, incident));
+  const deliveryOnly = blockingIncidents.length > 0 && releaseHealthy;
+  if (!deliveryOnly) {
+    for (const incident of blockingIncidents) {
+      const severity = readable(incident.severity) || "Open";
+      reasons.add(`${severity[0].toUpperCase()}${severity.slice(1)} incident open: ${readable(incident.failure_code) || "unknown failure"}`);
+    }
+  }
+  return {
+    tone: reasons.size ? "danger" : ["missing", "stale"].includes(runtimeTone) ? runtimeTone
+      : deliveryOnly || warnings.size ? "warning" : runtimeTone,
+    releaseHealthy,
+    attentionReasons: [...reasons],
+    warningReasons: reasons.size ? [] : [...warnings, ...(deliveryOnly
+      ? blockingIncidents.map(incident => `${readable(incident.failure_code)}; the current production release is healthy`)
+      : [])],
+  };
+}
+
+export const deployHoldNotices: Record<NonNullable<ProductEnvironmentSummary["deploy_hold"]>, string> = {
+  isolation_staging: "Deploys held until testing is proven separate from production",
+  staff_testing: "Deploys held while staff test",
+};
+
+export function deployHoldNotice(environment: ProductEnvironmentSummary | null): string | null {
+  return environment?.deploy_hold ? deployHoldNotices[environment.deploy_hold] : null;
 }
 
 export function environmentOperationalTone(environment: ProductEnvironmentSummary | null, now = Date.now()): SignalTone {
-  if (!environment) return "missing";
-  if (operationalAttentionReasons(environment, now).length) return "danger";
+  return operationalSignal(environment, now).tone;
+}
+
+function environmentRuntimeTone(environment: ProductEnvironmentSummary, now: number): SignalTone {
   environment = expireEnvironmentEvidence(environment, now);
   const checks = environment.health_monitoring.checks.filter(check => check.probe_effective);
   const warnings = healthWarnings(environment);
@@ -162,18 +237,14 @@ export function environmentOperationalTone(environment: ProductEnvironmentSummar
   if (!checks.length && environment.provenance.freshness_status === "missing") return "missing";
   if (
     otherWarnings.length || warnings.some(warning => warning.severity !== "info") ||
-    environment.topology.observed.placement.trust_state !== "verified" ||
+    runtimeVerificationGap(environment, now, { requireChecks: false }) !== null ||
     publicObservationGap(environment.topology) !== null ||
     publicTopologyApplicable(environment.topology) && (
       !checks.some(check => check.kind === "public_http") ||
       environment.topology.observed.ingress.trust_state === "stale" ||
       environment.topology.observed.tls_domains.some(domain => domain.trust_state === "stale")
     ) ||
-    environment.topology.observed.placement.runtime_identity_status !== "match" ||
-    checks.some(check => check.status !== "pass" || check.trust_state !== "verified") ||
-    checks.length > 0 && environment.provenance.freshness_status !== "verified" ||
     Date.parse(environment.provenance.stale_after) < now ||
-    checks.some(check => Date.parse(check.provenance?.stale_after ?? "") < now) ||
     environment.provenance.freshness_status === "stale"
   ) return "warning";
   // Lane provenance is verified only after health and current deployment identity both pass.

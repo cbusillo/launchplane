@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import UTC, datetime
 from typing import Callable, Literal, Protocol
 
@@ -19,6 +17,7 @@ from control_plane.contracts.merge_train_effect import (
 )
 from control_plane.contracts.text_fields import require_text
 from control_plane.merge_train import MergeTrainStackDiscoveryResult
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 MergeTrainStackCollapseStatus = Literal[
@@ -156,7 +155,7 @@ class MergeTrainStackCollapsePlan(BaseModel):
         self.collapse_id = require_text(
             self.collapse_id, "merge train stack collapse plan requires collapse_id"
         )
-        self.repository = _normalize_repository(self.repository)
+        self.repository = _normalize_repository(self.repository).lower()
         self.base_branch = require_text(
             self.base_branch, "merge train stack collapse plan requires base_branch"
         )
@@ -678,9 +677,7 @@ def build_merge_train_stack_collapse_plan_record_id(
     if record.ordinary_job_binding is None:
         digest_payload.pop("ordinary_job_binding")
     digest_payload["updated_at"] = canonical_updated_at
-    digest = hashlib.sha256(
-        json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(digest_payload)[:16]
     normalized_timestamp = canonical_updated_at.replace("-", "").replace(":", "")
     return f"merge-train-stack-collapse-plan-{normalized_timestamp}-{digest}"
 
@@ -696,19 +693,15 @@ def build_merge_train_stack_collapse_id(
     normalized_base_branch = require_text(
         base_branch, "merge train stack collapse id requires base_branch"
     ).replace("/", "-")
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "entry_head_shas": [
-                    require_text(sha, "merge train stack collapse id requires head sha")
-                    for sha in entry_head_shas
-                ],
-                "root_pull_request_number": root_pull_request_number,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "entry_head_shas": [
+                require_text(sha, "merge train stack collapse id requires head sha")
+                for sha in entry_head_shas
+            ],
+            "root_pull_request_number": root_pull_request_number,
+        }
+    )[:16]
     return f"merge-train-stack-collapse-{normalized_repository}-{normalized_base_branch}-{digest}"
 
 

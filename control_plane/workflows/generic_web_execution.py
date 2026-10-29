@@ -2,12 +2,11 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-import hashlib
-import json
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.dokploy import api
 from control_plane.provider_operations import ProviderMutationUnknownError
@@ -16,9 +15,7 @@ EXECUTION_EVIDENCE_KEY = "generic_web_original_execution"
 
 
 def evidence_digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(value)
 
 
 class ExecutionEntry(BaseModel):

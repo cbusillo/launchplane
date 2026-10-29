@@ -1,243 +1,350 @@
 import base64
-import configparser
-import contextlib
-import io
 import json
-import os
 import subprocess
-import sys
-import unittest
-from typing import Any
-from unittest.mock import MagicMock, patch
+from typing import Any, Literal
+from unittest.mock import patch
 
-from control_plane import odoo_import_diagnostics as diagnostic
-from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
-from control_plane.odoo_source_probe import GrantStatus
-from control_plane import odoo_runtime_source_grants as runtime
-from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
-from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
-from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
-from tests.test_odoo_import_diagnostics import DiagnosticFixture, PRIVATE
+from control_plane import odoo_runtime_source_prerequisites as reader
+from control_plane.odoo_import_diagnostics import SOURCE_PREFIXES
+from control_plane.odoo_instance_overrides import (
+    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+    config_parameter_secret_env_key,
+)
+from tests.test_odoo_import_diagnostics import PRIVATE
+from tests.test_odoo_runtime_source_prerequisites import PrerequisiteFixture
 
 
-class RuntimeSourceTests(unittest.TestCase):
+class RuntimeSourceTests(PrerequisiteFixture):
     def setUp(self) -> None:
-        self.fixture = DiagnosticFixture()
-        self.full_container_id = self.fixture.connection.evidence.container_id
-        self.values = self.fixture.applied.copy()
-        self.env = {
-            "PLATFORM_INSTANCE": "testing",
-            "ODOO_DB_NAME": "fixture_db",
-            RUNTIME_IDENTITY_ENV_KEY: self.fixture.identity.model_dump_json(),
-        }
-        self.keys: dict[str, dict[str, str]] = {}
-        for name, prefix in diagnostic.SOURCE_PREFIXES.items():
-            self.keys[name] = {}
-            for field in (*diagnostic.FIELDS, "password"):
-                key = (
-                    config_parameter_secret_env_key(prefix + ".password")
-                    if field == "password"
-                    else config_parameter_runtime_key(prefix + "." + field)
-                )
-                self.keys[name][field] = key
-                self.env[key] = self.values[prefix + "." + field]
-        self.config = configparser.ConfigParser(interpolation=None)
-        self.config["options"] = {
-            "db_name": "fixture_db",
-            "db_host": "database",
-            "db_user": "local_fixture",
-            "db_password": PRIVATE,
-        }
-        self.database = MagicMock()
-        self.cursor = self.database.cursor.return_value.__enter__.return_value
-        self.cursor.fetchmany.side_effect = lambda bound: [
-            (key, value)
-            for key, value in self.values.items()
-            if key in self.cursor.execute.call_args.args[1][0]
-        ][:bound]
-        self.mysql = MagicMock()
-        cursor = self.mysql.cursor.return_value.__enter__.return_value
-        cursor.fetchmany.return_value = [
-            ("GRANT SELECT ON *.* TO 'runtime_reader'@'runtime-origin'",)
-        ]
-        self.provider_payloads: list[dict[str, Any]] = []
-        self.inspections = 0
-        self.drift = ""
-        self.source_calls = 0
-        self.proc_calls: list[tuple[list[str], dict[str, Any]]] = []
-
-    def mysql_connect(self, **kwargs: Any) -> Any:
-        self.source_calls += 1
-        if kwargs["host"] == "cm_data.invalid":
-            if self.drift == "source_failure":
-                raise OSError(PRIVATE)
-            if self.drift == "parameter":
-                self.values["cm_data.db.password"] = "changed-fixture"
-        return self.mysql
-
-    def execute(self, program: str, input_text: str, argv: list[str] | None = None) -> str:
-        with (
-            patch.object(sys, "stdin", io.StringIO(input_text)),
-            patch.object(sys, "argv", argv or ["probe"]),
-            contextlib.redirect_stdout(io.StringIO()) as output,
-        ):
-            exec(compile(program, "<fixed-runtime-probe>", "exec"), {"__name__": "__main__"})
-        return output.getvalue()
+        super().setUp()
+        self.probes: list[dict[str, str]] = []
+        self.probe_failure = ""
+        self.probe_unknown = False
+        for name, prefix in SOURCE_PREFIXES.items():
+            self.values[prefix + ".host"] = name + ".invalid"
+        self.set_overrides({"fishbowl.db": "inventory"})
+        self.values["fishbowl.db"] = "inventory"
 
     def subprocess_run(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        self.proc_calls.append((command, kwargs))
-        if command[:2] == ["docker", "inspect"]:
-            self.inspections += 1
-            payload: dict[str, Any] = {
-                "Id": self.full_container_id,
-                "Config": {
-                    "Image": self.fixture.identity.image_reference,
-                    "Labels": {
-                        "com.docker.compose.project": self.fixture.connection.app_name,
-                        "com.docker.compose.service": "web",
-                    },
-                    "Env": [key + "=" + value for key, value in self.env.items()],
-                },
-                "State": {"Running": True, "StartedAt": "fixture-start"},
-                "NetworkSettings": {"Networks": {"fixture-network": {}}},
-            }
-            if self.drift == "health":
-                payload["State"]["Health"] = {"Log": [{"Start": str(self.inspections)}]}
-            if self.drift == "image":
-                payload["Config"]["Image"] = "foreign-image"
-            if self.inspections > 1 and self.drift == "container":
-                payload["State"]["StartedAt"] = "new-start"
-            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([payload]))
-        output = self.execute(command[-1], kwargs["input"])
-        return subprocess.CompletedProcess(command, 0, stdout=output)
+        if command[:3] == ["python3", "-I", "-c"] or command[1:3] == ["-I", "-c"]:
+            settings = json.loads(kwargs["input"])
+            self.probes.append(settings)
+            if self.probe_failure == settings["host"]:
+                if self.probe_unknown:
+                    return subprocess.CompletedProcess(
+                        command, 0, stdout=json.dumps({"grants": "unknown"})
+                    )
+                raise subprocess.TimeoutExpired(command, 10)
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps({"grants": "read_only"})
+            )
+        return super().subprocess_run(command, **kwargs)
 
-    def remote(self, **kwargs: Any) -> None:
-        payload = kwargs["payload"]
-        self.provider_payloads.append(payload)
-        encoded = base64.b64encode(json.dumps(payload).encode()).decode()
-        output = self.execute(kwargs["program"], "", ["host", encoded, "FRAME:"])
-        kwargs["receive"](json.loads(output.removeprefix("FRAME:")))
+    def consume(self, mode: Literal["grants", "preview"] = "grants") -> reader.SourceConsumerResult:
+        from control_plane import odoo_runtime_reads as reads
 
-    def run_probe(self) -> dict[str, GrantStatus]:
-        self.postgres = MagicMock(connect=MagicMock(return_value=self.database))
         with (
-            patch.dict(os.environ, self.env, clear=True),
-            patch.dict(sys.modules, {"psycopg2": self.postgres}),
-            patch.object(configparser.ConfigParser, "read", return_value=[ODOO_WEB_CONFIG_PATH]),
+            patch.object(reader, "_read_remote", side_effect=self.remote),
             patch.object(
-                configparser.ConfigParser, "__getitem__", return_value=self.config["options"]
+                reads, "select_stable_runtime", return_value=self.fixture.connection.selection
             ),
-            patch("pymysql.connect", side_effect=self.mysql_connect),
-            patch.object(subprocess, "run", side_effect=self.subprocess_run),
-            patch.object(runtime, "_read_remote", side_effect=self.remote),
+            patch.object(reads, "connect_runtime", return_value=self.fixture.connection),
+            patch.object(
+                reads, "inspect_runtime_container", side_effect=lambda *args: self.env.copy()
+            ),
+            patch.object(reads, "assert_selection_current"),
+            patch.object(reader, "_decrypt_secret_value", return_value=PRIVATE),
         ):
-            return runtime.runtime_grants(
-                self.fixture.connection,
-                tuple(diagnostic.SOURCE_PREFIXES),
-                prefixes=diagnostic.SOURCE_PREFIXES,
-                fields=diagnostic.GRANT_FIELDS,
-                environment_keys=self.keys,
-                observed_identity=self.env[RUNTIME_IDENTITY_ENV_KEY],
+            return reader.read_source_consumers(
+                store=self.fixture.store,
+                product=self.fixture.profile.product,
+                control_plane_root=self.root,
+                database_url=None,
+                mode=mode,
+                sources=tuple(SOURCE_PREFIXES) if mode == "grants" else ("fishbowl",),
             )
 
-    def test_real_program_chain_uses_runtime_origin_without_exporting_credentials(self) -> None:
-        self.assertTrue(all(value == "read_only" for value in self.run_probe().values()))
-        self.assertGreater(self.source_calls, 0)
-        for command, kwargs in self.proc_calls:
-            self.assertNotIn(PRIVATE, repr(command))
-            self.assertGreater(kwargs["timeout"], 0)
-        self.assertNotIn(PRIVATE, json.dumps(self.provider_payloads))
-        self.mysql.close.assert_called()
+    def test_capacity_and_reader_failures_keep_bounded_stages(self) -> None:
+        with patch.object(reader._READ_SLOTS, "acquire", return_value=False):
+            result = self.consume()
+        self.assertEqual(result.failure_stage, "capacity")
+        self.assertEqual(self.probes, [])
+        for failure, expected in (
+            (RuntimeError(PRIVATE), "transport"),
+            (None, "result_validation"),
+        ):
+            with self.subTest(expected=expected), patch.object(self, "remote", side_effect=failure):
+                result = self.consume()
+                self.assertEqual(result.failure_stage, expected)
+                self.assertTrue(all(item.grants == "unknown" for item in result.sources))
+                self.assertNotIn(PRIVATE, result.model_dump_json())
 
-    def test_finalized_timestamp_defaults_short_id_and_health_ticks_preserve_origin_proof(
+    def test_invalid_failure_stages_are_redacted_validation_failures(self) -> None:
+        minimal = {
+            "runtime": "unknown",
+            "sources": [{"source": name} for name in reader.SOURCE_ADDONS],
+        }
+        for field in ("global", "source"):
+            with self.subTest(field=field):
+                value = json.loads(json.dumps(minimal))
+                target = value if field == "global" else value["sources"][0]
+                target["failure_stage"] = PRIVATE
+
+                def remote(**kwargs: Any) -> None:
+                    kwargs["receive"]({"type": "complete", "result": value})
+
+                with patch.object(self, "remote", side_effect=remote):
+                    result = self.consume()
+                self.assertEqual(result.failure_stage, "result_validation")
+                self.assertNotIn(PRIVATE, result.model_dump_json())
+                self.assertEqual(self.probes, [])
+
+    def test_uninstalled_source_keeps_its_stage_and_other_grants(self) -> None:
+        self.installed[reader.SOURCE_ADDONS["cm_data"][0]] = "uninstalled"
+        result = self.consume()
+        self.assertEqual(result.runtime, "verified")
+        failed = next(item for item in result.sources if item.source == "cm_data")
+        self.assertEqual(failed.failure_stage, "addon_state")
+        self.assertEqual(failed.grants, "unknown")
+        self.assertTrue(
+            all(
+                item.grants == "read_only"
+                for item in result.sources
+                if item.source != failed.source
+            )
+        )
+
+    def test_typed_payload_and_installed_defaults_supply_runtime_origin_grants(self) -> None:
+        result = self.consume()
+        self.assertEqual(result.runtime, "verified")
+        self.assertTrue(all(source.grants == "read_only" for source in result.sources), result)
+        self.assertEqual(
+            {item["host"] for item in self.probes},
+            {self.values[prefix + ".host"] for prefix in SOURCE_PREFIXES.values()},
+        )
+        self.assertNotIn(PRIVATE, result.model_dump_json())
+        self.assertTrue(all(not source.parameters for source in result.sources))
+        self.pg.rollback.assert_called()
+        self.pg.close.assert_called()
+
+    def test_omitted_options_keep_persisted_values_and_preview_freezes_effective_source(
         self,
     ) -> None:
-        identity = json.loads(self.env[RUNTIME_IDENTITY_ENV_KEY])
-        identity["deployed_at"] = "2026-10-15T12:01:00Z"
-        identity.pop("schema_version")
-        identity["source_revision"] = identity.pop("source_git_ref")
-        self.env[RUNTIME_IDENTITY_ENV_KEY] = json.dumps(identity)
-        self.fixture.connection = self.fixture.connection.__class__(
-            **{
-                **self.fixture.connection.__dict__,
-                "evidence": self.fixture.connection.evidence.model_copy(
-                    update={"container_id": self.full_container_id[:12]}
-                ),
-            }
+        self.values["fishbowl.port"] = "3499"
+        result = self.consume("preview")
+        source = next(item for item in result.sources if item.source == "fishbowl")
+        self.assertEqual(source.parameters["port"], self.values["fishbowl.port"])
+        self.assertEqual(source.parameters["db"], self.values["fishbowl.db"])
+        self.assertNotIn(PRIVATE, result.model_dump_json())
+        self.assertEqual(self.probes, [])
+
+    def test_explicit_option_must_agree_with_applied_and_delivered_payload(self) -> None:
+        self.set_overrides({"fishbowl.db": "inventory", "fishbowl.port": 3401})
+        result = self.consume()
+        self.assertEqual(
+            next(item for item in result.sources if item.source == "fishbowl").grants, "unknown"
         )
-        self.drift = "health"
-        self.assertTrue(all(value == "read_only" for value in self.run_probe().values()))
-        for command, _ in self.proc_calls:
-            if command[:2] == ["docker", "exec"]:
-                self.assertIn(self.full_container_id, command)
+        self.assertEqual(len(self.probes), 2)
+        self.values["fishbowl.port"] = "3401"
+        self.assertEqual(
+            next(item for item in self.consume().sources if item.source == "fishbowl").grants,
+            "read_only",
+        )
 
-    def test_grants_do_not_require_a_producer_specific_database_name_key(self) -> None:
-        for name, prefix in diagnostic.SOURCE_PREFIXES.items():
-            del self.values[prefix + ".db"]
-            del self.env[self.keys[name]["db"]]
-        self.assertTrue(all(value == "read_only" for value in self.run_probe().values()))
+    def test_missing_payload_legacy_conflict_and_uninstalled_addon_never_probe(self) -> None:
+        self.env.pop(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY)
+        self.assertTrue(all(item.grants == "unknown" for item in self.consume().sources))
+        self.assertEqual(self.probes, [])
+        self.deliver_overrides()
+        self.fixture.runtime = self.fixture.runtime.model_copy(
+            update={"env": {"ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__PORT": "3306"}}
+        )
+        result = self.consume("preview")
+        self.assertFalse(
+            next(item for item in result.sources if item.source == "fishbowl").parameters
+        )
+        self.fixture.runtime = self.fixture.runtime.model_copy(update={"env": {}})
+        self.installed = {key: "uninstalled" for key in self.installed}
+        self.assertTrue(all(item.grants == "unknown" for item in self.consume().sources))
+        self.assertEqual(self.probes, [])
 
-    def test_equivalent_verified_tls_settings_preserve_runtime_proof(self) -> None:
-        self.env[self.keys["cm_data"]["ssl_verify"]] = "true"
-        self.assertEqual(self.run_probe()["cm_data"], "read_only")
+    def test_managed_password_must_match_agreeing_applied_and_delivered_values(self) -> None:
+        for prefix in SOURCE_PREFIXES.values():
+            key = prefix + ".password"
+            self.values[key] = "different-value"
+            self.env[config_parameter_secret_env_key(key)] = "different-value"
+        modes: tuple[Literal["grants", "preview"], ...] = ("grants", "preview")
+        for mode in modes:
+            with self.subTest(mode=mode):
+                self.probes.clear()
+                result = self.consume(mode)
+                self.assertEqual(result.runtime, "verified")
+                self.assertTrue(all(item.grants == "unknown" for item in result.sources))
+                self.assertTrue(all(not item.parameters for item in result.sources))
+                self.assertEqual(self.probes, [])
 
-    def test_unreachable_source_does_not_hide_other_sources(self) -> None:
-        self.drift = "source_failure"
-        result = self.run_probe()
-        self.assertEqual(result["cm_data"], "unknown")
-        self.assertEqual(result["repairshopr"], "read_only")
-        self.assertEqual(result["fishbowl"], "read_only")
-
-    def test_runtime_writer_and_role_results(self) -> None:
-        cursor = self.mysql.cursor.return_value.__enter__.return_value
-        for grants, expected in [
-            ([("GRANT SELECT, INSERT ON *.* TO 'reader'@'runtime'",)], "unsafe"),
-            ([("GRANT `role`@`%` TO `reader`@`runtime`",)], "unknown"),
-            ([("GRANT SELECT ON *.* TO 'reader'@'runtime' WITH GRANT OPTION",)], "unsafe"),
-            ([("REVOKE SELECT ON `private`.* FROM 'reader'@'runtime'",)], "unknown"),
-        ]:
-            with self.subTest(expected=expected, grants=grants):
-                cursor.fetchmany.return_value = grants
-                self.assertTrue(all(value == expected for value in self.run_probe().values()))
-
-    def test_parameter_binding_tls_and_identity_mismatch_never_authenticate(self) -> None:
-        original_env = self.env.copy()
-        original_values = self.values.copy()
-        for kind in ("password", "host", "user", "port", "ssl_verify", "identity"):
+    def test_applied_password_tls_and_payload_disagreement_remain_unknown(self) -> None:
+        for kind in ("delivered_password", "disabled_tls", "payload_mismatch"):
             with self.subTest(kind=kind):
-                self.env = original_env.copy()
-                self.values = original_values.copy()
-                self.source_calls = 0
-                if kind == "identity":
-                    self.env[RUNTIME_IDENTITY_ENV_KEY] = "{}"
-                else:
-                    for prefix in diagnostic.SOURCE_PREFIXES.values():
-                        self.values[prefix + "." + kind] = "mismatched"
-                self.assertTrue(all(value == "unknown" for value in self.run_probe().values()))
-                self.assertEqual(self.source_calls, 0)
+                self.probes.clear()
+                self.set_overrides({"fishbowl.db": "inventory"})
+                self.values.pop("fishbowl.ssl_verify", None)
+                self.env[config_parameter_secret_env_key("fishbowl.password")] = PRIVATE
+                if kind == "delivered_password":
+                    self.values["fishbowl.password"] = "different-value"
+                elif kind == "disabled_tls":
+                    self.values["fishbowl.ssl_verify"] = "false"
+                elif kind == "payload_mismatch":
+                    payload = json.loads(
+                        base64.b64decode(self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY])
+                    )
+                    next(
+                        item
+                        for item in payload["config_parameters"]
+                        if item["key"] == "fishbowl.host"
+                    )["value"]["value"] = "other.invalid"
+                    self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = base64.b64encode(
+                        json.dumps(payload).encode()
+                    ).decode()
+                result = self.consume("preview")
+                source = next(item for item in result.sources if item.source == "fishbowl")
+                self.assertFalse(source.parameters)
+                self.assertEqual(source.failure_stage, "source_resolution")
+                self.values["fishbowl.password"] = PRIVATE
 
-    def test_config_and_container_drift_discard_all_grants(self) -> None:
-        for drift in ("parameter", "container", "image"):
-            with self.subTest(drift=drift):
-                self.drift = drift
+    def test_parameter_and_container_drift_discards_the_observation(self) -> None:
+        for kind in ("parameter", "container", "image"):
+            with self.subTest(kind=kind):
+                self.parameter_reads = 0
                 self.inspections = 0
-                self.assertTrue(all(value == "unknown" for value in self.run_probe().values()))
+                self.drift = kind
+                result = self.consume("preview")
+                self.assertEqual(result.runtime, "unknown")
+                self.assertEqual(
+                    result.failure_stage, "host_inspection" if kind == "image" else "drift"
+                )
+                self.assertTrue(all(not item.parameters for item in result.sources))
 
-    def test_transport_failure_is_value_free_and_no_odoo_identity_is_required(self) -> None:
-        original = self.fixture.connection
-        with patch.object(runtime, "_read_remote", side_effect=OSError(PRIVATE)):
-            self.assertEqual(
-                runtime.runtime_grants(
-                    original,
-                    ("cm_data",),
-                    prefixes=diagnostic.SOURCE_PREFIXES,
-                    fields=diagnostic.GRANT_FIELDS,
-                    environment_keys=self.keys,
-                    observed_identity=self.env[RUNTIME_IDENTITY_ENV_KEY],
-                ),
-                {"cm_data": "unknown"},
-            )
-        self.fixture.connection = original.__class__(
-            **{**original.__dict__, "diagnostic_identity": None}
+    def test_probe_timeout_stage_and_unexplained_unknown_preserve_other_sources(self) -> None:
+        self.probe_failure = self.values["cm_data.db.host"]
+        for self.probe_unknown in (False, True):
+            with self.subTest(unknown=self.probe_unknown):
+                result = self.consume()
+                failed = next(item for item in result.sources if item.source == "cm_data")
+                self.assertEqual(failed.grants, "unknown")
+                self.assertEqual(
+                    failed.failure_stage, None if self.probe_unknown else "source_resolution"
+                )
+                self.assertTrue(
+                    all(
+                        item.grants == "read_only"
+                        for item in result.sources
+                        if item.source != failed.source
+                    )
+                )
+
+    def test_typed_only_authority_reaches_grant_route_and_preview_consumer(self) -> None:
+        from control_plane import odoo_import_diagnostics as diagnostic, odoo_runtime_reads as reads
+        from control_plane.odoo_preview_import_source import resolve_fishbowl_preview_source
+        from control_plane.product_secret_copy import ProductSecretCopyFrom
+
+        fishbowl = next(
+            index
+            for index, item in enumerate(self.fixture.bindings)
+            if item.binding_id == "fishbowl"
         )
-        self.assertTrue(all(value == "read_only" for value in self.run_probe().values()))
+        from control_plane.contracts.secret_record import SecretBinding
+
+        payload = self.fixture.bindings[fishbowl].model_dump(mode="json")
+        payload.update(
+            declared_secret_class="shared_safe",
+            sharing_reason={
+                "kind": "read_only_source",
+                "reason": "Fixture source",
+                "evidence": "Fixture SELECT-only grant",
+            },
+        )
+        self.fixture.bindings[fishbowl] = SecretBinding.model_validate(payload)
+        self.values["fishbowl.port"] = "3499"
+        with (
+            patch.object(reader, "_read_remote", side_effect=self.remote),
+            patch.object(
+                reads, "select_stable_runtime", return_value=self.fixture.connection.selection
+            ),
+            patch.object(reads, "connect_runtime", return_value=self.fixture.connection),
+            patch.object(
+                reads, "inspect_runtime_container", side_effect=lambda *args: self.env.copy()
+            ),
+            patch.object(reads, "assert_selection_current"),
+            patch.object(reader, "_decrypt_secret_value", return_value=PRIVATE) as compare_decrypt,
+            patch(
+                "control_plane.odoo_preview_import_source.copy_source_value",
+                side_effect=AssertionError("Planning must not copy source passwords"),
+            ),
+            patch.object(diagnostic, "_decrypt_secret_value", return_value=PRIVATE),
+            patch.dict(diagnostic._FAILED_PROBES, {}, clear=True),
+        ):
+            result = diagnostic.diagnose_runtime_source_grants(
+                store=self.fixture.store,
+                product=self.fixture.profile.product,
+                control_plane_root=self.root,
+                database_url=None,
+            )
+            self.assertTrue(
+                all(item.applied_connection_grants == "read_only" for item in result.sources),
+                result,
+            )
+            preview = resolve_fishbowl_preview_source(
+                store=self.fixture.store,
+                profile=self.fixture.profile,
+                preview_slug="pr-42",
+                copy_from=ProductSecretCopyFrom(
+                    context=self.fixture.context, instance="testing", version_id="fishbowl-v1"
+                ),
+                control_plane_root=self.root,
+                database_url=None,
+            )
+        fields = {
+            item.key: item.value.value
+            for item in preview.parameters
+            if item.value.source == "literal"
+        }
+        self.assertEqual(fields["fishbowl.port"], self.values["fishbowl.port"])
+        self.assertEqual(preview.environment, {})
+        compare_decrypt.assert_called()
+
+    def test_grant_consumer_cannot_substitute_a_new_runtime_origin(self) -> None:
+        from dataclasses import replace
+        from control_plane import odoo_runtime_reads as reads, odoo_runtime_source_grants as grants
+
+        previous = replace(
+            self.fixture.connection,
+            evidence=self.fixture.connection.evidence.model_copy(update={"container_id": "d" * 64}),
+        )
+        with (
+            patch.object(reader, "_read_remote", side_effect=self.remote),
+            patch.object(
+                reads, "select_stable_runtime", return_value=self.fixture.connection.selection
+            ),
+            patch.object(reads, "connect_runtime", return_value=self.fixture.connection),
+            patch.object(
+                reads, "inspect_runtime_container", side_effect=lambda *args: self.env.copy()
+            ),
+            patch.object(reads, "assert_selection_current"),
+            patch.object(reader, "_decrypt_secret_value", return_value=PRIVATE),
+        ):
+            result = grants.runtime_grants(
+                previous,
+                tuple(SOURCE_PREFIXES),
+                store=self.fixture.store,
+                product=self.fixture.profile.product,
+                control_plane_root=self.root,
+                database_url=None,
+            )
+        self.assertTrue(
+            all(
+                value.grants == "unknown" and value.failure_stage == "drift"
+                for value in result.values()
+            )
+        )
+        self.assertEqual(self.container_calls, 0)

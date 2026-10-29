@@ -13,6 +13,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
 from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyEnvelope,
+    _odoo_preview_destroy_reason,
     issue_odoo_preview_apply_plan,
 )
 from control_plane.service_auth import (
@@ -120,11 +121,11 @@ class DirectorBoundedWritesFixture:
             control_plane_root_path=self.root,
         )
 
-    def issue_preview(self) -> None:
+    def issue_preview(self, planned: Any = None) -> None:
         identity = configured_local_operator_identity(self.config)
         assert identity is not None
         issued = issue_odoo_preview_apply_plan(
-            result=_issued_plan(OdooPreviewApplyEnvelope.model_validate(self.payload)),
+            result=planned or _issued_plan(OdooPreviewApplyEnvelope.model_validate(self.payload)),
             plan_id=self.plan_id,
         )
         self.store.write_idempotency_record(
@@ -182,6 +183,45 @@ class DirectorBoundedWritesFixture:
             **changes,
         )
 
+    def prepare_destroyed_preview_creation(self) -> None:
+        generation = self.store.read_preview_generation_record(self.preview.latest_generation_id)
+        self.preview = self.preview.model_copy(
+            update={
+                "state": "destroyed",
+                "serving_generation_id": "",
+                "destroy_reason": _odoo_preview_destroy_reason(
+                    plan_id="previous-destroy", issued_at=generation.requested_at
+                ),
+            }
+        )
+        self.store.write_preview_record(self.preview)
+        from control_plane.workflows.odoo_preview_runtime import (
+            OdooPreviewDokployDryRunRequest,
+            build_odoo_preview_dokploy_dry_run,
+        )
+        from tests.test_odoo_preview_runtime import _runtime_plan
+
+        previous = self.payload["apply"]["dry_run_plan"]
+        runtime = _runtime_plan().model_copy(
+            update={
+                "product": self.profile.product,
+                "repository": self.profile.repository,
+                "pr_number": self.preview.anchor_pr_number,
+                "preview_slug": previous["preview_slug"],
+                "preview_url": previous["preview_url"],
+            }
+        )
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=runtime,
+                compose_name=previous["compose_name"],
+                environment_id=previous["environment_id"],
+                template_compose_id=previous["template_compose_id"],
+            )
+        )
+        self.payload["apply"]["dry_run_plan"] = plan.model_dump(mode="json")
+        self.issue_preview()
+
     async def preview_apply(self) -> Any:
         return await self.post("/v1/drivers/odoo/preview-apply", self.payload, self.plan_id)
 
@@ -233,7 +273,7 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase, DirectorBound
                         context=self.preview.context,
                         instance=scope["instance"],
                         preview=self.preview,
-                        preview_refresh=True,
+                        preview_operation="refresh",
                     )
 
     async def test_reviewed_never_live_correction_is_atomic_replayed_and_bounded(self) -> None:
@@ -443,48 +483,203 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase, DirectorBound
 
     async def test_protected_preview_refuses_even_when_report_is_expired(self) -> None:
         with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
-            for changes in (
-                {"usage": "in_use"},
-                {"data": "only_copy"},
-                {"production_resources": "shared"},
-                {
-                    "usage": "in_use",
-                    "observed_at": datetime.now(timezone.utc) - timedelta(minutes=10),
-                    "expires_at": datetime.now(timezone.utc) - timedelta(minutes=5),
-                },
-            ):
-                self.safety(**changes)
-                result = await self.preview_apply()
-                self.assertEqual(result.status_code, 409, result.text)
+            for operation in ("refresh", "destroy"):
+                self.payload["apply"]["dry_run_plan"]["operation"] = operation
+                self.plan_id = f"protected-{operation}"
+                self.issue_preview()
+                for changes in (
+                    {"usage": "in_use"},
+                    {"data": "only_copy"},
+                    {"production_resources": "shared"},
+                    {
+                        "usage": "in_use",
+                        "observed_at": datetime.now(timezone.utc) - timedelta(minutes=10),
+                        "expires_at": datetime.now(timezone.utc) - timedelta(minutes=5),
+                    },
+                ):
+                    self.safety(**changes)
+                    result = await self.preview_apply()
+                    self.assertEqual(result.status_code, 409, result.text)
             execute.assert_not_called()
 
-    async def test_refresh_does_not_require_invented_positive_usage_or_custody(self) -> None:
-        with patch(
-            "control_plane.http_app.execute_odoo_preview_apply_result",
-            return_value={"status": "blocked"},
-        ) as execute:
-            response = await self.preview_apply()
-        self.assertEqual(response.status_code, 202, response.text)
-        self.assertTrue(execute.call_args.kwargs["qualify_existing_refresh"])
+    async def test_existing_preview_operations_need_no_invented_usage_or_custody(self) -> None:
+        for operation in ("refresh", "destroy"):
+            with self.subTest(operation=operation):
+                self.payload["apply"]["dry_run_plan"]["operation"] = operation
+                self.plan_id = f"no-observation-{operation}"
+                self.issue_preview()
+                with patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result",
+                    return_value={"status": "blocked"},
+                ) as execute:
+                    response = await self.preview_apply()
+                self.assertEqual(response.status_code, 202, response.text)
+                execute.assert_called_once()
         self.assertIsNone(
             self.store.read_disposable_lane_safety(
                 self.profile.product, self.preview.context, "pr-42"
             )
         )
 
-    async def test_refresh_rechecks_protected_use_after_first_provider_effect(self) -> None:
+    async def test_destroyed_preview_can_refresh_without_rewriting_its_history(self) -> None:
+        generation = self.store.read_preview_generation_record(self.preview.latest_generation_id)
+        self.preview = self.preview.model_copy(
+            update={
+                "state": "destroyed",
+                "serving_generation_id": "",
+                "destroy_reason": _odoo_preview_destroy_reason(
+                    plan_id="previous-destroy", issued_at=generation.requested_at
+                ),
+            }
+        )
+        self.store.write_preview_record(self.preview)
+        self.issue_preview()
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result",
+            return_value={"status": "blocked"},
+        ) as execute:
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 202, response.text)
+        execute.assert_called_once()
+        self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
+
+    async def test_new_recipient_preserves_destroyed_preview_protections(self) -> None:
+        for protection in (
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+        ):
+            with self.subTest(protection=protection):
+                fixture = DirectorBoundedWritesFixture(self)
+                fixture.prepare_destroyed_preview_creation()
+                fixture.safety(**protection)
+                with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+                    response = await fixture.preview_apply()
+                self.assertEqual(response.status_code, 409, response.text)
+                execute.assert_not_called()
+
+    async def test_new_recipient_requires_destroyed_history_without_a_bound_target(self) -> None:
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        for existing in ("active", "bound", "unknown_teardown", "newer_teardown"):
+            with self.subTest(existing=existing):
+                fixture = DirectorBoundedWritesFixture(self)
+                fixture.prepare_destroyed_preview_creation()
+                if existing == "bound":
+                    fixture.store.write_dokploy_target_id_record(
+                        DokployTargetIdRecord(
+                            context=fixture.preview.context,
+                            instance=fixture.payload["apply"]["dry_run_plan"]["preview_slug"],
+                            target_id="retained-target",
+                            updated_at=fixture.profile.updated_at,
+                        )
+                    )
+                else:
+                    changes = (
+                        {"state": "active"}
+                        if existing == "active"
+                        else {
+                            "destroy_reason": ""
+                            if existing == "unknown_teardown"
+                            else _odoo_preview_destroy_reason(
+                                plan_id="newer-destroy",
+                                issued_at=(
+                                    datetime.now(timezone.utc) + timedelta(seconds=1)
+                                ).isoformat(),
+                            )
+                        }
+                    )
+                    fixture.store.write_preview_record(fixture.preview.model_copy(update=changes))
+                with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+                    response = await fixture.preview_apply()
+                self.assertEqual(response.status_code, 409, response.text)
+                execute.assert_not_called()
+
+    async def test_new_recipient_rechecks_protection_between_effects(self) -> None:
+        self.prepare_destroyed_preview_creation()
+
         def execute(**kwargs: Any) -> Any:
-            kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+            kwargs["provider_effect_checkpoint"]("compose_create")
             self.safety(usage="in_use")
-            kwargs["provider_effect_checkpoint"]("fixture-second-effect")
+            kwargs["provider_effect_checkpoint"]("compose_update")
             self.fail("The second effect must not run")
 
         with patch("control_plane.http_app.execute_odoo_preview_apply_result", side_effect=execute):
             response = await self.preview_apply()
         self.assertEqual(response.status_code, 409, response.text)
-        # A refusal after an effect retains uncertainty; it cannot release the
-        # reservation as though the first effect never happened.
         self.assertEqual(response.json()["error"]["code"], "mutation_reconciliation_required")
+
+    async def test_destroyed_preview_refresh_preserves_recorded_protection(self) -> None:
+        generation = self.store.read_preview_generation_record(self.preview.latest_generation_id)
+        self.preview = self.preview.model_copy(
+            update={
+                "state": "destroyed",
+                "serving_generation_id": "",
+                "destroy_reason": _odoo_preview_destroy_reason(
+                    plan_id="previous-destroy", issued_at=generation.requested_at
+                ),
+            }
+        )
+        self.store.write_preview_record(self.preview)
+        self.issue_preview()
+        for protection in (
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+        ):
+            with self.subTest(protection=protection):
+                self.safety(**protection)
+                with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+                    response = await self.preview_apply()
+                self.assertEqual(response.status_code, 409, response.text)
+                execute.assert_not_called()
+
+    async def test_destroyed_preview_refresh_refuses_stale_or_unknown_teardown_authority(
+        self,
+    ) -> None:
+        for verified in (False, True):
+            with self.subTest(verified=verified):
+                fixture = DirectorBoundedWritesFixture(self)
+                barrier = datetime.now(timezone.utc) + timedelta(seconds=1)
+                destroyed = fixture.preview.model_copy(
+                    update={
+                        "state": "destroyed",
+                        "serving_generation_id": "",
+                        "destroy_reason": _odoo_preview_destroy_reason(
+                            plan_id="newer-destroy", issued_at=barrier.isoformat()
+                        )
+                        if verified
+                        else "",
+                    }
+                )
+                fixture.store.write_preview_record(destroyed)
+                with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+                    response = await fixture.preview_apply()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], "odoo_preview_plan_stale")
+                execute.assert_not_called()
+
+    async def test_existing_preview_rechecks_protection_between_effects(self) -> None:
+        for operation in ("refresh", "destroy"):
+            with self.subTest(operation=operation):
+                fixture = DirectorBoundedWritesFixture(self)
+                fixture.payload["apply"]["dry_run_plan"]["operation"] = operation
+                fixture.issue_preview()
+
+                def execute(**kwargs: Any) -> Any:
+                    kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+                    fixture.safety(usage="in_use")
+                    kwargs["provider_effect_checkpoint"]("fixture-second-effect")
+                    self.fail("The second effect must not run")
+
+                with patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result", side_effect=execute
+                ):
+                    response = await fixture.preview_apply()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], "mutation_reconciliation_required"
+                )
 
     async def test_lifecycle_progress_during_refresh_does_not_create_a_false_fence(self) -> None:
         def execute(**kwargs: Any) -> Any:

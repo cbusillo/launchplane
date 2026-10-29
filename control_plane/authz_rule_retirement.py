@@ -1,9 +1,5 @@
 """Selected workflow rule inspection and inert, server-derived contraction plans."""
 
-from typing import Literal
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from control_plane.authz_grant_service import (
     _authz_rule_sha256,
     authz_policy_retains_reachable_github_id_administration,
@@ -11,6 +7,10 @@ from control_plane.authz_grant_service import (
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
+)
+from control_plane.contracts.workflow_rule_retirement import (
+    WorkflowRuleRetirementRequest as WorkflowRuleRetirementRequest,
+    WorkflowRuleSelection as WorkflowRuleSelection,
 )
 from control_plane.runtime_setting_removal import request_fingerprint
 from control_plane.service_auth import (
@@ -21,28 +21,6 @@ from control_plane.service_auth import (
 )
 
 ROUTE = "/v1/authz-policies/workflow-rule-retirement-plan"
-
-
-class WorkflowRuleSelection(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    rule_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    managed_set_id: str | None = Field(default=None, max_length=256)
-    managed_rule_id: str | None = Field(default=None, max_length=256)
-
-
-class WorkflowRuleRetirementRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    policy_record_id: str = Field(min_length=1, max_length=256)
-    policy_revision: int = Field(ge=1)
-    policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    selection: tuple[WorkflowRuleSelection, ...] = Field(min_length=1, max_length=50)
-    mode: Literal["inspect", "plan"] = "inspect"
-
-    @model_validator(mode="after")
-    def validate_unique(self) -> "WorkflowRuleRetirementRequest":
-        if len({s.rule_sha256 for s in self.selection}) != len(self.selection):
-            raise ValueError("Select unique workflow-rule fingerprints.")
-        return self
 
 
 def shared_scope(rule: GitHubActionsPolicyRule) -> bool:
@@ -69,16 +47,15 @@ def shared_scope(rule: GitHubActionsPolicyRule) -> bool:
     )
 
 
-def workflow_rule_retirement_plan(
+def workflow_rule_retirement_candidate(
     active: LaunchplaneAuthzPolicyRecord, request: WorkflowRuleRetirementRequest
-) -> dict[str, object]:
+) -> LaunchplaneAuthzPolicy:
     if (active.record_id, active.revision, active.policy_sha256) != (
         request.policy_record_id,
         request.policy_revision,
         request.policy_sha256,
     ):
         raise ValueError("Active policy changed; refresh its revision and fingerprint.")
-    selected: list[GitHubActionsPolicyRule] = []
     for selection in request.selection:
         matches = [
             rule
@@ -93,17 +70,24 @@ def workflow_rule_retirement_plan(
             selection.managed_rule_id,
         ):
             raise ValueError("Selected managed identity does not match its fingerprint.")
-        selected.append(rule)
     selected_hashes = {s.rule_sha256 for s in request.selection}
     survivors = tuple(
         r for r in active.policy.github_actions if _authz_rule_sha256(r) not in selected_hashes
     )
-    candidate = LaunchplaneAuthzPolicy.model_validate(
+    return LaunchplaneAuthzPolicy.model_validate(
         {
             **active.policy.model_dump(mode="json"),
             "github_actions": [r.model_dump(mode="json") for r in survivors],
         }
     )
+
+
+def workflow_rule_retirement_plan(
+    active: LaunchplaneAuthzPolicyRecord, request: WorkflowRuleRetirementRequest
+) -> dict[str, object]:
+    candidate = workflow_rule_retirement_candidate(active, request)
+    by_fingerprint = {_authz_rule_sha256(rule): rule for rule in active.policy.github_actions}
+    selected = [by_fingerprint[selection.rule_sha256] for selection in request.selection]
     lockout = not authz_policy_retains_reachable_github_id_administration(policy=candidate) or (
         len(strict_immutable_github_human_administrator_ids(candidate))
         < effective_administrator_quorum(candidate)
@@ -128,9 +112,9 @@ def workflow_rule_retirement_plan(
     if request.mode == "plan":
         result.update(
             candidate_policy_sha256=authz_policy_sha256(candidate),
-            surviving_workflow_rule_count=len(survivors),
+            surviving_workflow_rule_count=len(candidate.github_actions),
             survivor_rules_sha256=request_fingerprint(
-                [r.model_dump(mode="json") for r in survivors]
+                [r.model_dump(mode="json") for r in candidate.github_actions]
             ),
             other_principal_collections_preserved=True,
         )

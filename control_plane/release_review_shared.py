@@ -58,6 +58,7 @@ def read_shared_source_changes(
     read: GitHubRead,
     preview_hosts: tuple[str, ...] = (),
     review_label: str = "owner-review",
+    policy_store: object = None,
 ) -> tuple[tuple[SharedSourceReview, ...], tuple[str, ...]]:
     try:
         before = _shared_sources(production, repository)
@@ -89,6 +90,7 @@ def read_shared_source_changes(
                 read=read,
                 preview_hosts=preview_hosts,
                 review_label=review_label,
+                policy_store=policy_store,
             )
         except (ValueError, click.ClickException):
             # Preserve the existing release-scoped admin review path. Client

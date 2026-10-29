@@ -20,11 +20,18 @@ context cannot be substituted. This is separate from product-config's merge
 writer and does not change its ownership or global-target refusal.
 
 The authenticated Director agent can prepare previews and read back results.
-An existing admin can review with `secret.list`. Apply requires
-the signed-in immutable-ID administrator and existing `product_config.apply`
-authority for the exact selected scope, product and context. A `local_admin`,
-workflow, `local_operator` or terminal token cannot apply, even with a matching preview.
-Browser origin/fetch metadata/CSRF checks still apply. No new grant is installed.
+An existing admin can review with `secret.list`. Apply requires existing
+`product_config.apply` authority for the exact selected scope, product and
+context. The signed-in immutable-ID administrator keeps its existing scopes.
+The authenticated Director `local_operator` can also apply an instance-scoped
+removal for an exclusively owned, enabled product preview context with
+`instance: preview`. That context/instance pair must not alias a stable lane.
+This narrow path for the Director's agent rejects testing, production, context and global
+selections; other caller credentials, `local_admin`, workflow and terminal credentials
+cannot use it. The trusted Director marker alone does not make a terminal token
+writable, and standing read authority never supplies the required write grant.
+The same scope and permission checks run before receipt replay. Browser
+origin/fetch metadata/CSRF checks still apply. No new grant is installed.
 
 Dry-run saves a service-owned review containing the complete original record,
 request, reviewer and active authority binding. Its wire response contains only
@@ -58,13 +65,69 @@ Managed-secret records and bindings are untouched. An inherited value can
 become visible after a stored override is removed; the preview is not a claim
 that a key is absent across all layers or from the provider.
 
+Exact non-preview instance reviews also return `instance_plain_setting_effects`: for each
+selected key, whether the context supplies the same string value, a different
+value, or no value after the lane override is removed. This comparison follows
+the current site plain-setting layers, which exclude global settings. It does
+not evaluate preview templates, target overrides, managed secrets, provider
+leftovers, actual runtime consumers or legacy global-inclusive resolvers.
+Preview, context and global reviews omit this comparison and still require their own
+consumer and inheritance qualification.
+
+The service compares selected context values privately and binds them to the
+review with a nonce-protected `context_values_sha256`. Apply rechecks this
+binding under the existing authority locks, including when an absent context
+value has since appeared. A changed fallback requires a fresh review; unrelated
+context keys do not invalidate it. Older non-preview instance reviews also require a fresh
+review before applying. The comparison stays with the original review in
+historical receipts and readback; it is not a fresh runtime observation.
+
+Global dry runs also return `consumer_inventory`, a bounded names-only observation
+of every stored runtime record, product lane and preview profile, target overlay,
+and matching runtime secret-binding metadata. Enumeration includes inactive
+profiles, undeclared contexts, historical lane names and global bindings. Preview
+profile matches describe explicit overrides only; they do not resolve the
+template. Matching runtime/secret requirements and preview key policies are
+listed separately, including omitted/copied/required/template URL/domain names.
+An unspecified requirement context applies to all product lanes; it is not
+evidence of a global plain-setting source. Declarations do not prove runtime
+consumption. Lane entries have null `selected_keys` because their effective values
+have not been evaluated. An empty list for a source means no selected name in
+that source, not an unused setting. Counts describe the complete enumerated
+tables; each displayed consumer and authority list is capped separately and
+reports truncation.
+Matching entries appear before unmatched entries. The page shows displayed and
+total counts, so even a list containing only matches cannot imply full coverage.
+
+The inventory also lists every saved reconciliation request and production
+recipient, including completed and failed records. These are potential authority
+consumers, not proof that a selected name occurs in their captured authority.
+Resolve a held record through its original operation; never replace its key or
+capture new authority to bypass drift. Retained operation payloads, preview
+generations, baked images, provider environments, managed-secret resolution and
+external CLI consumers remain explicitly unqualified. This is no complete-fleet
+runtime-consumption verdict.
+
+This observation is collected after the saved review, is outside its digest,
+and is neither atomic across tables nor revalidated by Apply. It is not saved in
+the review or repeated on Apply/readback. It changes none of their existing
+guards. Obtain current operational qualification independently before removal.
+The signed-in page displays this evidence on global reviews. Terminal clients
+that omit the additive field cannot claim inventory coverage; use the page or
+update the bounded client in its owning repository.
+
 The change and its completion receipt commit in one transaction. Retry an
 uncertain reply only with its original request and key. A confirmed replay
 returns the original result; it does not reapply. `mode: readback` uses the
 same review binding and compares fresh stored survivors/absence and retirement
 intent, returning `readback_matches`; false means drift or incomplete removal,
 not success. The commit receipt identifies historical completion; readback is
-the separate current-state proof.
+the separate current-state proof. A 409 `runtime_setting_removal_stale` means
+this exact attempt acquired its reservation but refused changed state before
+writing, and the transaction rolled back. The browser may settle that attempt
+and request a fresh review. The generic `runtime_setting_removal_unverified`
+response does not prove that outcome and preserves continuity on a retry after
+an uncertain reply.
 
 Rollback custody stays inside the service's private database in the saved
 review's original record. The preview preimage is not an HTTP response and has
@@ -109,3 +172,86 @@ is checked again after planning so a concurrent change invalidates the result.
 This route has **no apply mode** (`apply_supported: false`). A later Director
 access-removal decision needs this exact plan and a supported reviewed admin
 policy operation; a plan digest never grants execution authority.
+
+### Reviewed workflow-rule removal
+
+The existing `managed-authz-policy-set` privileged-operation proposal accepts
+an optional `workflow_rule_retirement` containing that exact snapshot and selection
+with `mode: plan`. For this contraction, `managed_set_id` is empty and
+`desired_policy` is an empty schema-v2 or schema-v3 fragment. No managed set is
+reconciled. Schema migration, adoption, quorum changes and nonempty desired rules
+are rejected. The active schema, settings and every unselected rule remain exact.
+Only unmanaged selections are accepted. Contract a managed rule through its own
+reviewed managed set so its independent source cannot silently restore it.
+
+Prepare a private `managed-authz-policy-set` envelope with that request, a stable
+`source_event_id`, `reason` and optional `related_issue`. Submit it through the
+installed Launchplane helper's `privileged-policy-propose --payload-file` command.
+The helper keeps its existing private admin transport, response validation and
+full review URL. It never approves or applies. Keep the identical envelope and
+source event after an uncertain submission; inspect or replay that proposal
+rather than creating another. Older installed clients need the companion
+[helper update](https://github.com/cbusillo/codex-skills/issues/2633) before
+they accept this optional request field.
+
+The existing proposer grant and signed-in Director approval govern the request;
+no new grant or operation descriptor is installed. The Director's review shows
+each selected workflow's full scope and permissions, including unmanaged rules.
+The ordinary managed-reconcile HTTP route rejects this contraction: execution
+belongs to the existing approved-operation worker. Approval binds the selection,
+reason, original active policy and candidate digest. The worker replans against
+fresh state, writes through the existing locked policy CAS and audit transaction,
+and verifies the resulting complete policy digest. An interrupted execution uses
+the same operation's existing completion receipt and recovery path.
+
+The inspect/plan route remains inert. Delivering this source performs no
+retirement. After approval, read the active inventory again and compare it with
+the reviewed candidate; a proposal or historical worker receipt alone does not
+prove current absence or unchanged survivors.
+
+After the first proposal containing this request is persisted, retain a rollback
+image with this request reader. Older strict readers cannot load that new proposal;
+rolling back the service image never restores removed authorization data.
+
+## Signed-in removal page
+
+Engineering Ops → **Remove stored settings** (`/ui/engineering/runtime-setting-removal`)
+uses the existing removal endpoint. Enter the product, exact stored scope,
+context/lane when applicable, selected names and reason. **Review removal** saves
+a fresh service review and shows the exact selected names, survivors, retirement
+intent and reader/rollback requirement. Changing any field invalidates that review.
+No stored values, secret values or rollback preimages are displayed.
+Non-preview instance reviews display the stored context fallback comparison alongside the
+selected keys. This evidence narrows the stored-value question without
+attesting runtime use or qualifying a removal by itself.
+
+Before confirming, qualify the actual runtime consumers and the effective value
+that would be inherited from broader scopes. A context removal can change every
+lane without a more specific override; a global removal can reach other products.
+The global inventory identifies stored sources but does not attest actual
+consumption or effective values. Follow the live-site and
+Client boundaries in DIRECTION.md before approving the exact change.
+
+**Remove reviewed settings** uses the signed-in administrator's existing authority,
+CSRF protection and one retained operation key. The original request stays in that
+browser tab's session storage for same-request recovery after a lost reply or
+reload. Recovery is keyed by the administrator and the physical stored record
+(scope, context and instance), independently of product ownership. The record
+selector stays usable after uncertainty so other records can be reviewed;
+returning to the same record restores its original request and key. An uncertain
+outcome locks that record's setting names, reason and new reviews; **Retry original removal**
+reuses the request and key. Missing recovery storage blocks submission. A stale
+attempt that is proven rolled back requires a fresh review, including after
+an uncertain reply. An unverified reservation keeps the original operation locked.
+A committed removal is followed by an independent readback, and its local saved
+request is cleared. Historical completion remains in service custody. An unavailable or
+mismatched readback stays unverified. **Check current record**
+can repeat that read, including while an Apply is uncertain. The previous
+result is cleared while a fresh check runs, and progress is shown until the
+request finishes. Completed checks show their service reference so a fast recheck
+is distinguishable from its predecessor. A mismatch reports changed state;
+a failed check stays unverified. A previous match is not current proof during
+the recheck. A current match or mismatch never settles the original Apply. After a confirmed
+commit, a fresh review can inspect the current record even if another writer
+has changed it; the historical receipt does not promise current agreement.
+Runtime sync, deployment and production acceptance remain separate operations.

@@ -36,6 +36,24 @@ product-profile write path (`POST /v1/product-profiles`) after registry reads
 are qualified. Default serialization omits this field so existing fingerprints
 do not change. A disabled scan is explicit in the reconcile plan.
 
+The authenticated Director agent may use that same profile path to change only
+`image.scan_enabled` from false to true on an existing active managed product.
+The request requires the current profile's `If-Match` revision and an
+`Idempotency-Key`. The service qualifies the verified testing candidate again
+before committing the exact profile change; a failing or unavailable scan
+returns `artifact_scan_refused` and leaves the gate disabled. The final profile
+compare-and-write rejects concurrent edits during qualification. This narrow
+standing path cannot disable scanning, create a product, edit other fields,
+change access or deploy anything. Other callers retain their existing policy
+requirements.
+
+Allow up to five minutes for activation's service-side qualification. A lost or
+timed-out activation response is an uncertain write, not a scan refusal. Read
+the stored profile before any retry, and retain the original idempotency key
+and exact payload for a supported replay. A second request can encounter a busy
+scanner while the original is still running; that response does not settle the
+original request's outcome.
+
 Qualify first with `GET /v1/artifacts/scan?product=<product>`, using the existing
 whole-product `artifact_protection.read` authority. The service selects and
 verifies the current testing build through the same provenance planner and
@@ -54,9 +72,17 @@ GHCR-only auth entry in a mode-0600 file inside the private temporary Docker
 config directory. It never supplies global Trivy username/password settings,
 and removes the file when scanning ends. Other registry and advisory mirror
 hosts receive no such entry. It never falls back to a product token or host
-login. The Director creates/pastes any new
-credential through the existing managed-secret UI; the agent verifies only
-redacted reads. Absent credentials allow public reads; an enabled private scan
+login. The Director opens
+`/ui/owner-secrets?product=launchplane&environment=ghcr_artifact_read` on the
+deployed Launchplane service and saves the pull-only username and token in the
+existing write-only form. The service binds each value directly in its own
+context, without a product profile or a separate admin application step.
+Only the signed-in Director identified by the active policy's immutable GitHub
+administrator ID can read this request or submit it; product Clients, scoped
+admins and machine identities cannot. Values are encrypted, never returned or
+logged, and the form clears each input before dispatch. A saved receipt survives
+reload; replacing a credential rotates its encrypted version. The agent verifies
+only redacted reads. Absent credentials allow public reads; an enabled private scan
 without usable credentials remains unavailable and holds the deploy.
 
 Scanner databases and image-analysis cache stay in a private, process-owned

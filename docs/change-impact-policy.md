@@ -18,3 +18,7 @@ compatibility needed by persisted policies, audits, and review records. Existing
 tables, migrations, history, and storage import behavior are preserved. There is
 no service route for applying or evaluating these retired policies. This change
 does not delete records or mutate runtime grants.
+
+`control_plane/contracts/product_owner.py` preserves historical policy models and
+their validation. Its unused review-age, self-review, preview-trust and scoped
+fingerprint decision helpers have been removed.

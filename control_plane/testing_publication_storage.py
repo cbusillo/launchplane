@@ -20,11 +20,12 @@ from control_plane.contracts.testing_publication import (
 )
 from control_plane.contracts.testing_rebuild import TestingRouteObservation
 from control_plane.contracts.promotion_record import HealthcheckEvidence
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.storage import postgres as db
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.contracts.testing_route_refresh import testing_route_domains
+from control_plane.dokploy.testing_route import TestingLaneRoute
 from control_plane.route_binding_reconcile import route_binding_authority_projection
 from control_plane.testing_candidate_runtime import (
     testing_profile_binding,
@@ -57,13 +58,34 @@ def testing_binding_authority(
         binding.source.source_label,
         binding.source.source_versions.get("testing_publication"),
         binding.source.source_versions.get("testing_route"),
+        binding.source.source_versions.get("testing_address"),
+    )
+
+
+def testing_binding_matches_route(
+    actual: EnvironmentRouteBindingRecord | None,
+    expected: EnvironmentRouteBindingRecord,
+    route: TestingLaneRoute,
+) -> bool:
+    authority = testing_binding_authority(actual)
+    if authority == testing_binding_authority(expected):
+        return True
+    return authority == testing_binding_authority(
+        expected.model_copy(update={"domains": testing_route_domains(route)})
     )
 
 
 def serving_snapshot_matches(
-    actual: TestingServingSnapshot, expected: TestingServingSnapshot
+    actual: TestingServingSnapshot,
+    expected: TestingServingSnapshot,
+    *,
+    store: db.PostgresRecordStore | None = None,
 ) -> bool:
     """Serving authority and custody identify a copy; observation metadata does not."""
+    if store is not None and testing_binding_matches_retained_publication(
+        store, actual.binding, expected.binding
+    ):
+        actual = actual.model_copy(update={"binding": expected.binding})
     values = []
     for snapshot in (actual, expected):
         payload = snapshot.model_dump(mode="json")
@@ -71,6 +93,39 @@ def serving_snapshot_matches(
         payload["binding"] = testing_binding_authority(snapshot.binding)
         values.append(payload)
     return _same(*values)
+
+
+def testing_binding_matches_retained_publication(
+    store: db.PostgresRecordStore,
+    actual: EnvironmentRouteBindingRecord | None,
+    expected: EnvironmentRouteBindingRecord | None,
+) -> bool:
+    if testing_binding_authority(actual) == testing_binding_authority(expected):
+        return True
+    if (
+        actual is None
+        or expected is None
+        or testing_binding_authority(actual.model_copy(update={"domains": expected.domains}))
+        != testing_binding_authority(expected)
+    ):
+        return False
+    route = retained_testing_route(store, actual)
+    return route is not None and testing_binding_matches_route(actual, expected, route)
+
+
+def retained_testing_route(
+    store: db.PostgresRecordStore, binding: EnvironmentRouteBindingRecord
+) -> TestingLaneRoute | None:
+    key = binding.source.source_versions.get("testing_publication", "")
+    from control_plane.testing_address_storage import effective_testing_route
+
+    try:
+        publication = read_publication(store, key) if key else None
+        if publication is None or publication.state != "applied":
+            return None
+        return effective_testing_route(store, publication, binding=binding)
+    except (ValueError, FileNotFoundError):
+        return None
 
 
 def _snapshot(
@@ -190,7 +245,7 @@ def _sources(
 
     require_original_candidate_inputs(plan)
     profiles = tuple(
-        LaunchplaneProductProfileRecord.model_validate(row.payload)
+        store._read_product_profile_payload(row.payload)
         for row in session.scalars(select(db.LaunchplaneProductProfileRow))
     )
     require_bundle_context_owner(
@@ -261,6 +316,7 @@ def prepare_publication(
         if not serving_snapshot_matches(
             _snapshot(store, session, plan.candidate.product, plan.candidate.context),
             plan.before,
+            store=store,
         ):
             raise ValueError("Serving authority changed before publication preparation.")
         record = TestingPublicationRecord(plan=plan, updated_at=plan.created_at)
@@ -400,7 +456,7 @@ def publish(
         _sources(store, session, plan, runtime_after=prior.state == "applied")
         expected = plan.before if prior.state == "planned" else effective_after(prior)
         current = _snapshot(store, session, plan.candidate.product, plan.candidate.context)
-        if not serving_snapshot_matches(current, expected):
+        if not serving_snapshot_matches(current, expected, store=store):
             raise ValueError("Serving authority changed since the original publication.")
         health = (
             prior.public_health
@@ -530,7 +586,7 @@ def _write_serving_snapshot(
     bundle = ProductAuthorityBundle(
         required_context_owner=(plan.candidate.product, plan.candidate.context),
         expected_product_profiles=(
-            LaunchplaneProductProfileRecord.model_validate(
+            store._read_product_profile_payload(
                 session.get(db.LaunchplaneProductProfileRow, plan.profile.product).payload
             ),
         ),

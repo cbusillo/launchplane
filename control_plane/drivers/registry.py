@@ -45,6 +45,7 @@ from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
     resolve_production_backup_authority,
 )
+from control_plane.timestamps import utc_now_timestamp
 
 
 PROVIDER_BOUNDARY_NOTE = (
@@ -340,6 +341,17 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
     ),
     actions=(
         _action(
+            "service_restart",
+            "Restart a service (same version)",
+            "Inspect and restart one container on its recorded current artifact, excluding release runs.",
+            safety="mutation",
+            scope="instance",
+            route_path=SERVICE_RESTART_ROUTE,
+            authz_action="live_target_runtime.apply",
+            alternate_authz_actions=("live_target_runtime.plan",),
+            writes_records=("service_restart",),
+        ),
+        _action(
             "stable_deploy",
             "Deploy lane",
             "Deploy an immutable container image to a configured generic-web product lane.",
@@ -476,7 +488,6 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
                 "preview.required_template_env_keys",
                 "preview.copied_env_keys",
                 "preview.omitted_env_keys",
-                "preview.override_env",
                 "preview.preview_url_env_keys",
                 "preview.preview_domain_env_keys",
             ),
@@ -558,17 +569,6 @@ ODOO_DRIVER = DriverDescriptor(
             authz_action=WALKTHROUGH_ACTION,
             alternate_authz_actions=(WALKTHROUGH_PLAN_ACTION,),
             writes_records=("secret", "odoo_testing_task"),
-        ),
-        _action(
-            "service_restart",
-            "Restart a service (same version)",
-            "Inspect and restart one container on its recorded current artifact, excluding release runs.",
-            safety="mutation",
-            scope="instance",
-            route_path=SERVICE_RESTART_ROUTE,
-            authz_action="live_target_runtime.apply",
-            alternate_authz_actions=("live_target_runtime.plan",),
-            writes_records=("service_restart",),
         ),
         _action(
             "post_deploy",
@@ -1373,9 +1373,7 @@ def _production_backup_authorities(
         )
     ):
         return ()
-    generated_at = (
-        datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    )
+    generated_at = utc_now_timestamp()
     try:
         authority_store = require_production_backup_authority_store(record_store)
     except TypeError:

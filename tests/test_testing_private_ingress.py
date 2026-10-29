@@ -1,6 +1,7 @@
 """Exercise testing hostname creation against real records and fake providers."""
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -23,6 +24,8 @@ from control_plane.npmplus import (
     NpmplusCertificate,
     NpmplusClient,
     NpmplusProxyHost,
+    NpmplusProxyHostPayload,
+    NpmplusProxyHostClaim,
 )
 from control_plane.provider_operations import (
     ProviderOperationLease,
@@ -73,7 +76,9 @@ class EdgeClient(_FakeNpmplusIngressClient):
             raise ValueError("Unknown fixture access list")
         return NpmplusAccessList(id=1, name="Private testing", satisfy_any=False, pass_auth=False)
 
-    def get_proxy_host(self, host_id: int, *, public_only: bool = False) -> NpmplusProxyHost:
+    def get_proxy_host(
+        self, host_id: int, *, public_only: bool = False, private_bearer_auth: bool = False
+    ) -> NpmplusProxyHost:
         host = next(host for host in self.proxy_hosts if host.id == host_id)
         # Disabled NPMplus hosts are not loaded. Exercise the real public-read
         # parser instead of silently ignoring the public_only safety argument.
@@ -85,10 +90,12 @@ class EdgeClient(_FakeNpmplusIngressClient):
             "npmplus_mtls_verify_client_optional": False,
             "npmplus_mtls_bypass_auth_request": False,
             "npmplus_auth_request_upstream": "",
-            "npmplus_location_config": "",
+            "npmplus_location_config": host.npmplus_location_config,
             "npmplus_directory": "",
         }
-        return NpmplusClient.get_proxy_host(reader, host_id, public_only=public_only)
+        return NpmplusClient.get_proxy_host(
+            reader, host_id, public_only=public_only, private_bearer_auth=private_bearer_auth
+        )
 
     def list_other_host_domains(self) -> tuple[str, ...]:
         return self.other_domains
@@ -282,6 +289,158 @@ class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class PrivateTestingIngressTests(PrivateIngressFixture):
+    def create_legacy_private_route(self) -> None:
+        desired_builder = TestingPrivateIngressAdapter._desired
+
+        def legacy_desired(
+            adapter: TestingPrivateIngressAdapter, authority: dict[str, object]
+        ) -> NpmplusProxyHostPayload:
+            return desired_builder(adapter, authority).model_copy(
+                update={"npmplus_location_config": ""}
+            )
+
+        with patch.object(TestingPrivateIngressAdapter, "_desired", legacy_desired):
+            self.create()
+
+    def test_owned_legacy_route_retries_an_unwritten_update(self) -> None:
+        self.create_legacy_private_route()
+        original = self.client.proxy_hosts[0]
+        digest = self.adapter().plan()["plan_sha256"]
+        with patch.object(self.client, "update_proxy_host", side_effect=TimeoutError("No reply")):
+            with self.assertRaises(ProviderMutationUnknownError):
+                self.adapter(mode="apply", reviewed_plan_sha256=digest).apply(
+                    "bearer-upgrade", self.lease
+                )
+        observer = self.adapter(reviewed_plan_sha256=digest)
+        observed = observer.observe(
+            "bearer-upgrade", "apply_private_testing_edge", "fixture-reconciliation"
+        )
+        self.assertEqual(observed.outcome, "absent")
+        self.assertTrue(observed.retry_safe)
+        result = self.adapter(mode="apply", reviewed_plan_sha256=digest).apply(
+            "bearer-upgrade", self.lease
+        )
+        self.assertEqual(result.response_status_code, 202)
+        self.assertEqual(self.client.proxy_hosts[0].id, original.id)
+        self.assertNotEqual(
+            self.client.proxy_hosts[0].npmplus_location_config, original.npmplus_location_config
+        )
+
+    def assert_legacy_upgrade_adopts_lost_reply(self, *, disabled: bool = False) -> None:
+        self.create_legacy_private_route()
+        if disabled:
+            digest = self.adapter(operation="disable").plan()["plan_sha256"]
+            self.adapter(operation="disable", reviewed_plan_sha256=digest).apply(
+                "disable-legacy", self.lease
+            )
+        original = self.client.proxy_hosts[0]
+        digest = self.adapter().plan()["plan_sha256"]
+        update = self.client.update_proxy_host
+
+        def lose_reply(**kwargs: Any) -> Any:
+            update(**kwargs)
+            raise TimeoutError("Lost provider reply")
+
+        with patch.object(self.client, "update_proxy_host", side_effect=lose_reply):
+            with self.assertRaises(ProviderMutationUnknownError):
+                self.adapter(mode="apply", reviewed_plan_sha256=digest).apply(
+                    "bearer-upgrade", self.lease
+                )
+        applied = self.client.proxy_hosts[0]
+        self.assertEqual(applied.access_list_id, original.access_list_id)
+        self.assertEqual(applied.id, original.id)
+        self.assertNotEqual(applied.npmplus_location_config, original.npmplus_location_config)
+        writes = tuple(self.client.calls)
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        observed = adapter.observe(
+            "bearer-upgrade", "apply_private_testing_edge", "fixture-reconciliation"
+        )
+        if disabled:
+            self.assertEqual(observed.outcome, "absent")
+            self.assertTrue(observed.retry_safe)
+            adapter.apply("bearer-upgrade", self.lease)
+            observed = adapter.observe(
+                "bearer-upgrade", "apply_private_testing_edge", "fixture-reconciliation"
+            )
+            self.assertTrue(self.client.proxy_hosts[0].enabled)
+        self.assertEqual(observed.outcome, "present")
+        self.assertEqual(
+            tuple(call for call in self.client.calls if call.startswith("update:")),
+            tuple(call for call in writes if call.startswith("update:")),
+        )
+
+    def test_owned_legacy_route_upgrades_and_adopts_a_lost_reply(self) -> None:
+        self.assert_legacy_upgrade_adopts_lost_reply()
+
+    def test_disabled_legacy_route_resumes_enable_after_a_lost_update_reply(self) -> None:
+        self.assert_legacy_upgrade_adopts_lost_reply(disabled=True)
+
+    def test_legacy_activation_snapshot_matches_original_private_ingress_snapshot(self) -> None:
+        from control_plane.testing_application_private_route import private_ingress_snapshot
+
+        self.create_legacy_private_route()
+        desired_builder = TestingPrivateIngressAdapter._desired
+
+        def legacy_desired(
+            adapter: TestingPrivateIngressAdapter, authority: dict[str, object]
+        ) -> NpmplusProxyHostPayload:
+            return desired_builder(adapter, authority).model_copy(
+                update={"npmplus_location_config": ""}
+            )
+
+        with patch.object(TestingPrivateIngressAdapter, "_desired", legacy_desired):
+            original, _, _ = self.adapter()._snapshot()
+        with patch(
+            "control_plane.workflows.ingress_provider.build_npmplus_ingress_client_from_env",
+            return_value=self.client,
+        ):
+            current, _, _ = private_ingress_snapshot(
+                self.root, self.store, product=self.profile.product, context=self.context
+            )
+        self.assertEqual(current, original)
+
+    def test_legacy_pending_operation_preserves_its_original_forwarding_intent(self) -> None:
+        desired_builder = TestingPrivateIngressAdapter._desired
+        create = self.client.create_proxy_host
+
+        def legacy_desired(
+            adapter: TestingPrivateIngressAdapter, authority: dict[str, object]
+        ) -> NpmplusProxyHostPayload:
+            return desired_builder(adapter, authority).model_copy(
+                update={"npmplus_location_config": ""}
+            )
+
+        def lost_create(payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
+            create(payload)
+            raise TimeoutError("Lost legacy reply")
+
+        with patch.object(TestingPrivateIngressAdapter, "_desired", legacy_desired):
+            digest = self.adapter().plan()["plan_sha256"]
+            with patch.object(self.client, "create_proxy_host", side_effect=lost_create):
+                with self.assertRaises(ProviderMutationUnknownError):
+                    self.adapter(reviewed_plan_sha256=digest).apply("legacy-key", self.lease)
+        observed = self.adapter(reviewed_plan_sha256=digest).observe(
+            "legacy-key", "apply_private_testing_edge", "fixture-reconciliation"
+        )
+        self.assertEqual(observed.outcome, "present")
+        self.assertFalse(self.client.proxy_hosts[0].npmplus_location_config)
+
+    async def test_private_dependency_refusal_keeps_safe_trace_evidence(self) -> None:
+        from control_plane import http_error_evidence
+
+        private = "private-provider-diagnostic-sentinel"
+        self.factory.side_effect = ValueError(private)
+        with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+            response = await self.post()
+        self.assertEqual(response.status_code, 409, response.text)
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(evidence["trace_id"], response.json()["trace_id"])
+        self.assertTrue(evidence["sites"])
+        self.assertNotIn(private, response.text + str(logs.output))
+        self.assertEqual(self.dokploy_calls, [])
+        self.assertEqual(self.domains, [])
+        self.assertEqual(self.client.proxy_hosts, [])
+
     def test_historical_cleanup_receipt_requires_exact_successful_ownership(self) -> None:
         self.create()
         receipt = self.store.list_ingress_route_audit_records()[0]
@@ -385,7 +544,9 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
                         "require_exact_expected_host_domains": True,
                         "allow_create": False,
                         "route": {
-                            **actual.model_dump(mode="json", exclude={"id", "meta"}),
+                            **actual.model_dump(
+                                mode="json", exclude={"id", "meta", "npmplus_location_config"}
+                            ),
                             "forward_host": "",
                             "edge_endpoint_key": self.edge.endpoint_key,
                         },
@@ -586,8 +747,13 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         self.client.proxy_hosts = [
             _npmplus_proxy_host().model_copy(update={"domain_names": ("*.example.test",)})
         ]
-        with self.assertRaises(ValueError):
-            self.adapter().plan()
+        claims = tuple(
+            NpmplusProxyHostClaim(id=host.id, domain_names=host.domain_names)
+            for host in self.client.proxy_hosts
+        )
+        with patch.object(self.client, "list_proxy_hosts", return_value=claims):
+            with self.assertRaises(ValueError):
+                self.adapter().plan()
         self.client.proxy_hosts = []
         self.client.other_domains = ("bridge-testing.example.test",)
         with self.assertRaises(ValueError):

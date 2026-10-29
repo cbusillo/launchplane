@@ -70,7 +70,7 @@ class ReviewHistoryTests(unittest.IsolatedAsyncioTestCase):
         ):
             first = read_original_review_history(
                 store=self.store,
-                repository=self.repository,
+                repository=self.repository.swapcase(),
                 base_branch=self.base,
                 trace_id="read-one",
                 limit=1,
@@ -163,7 +163,9 @@ class ReviewHistoryTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(response.status_code, 403, response.text)
 
-    def test_original_review_evidence_handles_squash_ownership_and_scoped_read_errors(self) -> None:
+    def test_original_review_evidence_keeps_ownership_and_errors_across_repository_case(
+        self,
+    ) -> None:
         mutation = self.original.plan.mutations[0]
         parent = MergeTrainPullRequestSnapshot(
             number=mutation.parent_pull_request_number,
@@ -174,7 +176,7 @@ class ReviewHistoryTests(unittest.IsolatedAsyncioTestCase):
             requires_individual_landing=True,
         )
         snapshot = MergeTrainDryRunSnapshot(
-            repository=self.repository,
+            repository=self.repository.swapcase(),
             base_branch=self.base,
             base_sha="current-base",
             pull_requests=(parent,),
@@ -188,7 +190,7 @@ class ReviewHistoryTests(unittest.IsolatedAsyncioTestCase):
             def branch_contains_commit(
                 self, *, repository: str, branch_ref: str, commit_sha: str
             ) -> bool:
-                self_test.assertEqual(repository, self_test.repository)
+                self_test.assertEqual(repository, snapshot.repository)
                 if self.error_status:
                     raise MergeTrainGitHubError(
                         "Provider evidence unavailable", status_code=self.error_status
@@ -203,7 +205,7 @@ class ReviewHistoryTests(unittest.IsolatedAsyncioTestCase):
             def pull_request_is_merged(
                 self, *, repository: str, pull_request_number: int, expected_head_sha: str
             ) -> str:
-                self_test.assertEqual(repository, self_test.repository)
+                self_test.assertEqual(repository, snapshot.repository)
                 self_test.assertEqual(pull_request_number, mutation.child_pull_request_number)
                 self_test.assertEqual(expected_head_sha, mutation.child_head_sha)
                 return self.merged

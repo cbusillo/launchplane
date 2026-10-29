@@ -8,7 +8,6 @@ import type {
   DiscussionTopicsResponse,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
-  EveryCodeSummaryResponse,
   GitHubHumanIdentityResponse,
   GovernanceProjectionResponse,
   MergeAdmissionRecord,
@@ -54,7 +53,7 @@ const promotionDeliveries = new Map<string, number>();
 export function ownerSecretInputsForFixture(fixture: DataFixtureMode, product: string, environment: string, received = false): OwnerSecretInputResponse {
   assertFixtureAvailable(fixture);
   return {
-    status: "ok", trace_id: "fixture-owner-secret", product, display_name: "Example Site", environment, can_submit: true,
+    status: "ok", trace_id: "fixture-owner-secret", product, display_name: "Example Site", environment, can_submit: true, application_required: true,
     fields: fixture === "empty" ? [] : [{
       integration: "runtime_environment", binding_key: "MAIL_PASSWORD", label: "Mail app credential", instructions: "Enter the app credential for the website’s sending account.", environments: ["testing", "prod"], request_revision: "a".repeat(64),
       submitted_at: received ? OBSERVED_AT : "", submission_version_id: received ? "fixture-submission-version" : "",
@@ -382,6 +381,7 @@ export function incidentForFixture(
     : `observation-${incident.incident_id}-latest`;
   return {
     incident,
+    opening_observation: null,
     material_evidence: {
       check_kind: incident.check_kind,
       failure_code: incident.failure_code,
@@ -406,6 +406,9 @@ export function incidentForFixture(
         incident_event_id: eventId,
         material_fingerprint_sha256: incident.material_fingerprint_sha256,
         notification_sent: !resolved,
+        provider_operation_references: [],
+        provider_reservation_ids: [],
+        testing_recovery_reference: "",
       },
       ...(!resolved
         ? [
@@ -419,6 +422,9 @@ export function incidentForFixture(
               incident_event_id: eventId,
               material_fingerprint_sha256: incident.material_fingerprint_sha256,
               notification_sent: true,
+              provider_operation_references: [],
+              provider_reservation_ids: [],
+              testing_recovery_reference: "",
             },
           ]
         : []),
@@ -1472,53 +1478,6 @@ export function activityForFixture(
   };
 }
 
-export function everyCodeForFixture(
-  fixture: DataFixtureMode,
-): EveryCodeSummaryResponse {
-  assertEngineeringFixtureAvailable(fixture);
-  const summaries =
-    fixture === "empty"
-      ? []
-      : fixture === "missing"
-        ? [
-            engineeringEveryCodeSummary({
-              freshness: "missing",
-              issueNumber: 319,
-              state: "blocked",
-              summaryStatus: "stuck",
-              title: "Refresh external check evidence",
-            }),
-          ]
-        : [
-            engineeringEveryCodeSummary({
-              freshness: "verified",
-              issueNumber: 308,
-              state: "running",
-              summaryStatus: "active",
-              title: "Finish the admin evidence route",
-            }),
-            engineeringEveryCodeSummary({
-              freshness: "recorded",
-              issueNumber: 302,
-              state: "done",
-              summaryStatus: "complete",
-              title: "Publish generated API contracts",
-            }),
-          ];
-  return {
-    status: "ok",
-    summary: {
-      generated_at: OBSERVED_AT,
-      issue_number: null,
-      repository: "",
-      schema_version: 1,
-      state_filter: "",
-      summaries,
-    },
-    trace_id: "fixture-every-code-summary",
-  };
-}
-
 export function mergeTrainTargetsForFixture(
   fixture: DataFixtureMode,
 ): MergeTrainPolicyTargetsResponse {
@@ -1877,77 +1836,6 @@ export function tenantAdmissionForFixture(
     },
     status: "ok",
     trace_id: "fixture-tenant-admission",
-  };
-}
-
-function engineeringEveryCodeSummary({
-  freshness,
-  issueNumber,
-  state,
-  summaryStatus,
-  title,
-}: {
-  freshness: "verified" | "recorded" | "missing";
-  issueNumber: number;
-  state: "running" | "done" | "blocked";
-  summaryStatus: "active" | "complete" | "stuck";
-  title: string;
-}) {
-  const hasEvidence = freshness !== "missing";
-  return {
-    claimed_at: hasEvidence ? "2026-07-14T14:15:00Z" : "",
-    claimed_by_host: hasEvidence ? "every-code-fixture" : "",
-    evidence: [
-      {
-        code: "work_request_state",
-        detail: hasEvidence
-          ? "The durable work-request state was recorded by Launchplane."
-          : "No current worker evidence is available.",
-        recorded_at: hasEvidence ? OBSERVED_AT : "",
-        sensitivity: "internal" as const,
-        source_url: `https://example.invalid/example/control-plane/issues/${issueNumber}`,
-        state: freshness,
-      },
-    ],
-    finished_at: state === "done" ? OBSERVED_AT : "",
-    issue_number: issueNumber,
-    issue_title: title,
-    issue_url: `https://example.invalid/example/control-plane/issues/${issueNumber}`,
-    next_action:
-      state === "blocked"
-        ? "Restore worker evidence before rerunning."
-        : state === "done"
-          ? "Review the result pull request."
-          : "Wait for the current worker attempt to finish.",
-    provenance: {
-      detail: hasEvidence
-        ? "Durable Every Code work-request summary."
-        : "Every Code worker evidence is missing.",
-      freshness_status: freshness,
-      recorded_at: hasEvidence ? OBSERVED_AT : "",
-      refreshed_at: hasEvidence ? OBSERVED_AT : "",
-      sensitivity: "internal" as const,
-      source_kind: hasEvidence ? ("record" as const) : ("unsupported" as const),
-      source_record_id: hasEvidence ? `fixture-request-${issueNumber}` : "",
-      source_url: `https://example.invalid/example/control-plane/issues/${issueNumber}`,
-      stale_after: hasEvidence ? STALE_AFTER : "",
-    },
-    queued_at: "2026-07-14T14:00:00Z",
-    repository: "example/control-plane",
-    request_id: `fixture-request-${issueNumber}`,
-    result_pr_url:
-      state === "done"
-        ? `https://example.invalid/example/control-plane/pull/${issueNumber + 100}`
-        : "",
-    result_summary: state === "done" ? "The scoped change completed successfully." : "",
-    safe_to_rerun: state === "blocked" && hasEvidence,
-    source: "github_issue_label",
-    started_at: hasEvidence ? "2026-07-14T14:17:00Z" : "",
-    state,
-    summary_status: summaryStatus,
-    trigger_actor: "platform-operator",
-    trigger_label: "every-code",
-    updated_at: OBSERVED_AT,
   };
 }
 
@@ -2607,10 +2495,12 @@ export function productReviewForFixture(
   assertEngineeringFixtureAvailable(fixture);
   const params = new URLSearchParams(window.location.search);
   const scenario = params.get("scenario") ?? "ready";
+  const carriedDecision = ["carried-decision", "carried-base-integration", "carried-invisible-decision", "former-client-carried-decision", "earlier-carried-decision", "carried-without-preview"].includes(scenario);
+  const invisibleCarry = scenario !== "carried-decision";
   const ownerSet = scenario !== "no-owner";
   const viewerIsOwner = ownerSet && params.get("viewer") !== "non-owner";
   const previewUrl =
-    ["missing-preview", "pending-without-preview"].includes(scenario) ? "" : "https://site.preview.example.invalid/";
+    ["missing-preview", "pending-without-preview", "carried-without-preview"].includes(scenario) ? "" : "https://site.preview.example.invalid/";
   const cannotDecideReason = !ownerSet
     ? "No Client set for this product"
     : !viewerIsOwner
@@ -2626,6 +2516,19 @@ export function productReviewForFixture(
     repository: "example/control-plane",
     pull_request_number: 308,
     pull_request_url: "https://github.com/example/control-plane/pull/308",
+    pull_request_title: scenario === "notes-unavailable" ? "" : "Show the repair price on each model",
+    client_test_notes: {
+      "missing-notes": "",
+      "notes-unavailable": "",
+      "nothing-to-test": "Nothing for the Client to test: CI tests only.",
+      "open-questions": "Check the contact page.\n### Open questions for the Client\n- What is the public business address?",
+      "answered-questions": "Check the contact page.\n### Open questions for the Client\n",
+    }[scenario] ?? "1. Open **iPhone 15** repairs.\n2. Confirm each repair shows its price.",
+    client_test_notes_error: {
+      "missing-notes": "Client test notes are missing.",
+      "notes-unavailable": "Client test notes are missing.",
+      "open-questions": "Some Client facts are unanswered.",
+    }[scenario] ?? "",
     preview_url: previewUrl,
     head_sha: previewUrl ? "a".repeat(40) : "",
     preview_generation_id: previewUrl ? "fixture-review-generation" : "",
@@ -2645,16 +2548,23 @@ export function productReviewForFixture(
         ? { ...productReviewDecisionForFixture("accepted", ""), feedback_url: "", head_sha: "b".repeat(40) }
         : scenario === "earlier-decision"
         ? { ...productReviewDecisionForFixture("accepted", ""), head_sha: "b".repeat(40) }
-        : ["carried-decision", "carried-invisible-decision"].includes(scenario)
+        : carriedDecision
         ? {
-            ...productReviewDecisionForFixture("accepted", ""),
+            ...productReviewDecisionForFixture("accepted", "Keep the contact details visible."),
+            owner_github_id: scenario === "former-client-carried-decision" ? "9000" : "9001",
+            owner_github_login: scenario === "former-client-carried-decision" ? "former-client" : "example-owner",
+            head_sha: ["earlier-carried-decision", "carried-without-preview"].includes(scenario) ? "b".repeat(40) : "a".repeat(40),
             carried_from: {
               record_id: "fixture-original-acceptance",
-              head_sha: "b".repeat(40),
-              reason: scenario === "carried-invisible-decision" ? "client_impact_none" : "unchanged_patch_base_update",
-              commits: scenario === "carried-invisible-decision" ? [{ sha: "a".repeat(40), client_impact: "none" }] : [],
+              head_sha: ["earlier-carried-decision", "carried-without-preview"].includes(scenario) ? "c".repeat(40) : "b".repeat(40),
+              reason: scenario === "carried-base-integration" ? "accepted_base_integration" : invisibleCarry ? "client_impact_none" : "unchanged_patch_base_update",
+              commits: invisibleCarry ? [{ sha: "a".repeat(40), client_impact: "none" }] : [],
               refresh_record_ids: [],
-              comparison_base_sha: scenario === "carried-invisible-decision" ? "" : "c".repeat(40),
+              comparison_base_sha: scenario === "carried-base-integration" || !invisibleCarry ? "c".repeat(40) : "",
+              integrated_changes: scenario === "carried-base-integration"
+                ? [{ pull_request_number: 307, head_sha: "d".repeat(40), decision_record_id: "fixture-imported-acceptance", engineering_basis: "" }]
+                : [],
+              batch_record_ids: [],
             },
           }
         : scenario === "decided"

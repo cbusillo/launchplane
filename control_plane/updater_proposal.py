@@ -1,10 +1,10 @@
 """Open a new source proposal with a service-held App, without delivery authority."""
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from pathlib import Path
 from datetime import UTC, datetime
 from urllib.parse import quote
 from hashlib import sha256
-import json
 import logging
 from urllib.error import HTTPError
 from typing import Literal
@@ -139,11 +139,7 @@ def open_updater_proposal(
         workflow_prefix = (
             "launchplane/updater/" + sha256(identity.workflow_ref.encode()).hexdigest() + "/"
         )
-        proposal_digest = sha256(
-            json.dumps(
-                request.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-            ).encode()
-        ).hexdigest()
+        proposal_digest = nonvalidating_compact_sorted_json_sha256(request.model_dump(mode="json"))
         branch = workflow_prefix + proposal_digest
 
         def observed_proposal(

@@ -1,6 +1,47 @@
 """Fixed host disposal for an idle incomplete or completed later-phase standalone rehearsal."""
 
-INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY = r"""
+import inspect
+from typing import Any
+
+
+def preserved_rehearsal_abandonment(record: dict[str, Any]) -> bool:
+    archived = record.get("abandoned_validations", [])
+    progress = record.get("incomplete_retirement")
+    if not archived or not progress:
+        return False
+    disposal = progress.get("host_disposal")
+    return bool(
+        record.get("state") in {"retired", "rebuilding"}
+        and disposal
+        and disposal == archived[-1]["host_disposal"]
+        and disposal.get("disposed") is True
+        and disposal.get("recovery_snapshots_preserved") is True
+        and disposal.get("recovery_snapshots") == record.get("copies")
+    )
+
+
+def rehearsal_effect_marker(action: str, attempt: str) -> str:
+    return action + "-" + attempt + ".started"
+
+
+def archived_rehearsal_markers(record: dict[str, Any]) -> set[str]:
+    return {
+        rehearsal_effect_marker(
+            item.get("original", {}).get("provider_effect_phase", "validate-business"),
+            item["attempt_sha256"],
+        )
+        for item in record.get("abandoned_validations", [])
+    }
+
+
+INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY = (
+    "from typing import Any\n"
+    + inspect.getsource(preserved_rehearsal_abandonment)
+    + "\n"
+    + inspect.getsource(rehearsal_effect_marker)
+    + "\n"
+    + inspect.getsource(archived_rehearsal_markers)
+    + r"""
 def incomplete_initial_snapshot(spec,root,*,allow_partial):
     names=database_names(spec)
     for role in ('upgrade','final_source','final_upgrade'):
@@ -39,6 +80,23 @@ def incomplete_initial_snapshot(spec,root,*,allow_partial):
 LATER_PHASE_ROLES={'upgraded':('source',),'switched':('source','final_source')}
 
 
+def retaining_final_recovery(spec):
+    return spec['action']=='retire' and spec.get('retain_final_recovery') is True
+
+
+def validate_retained_final_recovery(spec,root,copies):
+    for copy in copies:
+        path=root/copy['database']
+        if not path.is_dir() or path.is_symlink():
+            raise RuntimeError('Retained recovery directory is missing or aliased')
+        for item in (root/'capture.json',path/'receipt.json',path/'database.dump',path/'filestore.tar'):
+            if item.is_symlink() or not item.is_file():
+                raise RuntimeError('Retained recovery custody is missing or aliased')
+        if not same_receipt(json.loads((path/'receipt.json').read_text()),copy):
+            raise RuntimeError('Retained recovery receipt changed')
+    validate_snapshots(spec,root,{},copies,retired=True)
+
+
 def same_receipt(saved,recorded):
     # Launchplane and the host serialize the same capture instant differently.
     return (isinstance(saved,dict) and isinstance(recorded,dict)
@@ -53,7 +111,10 @@ def later_phase_snapshots(spec,root):
     record=spec['record']
     names=database_names(spec)
     copies=record['copies']
-    roles=LATER_PHASE_ROLES[record['state']]
+    rebuilding=record['state']=='rebuilding' and spec['action']=='abandon-validation'
+    state='switched' if rebuilding else record['state']
+    roles=(('source','final_source','final_upgrade')
+        if retaining_final_recovery(spec) and state=='retired' else LATER_PHASE_ROLES[state])
     if [copy['database'] for copy in copies]!=[names[role] for role in roles]:
         raise RuntimeError('Recorded recovery copies do not match the rehearsal phase')
     for role,database in names.items():
@@ -68,16 +129,31 @@ def later_phase_snapshots(spec,root):
                 raise RuntimeError('Recovery snapshot custody is missing or aliased')
     # Witness, lineage and bytes must still be exactly the recorded tuples.
     validate_snapshots(spec,root,{},copies,retired=True)
-    # Every started effect settled with its receipt; none may still be writing.
     receipts=[]
+    abandoned_action=spec.get('abandoned_action','validate-business')
+    if (spec['action']=='abandon-validation' and abandoned_action!=
+            {'switched':'validate-business','rebuilding':'rebuild-final'}.get(record['state'])):
+        raise RuntimeError('Abandoned effect does not match its rehearsal phase')
+    abandoned=(rehearsal_effect_marker(abandoned_action,spec['abandoned_attempt_sha256'])
+        if spec['action']=='abandon-validation' else '')
+    archived=archived_rehearsal_markers(record)
+    if abandoned and (not (root/abandoned).is_file() or (root/abandoned).is_symlink()):
+        raise RuntimeError('Missing original validation marker')
     for marker in root.iterdir():
         if marker.name.endswith('.started'):
+            if marker.name==abandoned:
+                if any((root/(marker.name[:-len('.started')]+suffix)).exists()
+                        for suffix in ('.json','.outcome.json','.outcome.pending')):
+                    raise RuntimeError('A recorded validation outcome cannot be abandoned')
+                continue
+            if marker.name in archived:
+                continue
             receipt=root/(marker.name[:-len('.started')]+'.json')
             if receipt.is_symlink() or not receipt.is_file():
                 raise RuntimeError('Uncertain original effect retains its custody')
             receipts.append(json.loads(receipt.read_text()))
     if not any(isinstance(saved,dict) and saved.get('intent_sha256')==record['intent_sha256']
-            and saved.get('state')==record['state'] and isinstance(saved.get('copies'),list)
+            and saved.get('state')==state and isinstance(saved.get('copies'),list)
             and len(saved['copies'])==len(copies)
             and all(same_receipt(left,right) for left,right in zip(saved['copies'],copies))
             for saved in receipts):
@@ -90,7 +166,9 @@ def incomplete_retirement(spec, root):
     namespace=record['rehearsal_id']
     if spec['mode'] not in {'dry-run','apply'} or not (
             (record['state']=='prepared' and not record['copies'])
-            or (record['state'] in LATER_PHASE_ROLES and record['copies'])):
+            or (record['state'] in LATER_PHASE_ROLES and record['copies'])
+            or (spec['action']=='abandon-validation' and record['state']=='rebuilding' and record['copies'])
+            or (retaining_final_recovery(spec) and record['state']=='retired' and record['copies'])):
         raise RuntimeError('Only an incomplete prepared or settled later-phase rehearsal can be disposed')
     if not root.is_dir() or root.is_symlink() or root.resolve()!=root.absolute():
         raise RuntimeError('Missing private rehearsal custody')
@@ -105,10 +183,22 @@ def incomplete_retirement(spec, root):
 def incomplete_retirement_locked(spec,root):
     record=spec['record']
     namespace=record['rehearsal_id']
-    marker=root/'incomplete-retirement.json'
-    refusals=root/'incomplete-retirement-refusals.json'
+    preserve=spec['action']=='abandon-validation'
+    retain=retaining_final_recovery(spec)
+    prefix=('abandon-validation-'+spec['attempt_sha256'] if preserve else 'incomplete-retirement')
+    marker=root/(prefix+'.json')
+    refusals=root/(prefix+'-refusals.json')
     binding={'intent':record['intent_sha256'],'record':spec['record_binding_sha256'],
         'attempt':spec['attempt_sha256'],'resources':spec['resources_binding_sha256']}
+    if spec.get('execute_never_started'):
+        binding['execute_never_started']=True
+        forbidden=['execute.started','execute.json','capture.json','capture.pending','raw-source',
+            *database_names(spec).values()]
+        if any((root/name).exists() or (root/name).is_symlink() for name in forbidden):
+            raise RuntimeError('An execute effect or capture prevents unused rehearsal disposal')
+        if any(path.name.endswith('.started') and path.name!='prepare.started' for path in root.iterdir()):
+            raise RuntimeError('Another effect prevents unused rehearsal disposal')
+    if retain: binding['retain_final_recovery']=True
     progress=record.get('incomplete_retirement') or {}
     review=progress.get('reviewed_plan_sha256')
     def retirement_save(path,payload):
@@ -146,7 +236,7 @@ def incomplete_retirement_locked(spec,root):
         database,image=current(spec)
         containers=inspection(spec,database,image)
     else:
-        if not (root/'execute.started').is_file() or (root/'execute.started').is_symlink() or (root/'execute.json').exists():
+        if not spec.get('execute_never_started') and (not (root/'execute.started').is_file() or (root/'execute.started').is_symlink() or (root/'execute.json').exists()):
             raise RuntimeError('Original execute is not incomplete')
         names=database_names(spec)
         runners=[item for item in all_containers if
@@ -155,6 +245,8 @@ def incomplete_retirement_locked(spec,root):
         if len(runners)!=1: raise RuntimeError('Incomplete runtime selection is unverified')
         environment=dict(value.split('=',1) for value in runners[0]['Config'].get('Env',[]) if '=' in value)
         database=environment.get('ODOO_DB_NAME')
+        if spec.get('execute_never_started') and database!=names['source']:
+            raise RuntimeError('Unused runtime must still select its source database')
         snapshot=incomplete_initial_snapshot(spec,root,allow_partial=database==names['source'])
         if database==names['source']:
             image=spec['source_image']
@@ -242,8 +334,13 @@ def incomplete_retirement_locked(spec,root):
                 or set(manifest['volumes']) & set(docker('volume','ls','--format','{{.Name}}').decode().splitlines())
                 or manifest['network_name'] in set(docker('network','ls','--format','{{.Name}}').decode().splitlines())):
             raise RuntimeError('Resource absence is unverified; preserve recovery custody')
-        for path in root.iterdir():
+        paths=([root/'raw-source',root/database_names(spec)['source']] if retain else
+            [root/'raw-source'] if preserve else root.iterdir())
+        if retain:
+            validate_retained_final_recovery(spec,root,manifest['recovery_snapshots'][1:])
+        for path in paths:
             if path.name in {'.execution.lock',marker.name,refusals.name}: continue
+            if not path.exists() and not path.is_symlink(): continue
             if path.is_symlink(): path.unlink()
             elif path.is_dir(): shutil.rmtree(path)
             else: path.unlink()
@@ -253,7 +350,14 @@ def incomplete_retirement_locked(spec,root):
         for item in inventory())
     volumes_absent=not set(manifest['volumes']) & set(docker('volume','ls','--format','{{.Name}}').decode().splitlines())
     network_absent=manifest['network_name'] not in set(docker('network','ls','--format','{{.Name}}').decode().splitlines())
-    raw_absent=all(path.name in {'.execution.lock',marker.name,refusals.name} for path in root.iterdir())
+    raw_absent=(all(not path.exists() and not path.is_symlink() for path in
+        (root/'raw-source',root/database_names(spec)['source'])) if retain else
+        not (root/'raw-source').exists() if preserve else
+        all(path.name in {'.execution.lock',marker.name,refusals.name} for path in root.iterdir()))
+    if preserve:
+        later_phase_snapshots(spec,root)
+    if retain:
+        validate_retained_final_recovery(spec,root,manifest['recovery_snapshots'][1:])
     disposed=containers_absent and volumes_absent and network_absent and raw_absent
     if spec['mode']=='apply' and not disposed: raise RuntimeError('Disposal is incomplete')
     result={'qualified':True,'disposed':disposed,'binding_sha256':binding_sha256,
@@ -262,8 +366,12 @@ def incomplete_retirement_locked(spec,root):
         'containers_absent':containers_absent,'volumes_absent':volumes_absent,
         'network_absent':network_absent,'raw_source_absent':raw_absent,
         'initial_source_snapshot':manifest.get('initial_source_snapshot'),
-        'recovery_snapshots':manifest.get('recovery_snapshots',[]),
+        'recovery_snapshots':(manifest['recovery_snapshots'][:1] if retain else
+            manifest.get('recovery_snapshots',[])),
+        'recovery_snapshots_preserved':preserve,
         'public_route':False,'business_host_frozen':False}
+    if retain: result['retained_snapshots']=manifest['recovery_snapshots'][1:]
     emit_rehearsal_result(result)
     return result
 """
+)

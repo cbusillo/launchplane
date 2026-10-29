@@ -39,6 +39,15 @@ def generate(*, devkit_repo: Path, revision: str, output: Path, check: bool = Fa
 
 def render(*, commit: str, source: str) -> str:
     compile(source, "odoo_website_settings.py", "exec")
+    parameter_functions = [
+        ast.unparse(node)
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"read_string_parameter", "write_string_parameter"}
+    ]
+    if len(parameter_functions) != 2:
+        raise ValueError("Canonical string parameter adapter is unavailable.")
+    parameter_program = "from typing import Any\n\n" + "\n\n".join(parameter_functions) + "\n"
     indexing_parameter = next(
         ast.literal_eval(node.value)
         for node in ast.parse(source).body
@@ -80,6 +89,7 @@ with tempfile.TemporaryDirectory(prefix="launchplane-website-settings-") as conf
         "# Regenerate with scripts/generate_odoo_website_settings_program.py.\n"
         f"WEBSITE_SETTINGS_SOURCE_REVISION = {json.dumps(commit)}\n"
         f"WEBSITE_INDEXING_PARAMETER = {json.dumps(indexing_parameter)}\n"
+        f"ODOO_STRING_PARAMETERS_PROGRAM = {parameter_program!r}\n"
         f"WEBSITE_SETTINGS_PROGRAM = {wrapper!r}\n"
     )
     return generated

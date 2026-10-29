@@ -31,25 +31,19 @@ SECRET_SHAPED_RUNTIME_KEY_PARTS = frozenset({"PASSWORD", "TOKEN", "SECRET", "KEY
 # outgoing mail, printing, web push and business-system connectors.
 # A binding whose key carries one never takes its classification from a non-production
 # lane. The active policy record can add product-specific markers.
-DEFAULT_INTEGRATION_KEY_MARKERS = (
-    "SHOPIFY",
-    "STRIPE",
-    "PAYPAL",
-    "SQUARE",
-    "BRAINTREE",
-    "AUTHORIZE_NET",
-    "PAYMENT",
-    "SMTP",
-    "MAIL",
-    "SENDGRID",
-    "MAILGUN",
-    "POSTMARK",
-    "RESEND",
-    "PRINTNODE",
-    "REPAIRSHOPR",
-    "FISHBOWL",
-    "CM_DATA",
-    "VAPID",
+INTEGRATION_KEY_MARKERS = {
+    "shopify": ("SHOPIFY",),
+    "payment": ("STRIPE", "PAYPAL", "SQUARE", "BRAINTREE", "AUTHORIZE_NET", "PAYMENT"),
+    "outgoing_mail": ("SMTP", "MAIL", "SENDGRID", "MAILGUN", "POSTMARK", "RESEND"),
+    "incoming_mail": (),
+    "printnode": ("PRINTNODE",),
+    "repairshopr": ("REPAIRSHOPR",),
+    "fishbowl": ("FISHBOWL",),
+    "cm_data": ("CM_DATA",),
+    "web_push": ("VAPID",),
+}
+DEFAULT_INTEGRATION_KEY_MARKERS = tuple(
+    marker for markers in INTEGRATION_KEY_MARKERS.values() for marker in markers
 )
 
 
@@ -80,19 +74,49 @@ def is_credential_runtime_value(key_name: str, value: str) -> bool:
     )
 
 
-def is_integration_runtime_key(key_name: str, *, extra_markers: Iterable[str] = ()) -> bool:
+def runtime_key_matching_markers(key_name: str, markers: Iterable[str]) -> tuple[str, ...]:
     key_parts = _key_parts(key_name)
-    for marker in (*DEFAULT_INTEGRATION_KEY_MARKERS, *extra_markers):
+    matched: list[str] = []
+    for marker in markers:
         marker_parts = _key_parts(marker)
-        if not marker_parts:
-            continue
         width = len(marker_parts)
-        if any(
+        if width and any(
             key_parts[index : index + width] == marker_parts
             for index in range(len(key_parts) - width + 1)
         ):
-            return True
-    return False
+            matched.append("_".join(marker_parts))
+    return tuple(matched)
+
+
+def runtime_key_integrations(key_name: str) -> tuple[str, ...]:
+    matched = set(runtime_key_matching_markers(key_name, DEFAULT_INTEGRATION_KEY_MARKERS))
+    if not matched:
+        return ()
+    if matched == {"MAIL"} and runtime_key_matching_markers(key_name, ("INCOMING_MAIL",)):
+        return ("incoming_mail",)
+    specific = matched - {"MAIL"}
+    return tuple(
+        integration
+        for integration, markers in INTEGRATION_KEY_MARKERS.items()
+        if (specific or matched).intersection(markers)
+    )
+
+
+def is_integration_runtime_key(key_name: str, *, extra_markers: Iterable[str] = ()) -> bool:
+    return bool(
+        runtime_key_matching_markers(key_name, (*DEFAULT_INTEGRATION_KEY_MARKERS, *extra_markers))
+    )
+
+
+def runtime_key_required_integrations(
+    key_name: str, *, extra_markers: Iterable[str] = ()
+) -> frozenset[str]:
+    custom_markers = set(runtime_key_matching_markers(key_name, extra_markers)) - set(
+        DEFAULT_INTEGRATION_KEY_MARKERS
+    )
+    return frozenset(runtime_key_integrations(key_name)) | frozenset(
+        marker.lower() for marker in custom_markers
+    )
 
 
 def _key_parts(key_name: str) -> tuple[str, ...]:
@@ -191,7 +215,13 @@ def evaluate_preview_copied_runtime_key_safety(
         ),
         required_binding_keys=copied_keys,
         secret_bindings=tuple(
-            binding.model_copy(update={"context": preview_context, "instance": preview_slug})
+            binding.model_copy(
+                update={
+                    "context": preview_context,
+                    "instance": preview_slug,
+                    "declared_secret_class": None,
+                }
+            )
             for binding in template_bindings
         ),
         secret_rules=policy_record.rules,
@@ -354,7 +384,7 @@ def _evaluate_binding(
     if (
         binding.integration == "runtime_environment"
         and binding.declared_secret_class is not None
-        and _binding_stored_for_exact_stable_lane(
+        and _binding_stored_for_exact_settings_scope(
             binding=binding,
             target=target,
             extra_integration_key_markers=extra_integration_key_markers,
@@ -363,14 +393,18 @@ def _evaluate_binding(
         declared_findings = _evaluate_declared_secret_class(target=target, binding=binding)
         if declared_findings:
             return declared_findings
-        # An independently stored non-production credential is not the production
-        # credential that happens to use the same key name. Only an explicit
-        # non-production class on this exact stable lane can take precedence.
-        # Shared-safe, production and preview bindings still need the key's rule.
         if (
             binding.value_source == "supplied"
-            and target.environment_class == "testing"
-            and binding.declared_secret_class in {"testing", "non_prod"}
+            and (
+                (
+                    target.environment_class == "testing"
+                    and binding.declared_secret_class in {"testing", "non_prod"}
+                )
+                or (
+                    target.instance == "preview"
+                    and binding.declared_secret_class in {"preview", "non_prod"}
+                )
+            )
             and not is_integration_runtime_key(
                 binding.binding_key, extra_markers=extra_integration_key_markers
             )
@@ -378,10 +412,15 @@ def _evaluate_binding(
             return ()
     if rule is not None:
         return _evaluate_binding_rule(target=target, binding=binding, rule=rule)
-    if _binding_stored_for_exact_stable_lane(
+    if _binding_stored_for_exact_settings_scope(
         binding=binding,
         target=target,
         extra_integration_key_markers=extra_integration_key_markers,
+    ) and not (
+        target.environment_class == "preview"
+        and is_integration_runtime_key(
+            binding.binding_key, extra_markers=extra_integration_key_markers
+        )
     ):
         return _evaluate_declared_secret_class(target=target, binding=binding)
     return (
@@ -398,14 +437,7 @@ def _evaluate_binding(
 _LANE_CLASSIFIED_ENVIRONMENT_CLASSES = frozenset({"prod", "testing", "dev"})
 
 
-# A secret stored for one exact stable lane resolves only for that lane, so the
-# lane is its classification and no policy rule is needed. Previews are
-# excluded: they copy template-lane values, and their check retargets the
-# template's bindings to the preview, which would otherwise look lane-exact.
-# A production integration credential stored on a non-production lane is also
-# excluded unless its writer declared a class: the lane cannot tell a production
-# key from a test key, so it needs a rule or a declared class.
-def _binding_stored_for_exact_stable_lane(
+def _binding_stored_for_exact_settings_scope(
     *,
     binding: SecretBinding,
     target: RuntimeKeySafetyTarget,
@@ -420,7 +452,14 @@ def _binding_stored_for_exact_stable_lane(
     ):
         return False
     return (
-        target.environment_class in _LANE_CLASSIFIED_ENVIRONMENT_CLASSES
+        (
+            target.environment_class in _LANE_CLASSIFIED_ENVIRONMENT_CLASSES
+            or (
+                target.environment_class == "preview"
+                and target.instance == "preview"
+                and binding.declared_secret_class is not None
+            )
+        )
         and bool(binding.context)
         and bool(binding.instance)
         and binding.context == target.context

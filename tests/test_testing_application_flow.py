@@ -62,6 +62,27 @@ from tests import test_testing_event_deploy_recovery as historical
 from tests.test_generic_web_deploy import _FakeGenericWebDeployProvider
 
 
+def build_mount_response(body: dict[str, Any], *, mount_id: str) -> dict[str, Any]:
+    mount: dict[str, Any] = dict.fromkeys(
+        (
+            "hostPath",
+            "filePath",
+            "content",
+            "composeId",
+            "postgresId",
+            "mysqlId",
+            "mariadbId",
+            "mongoId",
+            "redisId",
+            "libsqlId",
+        )
+    )
+    mount.update(body)
+    mount["applicationId"] = mount.pop("serviceId")
+    mount["mountId"] = mount_id
+    return mount
+
+
 class ApplicationProvider(_FakeGenericWebDeployProvider):
     provider_id = "dokploy"
     delegated_executor = "control-plane.dokploy"
@@ -117,8 +138,54 @@ class ApplicationFlowTests(unittest.TestCase):
     database_url = ""
     pre_image_unknown = False
     direct_original = False
+    no_original = False
     adapter: ApplicationActivationAdapter
     planned: TestingActivationRecord
+
+    def test_resumed_external_conflict_after_route_switch_restores_original(self) -> None:
+        from control_plane.testing_external_capabilities import ExternalCapabilityConflict
+        from control_plane.dokploy.testing_route import observe_testing_route
+
+        routing, _, _ = self.private_addressed()
+        self.unhealthy_retained_runtime(omit_identity_default=True)
+        self.prepare()
+        interrupted = False
+
+        def compare(record: TestingActivationRecord, check: Any) -> None:
+            nonlocal interrupted
+            check()
+            readiness = record.application_readiness
+            if (
+                readiness is not None
+                and readiness.public_health is not None
+                and readiness.public_health.verified
+                and readiness.public_health.status == "pass"
+            ):
+                if not interrupted:
+                    interrupted = True
+                    raise OSError("Fixture reply unavailable")
+                raise ExternalCapabilityConflict()
+
+        with patch.object(self.adapter, "require_production_separation", side_effect=compare):
+            self.assertEqual(self.activate().status, "reconcile_required")
+            result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        record = self.adapter.current()
+        self.assertFalse(record.published)
+        self.assertIsNotNone(record.failure)
+        assert (
+            record.application_readiness is not None
+            and record.application_readiness.route is not None
+        )
+        self.assertEqual(
+            observe_testing_route(
+                record.application_readiness.route,
+                routing.raw,
+                json.loads(routing.route_file.read_text()),
+            ),
+            record.application_readiness.route.old_backend,
+        )
+        self.assertEqual(self.activate().status, "replayed")
 
     def setUp(self) -> None:
         self.enterContext(
@@ -182,6 +249,12 @@ class ApplicationFlowTests(unittest.TestCase):
         self.schedule_runs: list[str] = []
         self.nodes = [{"ID": "fixture-node", "Self": True}]
         self.services: dict[str, dict[str, Any]] = {}
+        self.cli_container_defaults: dict[str, Any] = {}
+        self.stored_service_reads = 0
+        self.stored_service_view: Any = None
+        self.after_stored_service_read: Any = None
+        self.service_id_resolution: Any = None
+        self.before_service_list: Any = None
         self.tasks: dict[str, dict[str, Any]] = {}
         self.containers: dict[str, dict[str, Any]] = {}
         self.images: dict[str, str] = {}
@@ -197,13 +270,16 @@ class ApplicationFlowTests(unittest.TestCase):
         self.old_backing.mkdir()
         (self.old_backing / "keep").write_text("Retained original data")
         self.payloads[self.old_id]["mounts"] = [
-            {
-                "type": "volume",
-                "volumeName": "retained-state",
-                "mountPath": "/var/lib/example",
-                "serviceType": "application",
-                "serviceId": self.old_id,
-            }
+            build_mount_response(
+                {
+                    "type": "volume",
+                    "volumeName": "retained-state",
+                    "mountPath": "/var/lib/example",
+                    "serviceType": "application",
+                    "serviceId": self.old_id,
+                },
+                mount_id="retained-mount",
+            )
         ]
         self.lose_command = False
         self.lose_create = False
@@ -241,12 +317,6 @@ class ApplicationFlowTests(unittest.TestCase):
                 ),
             )
         )
-        self.enterContext(
-            patch(
-                "control_plane.dokploy.api.wait_for_target_deployment",
-                side_effect=lambda **kw: self.deployments[kw["target_id"]][-1]["deploymentId"],
-            )
-        )
         self.schedule_runner = api.run_dokploy_schedule
         self.enterContext(
             patch("control_plane.dokploy.api.run_dokploy_schedule", side_effect=self.command)
@@ -273,6 +343,12 @@ class ApplicationFlowTests(unittest.TestCase):
             patch(
                 "control_plane.testing_application_activation.verified_product_image",
                 return_value="ghcr.io/example/site@sha256:" + "a" * 64,
+            )
+        )
+        self.enterContext(
+            patch(
+                "control_plane.testing_application_capabilities.fetch_application_runtime",
+                side_effect=self.observed_application,
             )
         )
         if self.store.database_dialect_name != "postgresql":
@@ -311,23 +387,25 @@ class ApplicationFlowTests(unittest.TestCase):
                 "scheduleId": "retained-schedule",
             }
         self.store.write_product_profile_record(profile)
-        self.lose_command = True
-        with patch.object(
-            self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
-        ):
-            self.assertEqual(self.normal("original").status, "reconcile_required")
         self.lose_command = False
-        self.original = next(
-            row
-            for row in self.store.list_held_provider_target_reservations()
-            if row.route_path == GENERIC_WEB_DEPLOY_ROUTE
-        )
-        self.assertEqual(
-            self.original.provider_effect_phase,
-            "application_schedule_restore"
-            if self.pre_image_unknown
-            else "application_maintenance_execute",
-        )
+        if not self.no_original:
+            self.lose_command = True
+            with patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-3600)
+            ):
+                self.assertEqual(self.normal("original").status, "reconcile_required")
+            self.lose_command = False
+            self.original = next(
+                row
+                for row in self.store.list_held_provider_target_reservations()
+                if row.route_path == GENERIC_WEB_DEPLOY_ROUTE
+            )
+            self.assertEqual(
+                self.original.provider_effect_phase,
+                "application_schedule_restore"
+                if self.pre_image_unknown
+                else "application_maintenance_execute",
+            )
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
         )
@@ -367,6 +445,30 @@ class ApplicationFlowTests(unittest.TestCase):
         self.lost_image_reply = False
         self.failed_image_type = ""
 
+    def observed_application(self, **kwargs: Any) -> Any:
+        from control_plane.dokploy.application_runtime import ApplicationRuntimeObservation
+
+        payload = self.payloads[kwargs["application_id"]]
+        service = self.services[payload["appName"]]
+        configuration = service["Spec"]["TaskTemplate"]["ContainerSpec"]
+        values = dict(value.split("=", 1) for value in configuration["Env"])
+        identity = json.loads(values["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"])
+        return ApplicationRuntimeObservation(
+            application_id=payload["applicationId"],
+            app_name=payload["appName"],
+            server_id=payload["serverId"],
+            service_id=service["ID"],
+            service_image=configuration["Image"],
+            service_deployment_record_id=identity["deployment_record_id"],
+            desired_replicas=1,
+            rollout_state="completed",
+            rollout_started_at="",
+            running_container_images=(),
+            running_container_deployment_record_ids=(),
+            running_container_health=(),
+            pending_task_count=0,
+        )
+
     def fresh(self, identifier: str, name: str, environment: str, project: str) -> dict[str, Any]:
         return {
             "applicationId": identifier,
@@ -381,7 +483,8 @@ class ApplicationFlowTests(unittest.TestCase):
             },
             "serverId": "server",
             "env": "",
-            "sourceType": None,
+            "sourceType": "github",
+            "autoDeploy": True,
             "mounts": [],
             "domains": [],
             "replicas": 1,
@@ -446,7 +549,11 @@ class ApplicationFlowTests(unittest.TestCase):
 
     def install_runtime(self, payload: dict[str, Any], identity: dict[str, Any]) -> None:
         name = payload["appName"]
-        service, task, container = name + "-service", name + "-task", name + "-container"
+        service, task, container = (
+            hashlib.sha256((name + "-service").encode()).hexdigest()[:25],
+            name + "-task",
+            name + "-container",
+        )
         values = [
             key + "=" + value
             for key, value in __import__(
@@ -465,6 +572,7 @@ class ApplicationFlowTests(unittest.TestCase):
         }
         self.services[name] = {
             "ID": service,
+            "Version": {"Index": 1},
             "Spec": {
                 "Name": name,
                 "Mode": {"Replicated": {"Replicas": 1}},
@@ -616,8 +724,9 @@ class ApplicationFlowTests(unittest.TestCase):
                 raise OSError("Lost application create reply")
             return deepcopy(self.payloads[identifier])
         if path == "/api/mounts.create":
-            self.payloads[body["serviceId"]]["mounts"].append({**body, "mountId": "new-mount"})
-            return {}
+            mount = build_mount_response(body, mount_id="new-mount")
+            self.payloads[body["serviceId"]]["mounts"].append(mount)
+            return deepcopy(mount)
         if path in {
             "/api/application.update",
             "/api/application.saveDockerProvider",
@@ -669,7 +778,13 @@ class ApplicationFlowTests(unittest.TestCase):
         if args[:2] == ["node", "ls"]:
             value: Any = "\n".join(json.dumps(node) for node in self.nodes)
         elif args[:2] == ["service", "inspect"]:
-            value = [self.services[args[2]]]
+            displayed = deepcopy(self.services[args[2]])
+            configuration = displayed["Spec"]["TaskTemplate"]["ContainerSpec"]
+            for key, default in self.cli_container_defaults.items():
+                configuration.setdefault(key, deepcopy(default))
+            value = [displayed]
+        elif args[:1] == ["version"]:
+            value = "1.47"
         elif args[:2] == ["volume", "inspect"]:
             value = [self.storage.volumes[args[2]]]
         elif args[:2] == ["service", "ps"]:
@@ -707,6 +822,15 @@ class ApplicationFlowTests(unittest.TestCase):
                     "NetworkSettings": {"Networks": {"dokploy-network": {}}},
                 }
             ]
+        elif args[:4] == ["exec", "proxy", "nslookup", "-type=A"]:
+            name = args[-1].rstrip(".")
+            addresses = [
+                network["IPAddress"]
+                for row in self.containers.values()
+                if (row["Config"].get("Labels") or {}).get("com.docker.swarm.service.name") == name
+                for network in row["NetworkSettings"]["Networks"].values()
+            ]
+            value = "\n".join("Name: " + name + "\nAddress: " + address for address in addresses)
         elif args[:4] == ["exec", "-i", "proxy", "nc"]:
             address = args[-2]
             container = next(
@@ -714,6 +838,8 @@ class ApplicationFlowTests(unittest.TestCase):
                 for row in self.containers.values()
                 if any(
                     network.get("IPAddress") == address
+                    or (row["Config"].get("Labels") or {}).get("com.docker.swarm.service.name")
+                    == address
                     for network in row["NetworkSettings"]["Networks"].values()
                 )
             )
@@ -770,7 +896,7 @@ class ApplicationFlowTests(unittest.TestCase):
             patch("sys.stdout", output),
         ):
             try:
-                exec(header, {})
+                exec(compile(header, "<stdin>", "exec"), {})
             except SystemExit as error:
                 if error.code != 1:
                     raise
@@ -870,6 +996,149 @@ class ApplicationFlowTests(unittest.TestCase):
             original_intent={"testing_activation": self.planned.model_dump(mode="json")},
         )
 
+    def prepare_external_discord(self) -> None:
+        from control_plane.contracts.testing_application import TestingApplicationExternalCredential
+
+        profile = self.store.read_product_profile_record(self.product)
+        profile.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(
+                binding_key="DB_PASSWORD",
+                context=self.context,
+                instance="testing",
+                external_provider="discord_bot",
+            ),
+        )
+        self.store.write_product_profile_record(profile)
+        version = self.store.read_secret_version("testing-version")
+        ciphertext, key_id = secrets._encrypt_secret_value("MTIz.fixture.signature")
+        self.store.write_secret_version(
+            version.model_copy(
+                update={"ciphertext": ciphertext, "key_id": key_id, "value_origin": None}
+            )
+        )
+        self.specification = self.specification.model_copy(
+            update={
+                "local_credentials": (),
+                "external_credentials": (
+                    TestingApplicationExternalCredential(
+                        binding_key="DB_PASSWORD", guild_ids=("10",)
+                    ),
+                ),
+            }
+        )
+        self.prepare()
+        self.adapter.authorize_external = self.store.list_product_profile_records
+
+    def test_external_admission_persists_once_across_original_restart(self) -> None:
+        from tests.test_testing_application_activation import ApplicationCredentialTests
+
+        self.prepare_external_discord()
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=ApplicationCredentialTests().discord_response,
+        ) as discord:
+            with patch.object(
+                self.adapter, "preflight_application_route", side_effect=KeyboardInterrupt
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.activate()
+            admitted = self.adapter.current()
+            self.assertTrue(admitted.external_capabilities)
+            self.assertFalse(admitted.project_id)
+            self.assertEqual(admitted.phase, "prepared")
+            self.assertEqual(admitted.plan_sha256, self.planned.plan_sha256)
+            reads = discord.call_count
+            self.assertGreater(reads, 0)
+            preflight = self.adapter.preflight_application_route
+
+            def inspect(record: TestingActivationRecord) -> Any:
+                proof = record.external_capabilities[0]
+                for proofs in (
+                    (),
+                    (proof.model_copy(update={"version_id": "foreign-version"}),),
+                    (proof, proof),
+                ):
+                    with self.subTest(proofs=proofs), self.assertRaises(ValueError):
+                        self.adapter.save(record, external_capabilities=proofs)
+                    self.assertEqual(self.adapter.current(), record)
+                return preflight(record)
+
+            with patch.object(self.adapter, "preflight_application_route", side_effect=inspect):
+                result = self.activate()
+            self.assertEqual(result.status, "completed", result)
+            self.assertEqual(
+                self.adapter.current().external_capabilities, admitted.external_capabilities
+            )
+            self.assertEqual(discord.call_count, reads)
+
+    def test_released_external_admission_reobserves_under_same_key(self) -> None:
+        from tests.test_testing_application_activation import ApplicationCredentialTests
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+
+        self.prepare_external_discord()
+        with patch(
+            "control_plane.discord_external_resources.request_public_http",
+            side_effect=ApplicationCredentialTests().discord_response,
+        ) as discord:
+            with patch.object(
+                self.adapter,
+                "preflight_application_route",
+                side_effect=TestingActivationRefusal("Fixture pre-effect refusal"),
+            ):
+                with self.assertRaises(TestingActivationRefusal):
+                    self.activate()
+            self.assertFalse(self.adapter.current().external_capabilities)
+            reads = discord.call_count
+            self.assertGreater(reads, 0)
+            result = self.activate()
+            self.assertEqual(result.status, "completed", result)
+            self.assertGreater(discord.call_count, reads)
+            self.assertTrue(self.adapter.current().external_capabilities)
+            self.assertEqual(self.adapter.current().plan_sha256, self.planned.plan_sha256)
+
+    def test_external_admission_refuses_foreign_or_combined_progress(self) -> None:
+        from tests.test_testing_application_activation import ApplicationCredentialTests
+        from control_plane.testing_external_capabilities import observe_activation_discord
+
+        self.prepare_external_discord()
+
+        def observe(*args: Any, **kwargs: Any) -> Any:
+            proof = observe_activation_discord(*args, **kwargs)
+            record = self.adapter.current()
+            for changes in (
+                {"external_capabilities": (proof,), "phase": "create_project"},
+                {"external_capabilities": (proof,), "project_id": "foreign-project"},
+                {
+                    "external_capabilities": (
+                        proof.model_copy(update={"activation_plan_sha256": "f" * 64}),
+                    )
+                },
+                {"external_capabilities": (proof.model_copy(update={"binding_key": "OTHER"}),)},
+                {"external_capabilities": (proof.model_copy(update={"guild_ids": ("20",)}),)},
+                {"external_capabilities": (proof, proof)},
+            ):
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    self.adapter.save(record, **changes)
+                self.assertEqual(self.adapter.current(), record)
+            late = self.adapter.save(record, phase="create_project")
+            with self.assertRaises(ValueError):
+                self.adapter.save(late, external_capabilities=(proof,))
+            self.assertEqual(self.adapter.current(), late)
+            raise KeyboardInterrupt
+
+        with (
+            patch(
+                "control_plane.discord_external_resources.request_public_http",
+                side_effect=ApplicationCredentialTests().discord_response,
+            ),
+            patch(
+                "control_plane.testing_external_capabilities.observe_activation_discord",
+                side_effect=observe,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.activate()
+
     def inspect_current_private_runtime(self) -> Any:
         from control_plane.testing_application_runtime import inspect_application_runtime
         from control_plane.testing_activation import preparation_resources
@@ -893,6 +1162,334 @@ class ApplicationFlowTests(unittest.TestCase):
             mount_path=self.specification.state.container_path,
             health_path=self.specification.health_path,
         )
+
+    def test_fresh_application_configures_the_shared_endpoint_before_first_deployment(self) -> None:
+        from control_plane.dokploy.application_endpoint import application_endpoint_spec
+
+        self.prepare()
+        observed: list[api.JsonValue] = []
+        provider = self.provider
+
+        def capture(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/application.deploy":
+                observed.append(
+                    deepcopy(
+                        self.payloads[kwargs["payload"]["applicationId"]].get("endpointSpecSwarm")
+                    )
+                )
+            return provider(**kwargs)
+
+        with patch.object(api, "dokploy_request", side_effect=capture):
+            self.assertEqual(self.activate().status, "completed")
+        self.assertEqual(observed, [application_endpoint_spec({})])
+
+    def test_private_qualification_connects_to_the_backend_it_will_publish(self) -> None:
+        from urllib.parse import urlsplit
+
+        self.prepare()
+        destinations: list[str] = []
+        docker = self.docker
+
+        def capture(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[1:5] == ["exec", "-i", "proxy", "nc"]:
+                destinations.append(arguments[-2])
+            return docker(arguments, **kwargs)
+
+        with patch.object(self, "docker", side_effect=capture):
+            self.assertEqual(self.activate().status, "completed")
+        readiness = self.adapter.current().application_readiness
+        assert readiness is not None
+        self.assertTrue(destinations)
+        self.assertEqual(set(destinations), {urlsplit(readiness.backend).hostname})
+
+    def test_legacy_null_recipient_keeps_task_health_diagnostics_without_retuning(self) -> None:
+        from control_plane.testing_application_inspection import (
+            ApplicationCandidateInspection,
+            inspect_candidate_runtime,
+        )
+
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        record = self.adapter.current()
+        self.payloads[record.target_id]["endpointSpecSwarm"] = None
+        docker = self.docker
+
+        def vip(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[1:5] == ["exec", "proxy", "nslookup", "-type=A"]:
+                return subprocess.CompletedProcess(
+                    arguments, 0, "Name: " + arguments[-1] + "\nAddress: 192.0.2.9", ""
+                )
+            return docker(arguments, **kwargs)
+
+        before = tuple(self.writes)
+        with (
+            patch.object(self, "docker", side_effect=vip),
+            patch(
+                "control_plane.testing_application_runtime.observation_window_seconds",
+                return_value=0,
+            ),
+        ):
+            observed = inspect_candidate_runtime(
+                self.adapter,
+                record,
+                self.adapter.live(record),
+                ApplicationCandidateInspection(placement="matched"),
+            )
+        self.assertEqual(observed.current_runtime_status, "available")
+        self.assertEqual(observed.current_http_status, 200)
+        self.assertEqual(observed.current_identity_status, "match")
+        self.assertIsNone(self.payloads[record.target_id]["endpointSpecSwarm"])
+        self.assertEqual(tuple(self.writes), before)
+
+    def test_original_configured_undeployed_null_endpoint_can_continue_without_reconfiguration(
+        self,
+    ) -> None:
+        from control_plane.dokploy.application_endpoint import application_endpoint_spec
+
+        self.prepare()
+        with (
+            patch.object(
+                self.adapter, "deploy_owned_target", side_effect=OSError("Before image dispatch")
+            ),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            first = self.activate()
+        self.assertEqual(first.status, "reconcile_required", first)
+        record = self.adapter.current()
+        self.assertEqual(record.state_recipient["application_configured"], "true")
+        self.assertNotIn("application_deployment_id", record.state_recipient)
+        self.assertFalse(self.deployments.get(record.target_id))
+        self.payloads[record.target_id]["endpointSpecSwarm"] = None
+        before = len(self.writes)
+        completed = self.activate()
+        self.assertIn(completed.status, {"completed", "adopted"}, completed)
+        self.assertTrue(completed.response_payload["result"]["applied"])
+        self.assertEqual(
+            [body for path, body in self.writes[before:] if path == "/api/application.update"],
+            [
+                {
+                    "applicationId": record.target_id,
+                    "endpointSpecSwarm": application_endpoint_spec({}),
+                }
+            ],
+        )
+
+    def test_original_endpoint_reconfiguration_preserves_started_or_unknown_deployments(
+        self,
+    ) -> None:
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        record = self.adapter.current()
+        self.payloads[record.target_id]["endpointSpecSwarm"] = None
+        before = tuple(self.writes)
+        checkpoint = unittest.mock.Mock()
+        for updates in (
+            {},
+            {"state_recipient": {}, "phase": "deploy_application_deployment_id"},
+        ):
+            with self.subTest(updates=updates):
+                original = record.model_copy(update=updates)
+                self.assertEqual(
+                    self.adapter.configure_original_undeployed_endpoint(original, checkpoint),
+                    original,
+                )
+        original = record.model_copy(
+            update={"state_recipient": {}, "phase": "configure_application"}
+        )
+        for history in ([{"deploymentId": "original"}], ValueError("history unavailable")):
+            with self.subTest(history=type(history).__name__):
+                options = (
+                    {"side_effect": history}
+                    if isinstance(history, Exception)
+                    else {"return_value": history}
+                )
+                with (
+                    patch.object(self.adapter, "verify_provider"),
+                    patch.object(api, "list_deployments_for_target", **options) as listing,
+                    self.assertRaises((TestingActivationRefusal, ValueError)),
+                ):
+                    self.adapter.configure_original_undeployed_endpoint(original, checkpoint)
+                self.assertTrue(listing.call_args.kwargs["require_complete"])
+        checkpoint.assert_not_called()
+        self.assertEqual(tuple(self.writes), before)
+
+    def test_endpoint_readback_loss_prevents_first_deployment(self) -> None:
+        self.prepare()
+        provider = self.provider
+
+        def discard(**kwargs: Any) -> Any:
+            result = provider(**kwargs)
+            if (
+                kwargs["path"] == "/api/application.update"
+                and "endpointSpecSwarm" in kwargs["payload"]
+            ):
+                self.payloads[kwargs["payload"]["applicationId"]]["endpointSpecSwarm"] = None
+            return result
+
+        with patch.object(api, "dokploy_request", side_effect=discard):
+            result = self.activate()
+        self.assertFalse(result.response_payload.get("result", {}).get("applied", False))
+        self.assertFalse(any(path == "/api/application.deploy" for path, _ in self.writes))
+
+    def test_endpoint_drift_after_configuration_prevents_first_deployment(self) -> None:
+        self.prepare()
+        deploy = self.adapter.deploy_owned_target
+
+        def drift(record: TestingActivationRecord, **kwargs: Any) -> TestingActivationRecord:
+            self.payloads[record.target_id]["endpointSpecSwarm"] = None
+            return deploy(record, **kwargs)
+
+        with patch.object(self.adapter, "deploy_owned_target", side_effect=drift):
+            result = self.activate()
+        self.assertFalse(result.response_payload.get("result", {}).get("applied", False))
+        self.assertFalse(any(path == "/api/application.deploy" for path, _ in self.writes))
+
+    def test_configured_endpoint_validation_preserves_legacy_null_without_retuning(self) -> None:
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+        from control_plane.dokploy.application_endpoint import application_endpoint_spec
+
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        record = self.adapter.current()
+        payload = self.payloads[record.target_id]
+        before = tuple(self.writes)
+        payload["endpointSpecSwarm"] = None
+        self.adapter.verify_provider(record)
+        self.assertEqual(tuple(self.writes), before)
+        canonical_endpoint = application_endpoint_spec({})
+        assert isinstance(canonical_endpoint, dict)
+        for endpoint in ({}, {"Mode": "vip"}, {**canonical_endpoint, "Ports": []}):
+            with self.subTest(endpoint=endpoint):
+                payload["endpointSpecSwarm"] = endpoint
+                with self.assertRaises(TestingActivationRefusal):
+                    self.adapter.verify_provider(record)
+        payload["endpointSpecSwarm"] = application_endpoint_spec({})
+        payload["resourcesSwarm"] = {}
+        with self.assertRaises(ValueError):
+            self.adapter.verify_provider(record)
+        self.assertEqual(tuple(self.writes), before)
+
+    def test_private_qualification_rejects_foreign_ambiguous_or_changed_backend_dns(self) -> None:
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        docker = self.docker
+        for addresses in (
+            [],
+            ["192.0.2.9"],
+            ["owned", "192.0.2.9"],
+            ["owned", "changed_after_http"],
+        ):
+            with self.subTest(addresses=addresses):
+                reads: list[list[str]] = []
+
+                def resolve(arguments: list[str], **kwargs: Any) -> Any:
+                    response = docker(arguments, **kwargs)
+                    if arguments[1:5] != ["exec", "proxy", "nslookup", "-type=A"]:
+                        return response
+                    reads.append(arguments)
+                    if addresses == ["owned", "changed_after_http"]:
+                        if len(reads) == 1:
+                            return response
+                        values = ["192.0.2.9"]
+                    else:
+                        current = self.adapter.current()
+                        assert current.application_readiness is not None
+                        owned = self.containers[current.application_readiness.container_id][
+                            "NetworkSettings"
+                        ]["Networks"][self.specification.network_name]["IPAddress"]
+                        values = [owned if value == "owned" else value for value in addresses]
+                    return subprocess.CompletedProcess(
+                        arguments,
+                        0,
+                        "\n".join(
+                            "Name: " + arguments[-1] + "\nAddress: " + value for value in values
+                        ),
+                        "",
+                    )
+
+                with (
+                    patch.object(self, "docker", side_effect=resolve),
+                    patch(
+                        "control_plane.testing_application_runtime.observation_window_seconds",
+                        return_value=0,
+                    ),
+                    self.assertRaises(ValueError),
+                ):
+                    self.inspect_current_private_runtime()
+                self.assertTrue(reads)
+
+    def test_private_qualification_cannot_substitute_healthy_task_ip_for_failed_service_origin(
+        self,
+    ) -> None:
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        docker = self.docker
+        name = self.adapter.current().app_name
+
+        def failed_origin(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[1:5] == ["exec", "-i", "proxy", "nc"] and arguments[-2] == name:
+                raise subprocess.CalledProcessError(1, arguments)
+            return docker(arguments, **kwargs)
+
+        with (
+            patch.object(self, "docker", side_effect=failed_origin),
+            patch(
+                "control_plane.testing_application_runtime.observation_window_seconds",
+                return_value=0,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            self.inspect_current_private_runtime()
+
+    def test_unavailable_runtime_frame_terminates_the_registered_read_without_private_text(
+        self,
+    ) -> None:
+        from control_plane.dokploy import native_copy_stream as transport
+        from tests.test_odoo_testing_native_source import Connection
+
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        captured: dict[str, Any] = {}
+
+        def capture(**kwargs: Any) -> None:
+            captured.update(kwargs)
+            raise ValueError("Fixture read unavailable")
+
+        with (
+            patch("control_plane.testing_application_runtime._read_remote", side_effect=capture),
+            patch(
+                "control_plane.testing_application_runtime.observation_window_seconds",
+                return_value=0,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            self.inspect_current_private_runtime()
+        encoded = base64.b64encode(json.dumps(captured["payload"]).encode()).decode()
+        output = StringIO()
+        private = "private-supplier-token"
+        with (
+            patch.object(sys, "argv", ["program", encoded, "frame:"]),
+            patch.object(subprocess, "run", side_effect=ValueError(private)),
+            patch("sys.stdout", output),
+            self.assertRaises(SystemExit),
+        ):
+            exec(compile(APPLICATION_RUNTIME_PROGRAM, "<string>", "exec"), {})
+        frame = json.loads(output.getvalue().removeprefix("frame:"))
+        with self.assertRaises(transport.NativeProgramFailed) as raised:
+            transport._read_program(
+                Connection(frame),
+                program=APPLICATION_RUNTIME_PROGRAM,
+                payload=captured["payload"],
+                timeout_seconds=5,
+                receive=lambda _frame: None,
+            )
+        self.assertTrue(raised.exception.unavailable)
+        self.assertTrue(raised.exception.program_sites)
+        self.assertNotIn(private, output.getvalue() + str(raised.exception))
 
     def test_bounded_private_health_warmup_canonical_variants_and_unknown_tail(self) -> None:
         import itertools
@@ -1262,7 +1859,7 @@ class ApplicationFlowTests(unittest.TestCase):
                 *(
                     row["Spec"]["ContainerSpec"]
                     for row in self.tasks.values()
-                    if row["ServiceID"] == name + "-service"
+                    if row["ServiceID"] == self.services[name]["ID"]
                 ),
                 container["Config"],
             ]
@@ -1272,6 +1869,212 @@ class ApplicationFlowTests(unittest.TestCase):
                 identity.pop("release_tuple_id", None)
                 environment["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"] = json.dumps(identity)
                 configuration["Env"] = [key + "=" + value for key, value in environment.items()]
+
+    def test_retained_stored_inputs_survive_cli_defaults_and_original_reentry(self) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        self.cli_container_defaults = {"DNSConfig": {}, "StopGracePeriod": 17}
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        witness = self.adapter.preflight_application_route(self.planned)
+        assert witness is not None
+        displayed = deepcopy(self.services["old-app"]["Spec"]["TaskTemplate"])
+        displayed["ContainerSpec"].update(self.cli_container_defaults)
+        self.assertEqual(witness.task_template_sha256, canonical_json_sha256(displayed))
+        original = self.planned.model_copy(update={"predecessor": witness})
+        self.assertEqual(self.adapter.preflight_application_route(original), witness)
+        result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        self.assertTrue(self.adapter.current().published)
+        self.assertGreater(routing.effect_count, 0)
+        effects = routing.effect_count
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(routing.effect_count, effects)
+
+    def test_retained_stored_service_witness_and_complete_task_inputs_are_required(self) -> None:
+        self.cli_container_defaults = {"DNSConfig": {}, "StopGracePeriod": 17}
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        for configuration in (
+            self.services["old-app"]["Spec"]["TaskTemplate"]["ContainerSpec"],
+            self.tasks["old-app-task"]["Spec"]["ContainerSpec"],
+            self.containers["old-app-container"]["Config"],
+        ):
+            configuration["Env"].append("FIXTURE_INPUT=fixture-private-value")
+        witness = self.adapter.preflight_application_route(self.planned)
+        assert witness is not None
+        record = self.planned.model_copy(update={"predecessor": witness})
+        self.adapter.route_admission(record)
+        service = deepcopy(self.services["old-app"])
+        tasks = deepcopy(self.tasks)
+        for problem in (
+            "id",
+            "name",
+            "version",
+            "boolean-version",
+            "missing",
+            "display-drift",
+            "race",
+        ):
+            with self.subTest(problem=problem):
+                self.services["old-app"] = deepcopy(service)
+                self.stored_service_view = None
+                self.after_stored_service_read = None
+
+                def change(raw: Any) -> Any:
+                    if problem == "id":
+                        raw["ID"] = "foreign-service"
+                    elif problem == "name":
+                        raw["Spec"]["Name"] = "foreign-name"
+                    elif problem in {"version", "boolean-version"}:
+                        raw["Version"]["Index"] = True if problem == "boolean-version" else 2
+                    elif problem == "missing":
+                        return None
+                    elif problem == "display-drift":
+                        raw["Spec"]["TaskTemplate"]["ContainerSpec"]["Command"] = ["foreign"]
+                    return raw
+
+                self.stored_service_view = change
+                if problem == "race":
+                    self.after_stored_service_read = lambda: self.services["old-app"][
+                        "Version"
+                    ].update(Index=2)
+                with self.assertRaises(ValueError):
+                    self.adapter.route_admission(record)
+                self.assertEqual(routing.effect_count, 0)
+        self.stored_service_view = self.after_stored_service_read = None
+        for problem in (
+            "explicit-display-values",
+            "shutdown-mismatch",
+            "env-order",
+            "unknown",
+            "null",
+        ):
+            with self.subTest(problem=problem):
+                self.services["old-app"] = deepcopy(service)
+                self.tasks = deepcopy(tasks)
+                configuration = self.services["old-app"]["Spec"]["TaskTemplate"]["ContainerSpec"]
+                task = self.tasks["old-app-task"]
+                task_configuration = task["Spec"]["ContainerSpec"]
+                if problem in {"explicit-display-values", "shutdown-mismatch"}:
+                    configuration.update(self.cli_container_defaults)
+                    if problem == "shutdown-mismatch":
+                        task["DesiredState"] = "shutdown"
+                elif problem == "env-order":
+                    task_configuration["Env"].reverse()
+                elif problem == "unknown":
+                    task_configuration["FutureInput"] = "fixture-private-value"
+                else:
+                    task_configuration["DNSConfig"] = None
+                with self.assertRaises(ValueError):
+                    self.adapter.route_admission(record)
+                self.assertEqual(routing.effect_count, 0)
+        self.services["old-app"] = service
+        self.tasks = tasks
+        self.assertEqual(self.adapter.preflight_application_route(record), witness)
+
+    def test_complete_service_inventory_resolves_prefixes_and_refuses_incomplete_views(
+        self,
+    ) -> None:
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        neighbor = deepcopy(self.services["old-app"])
+        neighbor["ID"] = hashlib.sha256(b"neighbor-service").hexdigest()[:25]
+        neighbor["Spec"]["Name"] = "neighbor"
+        neighbor["Spec"]["TaskTemplate"]["Networks"][0]["Aliases"] = ["neighbor"]
+        self.services["neighbor"] = neighbor
+        self.adapter.preflight_application_route(self.planned)
+        for problem in ("missing", "reordered", "duplicate", "foreign", "malformed", "reread"):
+
+            def resolve(rows: list[Any]) -> list[Any]:
+                if problem == "missing":
+                    return rows[:-1]
+                if problem == "reordered":
+                    return list(reversed(rows))
+                if problem == "duplicate":
+                    return [rows[0], rows[0]]
+                if problem == "foreign":
+                    return ["foreign-service", *rows[1:]]
+                if problem == "malformed":
+                    return [{"id": rows[0]}, *rows[1:]]
+                return rows
+
+            with self.subTest(problem=problem):
+                self.service_id_resolution = resolve
+                if problem == "reread":
+                    list_calls = 0
+
+                    def change_inventory() -> None:
+                        nonlocal list_calls
+                        list_calls += 1
+                        if list_calls == 2:
+                            neighbor["ID"] = hashlib.sha256(b"changed-neighbor").hexdigest()[:25]
+
+                    self.before_service_list = change_inventory
+                with self.assertRaises(ValueError):
+                    self.adapter.preflight_application_route(self.planned)
+                self.assertEqual(routing.effect_count, 0)
+                self.before_service_list = None
+                neighbor["ID"] = hashlib.sha256(b"neighbor-service").hexdigest()[:25]
+        self.service_id_resolution = None
+        original = neighbor["ID"]
+        neighbor["ID"] = self.services["old-app"]["ID"][:12] + "x" * 13
+        with self.assertRaises(ValueError):
+            self.adapter.preflight_application_route(self.planned)
+        self.assertEqual(routing.effect_count, 0)
+        neighbor["ID"] = original
+        self.adapter.preflight_application_route(self.planned)
+
+    def test_cli_defaults_do_not_replace_actual_immutable_image_proof(self) -> None:
+        self.cli_container_defaults = {"DNSConfig": {}, "StopGracePeriod": 17}
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        configuration = self.services["old-app"]["Spec"]["TaskTemplate"]["ContainerSpec"]
+        configuration["Image"] = "ghcr.io/example/site:retained-tag"
+        task = self.tasks["old-app-task"]
+        task["Spec"]["ContainerSpec"] = deepcopy(configuration)
+        self.containers["old-app-container"]["Config"]["Image"] = configuration["Image"]
+        self.adapter.preflight_application_route(self.planned)
+        task["Status"] = {"State": "ready", "ContainerStatus": {}}
+        self.containers.pop("old-app-container")
+        with self.assertRaises(ValueError) as caught:
+            self.adapter.preflight_application_route(self.planned)
+        self.assertEqual(getattr(caught.exception, "container_fields", None), ())
+        self.assertGreater(self.stored_service_reads, 0)
+        self.assertEqual(routing.effect_count, 0)
+
+    def test_retained_template_refusal_reports_fields_without_input_values(self) -> None:
+        from control_plane.http_error_evidence import log_handled_error_cause
+
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        private = "private-retained-input-sentinel"
+        template = self.services["old-app"]["Spec"]["TaskTemplate"]["ContainerSpec"]
+        template["DNSConfig"] = {}
+        task = self.tasks["old-app-task"]["Spec"]["ContainerSpec"]
+        task["Env"].append("PRIVATE_FIXTURE=" + private)
+        task["Command"] = [private]
+        task[private] = private
+        for desired_state in ("running", "shutdown"):
+            with self.subTest(desired_state=desired_state):
+                self.tasks["old-app-task"]["DesiredState"] = desired_state
+                with self.assertRaises(ValueError) as raised:
+                    self.adapter.preflight_application_route(self.planned)
+                with self.assertLogs("control_plane.http_error_evidence", level="WARNING") as logs:
+                    log_handled_error_cause(raised.exception, "retained-template-test")
+                text = logs.records[-1].getMessage()
+                fields = json.loads(text)["native_programs"][0]["container_fields"]
+                self.assertEqual(
+                    {item["field"]: item["difference"] for item in fields},
+                    {
+                        "DNSConfig": "service_only",
+                        "Command": "task_only",
+                        "Env": "unequal",
+                        "other": "unequal",
+                    },
+                )
+                self.assertNotIn(private, text)
+                self.assertEqual(routing.effect_count, 0)
 
     def test_retained_native_template_scope_and_execution_controls(self) -> None:
         routing, _, _ = self.private_addressed()
@@ -1760,6 +2563,11 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(
             restored.model_dump(exclude={"custody"}), expected.model_dump(exclude={"custody"})
         )
+        from control_plane.testing_activation_inspection import inspect_application_route_receipts
+
+        inspected = inspect_application_route_receipts(self.store, refused)
+        self.assertEqual(inspected[1].status, "bound")
+        self.assertEqual(inspected[1].state, inverse.state)
         self.assertEqual(self.activate().status, "replayed")
         self.assertEqual(routing.effect_count, changed[0])
         self.assertEqual(self.canonical_password(), "retained-only-password")
@@ -2379,11 +3187,11 @@ class ApplicationFlowTests(unittest.TestCase):
 
         # Superseded actual Swarm resources may be retired independently; the
         # completed lineage still owns the exact selected file/raw route.
-        self.services.pop("old-app")
+        retired_service = self.services.pop("old-app")
         self.tasks = {
             key: value
             for key, value in self.tasks.items()
-            if value["ServiceID"] != "old-app-service"
+            if value["ServiceID"] != retired_service["ID"]
         }
         self.containers.pop("old-app-container")
         observed = fetch()
@@ -2790,6 +3598,401 @@ class ApplicationFlowTests(unittest.TestCase):
             target_environment={},
         ).values["DB_PASSWORD"]
 
+    def interrupt_unanswered_mount(self) -> dict[str, Any]:
+        self.prepare()
+        pending: dict[str, Any] = {}
+        provider = self.provider
+
+        def interrupted(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/mounts.create":
+                pending.update(deepcopy(kwargs))
+                raise OSError("Fixture mount reply unavailable")
+            return provider(**kwargs)
+
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=interrupted):
+            self.assertEqual(self.activate().status, "reconcile_required")
+        self.assertTrue(pending)
+        self.assertEqual(self.adapter.current().phase, "create_application_mount")
+        return pending
+
+    def test_explicit_unanswered_mount_refusal_retains_custody_and_allows_new_generation(
+        self,
+    ) -> None:
+        pending = self.interrupt_unanswered_mount()
+        before = self.adapter.current()
+        password = self.canonical_password()
+        self.assertEqual(self.activate().status, "reconcile_required")
+        writes = deepcopy(self.writes)
+        self.request.mode = "refuse"
+        refused = self.activate()
+        self.assertEqual(refused.status, "completed", refused)
+        self.assertEqual(refused.response_payload["result"]["outcome"], "refused")
+        self.assertFalse(refused.response_payload["result"]["deployment_requested"])
+        self.assertEqual(self.writes, writes)
+        self.assertEqual(self.canonical_password(), password)
+        after = self.adapter.current()
+        self.assertEqual(after.state_recipient, before.state_recipient)
+        self.assertEqual(after.target_id, before.target_id)
+        self.assertEqual(after.preparation_record_id, before.preparation_record_id)
+        self.provider(**pending)
+        self.request.mode = "apply"
+        writes = deepcopy(self.writes)
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(self.writes, writes)
+        self.assertFalse(self.deployments.get(before.target_id))
+        self.prepare("after-unanswered-refusal")
+        self.activation_key = "after-unanswered-refusal"
+        self.assertEqual(self.activate().status, "completed")
+        self.assertNotEqual(self.adapter.current().target_id, before.target_id)
+        self.assertNotEqual(self.adapter.current().namespace, before.namespace)
+        self.assertIn(before.target_id, self.payloads)
+
+    def test_late_mount_after_durable_refusal_cannot_resume_forward_apply(self) -> None:
+        pending = self.interrupt_unanswered_mount()
+        original = self.adapter.save
+        decision_saved = False
+
+        def crash_after_decision(record: Any, **updates: Any) -> Any:
+            nonlocal decision_saved
+            saved = original(record, **updates)
+            if updates.get("phase") == "refusing_private_candidate":
+                decision_saved = True
+                self.provider(**pending)
+                raise OSError("Fixture process ended after durable decision")
+            return saved
+
+        self.request.mode = "refuse"
+        with patch.object(self.adapter, "save", side_effect=crash_after_decision):
+            self.assertEqual(self.activate().status, "reconcile_required")
+        self.assertTrue(decision_saved)
+        self.request.mode = "apply"
+        writes = deepcopy(self.writes)
+        completed = self.activate()
+        self.assertIn(completed.status, {"completed", "adopted"}, completed)
+        self.assertEqual(completed.response_payload["result"]["outcome"], "refused")
+        self.assertEqual(self.writes, writes)
+        self.assertFalse(self.deployments.get(self.adapter.current().target_id))
+
+    def test_foreign_mount_after_refusal_decision_retains_the_reservation(self) -> None:
+        pending = self.interrupt_unanswered_mount()
+        self.provider(**pending)
+        candidate = self.adapter.current()
+        mount = deepcopy(self.payloads[candidate.target_id]["mounts"][0])
+        self.payloads[candidate.target_id]["mounts"][0]["applicationId"] = "foreign"
+        self.request.mode = "refuse"
+        self.assertEqual(self.activate().status, "reconcile_required")
+        self.assertIsNone(self.adapter.current().failure)
+        self.assertEqual(self.adapter.current().phase, "refusing_private_candidate")
+        self.payloads[candidate.target_id]["mounts"] = [mount]
+        self.request.mode = "apply"
+        completed = self.activate()
+        self.assertEqual(completed.status, "completed", completed)
+        self.assertEqual(completed.response_payload["result"]["outcome"], "refused")
+
+    def test_unanswered_refusal_rejects_stale_forward_progress_in_storage(self) -> None:
+        self.interrupt_unanswered_mount()
+        self.request.mode = "refuse"
+        original = self.adapter.save
+        fenced = False
+
+        def attempt_forward(record: Any, **updates: Any) -> Any:
+            nonlocal fenced
+            saved = original(record, **updates)
+            if updates.get("phase") == "refusing_private_candidate":
+                with self.assertRaises(ValueError):
+                    original(saved, phase="configure_application")
+                fenced = True
+            return saved
+
+        with patch.object(self.adapter, "save", side_effect=attempt_forward):
+            self.assertEqual(self.activate().status, "completed")
+        self.assertTrue(fenced)
+
+    def test_unanswered_refusal_cannot_replace_a_live_original_lease(self) -> None:
+        self.interrupt_unanswered_mount()
+        parent = self.store.read_testing_application_activation_operation(
+            self.product, self.context, self.scope, self.request.preparation_key
+        )
+        assert parent is not None
+        acquired = self.store.retry_reconciled_mutation(
+            reservation=parent,
+            lease_owner="still-running-original",
+            lease_seconds=300,
+            preserve_effect_checkpoint=True,
+        )
+        self.assertEqual(acquired.status, "acquired")
+        before = deepcopy((self.writes, self.adapter.current()))
+        self.request.mode = "refuse"
+        self.assertEqual(self.activate().status, "in_progress")
+        self.assertEqual((self.writes, self.adapter.current()), before)
+
+    def test_plain_authority_changed_apply_cannot_abandon_an_unanswered_mount(self) -> None:
+        self.interrupt_unanswered_mount()
+        record = self.adapter.current()
+        self.correct_runtime()
+        for status in ("idle", "running"):
+            with self.subTest(status=status):
+                self.payloads[record.target_id]["applicationStatus"] = status
+                writes = deepcopy(self.writes)
+                self.assertEqual(self.activate().status, "reconcile_required")
+                self.assertEqual(self.adapter.current().phase, "create_application_mount")
+                self.assertIsNone(self.adapter.current().failure)
+                self.assertEqual(self.writes, writes)
+
+    def test_lost_negative_completion_adopts_the_refusal_without_forward_work(self) -> None:
+        self.interrupt_unanswered_mount()
+        self.request.mode = "refuse"
+        with (
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+            patch.object(
+                self.store,
+                "complete_mutation_reservation",
+                side_effect=OSError("Fixture completion save unavailable"),
+            ),
+            self.assertRaises(OSError),
+        ):
+            self.activate()
+        self.assertIsNotNone(self.adapter.current().failure)
+        self.request.mode = "apply"
+        writes = deepcopy(self.writes)
+        adopted = self.activate()
+        self.assertEqual(adopted.status, "adopted", adopted)
+        self.assertEqual(adopted.response_payload["result"]["outcome"], "refused")
+        self.assertEqual(self.writes, writes)
+
+    def test_unanswered_refusal_keeps_unknown_or_automatic_candidate_execution_fenced(self) -> None:
+        self.interrupt_unanswered_mount()
+        record = self.adapter.current()
+        live = self.payloads[record.target_id]
+        original = deepcopy(live)
+        self.request.mode = "refuse"
+        for changes in (
+            {"sourceType": "docker", "dockerImage": record.image_reference, "autoDeploy": False},
+            {"sourceType": None, "autoDeploy": True},
+            {"branch": "main"},
+            {"domains": [{"host": "foreign.invalid"}]},
+            {"applicationStatus": "running"},
+        ):
+            with self.subTest(changes=changes):
+                live.clear()
+                live.update(deepcopy(original) | changes)
+                writes = deepcopy(self.writes)
+                self.assertEqual(self.activate().status, "reconcile_required")
+                self.assertEqual(self.writes, writes)
+                self.assertIsNone(self.adapter.current().failure)
+        live.clear()
+        live.update(original)
+        completed = self.activate()
+        self.assertEqual(completed.status, "completed", completed)
+
+    def assert_http_unanswered_refusal(self) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        self.prepare()
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+
+        def post(mode: str, key: str = "activation", **changes: Any) -> Any:
+            return asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": key,
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": mode} | changes,
+                )
+            )
+
+        writes = deepcopy(self.writes)
+        self.assertEqual(post("refuse").status_code, 409)
+        self.assertEqual(self.writes, writes)
+        provider = self.provider
+
+        def interrupted(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/mounts.create":
+                raise OSError("Fixture unanswered mount")
+            return provider(**kwargs)
+
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=interrupted):
+            self.assertEqual(post("apply").status_code, 409)
+        before = self.adapter.current()
+        writes = deepcopy(self.writes)
+        for key, changes in (
+            ("foreign-key", {}),
+            ("activation", {"reason": "Changed original intent"}),
+            ("activation", {"reviewed_plan_sha256": "f" * 64}),
+            ("activation", {"application": None}),
+        ):
+            with self.subTest(key=key, changes=changes):
+                self.assertEqual(post("refuse", key, **changes).status_code, 409)
+                self.assertEqual(self.adapter.current(), before)
+                self.assertEqual(self.writes, writes)
+        from threading import get_ident
+
+        handler_thread = get_ident()
+        lookup = self.store.read_testing_application_activation_operation
+
+        def worker_lookup(*args: Any, **kwargs: Any) -> Any:
+            self.assertNotEqual(get_ident(), handler_thread)
+            return lookup(*args, **kwargs)
+
+        with patch.object(
+            self.store, "read_testing_application_activation_operation", side_effect=worker_lookup
+        ):
+            refused = post("refuse")
+        self.assertEqual(refused.status_code, 202, refused.text)
+        self.assertEqual(refused.json()["result"]["outcome"], "refused")
+        self.assertEqual(self.writes, writes)
+        for mode in ("refuse", "apply", "receipt", "readback"):
+            replayed = post(mode)
+            self.assertEqual(replayed.status_code, 202, replayed.text)
+            self.assertEqual(replayed.json()["result"], refused.json()["result"])
+            self.assertEqual(self.writes, writes)
+
+    def test_lost_mount_reply_adopts_provider_row_once_and_fences_conflicts(self) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        self.prepare()
+        interrupted = False
+
+        def lose_mount_reply(**kwargs: Any) -> Any:
+            nonlocal interrupted
+            response = self.provider(**kwargs)
+            if kwargs["path"] == "/api/mounts.create" and not interrupted:
+                interrupted = True
+                raise OSError("Lost mount create reply")
+            return response
+
+        retained_password = self.canonical_password()
+        with (
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=lose_mount_reply),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            self.assertEqual(self.activate().status, "reconcile_required")
+        record = self.adapter.current()
+        self.assertEqual(record.phase, "create_application_mount")
+        original = deepcopy(self.payloads[record.target_id]["mounts"])
+        self.assertEqual(len(original), 1)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        original_row = self.store.read_idempotency_record(
+            scope=self.scope,
+            route_path=ROUTE.format(product=self.product),
+            idempotency_key="activation",
+        )
+        before = deepcopy((self.writes, self.schedules, self.schedule_history))
+
+        def inspect_original() -> Any:
+            return asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "activation",
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                )
+            )
+
+        with (
+            patch(
+                "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                return_value=(),
+            ),
+            patch.object(
+                ApplicationActivationAdapter,
+                "candidate_refusal_ready",
+                side_effect=ValueError("private-observer-cause"),
+            ),
+            self.assertLogs("control_plane.http_error_evidence", level="WARNING") as causes,
+        ):
+            inspected = inspect_original()
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        cause = json.loads(causes.records[-1].getMessage())
+        self.assertEqual(cause["trace_id"], inspected.json()["trace_id"])
+        self.assertTrue(cause["sites"])
+        self.assertNotIn("private-observer-cause", " ".join(causes.output) + inspected.text)
+        with (
+            patch(
+                "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                return_value=(),
+            ),
+            self.assertLogs(
+                "control_plane.testing_activation_inspection", level="WARNING"
+            ) as outcomes,
+        ):
+            inspected = inspect_original()
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        outcome = json.loads(outcomes.records[-1].getMessage())
+        self.assertEqual(outcome["trace_id"], inspected.json()["trace_id"])
+        self.assertEqual(outcome["outcome"], "absent")
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+        self.assertEqual(self.adapter.current(), record)
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=self.scope,
+                route_path=ROUTE.format(product=self.product),
+                idempotency_key="activation",
+            ),
+            original_row,
+        )
+        mount = original[0]
+        conflicts = [("absent", []), ("duplicate", [mount, deepcopy(mount)])]
+        conflicts.extend(
+            (key, [{**mount, key: value}])
+            for key, value in (
+                ("applicationId", "foreign-application"),
+                ("serviceType", "compose"),
+                ("volumeName", "foreign-volume"),
+                ("mountPath", "/other-state"),
+                ("type", "bind"),
+                ("mountId", None),
+                ("hostPath", "/host-state"),
+                ("filePath", "state-file"),
+                ("content", "foreign-content"),
+                ("composeId", "foreign-compose"),
+            )
+        )
+        for reason, mounts in conflicts:
+            with self.subTest(reason=reason):
+                self.payloads[record.target_id]["mounts"] = mounts
+                self.assertEqual(self.activate().status, "reconcile_required")
+                self.assertFalse(self.adapter.current().published)
+                self.assertFalse(self.deployments.get(record.target_id))
+                self.assertEqual(self.canonical_password(), retained_password)
+        self.payloads[record.target_id]["mounts"] = original
+        completed = self.activate()
+        self.assertIn(completed.status, {"completed", "adopted"}, completed)
+        self.assertEqual(self.adapter.current().state_recipient["mount_verified"], "true")
+        self.assertEqual(len(self.payloads[record.target_id]["mounts"]), 1)
+        self.assertEqual(len([path for path, _ in self.writes if path == "/api/mounts.create"]), 1)
+        self.assertEqual(len(self.deployments[record.target_id]), 1)
+
     def test_lost_application_create_reply_adopts_exact_original_without_recreation(self) -> None:
         self.prepare()
         self.lose_create = True
@@ -2819,6 +4022,71 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(
             len([path for path, _ in self.writes if path == "/api/application.deploy"]), 1
         )
+
+    def test_lost_deployment_is_adopted_before_external_conflict_refusal(self) -> None:
+        from control_plane.testing_external_capabilities import ExternalCapabilityConflict
+
+        self.prepare()
+        self.lost_image_reply = True
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+        ):
+            first = self.activate()
+        self.assertEqual(first.status, "reconcile_required")
+
+        def conflict(record: TestingActivationRecord, check: Any) -> None:
+            check()
+            raise ExternalCapabilityConflict()
+
+        with patch.object(self.adapter, "require_production_separation", side_effect=conflict):
+            result = self.activate()
+        self.assertEqual(result.status, "completed", result)
+        record = self.adapter.current()
+        self.assertFalse(record.published)
+        self.assertIsNotNone(record.failure)
+        self.assertEqual(
+            record.state_recipient["application_deployment_id"],
+            api.deployment_key(self.deployments[record.target_id][0]),
+        )
+        self.assertIn(
+            api.deployment_status(self.deployments[record.target_id][0]),
+            api._DEPLOYMENT_SUCCESS_STATUSES,
+        )
+        self.assertEqual(
+            len([path for path, _ in self.writes if path == "/api/application.deploy"]), 1
+        )
+        before = tuple(self.writes)
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(tuple(self.writes), before)
+
+    def test_external_conflict_before_configure_keeps_credentials_and_candidate_unused(
+        self,
+    ) -> None:
+        from control_plane.testing_external_capabilities import ExternalCapabilityConflict
+
+        self.prepare()
+        original_password = self.canonical_password()
+
+        def conflict(record: TestingActivationRecord, check: Any) -> None:
+            check()
+            raise ExternalCapabilityConflict()
+
+        with (
+            patch.object(self.adapter, "require_production_separation", side_effect=conflict),
+            patch.object(api, "update_dokploy_target_env") as env,
+            patch.object(api, "trigger_deployment") as deploy,
+        ):
+            result = self.activate()
+            env.assert_not_called()
+            deploy.assert_not_called()
+        self.assertEqual(result.status, "completed", result)
+        record = self.adapter.current()
+        self.assertFalse(record.published)
+        self.assertIsNotNone(record.failure)
+        self.assertEqual(self.canonical_password(), original_password)
+        before = tuple(self.writes)
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(tuple(self.writes), before)
 
     def test_failed_atomic_publication_keeps_old_delivery_and_reuses_staged_generation(
         self,
@@ -3762,6 +5030,578 @@ class ApplicationFlowTests(unittest.TestCase):
     def test_supported_http_dry_run_and_original_receipt(self) -> None:
         self.assert_supported_http_activation(native_apply=False)
 
+    def test_historical_wait_receipt_preserves_original_candidate_custody_without_rewriting_state(
+        self,
+    ) -> None:
+        from control_plane.testing_application_activation import activation_image_record
+        from control_plane.testing_application_inspection import inspect_application_candidate
+        from control_plane.provider_operations import build_provider_operation_key
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+
+        self.prepare()
+        completed = self.activate()
+        self.assertEqual(completed.status, "completed")
+        assert completed.record is not None
+        row = completed.record
+        operation_key = build_provider_operation_key(
+            scope=row.scope,
+            route_path=row.route_path,
+            idempotency_key=row.idempotency_key,
+            request_fingerprint=row.request_fingerprint,
+            reconciliation_key=row.reconciliation_key,
+        )
+        current = self.adapter.current()
+        job = self.deployments[current.target_id][0]
+        receipt = api._wait_for_deployment_status(
+            fetch_latest_deployment=lambda: deepcopy(job),
+            before_key="",
+            timeout_seconds=1,
+            failure_message_prefix="Fixture deployment",
+        )
+        self.assertEqual(
+            current.state_recipient["application_deployment_id"], api.deployment_key(job)
+        )
+        record = current.model_copy(
+            update={
+                "state_recipient": {**current.state_recipient, "application_deployment_id": receipt}
+            }
+        )
+        before = deepcopy((self.writes, self.schedules, self.schedule_history))
+        self.adapter.require_terminal_candidate(record, operation_key)
+        self.assertEqual(
+            activation_image_record(record).deploy.deployment_id, api.deployment_key(job)
+        )
+        self.assertTrue(
+            inspect_application_candidate(
+                self.adapter, record, operation_key
+            ).sole_deployment_id_matches
+        )
+        for invalid in (
+            "",
+            receipt + " extra",
+            receipt + " deployment=other",
+            receipt.replace("status=", "unknown="),
+            "foreign-job",
+        ):
+            with self.subTest(receipt=invalid):
+                changed = record.model_copy(
+                    update={
+                        "state_recipient": {
+                            **record.state_recipient,
+                            "application_deployment_id": invalid,
+                        }
+                    }
+                )
+                with self.assertRaises(TestingActivationRefusal):
+                    self.adapter.require_terminal_candidate(changed, operation_key)
+                self.assertFalse(
+                    inspect_application_candidate(
+                        self.adapter, changed, operation_key
+                    ).sole_deployment_id_matches
+                )
+        self.assertEqual(self.adapter.current(), current)
+        self.assertEqual(record.state_recipient["application_deployment_id"], receipt)
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+
+    def test_original_candidate_inspection_identifies_terminal_predicates_without_values_or_writes(
+        self,
+    ) -> None:
+        from control_plane.testing_application_inspection import inspect_application_candidate
+        from control_plane.provider_operations import build_provider_operation_key
+
+        self.prepare()
+        completed = self.activate()
+        self.assertEqual(completed.status, "completed")
+        assert completed.record is not None
+        row = completed.record
+        record = self.adapter.current()
+        operation_key = build_provider_operation_key(
+            scope=row.scope,
+            route_path=row.route_path,
+            idempotency_key=row.idempotency_key,
+            request_fingerprint=row.request_fingerprint,
+            reconciliation_key=row.reconciliation_key,
+        )
+        before = deepcopy((self.writes, self.schedules, self.schedule_history))
+        observed = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(observed.placement, "matched")
+        self.assertEqual(observed.domains, "empty")
+        self.assertEqual(observed.history, "complete")
+        self.assertEqual(observed.deployment_count, len(self.deployments[record.target_id]))
+        self.assertTrue(observed.stored_deployment_recorded)
+        self.assertTrue(observed.sole_deployment_id_matches)
+        self.assertTrue(observed.sole_deployment_title_matches)
+        self.assertEqual(observed.sole_deployment_status, "terminal_success")
+        self.assertEqual(observed.current_runtime_status, "available")
+        self.assertEqual(observed.current_http_status, 200)
+        self.assertEqual(observed.current_identity_status, "match")
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        with (
+            patch(
+                "control_plane.testing_activation_inspection.activation_record",
+                return_value=record.model_copy(update={"phase": "restoring_application_route"}),
+            ),
+            patch(
+                "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                return_value=[],
+            ),
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "activation",
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                )
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertTrue(response.json()["result"]["candidate"]["sole_deployment_id_matches"])
+        self.assertEqual(response.json()["result"]["candidate"]["current_http_status"], 200)
+        for private in (
+            record.target_id,
+            record.app_name,
+            "retained-only-password",
+            self.deployments[record.target_id][0]["title"],
+        ):
+            self.assertNotIn(private, observed.model_dump_json())
+        original = deepcopy(self.payloads[record.target_id])
+        for changes, expected in (
+            ({}, "missing"),
+            ({"domains": None}, "malformed"),
+            ({"domains": [{"host": "private.example"}]}, "nonempty"),
+        ):
+            self.payloads[record.target_id] = {
+                key: value for key, value in original.items() if key != "domains"
+            } | changes
+            self.assertEqual(
+                inspect_application_candidate(self.adapter, record, operation_key).domains, expected
+            )
+        self.payloads[record.target_id] = original
+        with (
+            patch.object(
+                api,
+                "list_deployments_for_target",
+                side_effect=ValueError("private provider detail"),
+            ),
+            self.assertLogs("control_plane.http_error_evidence", level="WARNING") as diagnostic,
+        ):
+            unknown = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(unknown.history, "unknown")
+        self.assertIsNone(unknown.deployment_count)
+        self.assertIsNone(unknown.sole_deployment_id_matches)
+        self.assertNotIn("private provider detail", unknown.model_dump_json())
+        self.assertNotIn("private provider detail", "\n".join(diagnostic.output))
+        self.deployments[record.target_id].append(
+            {"deploymentId": "foreign-job", "title": "private foreign title", "status": "running"}
+        )
+        multiple = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(multiple.deployment_count, len(self.deployments[record.target_id]))
+        self.assertIsNone(multiple.sole_deployment_status)
+        from control_plane.testing_application_runtime import VerifiedApplicationRuntimeFailure
+
+        with patch(
+            "control_plane.testing_application_inspection.inspect_application_runtime",
+            side_effect=VerifiedApplicationRuntimeFailure(
+                {
+                    "http_status": 503,
+                    "identity_status": "missing",
+                    "health_payload": {"private": "unreported"},
+                }
+            ),
+        ):
+            failed = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(failed.current_http_status, 503)
+        self.assertEqual(failed.current_identity_status, "missing")
+        self.assertNotIn("unreported", failed.model_dump_json())
+        self.payloads[record.target_id]["appName"] = "foreign-private-application"
+        with patch(
+            "control_plane.testing_application_inspection.inspect_application_runtime",
+            side_effect=AssertionError("Changed placement must not be probed"),
+        ):
+            changed = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(changed.placement, "changed")
+        self.assertEqual(changed.current_runtime_status, "not_read")
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+        self.assertEqual(self.adapter.current(), record)
+
+    def test_original_route_inspection_reads_bound_receipts_without_provider_or_writes(
+        self,
+    ) -> None:
+        from control_plane.testing_activation_inspection import (
+            inspect_application_activation,
+            inspect_application_route_receipts,
+        )
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
+        from control_plane.testing_route_effects import ROUTE_WRITER_RECEIPT
+
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        record = self.adapter.current()
+        readiness = record.application_readiness
+        assert readiness is not None and readiness.route_execution is not None
+        assert readiness.private_health is not None and readiness.public_health is not None
+        forward = self.store.read_idempotency_record(
+            scope=record.scope,
+            route_path=ROUTE.format(product=self.product) + ":route",
+            idempotency_key=record.plan_sha256 + ":route",
+        )
+        assert forward is not None
+        writer = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=ROUTE_WRITER_RECEIPT,
+            idempotency_key=readiness.route_execution.key(attempt=forward.attempt),
+        )
+        assert writer is not None
+        before = deepcopy(
+            (self.writes, self.schedules, self.schedule_history, routing.effect_count)
+        )
+        read = self.store.read_idempotency_record
+        with (
+            patch(
+                "control_plane.dokploy.api.dokploy_request", side_effect=AssertionError
+            ) as provider_reads,
+            patch(
+                "control_plane.secrets._decrypt_secret_value", side_effect=AssertionError
+            ) as secret_reads,
+        ):
+            observed = inspect_application_route_receipts(self.store, record)
+            self.assertEqual(observed[0].state, forward.state)
+            self.assertEqual(observed[0].attempt, forward.attempt)
+            self.assertEqual(observed[0].status, "bound")
+            self.assertEqual(observed[0].writer_status, "bound")
+            self.assertEqual(observed[0].writer_state, writer.state)
+            self.assertEqual(observed[0].writer_outcome, writer.response_payload["writer_outcome"])
+            self.assertEqual(observed[1].status, "not_found")
+            with patch(
+                "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                return_value=[],
+            ):
+                integrated = inspect_application_activation(
+                    root=self.root,
+                    store=self.store,
+                    product=self.product,
+                    request=self.request,
+                    actor=self.actor,
+                    scope=self.scope,
+                    idempotency_key="activation",
+                    trace_id="original-route-inspection",
+                    observe_original=self.adapter.observe,
+                )
+            self.assertEqual(integrated.routes, observed)
+            self.assertEqual(integrated.private_health_status, readiness.private_health.status)
+            self.assertEqual(integrated.public_health_status, readiness.public_health.status)
+            intent = self.store.read_original_mutation_intent
+            for original in (forward, writer):
+                with (
+                    self.subTest(missing_intent=original.record_id),
+                    patch.object(
+                        self.store,
+                        "read_original_mutation_intent",
+                        side_effect=lambda row, selected=original: (
+                            {} if row == selected else intent(row)
+                        ),
+                    ),
+                ):
+                    missing = inspect_application_route_receipts(self.store, record)[0]
+                    if original == forward:
+                        self.assertEqual(missing.status, "unbound")
+                        self.assertEqual(missing.writer_status, "not_read")
+                    else:
+                        self.assertEqual(missing.writer_status, "unbound")
+            for original, changes in (
+                (forward, {"request_fingerprint": "foreign-private-fingerprint"}),
+                (writer, {"request_fingerprint": "foreign-private-fingerprint"}),
+                (writer, {"response_payload": {"writer_outcome": "private-provider-message"}}),
+                (writer, {"state": "reconcile_required"}),
+                (
+                    forward,
+                    {
+                        "state": "reconcile_required",
+                        "response_payload": {"route_write_not_started": True},
+                    },
+                ),
+            ):
+                with self.subTest(changes=changes, record=original.record_id):
+                    replacement = original.model_copy(update=changes)
+
+                    def changed_read(**kwargs: Any) -> Any:
+                        found = read(**kwargs)
+                        return replacement if found == original else found
+
+                    with patch.object(
+                        self.store, "read_idempotency_record", side_effect=changed_read
+                    ):
+                        changed = inspect_application_route_receipts(self.store, record)[0]
+                    if "state" in changes:
+                        self.assertEqual(changed.status, "bound")
+                        if original == forward:
+                            self.assertIsNone(changed.route_write_not_started)
+                        else:
+                            self.assertIsNone(changed.writer_outcome)
+                    elif original == forward:
+                        self.assertEqual(changed.status, "unbound")
+                        self.assertIsNone(changed.state)
+                        self.assertEqual(changed.writer_status, "not_read")
+                    elif "request_fingerprint" in changes:
+                        self.assertEqual(changed.writer_status, "unbound")
+                        self.assertIsNone(changed.writer_state)
+                        self.assertIsNone(changed.writer_outcome)
+                    else:
+                        self.assertEqual(changed.writer_outcome, "unrecognized")
+                    serialized = changed.model_dump_json()
+                    self.assertNotIn("private-provider-message", serialized)
+                    self.assertNotIn("foreign-private-fingerprint", serialized)
+            serialized = "".join(item.model_dump_json() for item in observed)
+            self.assertNotIn(readiness.backend, serialized)
+            self.assertNotIn("retained-only-password", serialized)
+            provider_reads.assert_not_called()
+            secret_reads.assert_not_called()
+        self.assertEqual(
+            (self.writes, self.schedules, self.schedule_history, routing.effect_count), before
+        )
+        self.assertEqual(self.adapter.current(), record)
+        self.assertEqual(
+            read(
+                scope=forward.scope,
+                route_path=forward.route_path,
+                idempotency_key=forward.idempotency_key,
+            ),
+            forward,
+        )
+        self.assertEqual(
+            read(
+                scope=writer.scope,
+                route_path=writer.route_path,
+                idempotency_key=writer.idempotency_key,
+            ),
+            writer,
+        )
+
+    def test_original_activation_inspection_retains_negative_program_evidence_without_writes(
+        self,
+    ) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.testing_application_capabilities import (
+            RETAINED_CAPABILITY_PROGRAM_NAME,
+            retained_application_capability_spec,
+            retained_application_capability_program,
+        )
+        from control_plane.testing_separation_resources import APPLICATION_CAPABILITY_PHASE
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        self.prepare()
+
+        def refuse(**kwargs: Any) -> None:
+            kwargs["before_effect"](APPLICATION_CAPABILITY_PHASE)
+            raise ValueError("private-unreported-provider-error")
+
+        with patch(
+            "control_plane.testing_application_capabilities.inspect_retained_application_capabilities",
+            side_effect=refuse,
+        ):
+            refused = self.activate()
+        self.assertEqual(refused.status, "completed", refused)
+        record = self.adapter.current()
+        self.assertIsNotNone(record.failure)
+        spec = retained_application_capability_spec(
+            self.store, self.root, self.product, self.context
+        )
+        from control_plane.dokploy import post_deploy
+
+        _, lookup, _, _ = post_deploy._resolve_dokploy_schedule_runtime(
+            host="https://provider.test",
+            token="fixture-token",
+            compose_id=self.old_id,
+            compose_name=self.context,
+            target_payload=self.payloads[self.old_id],
+        )
+        schedule: dict[str, Any] = {
+            "scheduleId": "original-capability",
+            "name": RETAINED_CAPABILITY_PROGRAM_NAME,
+            "appName": record.namespace,
+            "applicationId": lookup,
+            "enabled": False,
+            "script": retained_application_capability_program(spec),
+        }
+        self.schedules[schedule["scheduleId"]] = schedule
+        self.schedules["preparation-capability"] = {
+            **schedule,
+            "scheduleId": "preparation-capability",
+            "appName": record.namespace.removesuffix("-recipient"),
+        }
+        execution = {
+            "deploymentId": "original-capability-run",
+            "scheduleId": schedule["scheduleId"],
+            "status": "error",
+            "startedAt": self.old.now(-1),
+            "finishedAt": self.old.now(),
+        }
+        self.schedule_history[schedule["scheduleId"]] = [execution]
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        before = deepcopy((self.writes, self.schedules, self.schedule_history))
+        with (
+            patch(
+                "control_plane.testing_separation_inspection.post_deploy._read_odoo_post_deploy_log_markers",
+                return_value={"log_available": "true", "testing_resources_ok": "false"},
+            ),
+            patch("control_plane.secrets._decrypt_secret_value", side_effect=AssertionError),
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "activation",
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                )
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        observed = response.json()["result"]
+        assert refused.record is not None
+        self.assertEqual(observed["state"], refused.record.state)
+        self.assertEqual(observed["activation_phase"], record.phase)
+        self.assertEqual(observed["provider_effect_phase"], refused.record.provider_effect_phase)
+        self.assertEqual(observed["predecessor_recorded"], record.predecessor is not None)
+        self.assertEqual(observed["external_capability_count"], len(record.external_capabilities))
+        programs = {item["kind"]: item for item in observed["programs"]}
+        capability = programs["retained_capability"]
+        self.assertEqual(capability["schedule_id"], schedule["scheduleId"])
+        self.assertEqual(capability["deployment_id"], execution["deploymentId"])
+        self.assertEqual(capability["deployment_status"], execution["status"])
+        self.assertIs(capability["resources_ok"], False)
+        self.assertTrue(capability["script_matches"])
+        self.assertIsNone(programs["retained_capability_readback"]["resources_ok"])
+        self.assertNotIn("storage_preparation", programs)
+        self.assertNotIn(schedule["script"], response.text)
+        self.assertNotIn("private-unreported-provider-error", response.text)
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+        self.assertEqual(self.adapter.current(), record)
+
+        for key, changes in (
+            ("", {}),
+            ("different-original", {}),
+            ("activation", {"source_commit": "f" * 40}),
+            ("activation", {"preparation_key": "different-preparation"}),
+        ):
+            with (
+                self.subTest(key=key, changes=changes),
+                patch(
+                    "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                    side_effect=AssertionError(
+                        "Unbound inspection must not read provider programs"
+                    ),
+                ),
+            ):
+                denied = asyncio.run(
+                    request(
+                        app,
+                        "POST",
+                        ROUTE.format(product=self.product),
+                        headers={
+                            "Authorization": "Bearer local-operator-token",
+                            "Idempotency-Key": key,
+                        },
+                        payload=self.request.model_dump(mode="json")
+                        | {"mode": "inspect"}
+                        | changes,
+                    )
+                )
+                self.assertEqual(denied.status_code, 409, denied.text)
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+
+        for changed in (
+            None,
+            record.model_copy(update={"actor": "different-agent"}),
+            record.model_copy(update={"namespace": record.namespace + "-different"}),
+            record.model_copy(update={"preparation_record_id": "different-preparation-record"}),
+            record.model_copy(
+                update={
+                    "retained_target_id": record.retained_target_id.model_copy(
+                        update={"target_id": "different-target"}
+                    )
+                }
+            ),
+        ):
+            with (
+                self.subTest(record=changed),
+                patch(
+                    "control_plane.testing_activation_inspection.activation_record",
+                    return_value=changed,
+                ),
+                patch(
+                    "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                    side_effect=AssertionError("Foreign custody must refuse before provider reads"),
+                ),
+            ):
+                denied = asyncio.run(
+                    request(
+                        app,
+                        "POST",
+                        ROUTE.format(product=self.product),
+                        headers={
+                            "Authorization": "Bearer local-operator-token",
+                            "Idempotency-Key": "activation",
+                        },
+                        payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                    )
+                )
+                self.assertEqual(denied.status_code, 409, denied.text)
+
+        foreign_app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(
+                token_label="local-owner-write"
+            ).model_copy(update={"local_operator_subject": "different-agent"}),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        with patch(
+            "control_plane.testing_activation_inspection.inspect_preparation_programs",
+            side_effect=AssertionError("Foreign caller must refuse before provider reads"),
+        ):
+            denied = asyncio.run(
+                request(
+                    foreign_app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "activation",
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                )
+            )
+        self.assertEqual(denied.status_code, 409, denied.text)
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+
     def addressed(self) -> Any:
         """Reuse the native transport's real isolated file/lock/process harness."""
         from tests.test_testing_route_transport import TestingRouteTransportTests
@@ -3835,15 +5675,39 @@ class ApplicationFlowTests(unittest.TestCase):
         native = routing.command
 
         def command(arguments: list[str], **kwargs: Any) -> Any:
-            if arguments[1:4] == ["service", "ls", "-q"]:
+            if arguments[1:3] == ["service", "ls"]:
+                if self.before_service_list is not None:
+                    self.before_service_list()
+                if arguments[3:] not in (["-q"], ["--quiet"]):
+                    return subprocess.CompletedProcess(
+                        arguments, 125, b"", b"unsupported list option"
+                    )
                 return subprocess.CompletedProcess(
                     arguments,
                     0,
-                    stdout="\n".join(row["ID"] for row in self.services.values()).encode(),
+                    stdout="\n".join(row["ID"][:12] for row in self.services.values()).encode(),
                     stderr=b"",
                 )
             if arguments[1:4] == ["service", "inspect", "--format"]:
-                service = next(row for row in self.services.values() if row["ID"] == arguments[-1])
+                selected = []
+                for identifier in arguments[5:]:
+                    matching = [
+                        row for row in self.services.values() if row["ID"].startswith(identifier)
+                    ]
+                    if len(matching) != 1:
+                        return subprocess.CompletedProcess(
+                            arguments, 1, b"", b"ambiguous or missing service"
+                        )
+                    selected.append(matching[0])
+                if arguments[4] == "{{json .ID}}":
+                    rows = [row["ID"] for row in selected]
+                    if self.service_id_resolution is not None:
+                        rows = self.service_id_resolution(rows)
+                    return subprocess.CompletedProcess(
+                        arguments, 0, "\n".join(json.dumps(row) for row in rows).encode(), b""
+                    )
+                assert len(selected) == 1
+                service = selected[0]
                 return subprocess.CompletedProcess(
                     arguments,
                     0,
@@ -3855,16 +5719,22 @@ class ApplicationFlowTests(unittest.TestCase):
                     ).encode(),
                     stderr=b"",
                 )
-            if arguments[1:3] in (
-                ["service", "inspect"],
-                ["service", "ps"],
-                ["node", "ls"],
-                ["image", "inspect"],
-            ) or arguments[1:4] == [
-                "inspect",
-                "--type",
-                "task",
-            ]:
+            if (
+                arguments[1] == "version"
+                or arguments[1:3]
+                in (
+                    ["service", "inspect"],
+                    ["service", "ps"],
+                    ["node", "ls"],
+                    ["image", "inspect"],
+                )
+                or arguments[1:4]
+                == [
+                    "inspect",
+                    "--type",
+                    "task",
+                ]
+            ):
                 result = self.docker(arguments, **kwargs)
                 return subprocess.CompletedProcess(
                     arguments,
@@ -3875,6 +5745,51 @@ class ApplicationFlowTests(unittest.TestCase):
             return native(arguments, **kwargs)
 
         self.enterContext(patch.object(routing, "command", side_effect=command))
+        self.stored_service_reads = 0
+        self.stored_service_view = None
+        self.after_stored_service_read = None
+
+        def stdio() -> Any:
+            from io import BytesIO
+            from unittest.mock import MagicMock
+            from urllib.parse import urlsplit, parse_qs
+
+            process = MagicMock()
+            process.__enter__.return_value = process
+            process.poll.return_value = 0
+            process.wait.return_value = 0
+
+            def request(data: bytes) -> int:
+                path = urlsplit(data.split(b" ")[1].decode())
+                service = next(
+                    row
+                    for row in self.services.values()
+                    if row["ID"] == path.path.rsplit("/", 1)[-1]
+                )
+                result = deepcopy(service)
+                if parse_qs(path.query).get("insertDefaults") != ["false"]:
+                    for key, default in self.cli_container_defaults.items():
+                        result["Spec"]["TaskTemplate"]["ContainerSpec"].setdefault(
+                            key, deepcopy(default)
+                        )
+                if self.stored_service_view is not None:
+                    result = self.stored_service_view(result)
+                body = json.dumps(result).encode()
+                process.stdout = BytesIO(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                    + str(len(body)).encode()
+                    + b"\r\n\r\n"
+                    + body
+                )
+                self.stored_service_reads += 1
+                if self.after_stored_service_read is not None:
+                    self.after_stored_service_read()
+                return len(data)
+
+            process.stdin.write.side_effect = request
+            return process
+
+        routing.docker_stdio = stdio
         profile = self.store.read_product_profile_record(self.product)
         profile.public_website = "required"
         lane = next(item for item in profile.lanes if item.instance == "testing")
@@ -3943,6 +5858,89 @@ class ApplicationFlowTests(unittest.TestCase):
             result = self.activate()
         self.assertEqual(result.status, "completed", result)
         self.assertTrue(self.adapter.current().published)
+
+    def test_publication_refuses_stale_route_readiness_without_changing_custody(self) -> None:
+        from datetime import datetime, timedelta
+
+        self.addressed()
+        self.prepare()
+        write = self.store.write_testing_activation
+        attempted: list[str] = []
+
+        def publish(**kwargs: Any) -> None:
+            if kwargs["replacement"]["published"]:
+                before = self.adapter.current()
+                stale = deepcopy(kwargs["replacement"])
+                readiness = stale["application_readiness"]
+                observed = datetime.fromisoformat(readiness["observed_at"].replace("Z", "+00:00"))
+                readiness["observed_at"] = (observed - timedelta(hours=1)).isoformat()
+                attempted.append(readiness["observed_at"])
+                with self.assertRaises(ValueError):
+                    write(**{**kwargs, "replacement": stale})
+                self.assertEqual(self.adapter.current(), before)
+            write(**kwargs)
+
+        with patch.object(self.store, "write_testing_activation", side_effect=publish):
+            result = self.activate()
+        self.assertTrue(attempted)
+        self.assertEqual(result.status, "completed", result)
+        self.assertTrue(self.adapter.current().published)
+
+    def test_retained_fence_is_not_separated_when_binding_changes_between_reads(self) -> None:
+        from control_plane.testing_activation import retained_fence_is_separated
+        from control_plane.generic_web_testing_exclusion import bind_testing_recipient
+
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        self.assertTrue(retained_fence_is_separated(self.store, self.original))
+        identifier = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        rebound: list[str] = []
+
+        def return_to_original(*args: Any, **kwargs: Any) -> Any:
+            self.store.write_dokploy_target_record(self.retained)
+            self.store.write_dokploy_target_id_record(
+                identifier.model_copy(update={"target_id": self.old_id})
+            )
+            self.store.write_provider_target_record(
+                provider.model_copy(update={"target_id": self.old_id})
+            )
+            for alias in self.store.list_dokploy_target_id_records():
+                if alias.target_id == self.old_id and (alias.context, alias.instance) != (
+                    self.context,
+                    "testing",
+                ):
+                    self.store.delete_dokploy_target_id_record(expected_record=alias)
+            for registration in self.store.list_provider_target_records():
+                if registration.target_id == self.old_id and (
+                    registration.context,
+                    registration.instance,
+                ) != (self.context, "testing"):
+                    self.store.delete_provider_target_record(expected_record=registration)
+            bound = bind_testing_recipient(*args, **kwargs)
+            rebound.append(bound[2].target_id)
+            return bound
+
+        with patch(
+            "control_plane.testing_activation.bind_testing_recipient",
+            side_effect=return_to_original,
+        ):
+            self.assertFalse(retained_fence_is_separated(self.store, self.original))
+        self.assertEqual(rebound, [self.old_id])
+
+    def test_private_ingress_refuses_a_serving_application_moved_to_another_server(self) -> None:
+        _, ingress, _ = self.private_addressed()
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        self.assertTrue(self.adapter.current().published)
+        ingress.plan()
+        self.payloads[self.adapter.current().target_id]["serverId"] = "another-server"
+        with self.assertRaises(ValueError):
+            ingress.plan()
 
     def test_addressed_publication_correction_restores_route_and_allows_fresh_generation(
         self,
@@ -4027,6 +6025,7 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertTrue(self.adapter.current().published)
 
     def test_lost_inverse_reply_settles_its_original_and_never_resumes_forward(self) -> None:
+        self.cli_container_defaults = {"DNSConfig": {}, "StopGracePeriod": 17}
         self.assert_lost_inverse_reentry()
 
     def test_proxy_restart_after_lost_inverse_reply_reuses_original_child(self) -> None:
@@ -4088,6 +6087,11 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(self.canonical_password(), "retained-only-password")
 
     def test_proxy_restart_before_inverse_retains_distinct_inverse_custody(self) -> None:
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
+        from control_plane.dokploy.testing_route_execution import TestingRouteExecutionIntent
+        from control_plane.testing_activation_inspection import inspect_application_route_receipts
+        from control_plane.testing_route_effects import ROUTE_WRITER_RECEIPT
+
         routing = self.addressed()
         self.prepare()
 
@@ -4102,6 +6106,26 @@ class ApplicationFlowTests(unittest.TestCase):
         completed = self.adapter.current()
         assert completed.failure is not None
         self.assertEqual(completed.failure.kind, "publication_refused")
+        inverse = self.store.read_idempotency_record(
+            scope=completed.scope,
+            route_path=ROUTE.format(product=self.product) + ":route-inverse",
+            idempotency_key=completed.plan_sha256 + ":route-inverse",
+        )
+        assert inverse is not None
+        execution = TestingRouteExecutionIntent.model_validate(
+            self.store.read_original_mutation_intent(inverse)["route_execution"]
+        )
+        writer = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=ROUTE_WRITER_RECEIPT,
+            idempotency_key=execution.key(attempt=inverse.attempt),
+        )
+        assert writer is not None
+        inspected = inspect_application_route_receipts(self.store, completed)[1]
+        self.assertEqual(inspected.status, "bound")
+        self.assertEqual(inspected.writer_status, "bound")
+        self.assertEqual(inspected.writer_state, writer.state)
+        self.assertEqual(inspected.writer_outcome, writer.response_payload["writer_outcome"])
 
     def test_persisted_inverse_pauses_for_staff_use_then_restores_original(self) -> None:
         routing, _, _ = self.private_addressed()
@@ -4604,6 +6628,277 @@ class ApplicationFlowTests(unittest.TestCase):
                     ),
                 )
                 self.assertIn(reference, bulk[foreign_lane].unavailable_references)
+
+
+class FreshApplicationFlowTests(unittest.TestCase):
+    def fresh_fixture(self) -> ApplicationFlowTests:
+        fixture = ApplicationFlowTests()
+        fixture.no_original = True
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        return fixture
+
+    @staticmethod
+    def reserve_writer(fixture: ApplicationFlowTests, *, target_key: str) -> Any:
+        from control_plane.contracts.provider_target_origin import (
+            ProviderTargetOrigin,
+            requires_provider_target_origin,
+        )
+
+        return fixture.store.reserve_mutation(
+            scope="late-writer",
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key="late-writer",
+            request_fingerprint="late-writer",
+            lease_owner="late-writer",
+            reconciliation_key="unattributed-original",
+            provider_target_key=target_key,
+            provider_target_origin=ProviderTargetOrigin(
+                product=fixture.product,
+                context=fixture.context,
+                instance="testing",
+                provider_id="dokploy",
+                target_type="application",
+                target_id=fixture.old_id,
+            )
+            if requires_provider_target_origin(target_key)
+            else None,
+        )
+
+    def test_fresh_application_publishes_without_fabricating_an_original(self) -> None:
+        fixture = self.fresh_fixture()
+        old_payload = json.loads(json.dumps(fixture.payloads[fixture.old_id]))
+        self.assertFalse(fixture.store.list_held_provider_target_reservations())
+        fixture.prepare()
+        result = fixture.activate()
+        self.assertEqual(result.status, "completed", result)
+        record = fixture.adapter.current()
+        self.assertTrue(record.published)
+        self.assertFalse(record.retained_reservations)
+        self.assertNotEqual(record.target_id, fixture.old_id)
+        self.assertEqual(fixture.payloads[fixture.old_id], old_payload)
+        self.assertEqual((fixture.old_backing / "keep").read_text(), "Retained original data")
+        self.assertNotEqual(fixture.canonical_password(), "retained-only-password")
+        self.assertFalse(fixture.store.list_held_provider_target_reservations())
+
+    def test_actual_rollback_identity_is_attributed_from_its_exact_record(self) -> None:
+        fixture = self.fresh_fixture()
+        physical = deepcopy((fixture.services, fixture.tasks, fixture.containers, fixture.images))
+        self.assertEqual(fixture.normal("new-baseline").status, "completed")
+        fixture.services, fixture.tasks, fixture.containers, fixture.images = physical
+        fixture.prepare()
+        result = fixture.activate()
+        self.assertEqual(result.status, "completed", result)
+        self.assertTrue(fixture.adapter.current().published)
+
+    def test_unproved_observed_deployment_refuses_before_preparation_effects(self) -> None:
+        fixture = self.fresh_fixture()
+        observed = fixture.observed_application(application_id=fixture.old_id)
+        read = fixture.store.read_deployment_record
+        original = read(observed.service_deployment_record_id)
+        assert original.deployed_target is not None
+        physical = deepcopy((fixture.services, fixture.tasks, fixture.containers, fixture.images))
+        self.assertEqual(fixture.normal("new-baseline").status, "completed")
+        fixture.services, fixture.tasks, fixture.containers, fixture.images = physical
+        writes = list(fixture.writes)
+        variants = {
+            "missing": None,
+            "no-identity": original.model_copy(update={"runtime_identity": None}),
+            "no-artifact": original.model_copy(update={"artifact_identity": None}),
+            "foreign-lane": original.model_copy(update={"instance": "production"}),
+            "foreign-target": original.model_copy(
+                update={
+                    "deployed_target": original.deployed_target.model_copy(
+                        update={"target_id": "another-application"}
+                    )
+                }
+            ),
+        }
+        for name, replacement in variants.items():
+            with self.subTest(name=name):
+
+                def deployment(record_id: str) -> Any:
+                    if record_id != original.record_id:
+                        return read(record_id)
+                    if replacement is None:
+                        raise FileNotFoundError(record_id)
+                    return replacement
+
+                with patch.object(fixture.store, "read_deployment_record", side_effect=deployment):
+                    with self.assertRaises(ValueError):
+                        fixture.prepare()
+                self.assertEqual(fixture.writes, writes)
+                self.assertFalse(fixture.store.list_held_provider_target_reservations())
+
+    def test_unattributed_hold_cannot_supply_fresh_absence(self) -> None:
+        fixture = self.fresh_fixture()
+        self.reserve_writer(fixture, target_key="unknown-provider-target")
+        writes = list(fixture.writes)
+        with self.assertRaises(ValueError):
+            fixture.prepare()
+        self.assertEqual(fixture.writes, writes)
+
+    def test_foreign_original_capsule_distinguishes_an_unrelated_hold(self) -> None:
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
+        for same_target in (False, True):
+            with self.subTest(same_target=same_target):
+                fixture = self.fresh_fixture()
+                try:
+                    origin = ProviderTargetOrigin(
+                        product="another-product",
+                        context="another-testing-context",
+                        instance="testing",
+                        provider_id="dokploy",
+                        target_type="application",
+                        target_id=fixture.old_id if same_target else "another-application",
+                    )
+                    reservation = fixture.store.reserve_mutation(
+                        scope="foreign-writer",
+                        route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                        idempotency_key="foreign-writer",
+                        request_fingerprint="foreign-writer",
+                        lease_owner="foreign-writer",
+                        reconciliation_key="legacy-undecodable-target",
+                        provider_target_key=origin.target_key(),
+                        provider_target_origin=origin,
+                    )
+                    writes = list(fixture.writes)
+                    if same_target:
+                        with self.assertRaises(ValueError):
+                            fixture.prepare()
+                        self.assertEqual(fixture.writes, writes)
+                    else:
+                        fixture.prepare()
+                        self.assertEqual(fixture.activate().status, "completed")
+                        self.assertTrue(fixture.adapter.current().published)
+                    self.assertEqual(
+                        fixture.store.read_idempotency_record(
+                            scope=reservation.record.scope,
+                            route_path=reservation.record.route_path,
+                            idempotency_key=reservation.record.idempotency_key,
+                        ),
+                        reservation.record,
+                    )
+                finally:
+                    fixture.doCleanups()
+
+    def test_runtime_read_failure_refuses_before_preparation_effects(self) -> None:
+        from control_plane.dokploy.runtime_evidence import DokployEvidenceProviderError
+
+        fixture = self.fresh_fixture()
+        writes = list(fixture.writes)
+        with patch(
+            "control_plane.testing_application_capabilities.fetch_application_runtime",
+            side_effect=DokployEvidenceProviderError("target-inspect"),
+        ):
+            with self.assertRaises(ValueError):
+                fixture.prepare()
+        self.assertEqual(fixture.writes, writes)
+        self.assertFalse(fixture.store.list_held_provider_target_reservations())
+
+    def test_late_writer_is_rechecked_inside_publication_transaction(self) -> None:
+        for state in ("running", "reconcile_required"):
+            with self.subTest(state=state):
+                fixture = self.fresh_fixture()
+                try:
+                    fixture.prepare()
+                    old_key = preparation_binding(
+                        fixture.store,
+                        fixture.product,
+                        fixture.context,
+                        fixture.actor,
+                        fixture.root,
+                        fixture.specification,
+                    )[1]
+                    write = fixture.store.write_testing_activation
+                    inserted: list[Any] = []
+
+                    def publish(**kwargs: Any) -> None:
+                        if kwargs["replacement"]["published"] and not inserted:
+                            reservation = self.reserve_writer(fixture, target_key=old_key)
+                            inserted.append(reservation.record)
+                            if state == "reconcile_required":
+                                updated = fixture.store.mark_mutation_reconcile_required(
+                                    reservation=reservation.record,
+                                    reconciliation_key=reservation.record.reconciliation_key,
+                                )
+                                self.assertEqual(updated.status, "updated")
+                        write(**kwargs)
+
+                    with patch.object(
+                        fixture.store, "write_testing_activation", side_effect=publish
+                    ):
+                        fixture.activate()
+                    self.assertTrue(inserted)
+                    self.assertFalse(fixture.adapter.current().published)
+                    self.assertEqual(
+                        fixture.store.read_dokploy_target_id_record(
+                            context_name=fixture.context, instance_name="testing"
+                        ).target_id,
+                        fixture.old_id,
+                    )
+                    self.assertEqual(fixture.canonical_password(), "retained-only-password")
+                finally:
+                    fixture.doCleanups()
+
+    def test_late_writer_keeps_original_target_before_and_after_creation(self) -> None:
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+        from control_plane.testing_separation_resources import preparation_binding
+
+        for after_creation in (False, True):
+            with self.subTest(after_creation=after_creation):
+                fixture = self.fresh_fixture()
+                try:
+                    fixture.prepare()
+                    old_key = preparation_binding(
+                        fixture.store,
+                        fixture.product,
+                        fixture.context,
+                        fixture.actor,
+                        fixture.root,
+                        fixture.specification,
+                    )[1]
+                    write = fixture.store.write_testing_activation
+                    inserted: list[Any] = []
+
+                    def insert(**kwargs: Any) -> None:
+                        write(**kwargs)
+                        if kwargs["replacement"]["phase"] == "recipient_ready" and not inserted:
+                            inserted.append(self.reserve_writer(fixture, target_key=old_key))
+
+                    if after_creation:
+                        with patch.object(
+                            fixture.store, "write_testing_activation", side_effect=insert
+                        ):
+                            result = fixture.activate()
+                        self.assertTrue(inserted)
+                        if result.status == "completed":
+                            self.assertFalse(result.response_payload["result"]["applied"])
+                    else:
+                        self.reserve_writer(fixture, target_key=old_key)
+                        with self.assertRaises(TestingActivationRefusal):
+                            fixture.activate()
+                    record = activation_record(
+                        fixture.store,
+                        fixture.product,
+                        fixture.context,
+                        scope=fixture.scope,
+                        preparation_key=fixture.request.preparation_key,
+                    )
+                    self.assertTrue(record is None or not record.published)
+                    self.assertEqual(
+                        fixture.store.read_dokploy_target_id_record(
+                            context_name=fixture.context, instance_name="testing"
+                        ).target_id,
+                        fixture.old_id,
+                    )
+                    self.assertFalse(
+                        any(path == "/api/application.deploy" for path, _ in fixture.writes)
+                    )
+                    self.assertEqual(fixture.canonical_password(), "retained-only-password")
+                finally:
+                    fixture.doCleanups()
 
 
 class DirectApplicationContinuationTests(unittest.TestCase):

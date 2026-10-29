@@ -3,10 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from fnmatch import fnmatchcase
-import hashlib
-import json
 import re
 from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
@@ -57,6 +54,7 @@ from control_plane.contracts.authz_access_read import (
     EffectiveAccessRequestSummary,
 )
 from control_plane.contracts.ordinary_agent import OrdinaryAgentPolicyRule
+from control_plane.contracts.workflow_rule_retirement import WorkflowRuleRetirementRequest
 from control_plane.contracts.product_owner import (
     PRODUCT_OWNER_POLICY_READ_ACTION,
     PRODUCT_OWNER_POLICY_WRITE_ACTION,
@@ -85,6 +83,7 @@ from control_plane.service_auth import (
     migrate_authz_policy_to_schema_v2,
     strict_immutable_github_human_administrator_ids,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 TimestampProvider = Callable[[], str]
@@ -333,6 +332,11 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
     related_issue: str = ""
     reviewed_plan_sha256: str = ""
     desired_policy: LaunchplaneAuthzPolicy
+    workflow_rule_retirement: WorkflowRuleRetirementRequest | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_reconcile(self) -> "AuthzManagedPolicyReconcileEnvelope":
@@ -340,7 +344,26 @@ class AuthzManagedPolicyReconcileEnvelope(BaseModel):
             raise ValueError("Managed authz policy reconciliation requires product 'launchplane'.")
         self.product = "launchplane"
         self.managed_set_id = self.managed_set_id.strip()
-        if _MANAGED_AUTHZ_SET_PATTERN.fullmatch(self.managed_set_id) is None:
+        if self.workflow_rule_retirement is not None:
+            if (
+                self.managed_set_id
+                or self.workflow_rule_retirement.mode != "plan"
+                or self.schema_migration != "reject"
+                or self.unmanaged_adoption != "reject"
+                or self.administrator_quorum_change is not None
+                or any(rules for _, rules in _authz_policy_rule_collections(self.desired_policy))
+                or self.desired_policy.administrator_quorum is not None
+                or any(
+                    selection.managed_set_id is not None or selection.managed_rule_id is not None
+                    for selection in self.workflow_rule_retirement.selection
+                )
+            ):
+                raise ValueError(
+                    "Selected workflow retirement only removes unmanaged rules. "
+                    "Contract managed rules through their own reviewed managed set; "
+                    "do not combine retirement with any other policy change."
+                )
+        elif _MANAGED_AUTHZ_SET_PATTERN.fullmatch(self.managed_set_id) is None:
             raise ValueError(
                 "Managed authz policy reconciliation requires a stable managed_set_id."
             )
@@ -904,12 +927,7 @@ class AuthzPolicyRequestError(ValueError):
 
 
 def _authz_rule_sha256(rule: AuthzPolicyRule) -> str:
-    canonical_json = json.dumps(
-        rule.model_dump(mode="json", exclude_none=True),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical_json.encode()).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(rule.model_dump(mode="json", exclude_none=True))
 
 
 @overload
@@ -2060,18 +2078,41 @@ def plan_managed_authz_policy_reconcile(
         current_rules=dict(_authz_policy_rule_collections(base_policy))["github_actions"],
         desired_rules=desired_collections["github_actions"],
     )
-    (
-        updated_policy,
-        changes,
-        unchanged_rule_count,
-        unmanaged_compatibility_candidate_count,
-        compatibility_retirements,
-    ) = _reconcile_managed_policy(
-        current_policy=base_policy,
-        desired_policy=request.desired_policy,
-        managed_set_id=request.managed_set_id,
-        unmanaged_adoption=request.unmanaged_adoption,
-    )
+    if request.workflow_rule_retirement is not None:
+        from control_plane.authz_rule_retirement import workflow_rule_retirement_candidate
+
+        updated_policy = workflow_rule_retirement_candidate(
+            current_record, request.workflow_rule_retirement
+        )
+        selected_hashes = {
+            selection.rule_sha256 for selection in request.workflow_rule_retirement.selection
+        }
+        changes = tuple(
+            AuthzManagedRuleChange(
+                managed_rule_id=rule.managed_rule_id or "",
+                change="removed",
+                previous_principal_type="github_actions",
+                previous_rule_sha256=_authz_rule_sha256(rule),
+            )
+            for rule in current_policy.github_actions
+            if _authz_rule_sha256(rule) in selected_hashes
+        )
+        unchanged_rule_count = _authz_policy_rule_count(updated_policy)
+        unmanaged_compatibility_candidate_count = 0
+        compatibility_retirements: tuple[AuthzManagedCompatibilityRetirement, ...] = ()
+    else:
+        (
+            updated_policy,
+            changes,
+            unchanged_rule_count,
+            unmanaged_compatibility_candidate_count,
+            compatibility_retirements,
+        ) = _reconcile_managed_policy(
+            current_policy=base_policy,
+            desired_policy=request.desired_policy,
+            managed_set_id=request.managed_set_id,
+            unmanaged_adoption=request.unmanaged_adoption,
+        )
     candidate_administrator_quorum = (
         request.administrator_quorum_change
         if request.administrator_quorum_change is not None
@@ -2111,13 +2152,7 @@ def plan_managed_authz_policy_reconcile(
     desired_policy_sha256 = authz_policy_sha256(updated_policy)
     changed = current_record.policy_sha256 != desired_policy_sha256
     desired_set_payload = _desired_managed_set_payload(request.desired_policy)
-    desired_set_sha256 = hashlib.sha256(
-        json.dumps(
-            desired_set_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    desired_set_sha256 = nonvalidating_compact_sorted_json_sha256(desired_set_payload)
     candidate_revision = current_record.revision + int(changed)
     plan_payload = {
         "contract_version": 2,
@@ -2136,9 +2171,11 @@ def plan_managed_authz_policy_reconcile(
         "reason": request.reason,
         "related_issue": request.related_issue,
     }
-    plan_sha256 = hashlib.sha256(
-        json.dumps(plan_payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    if request.workflow_rule_retirement is not None:
+        plan_payload["workflow_rule_retirement"] = request.workflow_rule_retirement.model_dump(
+            mode="json"
+        )
+    plan_sha256 = nonvalidating_compact_sorted_json_sha256(plan_payload)
     if request.mode == "apply" and request.reviewed_plan_sha256 != plan_sha256:
         raise AuthzPolicyReviewedPlanConflictError(
             "Managed authz policy reviewed_plan_sha256 no longer matches the active policy "
@@ -2405,23 +2442,6 @@ def execute_managed_authz_policy_reconcile(
                 expected_revision=current_record.revision,
                 expected_policy_sha256=current_record.policy_sha256,
                 candidate_policy_sha256=authz_policy_sha256(updated_policy),
-            )
-        elif transition.kind in {"v2_to_v3_enable", "v3_enable_or_expand"}:
-            if immutable_applying_github_id < 1:
-                raise AuthzPolicySafetyError(
-                    code="authz_policy_applying_admin_removed",
-                    message="Ordinary authority enabling requires an immutable human administrator.",
-                )
-            from control_plane.ordinary_agent_activation import (
-                resolve_authz_policy_schema_v3_enable_evidence,
-            )
-
-            schema_v3_write_evidence = resolve_authz_policy_schema_v3_enable_evidence(
-                record_store,
-                current_record=current_record,
-                candidate_policy=updated_policy,
-                github_id=immutable_applying_github_id,
-                observed_at=datetime.fromisoformat(now_timestamp()),
             )
     diff = managed_diff.model_dump(mode="json")
     audit = authz_managed_policy_reconcile_audit_payload(

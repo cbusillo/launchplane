@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.text_fields import require_text
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 OutboxDeliveryKind = Literal[
@@ -22,6 +21,8 @@ OutboxDeliveryState = Literal[
     "failed",
     "reconcile_required",
 ]
+RETIRED_DISCORD_SUMMARY_AGGREGATE_TYPE = "public_ingress_discord_summary"
+PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY = "backlog_summary_delivery_id"
 
 
 class OutboxDeliveryRecord(BaseModel):
@@ -88,13 +89,9 @@ class OutboxDeliveryRecord(BaseModel):
 
 
 def build_outbox_delivery_id(*, kind: str, dedupe_key: str) -> str:
-    digest = hashlib.sha256(
-        json.dumps(
-            {"kind": kind.strip(), "dedupe_key": dedupe_key.strip()},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:20]
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {"kind": kind.strip(), "dedupe_key": dedupe_key.strip()}
+    )[:20]
     return "-".join(
         token
         for token in (

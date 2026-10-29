@@ -148,6 +148,46 @@ class _FakeDokployTargetStore:
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_schedule_inventory_requires_an_explicit_whole_object_array(self) -> None:
+        malformed: tuple[JsonValue, ...] = (
+            None,
+            {},
+            {"raw": "synthetic-private-value"},
+            {"data": None},
+            {"items": [], "total": 40},
+            {"data": []},
+            [None],
+            [{}, None],
+        )
+        for payload in malformed:
+            with (
+                self.subTest(payload=payload),
+                patch.object(dokploy_api, "dokploy_request", return_value=payload),
+            ):
+                with self.assertRaises(click.ClickException) as caught:
+                    dokploy_api.list_dokploy_schedules(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        target_id="retained",
+                        schedule_type="compose",
+                    )
+                self.assertNotIn("synthetic-private-value", str(caught.exception))
+        valid_inventories: tuple[list[JsonValue], ...] = ([], [{"scheduleId": "retained-job"}])
+        for rows in valid_inventories:
+            with (
+                self.subTest(rows=rows),
+                patch.object(dokploy_api, "dokploy_request", return_value=rows),
+            ):
+                self.assertEqual(
+                    dokploy_api.list_dokploy_schedules(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        target_id="retained",
+                        schedule_type="compose",
+                    ),
+                    tuple(rows),
+                )
+
     def test_dokploy_request_redacts_http_error_body(self) -> None:
         error = HTTPError(
             url="https://dokploy.example/api/schedule.runManually",
@@ -158,7 +198,8 @@ class DokployConfigTests(unittest.TestCase):
                 b'{"message":"Remote command failed with exit code 1",'
                 b'"DATABASE_URL":"postgresql://user:password@database/example",'
                 b'"SERVICE_TOKEN":"secret-token",'
-                b'"headers":{"Set-Cookie":"session_id=cookie-secret; HttpOnly"}}'
+                b'"headers":{"Set-Cookie":[\n"session_id=cookie-secret; HttpOnly",\n'
+                b'"other=made-up-cookie"]},"status":502}'
             ),
         )
         self.addCleanup(error.close)
@@ -177,6 +218,8 @@ class DokployConfigTests(unittest.TestCase):
         self.assertNotIn("password", raised.exception.format_message())
         self.assertNotIn("secret-token", raised.exception.format_message())
         self.assertNotIn("cookie-secret", raised.exception.format_message())
+        self.assertNotIn("made-up-cookie", raised.exception.format_message())
+        self.assertIn('"status":502', raised.exception.format_message())
         self.assertIn("[redacted]", raised.exception.format_message())
 
     def test_dokploy_request_closes_http_error_when_its_body_times_out(self) -> None:
@@ -480,13 +523,20 @@ class DokployConfigTests(unittest.TestCase):
                 "control_plane.dokploy.api._read_schedule_deployments",
                 return_value=[{"deploymentId": "deployment-failed", "status": "failed"}],
             ),
-            patch("control_plane.dokploy.api.dokploy_request", side_effect=request_error),
             patch(
-                "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
-                return_value=(
-                    "sh: 1: npx: not found",
-                    "DATABASE_URL=postgresql://user:password@database/example",
-                    "PREVIEW_DB_ARGS_BASE64=opaque-secret-payload",
+                "control_plane.dokploy.api.dokploy_request",
+                side_effect=(
+                    request_error,
+                    {
+                        "logs": [
+                            "sh: 1: npx: not found",
+                            "DATABASE_URL=postgresql://user:password@database/example",
+                            "PREVIEW_DB_ARGS_BASE64=opaque-secret-payload",
+                            "'Cookie': [",
+                            "'session_id=made-up-cookie'",
+                            "]",
+                        ]
+                    },
                 ),
             ),
         ):
@@ -504,6 +554,7 @@ class DokployConfigTests(unittest.TestCase):
         self.assertIn("npx: not found", raised.exception.format_message())
         self.assertNotIn("password", raised.exception.format_message())
         self.assertNotIn("opaque-secret-payload", raised.exception.format_message())
+        self.assertNotIn("made-up-cookie", raised.exception.format_message())
         self.assertIn("DATABASE_URL=[redacted]", raised.exception.format_message())
         self.assertIn("PREVIEW_DB_ARGS_BASE64=[redacted]", raised.exception.format_message())
 
@@ -679,12 +730,11 @@ class DokployConfigTests(unittest.TestCase):
         )
 
     def test_redact_dokploy_log_line_redacts_structured_cookie_fields(self) -> None:
-        self.assertEqual(
-            control_plane_dokploy.redact_dokploy_log_line(
-                '{"status":502,"Cookie":"sid=\\"abc\\"; x=abc123","set-cookie":["sid=a]bc123", "x=abc123"]}'
-            ),
-            '{"status":502,"Cookie":"[redacted]","set-cookie":[redacted]',
+        redacted = control_plane_dokploy.redact_dokploy_log_line(
+            '{"status":502,"Cookie":"sid=\\"abc\\"; x=abc123","set-cookie":["sid=a]bc123", "x=abc123"]}'
         )
+        self.assertNotIn("abc", redacted)
+        self.assertIn('"status":502', redacted)
         self.assertEqual(
             control_plane_dokploy.redact_dokploy_log_line(
                 "{'Set-Cookie': 'sid=abc123; Secure', 'path': '/web'}"
@@ -1252,8 +1302,16 @@ target_name = "syo-testing-app"
                     return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
                 ),
                 patch(
-                    "control_plane.tracked_target_logs.dokploy_api.fetch_dokploy_application_logs",
-                    return_value=("started", "SMTP_PASSWORD=[redacted]"),
+                    "control_plane.dokploy.api.dokploy_request",
+                    return_value={
+                        "logs": [
+                            "started",
+                            "Cookie: [",
+                            "'session_id=made-up-cookie'",
+                            "]",
+                            "SMTP_PASSWORD=made-up-smtp",
+                        ]
+                    },
                 ),
             ):
                 result = runner.invoke(
@@ -1268,7 +1326,7 @@ target_name = "syo-testing-app"
                         "--instance",
                         " Testing ",
                         "--lines",
-                        "2",
+                        "3",
                     ],
                 )
 
@@ -1279,7 +1337,8 @@ target_name = "syo-testing-app"
         self.assertEqual(payload["target"]["target_id"], "app-123")
         self.assertEqual(payload["target"]["target_name"], "syo-testing-app")
         self.assertEqual(payload["target"]["app_name"], "syo-testing-gfbiqh")
-        self.assertEqual(payload["logs"]["lines"], ["started", "SMTP_PASSWORD=[redacted]"])
+        self.assertNotIn("made-up-", result.output)
+        self.assertTrue(any("SMTP_PASSWORD=" in line for line in payload["logs"]["lines"]))
         self.assertNotIn("secret-token", result.output)
 
     def test_environments_logs_reports_missing_records_without_traceback(self) -> None:
@@ -4502,6 +4561,26 @@ esac
 
 
 class LaunchplaneServiceDeployTests(unittest.TestCase):
+    def test_rendered_product_services_honor_the_configured_filestore(self) -> None:
+        import yaml
+        from control_plane.testing_activation_compose import interpolate
+
+        configured = "/volumes/data/custom-filestore"
+        document = yaml.safe_load(
+            control_plane_dokploy.render_odoo_raw_compose_file(
+                image_reference="fixture-image", hold_web_until_integration_readback=False
+            )
+        )
+        for name in ("web", "script-runner"):
+            with self.subTest(service=name):
+                self.assertEqual(
+                    interpolate(
+                        document["services"][name]["environment"]["ODOO_FILESTORE_PATH"],
+                        {"ODOO_FILESTORE_PATH": configured},
+                    ),
+                    configured,
+                )
+
     @staticmethod
     def _target_payload(
         *, env_text: str, custom_git_ssh_key_id: str = "ssh-key-123"

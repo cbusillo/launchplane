@@ -153,21 +153,17 @@ def build_odoo_prod_retained_volume_backup_import_plan(
         label="ODOO_FILESTORE_PATH",
         blockers=blockers,
     )
-    backup_root = _normalized_absolute_path(
-        runtime_values.get("ODOO_BACKUP_ROOT", ""),
-        label="ODOO_BACKUP_ROOT",
-        blockers=blockers,
-    )
-    if backup_root:
-        allowed_backup_root = PurePosixPath(dokploy_post_deploy.DEFAULT_ODOO_BACKUP_ROOT)
-        backup_root_path = PurePosixPath(backup_root)
-        if (
-            backup_root_path != allowed_backup_root
-            and allowed_backup_root not in backup_root_path.parents
-        ):
-            blockers.append(
-                "DB-backed ODOO_BACKUP_ROOT is outside the dedicated Launchplane backup root."
-            )
+    from control_plane.contracts.odoo_online_backup import normalized_odoo_backup_root
+
+    try:
+        backup_root = normalized_odoo_backup_root(
+            runtime_values.get("ODOO_BACKUP_ROOT", "").strip()
+        )
+    except ValueError:
+        backup_root = ""
+        blockers.append(
+            "DB-backed ODOO_BACKUP_ROOT must name the dedicated Launchplane backup root."
+        )
     backup_paths = _backup_paths(
         backup_root=backup_root,
         database_name=destination_database_name,

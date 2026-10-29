@@ -27,6 +27,20 @@ def public_dns_addresses(values: tuple[str, ...]) -> tuple[str, ...]:
     return addresses
 
 
+def public_dns_name(value: str) -> str:
+    name = value.strip().rstrip(".").lower().encode("idna").decode()
+    if len(name) > 253 or not re.fullmatch(
+        r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",
+        name,
+    ):
+        raise ValueError("DNS expectations require an exact public DNS name")
+    try:
+        ip_address(name)
+    except ValueError:
+        return name
+    raise ValueError("DNS expectations require a DNS name, not an IP literal")
+
+
 class PublicDnsExpectedTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -35,18 +49,7 @@ class PublicDnsExpectedTarget(BaseModel):
 
     @model_validator(mode="after")
     def _validate_target(self) -> PublicDnsExpectedTarget:
-        self.public_name = self.public_name.strip().rstrip(".").lower().encode("idna").decode()
-        if len(self.public_name) > 253 or not re.fullmatch(
-            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",
-            self.public_name,
-        ):
-            raise ValueError("DNS expectations require an exact public DNS name")
-        try:
-            ip_address(self.public_name)
-        except ValueError:
-            pass
-        else:
-            raise ValueError("DNS expectations require a DNS name, not an IP literal")
+        self.public_name = public_dns_name(self.public_name)
         self.addresses = public_dns_addresses(self.addresses)
         return self
 
