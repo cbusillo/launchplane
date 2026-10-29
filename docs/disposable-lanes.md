@@ -229,15 +229,12 @@ and worker images together; older readers reject held publication plans and
 fail closed without changing their original records.
 The database and other owned dependencies may still be running. Their custody is
 retained, and the ordinary fenced stop runs after the candidate passes public
-health and metadata publication. A fresh retained-copy read immediately before
-retirement decides whether every service is already stopped and the stop can be
-skipped, unless the original stop has already been dispatched or completed.
-That durable effect resumes observation on replay. Admission-time state cannot
-skip a dependency that started later. After the candidate route is selected,
-an admitted running-unhealthy web may recover health on the same container and
-start time, with unchanged inventory, configuration and storage custody.
-Missing process evidence, a healthy replacement process or a reappeared Docker router
-still refuses continuation. The pre-write unavailable admission remains strict.
+health and metadata publication. A fresh retained-copy read immediately before retirement qualifies the current
+testing target and its independent storage. Once the new copy is selected and
+verified, a later process on that retiring target follows the same stop path:
+automatic deploys are disabled first, then the existing target-stop operation
+stops every remaining service. Fresh use, hold, placement and production-isolation
+checks still gate each mutation. Pre-cutover unavailable admission remains strict.
 A missing web or database does not invent its old data;
 every remaining mounted volume is still inspected for independent backing and
 foreign consumers. Both retained-copy and route observations use the same
@@ -283,21 +280,21 @@ waits for exact original bytes or absence and the captured lane-owned applied
 routing before reversing metadata. It reports current stopped, absent or present
 process state separately; a reappeared process has unverified health.
 After successful publication, automatic deployment of the old target is disabled
-and a fully removed original needs no stop dispatch. An unavailable web process
-with running dependencies retains its post-verification stop, followed by removal
-of the admitted stopped containers. Changed retirement custody remains fenced
-with the verified new copy selected.
+and every current service must be observed stopped or absent. Qualified stopped
+containers are then removed without deleting volumes. A healthy new copy stays
+selected while any retirement prerequisite is unresolved.
 This receipt does not request rollback after a checkpoint interruption. Complete,
 quiescent old-target deployment and data-workflow observations gate admission
 before cutover. Later old-side work does not reverse the selected candidate.
 
 Stopped custody binds member identities, ownership labels and storage, separately
 from current stopped/absent state. Incidental Docker lifecycle timestamps do not
-invalidate an unchanged stopped copy. Container removal accepts only the admitted
-IDs in complete current inventory, refuses running or replacement members, and
-uses Docker removal without force or volume deletion. Interrupted removal reads
-back those same IDs and finishes only their stopped or dead leftovers; absent members
-need no repeated removal. Preparation resumes with the observed absent original,
+invalidate an unchanged stopped copy. Pre-start container removal accepts only admitted IDs in complete current
+inventory and refuses running or replacement members. Post-verification removal
+captures the freshly qualified stopped IDs and storage in its durable effect;
+replay uses that same custody. Both use Docker removal without force or volume
+deletion. Interrupted removal finishes only its stopped or dead leftovers;
+absent members need no repeated removal. Preparation resumes with the observed absent original,
 while preserving the original ingress preimage and metadata for health rollback.
 
 A changed predecessor before cutover ends admission once original artifact

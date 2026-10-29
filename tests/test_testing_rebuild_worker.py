@@ -295,6 +295,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
 
         self.assertFalse(self.fail_public)
+        self.assertIs(self.old_provider["autoDeploy"], False)
         self.effects.append("stop-old")
         self.retained["stopped"] = self.retained["web_stopped"] = True
         if "availability" in self.retained:
@@ -314,7 +315,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
     def physical(self, **kwargs: Any) -> dict[str, Any]:
         if kwargs["payload"]["mode"] == "remove":
             self.assertTrue(self.retained["stopped"])
-            if self.intent.retained.get("stopped") is True:
+            if self.intent.retained.get("stopped") is True and not kwargs["payload"].get(
+                "retiring"
+            ):
                 self.assertIsNone(self.owned)
             else:
                 self.assertEqual(
@@ -770,19 +773,87 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
-    def test_old_side_change_after_removal_does_not_stop_a_new_process(self) -> None:
+    def test_old_side_change_after_removal_stops_a_new_process_after_cutover(self) -> None:
         self.admit_unavailable("stopped")
         switch = self.switch
 
         def dependency_started(plan: Any, backend: str | None, **kwargs: Any) -> str:
             result = switch(plan, backend, **kwargs)
             if backend == plan.new_backend:
-                self.retained["stopped"] = False
+                self.retained.update(
+                    self.intent.retained,
+                    stopped=False,
+                    web_stopped=False,
+                    availability="available",
+                    container_ids=["later-web", "later-database"],
+                )
+                self.old_provider["autoDeploy"] = True
             return result
 
-        with patch.object(DokployTestingRouteTransport, "publish", side_effect=dependency_started):
+        def provider(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/compose.update":
+                self.assertEqual(kwargs["payload"]["composeId"], self.intent.old.target_id)
+                self.assertIs(kwargs["payload"]["autoDeploy"], False)
+                self.old_provider["autoDeploy"] = False
+                self.effects.append("disable-old-auto-deploy")
+                return dict(self.old_provider)
+            return self.provider_request(**kwargs)
+
+        with (
+            patch.object(DokployTestingRouteTransport, "publish", side_effect=dependency_started),
+            patch.object(api, "dokploy_request", side_effect=provider),
+        ):
             self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "disable-old-auto-deploy", "stop-old"])
+        self.assertEqual(self.removed_container_ids, ["later-web", "later-database"])
+
+    def test_fresh_use_on_retiring_unavailable_target_prevents_stop(self) -> None:
+        self.admit_unavailable("stopped", partial=True)
+        retire = service.NativeTestingRebuildExecution.retire_old
+
+        def in_use(executor: Any, plan: Any) -> None:
+            with patch.object(
+                service,
+                "read_odoo_testing_usage",
+                return_value=OdooTestingUsage("in_use", True, True, "complete"),
+            ):
+                retire(executor, plan)
+
+        with patch.object(service.NativeTestingRebuildExecution, "retire_old", new=in_use):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
         self.assertEqual(self.effects, ["switch-new"])
+        self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_lost_retirement_removal_reply_resumes_original_container_custody(self) -> None:
+        self.admit_unavailable("stopped", partial=True)
+        physical = self.physical
+        removed = False
+
+        def lost(**kwargs: Any) -> dict[str, Any]:
+            nonlocal removed
+            frame = physical(**kwargs)
+            if kwargs["payload"]["mode"] == "remove" and not removed:
+                removed = True
+                raise TimeoutError("Fixture lost retired-container removal reply")
+            return frame
+
+        with patch.object(service, "retained_copy_operation", side_effect=lost):
+            with self.assertRaises(TimeoutError):
+                self.execute()
+            self.assertEqual(self.execute().deploy_status, "pass")
+        receipt = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=REBUILD_ROUTE + ":effect",
+            idempotency_key=self.operation.operation_id + ":remove-retired-containers",
+        )
+        assert receipt is not None
+        self.assertEqual(receipt.state, "completed")
+        custody = self.store.read_original_mutation_intent(receipt)["removal_custody"]
+        self.assertEqual(custody["container_ids"], self.intent.retained["container_ids"])
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
     def test_partial_unavailable_retirement_replays_a_lost_stop_reply(self) -> None:
         self.admit_unavailable("stopped", partial=True)
@@ -846,117 +917,6 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 self.execute()
         self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
-
-    def test_original_health_may_flap_between_route_and_custody_reads(self) -> None:
-        self.admit_unhealthy_running()
-        physical = self.physical
-
-        def flapping(**kwargs: Any) -> dict[str, Any]:
-            proof = physical(**kwargs)
-            if proof.get("availability") == "available":
-                proof["web_process"] = {**proof["web_process"], "health": "unhealthy"}
-            return proof
-
-        with (
-            patch.object(service, "retained_copy_operation", side_effect=flapping),
-            patch.object(
-                DokployTestingRouteTransport, "publish", side_effect=self.recover_original_health
-            ),
-        ):
-            result = self.execute()
-        self.assertEqual(result.deploy_status, "pass", result.error_code)
-        self.assertEqual(self.effects, ["switch-new", "stop-old"])
-
-    def test_original_health_recovery_requires_proof_side_storage_custody(self) -> None:
-        self.admit_unhealthy_running()
-        physical = self.physical
-
-        def changed(**kwargs: Any) -> dict[str, Any]:
-            proof = physical(**kwargs)
-            if proof.get("availability") == "available":
-                proof.update(
-                    physical_binding="different-physical-backing",
-                    availability="stopped",
-                    web_process={},
-                )
-            return proof
-
-        with (
-            patch.object(service, "retained_copy_operation", side_effect=changed),
-            patch.object(
-                DokployTestingRouteTransport, "publish", side_effect=self.recover_original_health
-            ),
-        ):
-            with self.assertRaises(service.NativeTestingRebuildPending):
-                self.execute()
-        self.assertEqual(self.effects, ["switch-new"])
-        self.assertEqual(self.execute().deploy_status, "pass")
-        self.assertEqual(self.effects, ["switch-new", "stop-old"])
-
-    def test_original_may_stop_between_route_and_custody_reads(self) -> None:
-        self.admit_unhealthy_running()
-        physical = self.physical
-
-        def stopped(**kwargs: Any) -> dict[str, Any]:
-            proof = physical(**kwargs)
-            if proof.get("availability") == "available":
-                proof.update(availability="stopped", web_stopped=True, web_process={})
-            return proof
-
-        with (
-            patch.object(service, "retained_copy_operation", side_effect=stopped),
-            patch.object(
-                DokployTestingRouteTransport, "publish", side_effect=self.recover_original_health
-            ),
-        ):
-            result = self.execute()
-        self.assertEqual(result.deploy_status, "pass", result.error_code)
-        self.assertEqual(self.effects, ["switch-new", "stop-old"])
-
-    def test_recovered_original_requires_admitted_process_and_custody(self) -> None:
-        self.doCleanups()
-        for change in ("started_at", "id", "inventory", "missing", "unrecorded"):
-            with self.subTest(change=change):
-                fixture = NativeTestingWorkerTests()
-                fixture.setUp()
-                try:
-                    fixture.admit_unhealthy_running()
-                    if change == "unrecorded":
-                        fixture.intent = fixture.intent.model_copy(
-                            update={
-                                "retained": {
-                                    key: value
-                                    for key, value in fixture.intent.retained.items()
-                                    if key != "web_process"
-                                }
-                            }
-                        )
-                        fixture.capture.return_value = fixture.intent
-
-                    def changed(plan: Any, backend: str | None, **kwargs: Any) -> str:
-                        switched = fixture.recover_original_health(plan, backend, **kwargs)
-                        if backend == plan.new_backend:
-                            if change == "inventory":
-                                fixture.retained["inventory_sha256"] = "e" * 64
-                            elif change == "missing":
-                                fixture.retained.pop("web_process")
-                            elif change != "unrecorded":
-                                fixture.retained["web_process"] = {
-                                    **fixture.retained["web_process"],
-                                    change: "changed",
-                                }
-                        return switched
-
-                    with patch.object(DokployTestingRouteTransport, "publish", side_effect=changed):
-                        with self.assertRaises(service.NativeTestingRebuildPending):
-                            fixture.execute()
-                    self.assertEqual(fixture.effects, ["switch-new"])
-                    self.assertEqual(fixture.checkpoint().step, "retiring")
-                    self.assertEqual(
-                        fixture.current().target_id.target_id, fixture.fixture.candidate.compose_id
-                    )
-                finally:
-                    fixture.doCleanups()
 
     def test_recovered_original_cannot_reintroduce_its_docker_router(self) -> None:
         self.admit_unhealthy_running()
@@ -1125,7 +1085,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         with patch.object(service.NativeTestingRebuildExecution, "publish", new=changed):
             result = self.execute()
         self.assertEqual(result.deploy_status, "pass", result.error_code)
-        self.assertEqual(self.effects, ["switch-new"])
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
 
     def test_legacy_partial_intent_replays_stop_without_new_removal_authority(self) -> None:

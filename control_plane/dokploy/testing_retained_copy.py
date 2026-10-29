@@ -158,7 +158,8 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
     ]
     availability = retained_copy_availability(containers, spec)
     unavailable = spec.get("allow_unavailable") is True and (
-        availability == "stopped"
+        spec.get("retiring") is True
+        or availability == "stopped"
         or matches_unavailable_web_process(
             spec.get("unavailable_web_process"), retained_web_process(containers, spec)
         )
@@ -314,6 +315,12 @@ try:
         elif not states.issubset({'exited','created','dead'}):
             raise ValueError('Old testing container state is unverified')
         elif spec['mode']=='remove':
+            if spec.get('retiring') is True and own:
+                qualified=qualify_retained_copy(containers,{**spec,'resource_binding':spec.get('resource_binding') if own==set(expected) else None})
+                backings=inspect_volume_backings(qualified['volumes'],containers,own)
+                physical=hashlib.sha256(json.dumps({'logical':qualified['resource_binding'],'backings':backings},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+                if own==set(expected) and physical!=spec.get('physical_binding'):
+                    raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
             for identifier in sorted(own):
                 docker('rm',identifier)
             containers=inventory()
