@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from threading import Event
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
@@ -410,7 +410,14 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.release_run = self.release_run.model_copy(
             update={"decision_record_id": rollback.record_id}
         )
-        self.advance()
+        completed = cast(ClientReleaseRunView, cast(object, self.release_run))
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: completed.model_copy(
+                update={"decision_record_id": kwargs["decision"].record_id}
+            ),
+        ):
+            self.advance()
         self.assertEqual(self.issue["state"], "closed")
         self.assertNotEqual(forward_outcome, self.comments[0]["body"].splitlines()[1:])
 
@@ -446,10 +453,54 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         ):
             self.advance()
         self.assertEqual(self.issue["state"], "open")
-        self.assertEqual(self.comments, [])
-        self.release_run = retry.model_copy(update={"state": "passed"})
+        self.assertEqual(len(self.comments), 1)
+        finished_retry = retry.model_copy(update={"state": "passed"})
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: (
+                finished_retry if kwargs["decision"].record_id == newer.record_id else original
+            ),
+        ):
+            self.advance()
+        self.assertEqual(self.issue["state"], "closed")
+        self.assertEqual(len(self.comments), 2)
+
+    def test_record_only_decision_does_not_hide_running_release_outcome(self) -> None:
+        newer = self.decision.model_copy(
+            update={
+                "record_id": "record-only",
+                "decided_at": "2026-09-24T01:00:00Z",
+                "release_start": "",
+                "decision": "overridden",
+                "reason": "Recorded override",
+            }
+        )
+        self.store.create_release_review_decision_record_if_absent(newer)
         self.advance()
         self.assertEqual(self.issue["state"], "closed")
+        self.assertEqual(len(self.comments), 1)
+
+    def test_finished_earlier_attempt_keeps_the_same_candidates_hotfix_review_open(self) -> None:
+        hotfix = self.decision.model_copy(
+            update={
+                "record_id": "hotfix-retry",
+                "decided_at": "2026-09-24T01:00:00Z",
+                "decision": "temporary_hotfix",
+                "reason": "Repair live breakage",
+                "actor_github_id": "7001",
+            }
+        )
+        self.store.create_release_review_decision_record_if_absent(hotfix)
+        assert self.release_run is not None
+        original = self.release_run
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: original.model_copy(
+                update={"decision_record_id": kwargs["decision"].record_id}
+            ),
+        ):
+            self.advance()
+        self.assertEqual(self.issue["state"], "open")
         self.assertEqual(len(self.comments), 1)
 
     def test_changed_run_after_issue_lookup_stays_open(self) -> None:

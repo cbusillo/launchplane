@@ -476,7 +476,8 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
                         f"https://github.com/example/site/issues/{issue['number']}",
                     )
                     # Read the body submitted to publication, not a separate rendering.
-                    body = str(issue["body"])
+                    body = github.comments[-1]["body"] if github.comments else issue["body"]
+                    assert isinstance(body, str)
                     effect = _decision_effect(saved)
                     self.assertIn(effect, body)
                     # A universal description must not erase distinct recorded actions.

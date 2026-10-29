@@ -89,8 +89,7 @@ in production, identifying the reviewed, previous or another version by commit.
 Unavailable reasons or production evidence are stated explicitly; a past
 successful promotion is never used to infer what production runs now.
 Temporary-hotfix review requests remain open for the Client to decide. Already
-closed records are left alone. The saved decision and original request remain in the same issue; the decision
-is appended to its body, and the outcome is a comment. Retries reuse the outcome
+closed records are left alone. The saved decision and original request remain in the same issue; the decision and outcome are comments on it. Retries reuse the outcome
 receipt and the confirmed issue-closure path.
 
 ## Odoo business hours
@@ -318,13 +317,15 @@ that released version without asking the Client again.
 Each reviewed candidate has one issue in the product repository. Its body opens
 with the Client's mention, what to test, the reason for the request and the
 release-page link. Its identity binds the complete checklist digest, including
-both lane versions, source changes and reviewed settings. A later candidate gets
-a new issue. The publisher closes an undecided predecessor with a link to the
+both lane versions, source changes and reviewed settings. A later candidate gets a new issue. A renewed request after rejection or a stopped
+release also gets a new issue, even when its checklist is unchanged; the earlier
+attempt stays closed with its history. The publisher closes an undecided predecessor with a link to the
 replacement; it never reopens a shared requests thread or rewrites old invitation
 comments. A decided release keeps its own issue until its run finishes.
 
-The signed-in Client's decision is appended to that same issue, together with
-the complete saved checklist and release action. Request changes closes the issue
+The signed-in Client's decision is posted as a comment on that same issue,
+together with the complete saved checklist and release action. This keeps the
+request and any human notes intact and avoids repeatedly growing the issue body. Request changes closes the issue
 immediately unless it starts a temporary-hotfix rollback. Accepted releases close
 with their persisted outcome; missing, pending or reconciliation-required work
 keeps them open. A temporary hotfix starts its own issue with the existing review
@@ -332,11 +333,17 @@ notice, and its Client decision uses that issue too. These issues project saved
 Launchplane records. Editing an issue never accepts a release or changes a
 promotion gate.
 
-Product publication locks serialize request and decision publication across
-replicas. A lost issue-create, decision-update or storage acknowledgement is
+A candidate publication lock serializes its issue creation and decision comments
+across replicas. Checklist compilation and legacy carryover reads do not hold this
+lock. The saved decision is acknowledged afterward under its own publication lock;
+those transactions never nest on the acceptance path. A lost issue-create, decision-update or storage acknowledgement is
 recovered from the existing issue rather than creating another. New candidate
-issues must be authored by the configured Delivery App. Discovery remains bounded
-to 1,000 issues and PRs, and each comment lookup to 1,000 entries. Incomplete
+issues must be authored by the configured Delivery App. Candidate lookup stops at the page containing its marker or an issue older than
+the saved request, using creation order. A later decision can reuse the preceding
+published decision's exact issue URL. Closed repository history alone cannot block
+publication. Pending-candidate supersession and legacy request discovery scan the
+open issue inventory, bounded to 1,000 issues and PRs; each comment lookup is also
+bounded to 1,000 entries. Incomplete
 reads, ambiguous candidate identities or missing source-control access refuse
 publication; they do not authorize a release, change access or create credentials.
 The Client must already be able to read the product repository for the mention
@@ -433,8 +440,8 @@ provider latency guarantee. All existing checklist, candidate and release gates
 still apply.
 New candidate issue markers bind the checklist and product. Existing issue bodies
 can refresh test-note annotations for that same checklist; their request time
-and reminder deadline stay fixed. Decision markers identify each saved action
-inside the candidate issue. Legacy request and adoption markers are compatibility
+and reminder deadline stay fixed. Decision markers identify each saved action in the candidate issue's comments
+or a standalone decision's original body. Legacy request and adoption markers are compatibility
 evidence for the carryover path, never acceptance authority.
 
 A saved, still-current release request gets at most one reminder per open review
@@ -549,8 +556,8 @@ release evidence requires a new decision. Decisions do not expire merely because
 time passes. A later request for changes replaces acceptance of the same
 checklist. Backup and deployment evidence remain independently required.
 
-Recording a decision appends that complete checklist, actor, decision and reason
-to the candidate's existing release issue in the product repository. A standalone
+Recording a decision posts that complete checklist, actor, decision and reason
+as a comment on the candidate's existing release issue in the product repository. A standalone
 decision, such as a temporary hotfix, creates its candidate issue if none exists. The Client
 does not need to open GitHub. The existing managed source-control credential
 must be able to read and create issues in that repository; this feature creates
@@ -568,7 +575,7 @@ no saved start records approval only; requests for changes withdraw approval,
 and admin overrides do not start a release. These statements describe the
 recorded action, not proof that its operations completed. Publication retries
 preserve existing historical issue bodies, including older wording.
-Publishers serialize candidate lookup, issue creation, decision updates and the
+Publishers serialize candidate lookup, issue creation, decision comments and the
 stored URL acknowledgement with a per-decision storage lock. After waiting, a
 publisher reads the saved decision again and reuses its authoritative URL. The
 PostgreSQL holder reads and acknowledges that exact decision using its lock
