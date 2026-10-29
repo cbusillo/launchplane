@@ -1128,9 +1128,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, ["switch-new"])
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
 
-    def test_legacy_intent_recovers_container_ids_only_from_matching_admission(self) -> None:
-        self.admit_unavailable("stopped")
-        identifiers = self.intent.retained["container_ids"]
+    def test_legacy_partial_intent_replays_stop_without_new_removal_authority(self) -> None:
+        self.admit_unavailable("stopped", partial=True)
         self.intent = self.intent.model_copy(
             update={
                 "retained": {
@@ -1141,10 +1140,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
             }
         )
         self.capture.return_value = self.intent
+        self.fail_after_stop = True
+        with self.assertRaises(TimeoutError):
+            self.execute()
         result = self.execute()
         self.assertEqual(result.deploy_status, "pass", result.error_code)
-        self.assertEqual(self.removed_container_ids, identifiers)
-        self.assertEqual(self.effects, ["switch-new"])
+        self.assertFalse(hasattr(self, "removed_container_ids"))
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
     def test_recorded_admission_rollback_finishes_without_making_a_new_decision(self) -> None:
         self.admit_unavailable("absent")

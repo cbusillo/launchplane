@@ -1616,17 +1616,7 @@ class NativeTestingRebuildExecution:
         if not self.removed_old_containers:
             identifiers = self.intent.retained.get("container_ids")
             if identifiers is None:
-                proof = retained_copy_operation(
-                    host=self.host,
-                    token=self.token,
-                    server_id=self.intent.server_id,
-                    payload=self.retained_payload("read"),
-                )
-                if proof.get("observation_sha256") != self.intent.old.observation_sha256:
-                    raise NativeTestingRebuildPending(
-                        "The original container IDs cannot be recovered from admitted custody."
-                    )
-                identifiers = proof.get("container_ids", [])
+                return
             if not identifiers:
                 if self.intent.old.availability == "stopped":
                     raise NativeTestingRebuildPending(
