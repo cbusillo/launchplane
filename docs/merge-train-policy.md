@@ -1440,14 +1440,13 @@ not label both members as individually broken; feedback names the failing
 candidate checks and tests against the base used for that candidate.
 
 A controller-owned culprit hold has one bounded unchanged-head escape after
-the protected base moves. Immediately before removing its own recorded label,
-the controller re-reads the exact new base SHA, the failed candidate's required
-check identities, their success on that base, the unchanged policy and the
-original label event. A crash or lost removal response may replay the same
-failed-record/base reservation, but a later failure or another base cannot
-spend it again. This path uses the existing current-head Ready admission; it
-does not require a new Ready handoff. Independent causal setup-failure recovery
-remains available on every base and retains its fresh-Ready proof.
+the protected base moves. The controller reads the actual protected branch ref
+before proving the failed check identities green on that exact base and again
+after committing its reservation immediately before removing its original
+label event. A crash or lost removal response can replay that same reservation,
+but a later label event or failure cannot spend it again. This route uses the
+existing current-head Ready admission. Independent causal setup recovery stays
+available on every base and retains its fresh-Ready floor.
 
 Before ordinary planning, failed-candidate reflow or a smaller isolation retest creates a candidate, the
 controller checks persisted failure history, including superseded records. The

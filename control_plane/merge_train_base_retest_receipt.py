@@ -11,24 +11,21 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
     merge_train_pr_feedback_marker,
 )
+from control_plane.github_required_checks import CheckRequirement
 from control_plane.merge_train_pr_feedback import MergeTrainPrFeedbackRecordStore
 
 _SOURCE = "launchplane:base-retest-reservation:v1"
 _PREFIX = "<!-- launchplane-base-retest:v1 "
 
 
-class BaseRetestRequiredCheck(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    name: str = Field(min_length=1)
-    app_id: int | None = Field(default=None, ge=1)
-
-
 class BaseRetestReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     failed_record_id: str
     failed_base_sha: str = Field(min_length=1)
+    head_sha: str = Field(min_length=1)
+    applied_label_event_id: int = Field(ge=1)
     retest_base_sha: str = Field(min_length=1)
-    required_checks: tuple[BaseRetestRequiredCheck, ...] = Field(min_length=1)
+    required_checks: tuple[CheckRequirement, ...] = Field(min_length=1)
 
 
 def receipt_id(repository: str, number: int, head: str) -> str:
@@ -44,7 +41,10 @@ def read_base_retest_receipt(
         if store is None:
             return None
         raise ValueError("Base retest receipt storage is unavailable.")
-    record = reader(receipt_id(repository, number, head))
+    feedback_store = cast(MergeTrainPrFeedbackRecordStore, store)
+    record = feedback_store.read_merge_train_pr_feedback_record(
+        receipt_id(repository, number, head)
+    )
     if record is None:
         return None
     if not isinstance(record, MergeTrainPrFeedbackRecord) or (
@@ -59,7 +59,7 @@ def read_base_retest_receipt(
     if not marker or not suffix.endswith(" -->"):
         raise ValueError("Base retest reservation proof is invalid.")
     receipt = BaseRetestReceipt.model_validate_json(suffix[:-4])
-    if record.controller_record_id != receipt.failed_record_id:
+    if receipt.head_sha != head or record.controller_record_id != receipt.failed_record_id:
         raise ValueError("Base retest reservation binding is invalid.")
     return receipt
 
@@ -80,10 +80,18 @@ def reserve_base_retest(
         existing = read_base_retest_receipt(
             store, policy.repository, entry.pull_request_number, entry.head_sha
         )
-        if existing is not None:
-            if existing != receipt:
-                raise ValueError("Base retest budget is already reserved.")
-            return
+        if existing is not None and (
+            existing.failed_record_id,
+            existing.failed_base_sha,
+            existing.head_sha,
+            existing.applied_label_event_id,
+        ) != (
+            receipt.failed_record_id,
+            receipt.failed_base_sha,
+            receipt.head_sha,
+            receipt.applied_label_event_id,
+        ):
+            raise ValueError("Base retest budget is already reserved.")
         feedback_store.write_merge_train_pr_feedback_record(
             MergeTrainPrFeedbackRecord(
                 feedback_id=receipt_id(
