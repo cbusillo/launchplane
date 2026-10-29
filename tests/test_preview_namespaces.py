@@ -26,7 +26,13 @@ from control_plane.workflows.postgres_preview import (
 )
 from tests.test_generic_web_preview_extensions import _driver_profile
 from tests.test_postgres_preview import _refresh_request
-from control_plane.workflows.generic_web_preview import _wait_for_preview_health
+from control_plane.workflows.generic_web_preview import (
+    _wait_for_preview_health,
+    _enforce_preview_copied_runtime_key_safety,
+)
+from control_plane.runtime_environments import SiteRuntimeEnvironment
+from control_plane.workflows.postgres_preview import _render_postgres_preview_env, _DatabaseParts
+from control_plane.dokploy.api import parse_dokploy_env_text, JsonObject
 from control_plane.workflows.postgres_preview import _build_preview_runtime_identity
 from tests.test_product_retirement import _Store, _observation, _plan, _request
 from control_plane.product_retirement_no_target import bind_no_target_retirement
@@ -70,6 +76,80 @@ def _preview(profile: LaunchplaneProductProfileRecord) -> PreviewRecord:
 
 
 class PreviewNamespaceTests(unittest.TestCase):
+    def test_postgres_generated_credentials_own_managed_and_retired_collisions(self) -> None:
+        profile = _driver_profile()
+        key = next(iter(profile.preview.generated_secret_env))
+        parts = _DatabaseParts(
+            host="db.invalid",
+            port=5432,
+            database="isolated_preview",
+            username="isolated_preview",
+            password="preview-password",
+        )
+        for managed in (
+            SiteRuntimeEnvironment(
+                values={
+                    "DATABASE_URL": "postgresql://shared:shared@db.invalid/shared",
+                    key: "managed-secret",
+                },
+                secret_keys=frozenset({"DATABASE_URL", key}),
+            ),
+            SiteRuntimeEnvironment(
+                values={}, secret_keys=frozenset(), retired_keys=frozenset({"DATABASE_URL", key})
+            ),
+        ):
+            with self.subTest(managed=bool(managed.values)):
+                env = parse_dokploy_env_text(
+                    _render_postgres_preview_env(
+                        profile=profile,
+                        template_env_map={
+                            "DATABASE_URL": "postgresql://admin:fixture@db.invalid/testing",
+                            key: "template-secret",
+                        },
+                        existing_env_map={key: "existing-preview-secret"},
+                        database_parts=parts,
+                        preview_url="https://preview.example.test",
+                        runtime_identity=_build_preview_runtime_identity(
+                            product=profile.product, request=_refresh_request()
+                        ),
+                        preview_environment=managed,
+                    )
+                )
+                self.assertEqual(env[key], "existing-preview-secret")
+                self.assertIn(f"/{parts.database}", env["DATABASE_URL"])
+                self.assertNotIn("shared", env["DATABASE_URL"])
+
+    def test_query_value_check_is_opted_in_by_postgres_only(self) -> None:
+        profile = _driver_profile()
+        profile = profile.model_copy(
+            update={
+                "preview": profile.preview.model_copy(
+                    update={"copied_env_keys": ("NEXT_PUBLIC_MAPS_URL",)}
+                )
+            }
+        )
+        template: JsonObject = {
+            "env": "NEXT_PUBLIC_MAPS_URL=https://maps.example.test/js?key=public-key"
+        }
+        with self.store("postgres") as store:
+            assert isinstance(store, PostgresRecordStore)
+            _enforce_preview_copied_runtime_key_safety(
+                record_store=store,
+                profile=profile,
+                template_lane=profile.lanes[0],
+                template_application=template,
+                preview_slug="pr-7",
+            )
+            with self.assertRaises(click.ClickException):
+                _enforce_preview_copied_runtime_key_safety(
+                    record_store=store,
+                    profile=profile,
+                    template_lane=profile.lanes[0],
+                    template_application=template,
+                    preview_slug="pr-7",
+                    check_credential_values=True,
+                )
+
     def test_shared_health_returns_observed_identity_without_an_ok_flag_and_rejects_false(
         self,
     ) -> None:

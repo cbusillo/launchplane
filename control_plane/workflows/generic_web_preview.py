@@ -1013,6 +1013,7 @@ def _enforce_preview_copied_runtime_key_safety(
     template_application: JsonObject,
     preview_slug: str,
     preview_environment: control_plane_runtime_environments.SiteRuntimeEnvironment | None = None,
+    check_credential_values: bool = False,
 ) -> None:
     template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
     overridden = (
@@ -1040,7 +1041,8 @@ def _enforce_preview_copied_runtime_key_safety(
         key
         for key, value in copied_values.items()
         if is_preview_copied_credential(key, value, template_bindings=template_bindings)
-        or runtime_platform_credentials.plain_setting_looks_like_credential("", value)
+        or check_credential_values
+        and runtime_platform_credentials.plain_setting_looks_like_credential("", value)
     )
     if not required_binding_keys:
         return

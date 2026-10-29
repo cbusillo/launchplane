@@ -21,11 +21,11 @@ function previewDeclarations(preview: Declarations["preview"] | LaunchplaneProdu
     ...(extensions && (extensions.maintenance?.length || extensions.schedules?.length || extensions.verification_extension) ? { generic_web_extensions: extensions } : {}),
     transport_extension: preview.transport_extension === "verireel-postgres" ? "postgres" : preview.transport_extension ?? "",
     ...(preview.transport_extension === "verireel-postgres" ? {} : {
+      copied_env_keys: preview.copied_env_keys ?? [],
       generated_secret_env: preview.generated_secret_env ?? {},
       preview_url_env_keys: preview.preview_url_env_keys ?? [],
       preview_domain_env_keys: preview.preview_domain_env_keys ?? [],
     }),
-    copied_env_keys: preview.copied_env_keys ?? [],
     required_template_env_keys: preview.required_template_env_keys ?? [],
     omitted_env_keys: preview.omitted_env_keys ?? [],
     transport_database_prefix: preview.transport_database_prefix ?? "",

@@ -1,7 +1,7 @@
 import { expect, test } from "./state";
 import type { GenericWebPreviewDeclaration } from "../../src/generated/openapi.ts";
 
-async function arrange(page: import("@playwright/test").Page, failure: "none" | "uncertain" | "uncertain-changed" | "stale" = "none", omitPreviewExtensions = false) {
+async function arrange(page: import("@playwright/test").Page, failure: "none" | "uncertain" | "uncertain-changed" | "stale" = "none", omitPreviewExtensions = false, legacyPreview = false) {
   await page.goto("/ui/products/atlas-commerce?fixture=products");
   const { products, fixtureIdentity } = await page.evaluate(async () => {
     const fixtures = await import("/ui/src/dev-fixtures.ts");
@@ -15,12 +15,19 @@ async function arrange(page: import("@playwright/test").Page, failure: "none" | 
     preview: { data_transport_mode: "driver", transport_extension: "", transport_database_prefix: "", app_name_suffix: "" } as GenericWebPreviewDeclaration,
   };
   const requests: Array<{ body: Record<string, unknown>; key: string }> = [];
+  const reviews: Array<Record<string, unknown>> = [];
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity: fixtureIdentity } }));
   await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products } }));
   await page.route("**/v1/products/atlas-commerce", route => route.fulfill({ json: { status: "ok", trace_id: "product", product: products[0] } }));
-  await page.route("**/v1/product-profiles/atlas-commerce", route => route.fulfill({ json: { status: "ok", trace_id: "profile", profile: stored } }));
+  await page.route("**/v1/product-profiles/atlas-commerce", route => route.fulfill({ json: { status: "ok", trace_id: "profile", profile: legacyPreview ? { ...stored, preview: { ...stored.preview, transport_extension: "verireel-postgres" } } : stored } }));
   await page.route("**/v1/product-profiles/atlas-commerce/generic-web-transition", async route => {
     const body = route.request().postDataJSON();
+    if (body.mode !== "apply") {
+      reviews.push(body);
+      if (legacyPreview && !Object.hasOwn(body.preview, "copied_env_keys")) {
+        await route.fulfill({ status: 400, json: { trace_id: "copy-choice", error: { code: "invalid_request", message: "Declare copied_env_keys from the product runtime contract." } } }); return;
+      }
+    }
     if (body.mode === "apply") {
       requests.push({ body, key: route.request().headers()["idempotency-key"] });
       if (failure === "stale") {
@@ -46,14 +53,34 @@ async function arrange(page: import("@playwright/test").Page, failure: "none" | 
   const panel = page.getByRole("region", { name: "Shared web driver", exact: true });
   await expect(panel.getByRole("button", { name: "Review shared-web transition" })).toBeDisabled();
   await expect(panel.locator("output")).toHaveText("verireel");
+  if (legacyPreview) return { panel, requests, reviews };
   const definition = { lanes: [
     { context: "atlas", instance: "testing", extensions: { verification_extension: "verireel-testing", maintenance: [], schedules: [] } },
     { context: "atlas", instance: "prod", extensions: { maintenance: [{ name: "migrate", command: "node /app/migrate.js", timeout_seconds: 300 }], schedules: [{ name: "recover", command: "node /app/recover.js", timeout_seconds: 300, cron_expression: "*/10 * * * *", enabled: true }] } },
   ], preview: { data_transport_mode: "driver", transport_extension: "postgres", transport_database_prefix: "atlas", copied_env_keys: ["PUBLIC_MODE"], app_name_suffix: "-app" } };
   await panel.getByLabel("Lane and preview declarations").fill(JSON.stringify(definition, null, 2));
   await panel.getByLabel("Change reason").fill("Review declared lifecycle before testing qualification.");
-  return { panel, requests };
+  return { panel, requests, reviews };
 }
+
+test("legacy review requires an explicit template copy choice", async ({ page }) => {
+  const { panel, requests, reviews } = await arrange(page, "none", false, true);
+  const editor = panel.getByLabel("Lane and preview declarations");
+  const definition = JSON.parse(await editor.inputValue());
+  expect(definition.preview).not.toHaveProperty("copied_env_keys");
+  Object.assign(definition.preview, { generated_secret_env: {}, preview_url_env_keys: [], preview_domain_env_keys: [] });
+  await editor.fill(JSON.stringify(definition));
+  await panel.getByLabel("Change reason").fill("Choose safe preview settings.");
+  await panel.getByRole("button", { name: "Review shared-web transition" }).click();
+  await expect(panel).toContainText("Declare copied_env_keys");
+  expect(reviews[0].preview).not.toHaveProperty("copied_env_keys");
+  definition.preview.copied_env_keys = [];
+  await editor.fill(JSON.stringify(definition));
+  await panel.getByRole("button", { name: "Review shared-web transition" }).click();
+  await expect(panel.getByRole("button", { name: "Apply shared-web profile" })).toBeEnabled();
+  expect(reviews[1].preview).toHaveProperty("copied_env_keys", []);
+  expect(requests).toHaveLength(0);
+});
 
 test("shared-web review, draft invalidation, apply and exact readback", { tag: "@responsive" }, async ({ page }, testInfo) => {
   const { panel, requests } = await arrange(page);

@@ -134,9 +134,10 @@ source, template or transport. Disabling previews leaves cleanup available.
 Environment rendering uses the plain-preview model: only `copied_env_keys` are
 inherited from testing, declared required keys must exist, and managed preview
 runtime settings, secrets and retired keys apply before generated credentials.
-Use managed preview records for overrides; unlisted template values are absent.
-Copied credentials use the shared runtime key-safety gate, including credentials
-inside URL query parameters. Declare the copy list explicitly when transitioning
+Use managed preview records for nongenerated settings; unlisted template values
+are absent. Copied credentials use the shared runtime key-safety gate;
+PostgreSQL also checks for credentials inside copied URL query values. Existing
+plain-preview classification is unchanged. Declare the copy list explicitly when transitioning
 a historical PostgreSQL profile. `preview.generated_secret_env` maps application
 environment keys to `urlsafe` or `base64`; values are generated for each preview
 and retained on refresh, never copied from testing. `preview_url_env_keys` and
@@ -144,6 +145,12 @@ and retained on refresh, never copied from testing. `preview_url_env_keys` and
 product-specific URL rewriting. Maintenance and schedules remain profile-owned.
 Domain keys receive the full preview hostname, as with plain previews; a product
 needing a static base domain declares that value in managed preview settings.
+`DATABASE_URL` belongs to this transport, and `generated_secret_env` assigns its
+keys to the generator. Those declarations take precedence over managed values,
+secrets and retired-key entries. Remove an application key's generator declaration
+to retire it or supply it through managed configuration. Database credentials
+remain required while this transport is enabled; clean up previews before
+switching transport to use a separately managed database connection.
 This uses the existing isolated PostgreSQL preparation and cleanup rather than
 the plain preview path. Stored `verireel-postgres` declarations remain unchanged
 when read, including profiles embedded in retirement records and their hash

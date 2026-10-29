@@ -1062,6 +1062,7 @@ def execute_postgres_preview_refresh(
             template_application=template_application,
             preview_slug=request.preview_slug,
             preview_environment=preview_environment,
+            check_credential_values=True,
         )
     except click.ClickException as error:
         raise PostgresPreviewRefreshConfigError(str(error)) from error

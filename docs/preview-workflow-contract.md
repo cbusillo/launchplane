@@ -115,8 +115,10 @@ retiring products, including disabled previews, while refresh still requires an
 active canonical profile. Cleanup preserves the stored profile and retirement
 hash fence; retired products cannot execute cleanup.
 PostgreSQL environments use the same explicit template copy list, managed preview
-configuration and credential-safety checks as plain previews, followed by their
-generated database/application credentials. Template connection identity and
+configuration and credential-safety checks as plain previews, with additional
+copied query-value checks limited to PostgreSQL. Generated database/application
+declarations take precedence over managed values and retired entries; removing a
+generator declaration is the supported way to change that ownership. Template connection identity and
 credential query overrides fail before provider effects.
 
 Because product callers pin reusable workflows while the service deploys
