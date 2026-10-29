@@ -299,8 +299,9 @@ retains its original key; rollback reads the latest effect rather than an older
 exclusion. For an unavailable original, health failure may use either an
 undispatched-stop receipt or a distinct completed-retirement receipt, never a
 claim that a dispatched stop was excluded. Existing cleanup first settles on its
-saved IDs and original key: an undispatched cleanup can be excluded, while an
-unknown dispatched cleanup remains fenced. Inverse preparation starts no new
+saved IDs and original key: an undispatched cleanup can be excluded. A dispatched cleanup resumes on that
+same key only when complete current readback proves its saved IDs stopped or
+absent; running, changed or unknown custody remains fenced. Inverse preparation starts no new
 cleanup batch. A recorded health-failure exclusion remains binding on replay,
 even if health subsequently recovers. Both removal stages use Docker removal without force or volume
 deletion. Interrupted removal finishes only its stopped or dead leftovers;

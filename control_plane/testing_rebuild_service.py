@@ -2198,8 +2198,6 @@ class NativeTestingRebuildExecution:
             raise ValueError("A dispatched retirement cannot claim exclusion.")
         if isinstance(plan.old, UnavailableTestingPredecessor):
             cleanup_phase, cleanup = self.latest_retirement_effect("remove-retired-containers")
-            if cleanup is not None and cleanup.state != "completed":
-                return None
             recorded_failure = any(
                 receipt is not None
                 and receipt.state == "completed"
@@ -2212,6 +2210,15 @@ class NativeTestingRebuildExecution:
             )
             if not after_health_failure and not recorded_failure:
                 return None
+            if cleanup is not None and cleanup.state != "completed":
+                if after_health_failure:
+                    return None
+                recovery = self.unstarted_retirement(plan)
+                if recovery is None:
+                    raise NativeTestingRebuildPending(
+                        "The recorded health failure needs original cleanup settlement."
+                    )
+                return recovery
             evidence = dict(
                 copy_id=plan.old.copy_id,
                 host=plan.host,
@@ -2288,27 +2295,33 @@ class NativeTestingRebuildExecution:
             return True
         custody = self.store.read_original_mutation_intent(prior)["removal_custody"]
 
-        def absent() -> bool:
-            return (
-                retained_copy_operation(
-                    host=self.host,
-                    token=self.token,
-                    server_id=self.intent.server_id,
-                    payload={
-                        **self.retained_payload("removal-readback"),
-                        "retiring": True,
-                        "container_ids": custody["container_ids"],
-                    },
-                ).get("availability")
-                == "absent"
+        def read(mode: str) -> dict[str, Any]:
+            frame = retained_copy_operation(
+                host=self.host,
+                token=self.token,
+                server_id=self.intent.server_id,
+                payload={
+                    **self.retained_payload(mode),
+                    "retiring": True,
+                    "container_ids": custody["container_ids"],
+                    "resource_binding": custody.get("resource_binding"),
+                    "physical_binding": custody.get("physical_binding"),
+                },
             )
+            if frame.get("availability") not in {"stopped", "absent"}:
+                raise NativeTestingRebuildPending(
+                    "The original cleanup IDs are not positively stopped or absent."
+                )
+            return frame
+
+        def absent() -> bool:
+            return read("removal-readback")["availability"] == "absent"
 
         try:
             self.run_effect(
                 phase,
                 absent,
-                lambda dispatch: None,
-                reconcile_only=True,
+                lambda dispatch: dispatch(lambda: read("remove")),
                 recovery=True,
                 removal_custody=custody,
                 exclude_undispatched=not bool(prior.provider_effect_started_at),

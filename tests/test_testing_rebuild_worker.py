@@ -1011,7 +1011,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertIsNone(self.owned)
         self.assertEqual(self.execute(), result)
 
-    def test_health_rollback_observes_unknown_cleanup_without_dispatching_again(self) -> None:
+    def test_health_rollback_keeps_running_cleanup_fenced_until_original_ids_are_absent(
+        self,
+    ) -> None:
         self.admit_unavailable("stopped", partial=True)
         physical = self.physical
 
@@ -1023,6 +1025,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         with patch.object(service, "retained_copy_operation", side_effect=unknown):
             with self.assertRaises(TimeoutError):
                 self.execute()
+        self.retained.update(stopped=False, web_stopped=False, availability="available")
         self.fail_public = True
         with self.assertRaises(service.NativeTestingRebuildPending):
             self.execute()
@@ -1065,6 +1068,40 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.execute().error_code, "candidate_public_health_failed")
         self.assertEqual(self.effects, ["switch-new", "stop-old", "switch-old"])
         self.assertFalse(hasattr(self, "removed_container_ids"))
+        self.assertEqual(self.current(), self.fixture.before)
+
+    def test_recorded_health_failure_resumes_only_its_stopped_original_cleanup(self) -> None:
+        self.admit_unavailable("stopped", partial=True)
+        physical = self.physical
+
+        def unknown(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["payload"]["mode"] == "remove":
+                raise TimeoutError("Fixture loses cleanup reply before containers disappear")
+            return physical(**kwargs)
+
+        with patch.object(service, "retained_copy_operation", side_effect=unknown):
+            with self.assertRaises(TimeoutError):
+                self.execute()
+        self.retained.update(stopped=False, web_stopped=False, availability="available")
+        with patch.object(
+            service,
+            "read_odoo_testing_usage",
+            return_value=OdooTestingUsage("in_use", True, True, "complete"),
+        ):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.fail_public = True
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.fail_public = False
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.assertFalse(hasattr(self, "removed_container_ids"))
+        self.retained.update(stopped=True, web_stopped=True, availability="stopped")
+        self.assertEqual(self.execute().error_code, "candidate_public_health_failed")
+        self.assertEqual(self.removed_container_ids, self.intent.retained["container_ids"])
+        self.assertEqual(self.effects, ["switch-new", "stop-old", "switch-old"])
         self.assertEqual(self.current(), self.fixture.before)
 
     def test_partial_unavailable_retirement_replays_a_lost_stop_reply(self) -> None:
