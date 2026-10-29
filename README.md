@@ -6,8 +6,8 @@ package is `control_plane`; its CLI is `launchplane`.
 
 Read the Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md),
 then this repository's [DIRECTION.md](DIRECTION.md) for purpose, priorities,
-roles, stop boundaries, and retired designs. Overall direction takes precedence;
-issues track work. [AGENTS.md](AGENTS.md) is the agent execution guide and the only
+roles, stop boundaries, and retired designs.
+[AGENTS.md](AGENTS.md) is the agent execution guide and the only
 agent-instruction filename, including any directory-specific guidance.
 
 ## Development
@@ -49,9 +49,7 @@ Replace `tests.test_module_name` with the module for the changed behavior.
 Follow [testing style](docs/style/testing.md#local-test-loop) for local safety
 module selection, the Q778 focused PR pilot and the full candidate merge gate.
 
-Implementation goes through a task branch and PR. Once required checks pass and
-review findings are accounted for, follow [AGENTS.md](AGENTS.md) to hand the PR
-to the merge train. Follow DIRECTION.md for merge and release authority.
+Follow [AGENTS.md](AGENTS.md) for source delivery and DIRECTION.md for merge and release authority.
 
 ## Service and runtime records
 
@@ -61,8 +59,8 @@ preview, runtime-environment, authorization, and encrypted managed-secret
 records. File-backed records and local CLI operations support development,
 rehearsal, and explicit bootstrap repair; they are not shared runtime authority.
 
-Use the deployed service API or Launchplane UI for routine shared/runtime
-mutations. Direct DB mutation flags are local/bootstrap repair tools. See the
+Follow the shared [Runtime Authority Boundary](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/SKILL.md#runtime-authority-boundary).
+Direct DB mutation flags are local/bootstrap repair tools. See the
 [configuration boundary](docs/config-boundary.md),
 [service boundary](docs/service-boundary.md), and [operations](docs/operations.md)
 for supported paths and their prerequisites.
