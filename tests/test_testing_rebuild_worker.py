@@ -4916,6 +4916,23 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.execute(), result)
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
+    def test_unknown_dispatched_stop_is_not_excluded_or_repeated_when_health_recovers(self) -> None:
+        self.fail_after_stop = True
+        with self.assertRaises(TimeoutError):
+            self.execute()
+        with patch(
+            "control_plane.testing_rebuild_service.retained_copy_operation",
+            side_effect=NativeSourceUnavailable("Fixture cannot observe the retiring target"),
+        ):
+            for failed_health in (True, False):
+                self.fail_public = failed_health
+                with self.assertRaises(service.NativeTestingRebuildPending):
+                    self.execute()
+                self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+
     def test_provider_reply_does_not_retire_until_every_old_service_is_observed_stopped(
         self,
     ) -> None:
