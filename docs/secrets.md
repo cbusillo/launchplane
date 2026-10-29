@@ -207,6 +207,20 @@ that cannot safely appear in a marker retain their earlier readback behavior;
 new reference creation accepts only safe names. No values or secret hashes
 are emitted.
 
+For an existing read-only import source, the same reference route accepts
+`create_missing: true` with `allowance_kind: "read_only_source"`. It selects only
+the already configured exact-testing-lane binding and requires a recorded
+`read_only_source` allowance with grant evidence for each recognized integration.
+Keys with no recognized integration are refused. Shared-safe bindings additionally
+need their own read-only sharing reason and evidence. Active key-safety rules,
+exact review, atomic metadata checks,
+idempotency and readback still apply. This records a pointer without reading,
+copying, reclassifying or creating a credential. It neither installs an importer
+nor syncs runtime settings, probes privileges or starts an import. Actual
+delivered/applied agreement, verified TLS and runtime-origin grants must qualify
+before import execution. The default private-integration path still requires an
+independently supplied testing credential and a `dev_store` allowance.
+
 A typed config-parameter's `secret_binding_id` identifies the binding delivered
 under its neutral `ODOO_OVERRIDE_SECRET__CONFIG_PARAM__*` environment key. The
 payload keeps both fields for adapter compatibility. The adapter consumes the
