@@ -439,7 +439,6 @@ def require_unrecorded_preview_refresh(
     if (
         store.read_product_profile_record(profile.product) != profile
         or profile.preview.clean_testing_snapshot
-        or profile.preview.data_transport_mode != "none"
         or issued_plan.dry_run_plan.clean_snapshot is not None
         or issued_plan.plan_request.fishbowl_source is not None
     ):

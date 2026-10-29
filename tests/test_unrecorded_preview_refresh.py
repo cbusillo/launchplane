@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager, nullcontext
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Literal
 import unittest
 from unittest.mock import patch
 
@@ -43,10 +43,13 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         created: bool = True,
         original_source: ProductSecretCopyFrom | None = None,
         original_snapshot: CleanTestingSnapshot | None = None,
+        data_transport_mode: Literal["none", "driver"] = "driver",
     ) -> None:
         self.fixture = DirectorBoundedWritesFixture(self)
         self.store = self.fixture.store
         self.profile = self.fixture.profile
+        self.profile.preview.data_transport_mode = data_transport_mode
+        self.store.write_product_profile_record(self.profile)
         with self.store._session_factory() as session:
             session.execute(delete(LaunchplanePreviewGenerationRow))
             session.execute(delete(LaunchplanePreviewRow))
@@ -177,16 +180,18 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assert_original_preserved()
 
     async def test_existing_target_failed_original_qualifies_without_lifecycle(self) -> None:
-        self.prepare_fixture(created=False)
-        with patch(
-            "control_plane.http_app.execute_odoo_preview_apply_result",
-            return_value={"status": "blocked"},
-        ) as apply:
-            response = await self.fixture.preview_apply()
-        self.assertEqual(response.status_code, 202, response.text)
-        apply.assert_called_once()
-        self.assertEqual(self.store.list_preview_records(), ())
-        self.assert_original_preserved()
+        for mode in ("none", "driver"):
+            with self.subTest(mode=mode):
+                self.prepare_fixture(created=False, data_transport_mode=mode)
+                with patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result",
+                    return_value={"status": "blocked"},
+                ) as apply:
+                    response = await self.fixture.preview_apply()
+                self.assertEqual(response.status_code, 202, response.text)
+                apply.assert_called_once()
+                self.assertEqual(self.store.list_preview_records(), ())
+                self.assert_original_preserved()
 
     async def test_failed_apply_and_original_observation_never_publish_success_or_reexecute(
         self,
@@ -427,7 +432,6 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
             "stable_collision",
             "profile_drift",
             "snapshot",
-            "restore",
         ):
             with self.subTest(scenario=scenario):
                 self.prepare_fixture()
@@ -438,11 +442,9 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
                     self.store.write_product_profile_record(
                         self.profile.model_copy(update={"repository": "example/changed"})
                     )
-                elif scenario in {"snapshot", "restore"}:
+                elif scenario == "snapshot":
                     preview = self.profile.preview.model_copy(
                         update={"clean_testing_snapshot": True}
-                        if scenario == "snapshot"
-                        else {"data_transport_mode": "driver"}
                     )
                     self.store.write_product_profile_record(
                         self.profile.model_copy(update={"preview": preview})
@@ -565,7 +567,12 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
                 database_bytes=1, filestore_bytes=1, staging_bytes=1, reserve_bytes=1
             ),
         )
-        for scenario in ("current_import", "original_import", "original_snapshot"):
+        for scenario in (
+            "current_import",
+            "original_import",
+            "current_snapshot",
+            "original_snapshot",
+        ):
             with self.subTest(scenario=scenario):
                 self.prepare_fixture(
                     original_source=reference if scenario == "original_import" else None,
@@ -574,6 +581,8 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
                 current = _issued_plan(self.request)
                 if scenario == "current_import":
                     current.plan_request.fishbowl_source = reference
+                elif scenario == "current_snapshot":
+                    current.dry_run_plan.clean_snapshot = snapshot
                 assert self.original is not None
                 with self.assertRaises(ValueError):
                     require_unrecorded_preview_refresh(

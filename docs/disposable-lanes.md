@@ -742,7 +742,9 @@ resource inspector without backfilling a lifecycle or positive safety facts:
    provider quiescence, exact current profile/target ownership and existing
    use/needed-copy protection. Settle an unresolved original through its own
    observation path first. Both original and current plan must be source-free,
-   without Fishbowl input or a clean snapshot.
+   without Fishbowl input or a clean snapshot. Keep the current profile's
+   `none` or `driver` mode; driver mode alone does not select a data source.
+   Resolved upstream restore inputs refuse before provider execution.
 2. Obtain a fresh service-issued refresh plan for the same concrete Compose
    target. An originally allocated target needs its exact ID in the failure
    receipt. Keep retained failed/refused packets unchanged.

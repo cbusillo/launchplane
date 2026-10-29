@@ -334,6 +334,57 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
                 mode == "driver",
             )
 
+    def test_unrecorded_driver_refresh_rejects_resolved_upstream_before_provider(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        profile.preview.data_transport_mode = "driver"
+        envelope = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        envelope.apply.dry_run_plan.compose_ref = "retained-failed-preview"
+        envelope.unrecorded_original_reservation_id = build_launchplane_mutation_reservation_id(
+            scope="original-preview", route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key="failed"
+        )
+        issued = _issued_plan(envelope)
+        for environment in ({}, {"ODOO_UPSTREAM_HOST": "source.example.test"}):
+            with (
+                self.subTest(environment=environment),
+                patch.object(
+                    preview_http, "refresh_odoo_preview_issued_plan", return_value=envelope
+                ),
+                patch.object(
+                    preview_http,
+                    "_odoo_preview_service_environment",
+                    return_value=preview_http._OdooPreviewServiceEnvironment(values=environment),
+                ),
+                patch("control_plane.lane_movement.require_forward_preview_build"),
+                patch.object(
+                    preview_http,
+                    "execute_odoo_preview_dokploy_apply",
+                    return_value=Mock(model_dump=Mock(return_value={"status": "blocked"})),
+                ) as execute,
+            ):
+
+                def refresh() -> None:
+                    preview_http.execute_odoo_preview_apply_result(
+                        control_plane_root_path=Path("."),
+                        record_store=Mock(list_preview_records=Mock(return_value=())),
+                        profile=profile,
+                        request=envelope,
+                        issued_plan=issued,
+                        database_url=None,
+                        deployment_record_id="new-refresh",
+                        qualify_existing_preview=True,
+                    )
+
+                if "ODOO_UPSTREAM_HOST" in environment:
+                    with self.assertRaises(ValueError):
+                        refresh()
+                    execute.assert_not_called()
+                else:
+                    refresh()
+                    execute.assert_called_once()
+                    self.assertTrue(execute.call_args.kwargs["qualify_existing_preview"])
+                    self.assertFalse(execute.call_args.kwargs["restore_upstream"])
+                    self.assertFalse(execute.call_args.kwargs["restore_clean_snapshot"])
+
     def test_destroy_no_effect_refusal_releases_reservation(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
