@@ -285,7 +285,7 @@ configuration or record authority.
   truth.
 - Do not add product capability to file-backed JSON, local CLI writers,
   compatibility readers, or transitional GitHub credential/workflow paths.
-  Before deleting obsolete code, docs, commands, or tests, migrate required
+  Delete obsolete code, docs, commands, and tests after migrating required
   local-development, test, rehearsal, diagnostic, and recovery capabilities into
   generic test infrastructure, supported read models, admin APIs, or narrow
   root-of-trust recovery paths.
