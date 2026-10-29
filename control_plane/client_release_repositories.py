@@ -5,7 +5,7 @@ from typing import Protocol
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
-from control_plane.release_review_shared import repository_key
+from control_plane.artifact_release_inputs import recorded_release_repositories, repository_key
 
 
 class ClientReleaseRepositoryStore(Protocol):
@@ -19,7 +19,6 @@ class ClientReleaseRepositoryStore(Protocol):
 def client_release_profiles(
     *, store: ClientReleaseRepositoryStore, repository: str
 ) -> tuple[LaunchplaneProductProfileRecord, ...]:
-    """Include shared addon inputs pinned in either current release lane."""
     key = repository_key(repository)
     result = []
     for profile in store.list_product_profile_records():
@@ -40,7 +39,7 @@ def client_release_profiles(
                 artifact = store.read_artifact_manifest(release.artifact_id)
             except FileNotFoundError:
                 continue  # No recorded release input for this lane yet.
-            if any(repository_key(source.repository) == key for source in artifact.addon_sources):
+            if key in recorded_release_repositories(artifact):
                 result.append(profile)
                 break
     return tuple(result)

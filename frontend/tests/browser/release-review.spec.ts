@@ -1,3 +1,4 @@
+import { NOTHING_TO_TEST } from "../../src/release-review-model";
 import { waitForState, expect, test } from "./state";
 import type { Request } from "@playwright/test";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
@@ -289,7 +290,7 @@ test("Owner reviews the complete release and can request changes after accepting
   }
   await expect(checks.getByRole("heading")).toHaveCount(2);
   for (const repository of ["example/shared-addons", "example/disable-online"]) {
-    const shared = page.getByRole("region", { name: `Shared website components from ${repository}`, exact: true });
+    const shared = page.getByRole("region", { name: `Shared release inputs from ${repository}`, exact: true });
     await expect(shared).toContainText("Sign in as a staff user and confirm your usual pages open.");
     await expect(shared).toContainText("Preserve staff sign-in");
   }
@@ -329,7 +330,7 @@ test("Owner reviews the complete release and can request changes after accepting
 
 test("Missing shared PR instructions disable Client acceptance", async ({ page }) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=denied");
-  await expect(page.getByRole("region", { name: "Shared website components from example/shared-addons", exact: true })).toContainText("#52 has no Client test notes.");
+  await expect(page.getByRole("region", { name: "Shared release inputs from example/shared-addons", exact: true })).toContainText("#52 has no Client test notes.");
   await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeDisabled();
 });
 
@@ -717,4 +718,34 @@ test("Client sees website settings before accepting the bound release", { tag: "
     await expect(settings.locator(`[data-setting='${field}']`)).toHaveAttribute("data-state", "enabled");
   }
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+
+test("Base image and build tool ranges keep their Client notes", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
+  const response = await page.evaluate(async (nothingToTest) => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    const response = fixtures.releaseReviewForFixture("products");
+    const template = response.review.checklist.shared_sources[0];
+    response.review.checklist.shared_sources = [
+      { ...template, repository: "example/base-image", production_commit: "a".repeat(40) },
+      { ...template, repository: "example/base-image", production_commit: "b".repeat(40) },
+      { ...template, repository: "example/build-tool", items: [{ ...template.items[0], owner_test_notes: `${nothingToTest}: Build packaging maintenance.` }] },
+    ];
+    return response;
+  }, NOTHING_TO_TEST);
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "client", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.goto("/ui/owner-review?product=example-site");
+  const images = page.getByRole("region", { name: "Shared release inputs from example/base-image", exact: true });
+  await expect(images).toHaveCount(2);
+  for (const image of await images.all()) {
+    await expect(image).toContainText(response.review.checklist.shared_sources[0].items[0].owner_test_notes);
+  }
+  await expect(page.getByRole("region", { name: "Shared release inputs from example/build-tool", exact: true })).toContainText("Build packaging maintenance.");
+  await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
+  expect(errors).toEqual([]);
 });
