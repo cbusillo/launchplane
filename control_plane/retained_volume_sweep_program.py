@@ -15,7 +15,7 @@ RETAINED_VOLUME_SWEEP_HOST_PROGRAM = (
     + inspect.getsource(_batched_docker_inspect)
     + inspect.getsource(retained_volume_docker_command)
     + r"""
-import base64,fcntl,hashlib,json,os,re,stat,subprocess,sys,time
+import base64,fcntl,hashlib,json,math,os,re,stat,subprocess,sys,time
 from pathlib import Path
 
 prefix=sys.argv[2]
@@ -35,11 +35,17 @@ mode=spec.get('mode')
 captured=spec.get('identity')
 captured_engine=spec.get('engine_identity','')
 operation=spec.get('operation')
+retirement=spec.get('retirement',{})
 if (mode not in {'dry-run','apply','readback'} or not isinstance(name,str)
     or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',name) is None
     or not isinstance(captured,str) or re.fullmatch(r'[a-f0-9]{64}',captured) is None
     or not isinstance(captured_engine,str) or (captured_engine and re.fullmatch(r'[a-f0-9]{64}',captured_engine) is None)
     or not isinstance(operation,str) or not operation or len(operation)>512):
+    emit('unknown','invalid_request')
+    raise SystemExit
+if retirement and (not isinstance(retirement,dict) or set(retirement)!={'binding','fresh_until'}
+    or not isinstance(retirement['binding'],str) or re.fullmatch(r'[a-f0-9]{64}',retirement['binding']) is None
+    or type(retirement['fresh_until']) not in (int,float)):
     emit('unknown','invalid_request')
     raise SystemExit
 
@@ -281,9 +287,10 @@ def read_receipt(path):
         value=json.loads(path.read_text())
     except (OSError,ValueError):
         raise Unknown() from None
-    if (not isinstance(value,dict) or not {'operation','identity','volume','started','engine_id'}<=set(value)<= {'operation','identity','volume','started','engine_id','outcome'}
+    if (not isinstance(value,dict) or not {'operation','identity','volume','started','engine_id'}<=set(value)<= {'operation','identity','volume','started','engine_id','outcome','retirement'}
         or value['operation']!=operation or value['identity']!=captured or value['volume']!=name
-        or value['started'] is not True or not isinstance(value['engine_id'],str) or not value['engine_id']):
+        or value['started'] is not True or not isinstance(value['engine_id'],str) or not value['engine_id']
+        or value.get('retirement',{})!=retirement):
         raise Unknown()
     return value
 
@@ -317,6 +324,9 @@ try:
         receipt=read_receipt(receipt_path)
         engine_id,root=engine()
         if receipt is not None:
+            if receipt.get('outcome')=='never_started':
+                emit('held','never_started')
+                raise SystemExit
             if receipt.get('outcome') not in (None,'no_effect'):
                 raise Unknown()
             if receipt['engine_id']!=engine_id:
@@ -339,6 +349,7 @@ try:
             _,metadata=binding(volume,root)
             if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:
                 raise Unknown()
+            persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id,'outcome':'never_started','retirement':retirement})
             emit('held','never_started')
             raise SystemExit
         if mode=='dry-run' and absence(engine_id):
@@ -351,7 +362,8 @@ try:
         if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:
             raise Held()
         inventory(backing,root)
-        empty(backing)
+        if not retirement:
+            empty(backing)
         if mode=='dry-run':
             emit('eligible','qualified')
             raise SystemExit
@@ -360,12 +372,15 @@ try:
         if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:
             raise Held()
         inventory(backing,root)
-        empty(backing)
+        if not retirement:
+            empty(backing)
+        elif not math.isfinite(retirement['fresh_until']) or not time.time() < retirement['fresh_until']:
+            raise Held()
         remaining=deadline-time.monotonic()
         if remaining<10:
             raise Held()
         rm_timeout=10
-        persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id})
+        persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id,'retirement':retirement})
         try:
             result=subprocess.run(retained_volume_docker_command('volume','rm',name),capture_output=True,timeout=rm_timeout,check=False)
         except (OSError,subprocess.SubprocessError):
@@ -380,7 +395,7 @@ try:
             _,current_metadata=binding(current,root)
             if retained_volume_identity(current,engine_id,current_metadata.st_dev,current_metadata.st_ino)!=captured:
                 raise Unknown()
-            persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id,'outcome':'no_effect'})
+            persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id,'outcome':'no_effect','retirement':retirement})
             emit('held','no_effect')
         else:
             emit('unknown','effect_unknown')

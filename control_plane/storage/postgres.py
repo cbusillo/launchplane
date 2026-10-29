@@ -14251,6 +14251,13 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.get(LaunchplaneProductionRecipientRow, (product, context))
             return dict(row.payload) if row else None
 
+    def list_production_recipient_payloads(self) -> tuple[dict[str, Any], ...]:
+        with self._session_factory() as session:
+            return tuple(
+                dict(row.payload)
+                for row in session.scalars(select(LaunchplaneProductionRecipientRow)).all()
+            )
+
     def write_production_recipient(
         self,
         *,

@@ -31,7 +31,7 @@ if state.get('fail') and args[:2] not in (['volume','rm'],):
     print('access denied',file=sys.stderr);raise SystemExit(1)
 root=state['root'];name=state['name']
 def volume(value,point=None):
-    return {'Name':value,'CreatedAt':'2026-01-01T00:00:00Z','Driver':'local','Labels':{},'Mountpoint':point or root+'/volumes/'+value+'/_data','Options':{}}
+    return {'Name':value,'CreatedAt':'2026-01-01T00:00:00Z','Driver':'local','Labels':state.get('volume_labels',{}),'Mountpoint':point or root+'/volumes/'+value+'/_data','Options':{}}
 if args[:2]==['info','--format']:
     print(json.dumps({'ID':state.get('engine','engine-one'),'DockerRootDir':root,'Swarm':{'LocalNodeState':'active','ControlAvailable':True}}))
 elif args[:3]==['ps','-aq','--no-trunc']:
@@ -44,7 +44,7 @@ elif args[:3]==['inspect','--type','container']:
             mounts=[{'Type':'volume','Name':name,'Source':root+'/volumes/'+name+'/_data'}]
         if state.get('bind_ref'):
             mounts=[{'Type':'bind','Source':root+'/volumes/'+name}]
-        rows.append({'Id':identifier,'Mounts':mounts})
+        rows.append({'Id':identifier,'Mounts':mounts,'Config':{'Labels':state.get('container_labels',{})},'State':{'Running':state.get('running',False)},'NetworkSettings':{'Networks':state.get('networks',{})}})
     if state.get('malformed_containers'):
         rows=rows[:-1]
     if state.get('duplicate_containers') and rows:
@@ -65,6 +65,10 @@ elif args[:3]==['inspect','--type','task']:
     print(json.dumps([{'ID':identifier,'ServiceID':identifier.removeprefix('task-') if state.get('task_per_service') else 'service-one','NodeID':'','Spec':{'ContainerSpec':{'Mounts':mounts}}} for identifier in args[3:]]))
 elif args[:3]==['node','ls','-q']:
     print('node-one')
+elif args==['node','ls','--format','json']:
+    print(json.dumps({'ID':'node-one','Self':True}))
+elif args==['network','ls','--format','{{.Name}}']:
+    sys.stdout.write('')
 elif args[:3]==['volume','ls','-q']:
     values=[] if state.get('removed') else [name]
     values.extend(state.get('extra_volumes',[]))
@@ -122,7 +126,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             "Name": "candidate",
             "CreatedAt": "2026-01-01T00:00:00Z",
             "Driver": "local",
-            "Labels": {},
+            "Labels": self.state.get("volume_labels", {}),
             "Mountpoint": str(self.data),
             "Options": {},
         }
@@ -145,10 +149,11 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         operation: str = "provider/key",
         exhaust_budget: bool = False,
         engine_identity: str | None = None,
+        retirement: dict[str, object] | None = None,
     ) -> dict[str, object]:
         engine_id = self.state.get("engine", "engine-one")
         assert isinstance(engine_id, str)
-        spec = {
+        spec: dict[str, object] = {
             "mode": mode,
             "volume": "candidate",
             "identity": identity or self.identity(),
@@ -159,6 +164,8 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
                 else engine_identity
             ),
         }
+        if retirement is not None:
+            spec["retirement"] = retirement
         payload = base64.b64encode(json.dumps(spec).encode()).decode()
         environment = os.environ | {
             "HOME": str(self.home),
@@ -250,10 +257,18 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
 
     def test_confirmed_no_effect_and_never_started_readbacks_settle_without_removal(self) -> None:
         self.assertEqual(self.run_program("readback")["reason_code"], "never_started")
+        self.assertEqual(self.run_program("apply")["reason_code"], "never_started")
+        self.assertNotIn(
+            ["volume", "rm", "candidate"], json.loads(self.state_path.read_text())["calls"]
+        )
         self.state["rm_fail"] = True
         self.write_state()
-        self.assertEqual(self.run_program("apply")["reason_code"], "no_effect")
-        self.assertEqual(self.run_program("readback")["reason_code"], "no_effect")
+        self.assertEqual(
+            self.run_program("apply", operation="another-key")["reason_code"], "no_effect"
+        )
+        self.assertEqual(
+            self.run_program("readback", operation="another-key")["reason_code"], "no_effect"
+        )
         self.assertFalse(json.loads(self.state_path.read_text()).get("removed", False))
 
     def test_late_failed_removal_gets_a_fresh_no_effect_classification_budget(self) -> None:

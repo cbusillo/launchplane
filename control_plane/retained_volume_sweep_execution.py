@@ -76,7 +76,9 @@ def _custody_clear(
     )
 
 
-def _inventory_clear(root: Path, binding: RetainedVolumeBinding) -> bool:
+def _inventory_clear(
+    root: Path, binding: RetainedVolumeBinding, *, ignored_compose_id: str = ""
+) -> bool:
     host, token = source.read_dokploy_config(control_plane_root=root)
     for project in api.fetch_dokploy_projects(host=host, token=token):
         environments = project.get("environments")
@@ -94,6 +96,8 @@ def _inventory_clear(root: Path, binding: RetainedVolumeBinding) -> bool:
                         return False
                     target_id = target[identifier]
                     assert isinstance(target_id, str)
+                    if target_type == "compose" and target_id == ignored_compose_id:
+                        continue
                     if target_type in {"application", "compose"}:
                         payload = api.fetch_dokploy_target_payload(
                             host=host, token=token, target_type=target_type, target_id=target_id
@@ -160,6 +164,8 @@ def _host_result(
     mode: str,
     operation_key: str,
     lease: ProviderOperationLease | None = None,
+    *,
+    retirement: dict[str, object] | None = None,
 ) -> tuple[SweepStatus, str]:
     host, token = source.read_dokploy_config(control_plane_root=root)
     frames: list[dict[str, object]] = []
@@ -181,6 +187,7 @@ def _host_result(
             "identity": binding.volume_identity_sha256,
             "engine_identity": binding.engine_identity_sha256,
             "operation": operation_key,
+            **({"retirement": retirement} if retirement else {}),
         },
         receive=frames.append,
         timeout_seconds=120,

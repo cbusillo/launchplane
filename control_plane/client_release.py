@@ -918,7 +918,7 @@ def native_release_recipient(
     recipient = custody(store, profile.product, _prod_context(profile))
     if recipient is None or recipient.phase == "retired":
         return None
-    if recipient.phase != "published":
+    if recipient.phase not in {"published", "old_retired"}:
         return recipient
     trace = recipient.execution.get("release_trace", "")
     if not isinstance(trace, str) or not trace.startswith("client-release-"):

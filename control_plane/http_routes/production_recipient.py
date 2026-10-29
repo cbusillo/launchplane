@@ -1012,3 +1012,154 @@ def register_production_recipient_routes(
             code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 409, 503)
         },
     )
+
+    from control_plane.production_recipient_retirement import (
+        RETIREMENT_ROUTE,
+        RecipientRetirementAdapter,
+        RecipientRetirementPlan,
+        RecipientRetirementRequest,
+    )
+
+    async def retire_old_recipient(
+        product: Annotated[str, PathParameter(min_length=1, pattern=r"^[A-Za-z0-9._-]+$")],
+        body: RecipientRetirementRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(mutation_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace = dependencies.next_trace_id()
+        apply = body.mode == "apply"
+        if (
+            not dependencies.authorization_allows(
+                identity=identity,
+                action="product_retirement.apply" if apply else "product_profile.read",
+                product=product,
+                context=body.context,
+                target=AuthorizationTarget(scope="instance", instances=("prod",)),
+            )
+            or apply
+            and isinstance(identity, TerminalAgentIdentity)
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="Existing production retirement authority is required.",
+            )
+        if (
+            not isinstance(record_store, PostgresRecordStore)
+            or apply
+            and record_store.database_dialect_name != "postgresql"
+        ):
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace,
+                code="postgresql_required",
+                message="Service-owned retirement custody is required.",
+            )
+
+        def can_read(selected_product: str, selected_context: str, instance: str) -> bool:
+            return dependencies.authorization_allows(
+                identity=identity,
+                action="operations.read",
+                product=selected_product,
+                context=selected_context,
+                target=AuthorizationTarget(scope="instance", instances=(instance,)),
+            )
+
+        adapter = RecipientRetirementAdapter(
+            root,
+            record_store,
+            product,
+            body,
+            actor(identity),
+            idempotency_scope(identity),
+            trace,
+            idempotency_key.strip(),
+            can_read,
+        )
+        try:
+            if body.mode == "receipt":
+                row = record_store.read_idempotency_record(
+                    scope=adapter.scope,
+                    route_path=RETIREMENT_ROUTE.format(product=product),
+                    idempotency_key=adapter.original_key,
+                )
+                if not adapter.original_key or row is None or row.state != "completed":
+                    raise ValueError("Retain retirement's completed original key.")
+                result = RecipientRetirementPlan.model_validate(row.response_payload.get("result"))
+                if (
+                    result.product,
+                    result.context,
+                    result.preparation_plan_sha256,
+                    result.publication_sha256,
+                ) != (product, body.context, body.preparation_plan_sha256, body.publication_sha256):
+                    raise ValueError("The receipt belongs to another publication.")
+                return accepted_evidence_response(
+                    trace_id=trace, records={}, result=result.model_dump(mode="json")
+                )
+            if apply:
+                if not adapter.original_key or not body.reviewed_plan_sha256:
+                    raise ValueError("Review the exact retirement plan and original key.")
+                return await run_provider_mutation(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=RETIREMENT_ROUTE.format(product=product),
+                    idempotency_key=adapter.original_key,
+                    request_fingerprint=request_fingerprint(
+                        {"product": product, **body.model_dump(mode="json")}
+                    ),
+                    trace_id=trace,
+                    adapter=adapter,
+                    in_progress_message="Retirement remains under its original key.",
+                    reconcile_message="Retain the original retirement key, all custody and permanently reserved old names; observe only.",
+                )
+
+            def read() -> RecipientRetirementPlan:
+                if body.mode == "readback":
+                    record = adapter.record()
+                    adapter.require_original(record)
+                    if (
+                        not body.reviewed_plan_sha256
+                        or record.execution.get("retirement_owner", {}).get("plan")
+                        != body.reviewed_plan_sha256
+                    ):
+                        raise ValueError("Readback requires the original retirement plan and key.")
+                    return adapter.plan(
+                        record, record.execution["retirement_manifest"], body.reviewed_plan_sha256
+                    )
+                record, manifest, authority, _ = adapter.current()
+                return adapter.plan(record, manifest, adapter.digest(record, manifest, authority))
+
+            result = await run_in_worker_thread(read)
+            return accepted_evidence_response(
+                trace_id=trace, records={}, result=result.model_dump(mode="json")
+            )
+        except NativeSourceAuthorizationDenied as error:
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="The provider refused the retirement read.",
+            ) from error
+        except (ValueError, KeyError, OSError, RuntimeError, click.ClickException) as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code="recipient_retirement_unverified",
+                message="Retain recovery, testing and backup custody and the original retirement key.",
+            ) from error
+
+    app.add_api_route(
+        RETIREMENT_ROUTE,
+        retire_old_recipient,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="retire_exact_old_production_recipient",
+        summary="Retire only the exact old Compose and exclusive volumes after the rollback window",
+        responses={
+            code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 409, 503)
+        },
+    )

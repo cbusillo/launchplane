@@ -274,7 +274,9 @@ def runtime_values(
     *,
     published: bool = False,
 ) -> dict[str, str]:
-    if published and (record.phase != "published" or not record.publication):
+    if published and (
+        record.phase not in {"published", "retiring_old", "old_retired"} or not record.publication
+    ):
         raise ValueError("Published rendering requires a current recorded publication.")
     environment = runtime_environments.resolve_site_runtime_environment(
         control_plane_root=root,
@@ -622,6 +624,10 @@ class ProductionRecipientAdapter:
             authority_snapshot(self.store, self.product, record.context), record.authority_snapshot
         ):
             raise RecipientAuthorityChanged("Production authority changed after review.")
+        if record.phase in {"retiring_old", "old_retired"} and record.execution.get(
+            "retirement_started_at"
+        ):
+            return
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         old = api.fetch_dokploy_target_payload(
             host=host,
@@ -1009,6 +1015,11 @@ class ProductionRecipientAdapter:
                 if field == "environmentId":
                     body = {"name": record.namespace, "projectId": record.project_id}
                 if field == "composeId":
+                    from control_plane.production_recipient_retirement_names import (
+                        require_unretired_provider_name,
+                    )
+
+                    require_unretired_provider_name(self.store, record.namespace)
                     body = {
                         "name": record.namespace,
                         "appName": record.namespace,
