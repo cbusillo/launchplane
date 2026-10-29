@@ -1332,6 +1332,13 @@ cannot change existing health-monitoring authority, and onboarding updates
 preserve it; admins use this bounded apply path instead. Concurrent profile
 edits fail stale instead of being overwritten.
 
+Preview TLS, prelaunch rebuild policy and repository identity planners validate
+each changed complete candidate with the same profile builder and write contract
+used by apply. Both modes return a redacted `invalid_product_profile` refusal
+before offering an invalid changed plan or writing it. Stored historical profiles
+remain readable, and unchanged requests do not rewrite or revalidate unrelated
+legacy fields.
+
 Odoo prelaunch rebuild policy changes use
 `POST /v1/product-profiles/prelaunch-rebuild/apply`. The request identifies one
 exact product/context/instance lane and can change only that lane's

@@ -148,6 +148,10 @@ def build_product_prelaunch_rebuild_policy_plan(
     _validate_requested_policy(lane=lane, policy=requested_policy)
     current_policy = lane.odoo_prelaunch_rebuild
     changed = current_policy.model_dump(mode="json") != requested_policy.model_dump(mode="json")
+    if changed:
+        updated_product_prelaunch_rebuild_policy_profile(
+            profile=profile, request=request, updated_at=profile.updated_at
+        )
     operation: ProductPrelaunchRebuildPolicyOperation = "update" if changed else "unchanged"
     profile_sha256 = _canonical_sha256(profile.model_dump(mode="json"))
     plan_evidence = {

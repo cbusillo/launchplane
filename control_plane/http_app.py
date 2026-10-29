@@ -14577,6 +14577,13 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message=str(error),
             ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_product_profile",
+                message="Updated product profile failed validation.",
+            ) from error
         if (
             prelaunch_rebuild_request.mode == "apply"
             and prelaunch_rebuild_request.reviewed_plan_sha256 != plan.plan_sha256
@@ -14597,19 +14604,11 @@ def create_launchplane_fastapi_app(
             replacement_profile = profile
             profile_updated_at_after = profile.updated_at
             if plan.changed:
-                try:
-                    replacement_profile = control_plane_product_prelaunch_rebuild_policy.updated_product_prelaunch_rebuild_policy_profile(
-                        profile=profile,
-                        request=prelaunch_rebuild_request,
-                        updated_at=utc_now_timestamp(),
-                    )
-                except ValueError as error:
-                    raise _launchplane_http_error(
-                        status_code=400,
-                        trace_id=trace_id,
-                        code="invalid_product_profile",
-                        message="Updated product profile failed validation.",
-                    ) from error
+                replacement_profile = control_plane_product_prelaunch_rebuild_policy.updated_product_prelaunch_rebuild_policy_profile(
+                    profile=profile,
+                    request=prelaunch_rebuild_request,
+                    updated_at=utc_now_timestamp(),
+                )
                 profile_updated_at_after = replacement_profile.updated_at
             result_plan = plan.model_copy(
                 update={
@@ -14864,8 +14863,8 @@ def create_launchplane_fastapi_app(
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,
-                code="invalid_request",
-                message="Product preview TLS request does not match the stored profile.",
+                code="invalid_product_profile",
+                message="Updated product profile failed validation.",
             ) from error
         if (
             preview_tls_request.mode == "apply"
@@ -14884,21 +14883,13 @@ def create_launchplane_fastapi_app(
             replacement_profile = profile
             profile_updated_at_after = profile.updated_at
             if plan.changed:
-                try:
-                    replacement_profile = (
-                        control_plane_product_preview_tls.updated_product_preview_tls_profile(
-                            profile=profile,
-                            request=preview_tls_request,
-                            updated_at=utc_now_timestamp(),
-                        )
+                replacement_profile = (
+                    control_plane_product_preview_tls.updated_product_preview_tls_profile(
+                        profile=profile,
+                        request=preview_tls_request,
+                        updated_at=utc_now_timestamp(),
                     )
-                except ValueError as error:
-                    raise _launchplane_http_error(
-                        status_code=400,
-                        trace_id=trace_id,
-                        code="invalid_product_profile",
-                        message="Updated product profile failed validation.",
-                    ) from error
+                )
                 profile_updated_at_after = replacement_profile.updated_at
             result_plan = plan.model_copy(
                 update={
@@ -15148,6 +15139,13 @@ def create_launchplane_fastapi_app(
                 code=error.code,
                 message=str(error),
             ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_product_profile",
+                message="Updated product profile failed validation.",
+            ) from error
         records = {
             "product_profile": identity_request.product,
             "repository_inventory": plan.inventory_record_id,
@@ -15178,19 +15176,11 @@ def create_launchplane_fastapi_app(
         replacement_profile = profile
         profile_updated_at_after = profile.updated_at
         if plan.changed:
-            try:
-                replacement_profile = control_plane_product_repository_identity.updated_product_repository_identity_profile(
-                    profile=profile,
-                    plan=plan,
-                    updated_at=utc_now_timestamp(),
-                )
-            except ValueError as error:
-                raise _launchplane_http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="invalid_product_profile",
-                    message="Updated product profile failed validation.",
-                ) from error
+            replacement_profile = control_plane_product_repository_identity.updated_product_repository_identity_profile(
+                profile=profile,
+                plan=plan,
+                updated_at=utc_now_timestamp(),
+            )
             profile_updated_at_after = replacement_profile.updated_at
         applied_plan = plan.model_copy(
             update={"applied": True, "profile_updated_at_after": profile_updated_at_after}
