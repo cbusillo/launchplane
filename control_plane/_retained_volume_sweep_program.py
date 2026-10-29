@@ -356,6 +356,7 @@ try:
             result=subprocess.run(['docker','volume','rm',name],capture_output=True,timeout=rm_timeout,check=False)
         except (OSError,subprocess.SubprocessError):
             raise Unknown() from None
+        deadline=time.monotonic()+20
         if len(result.stdout)>8*1024*1024 or len(result.stderr)>1024*1024:
             raise Unknown()
         if result.returncode==0 and absence(engine_id):

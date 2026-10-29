@@ -14,7 +14,7 @@ from control_plane.retained_volume_capture import retained_volume_identity
 
 
 DOCKER_FIXTURE = r"""#!/usr/bin/env python3
-import json,os,sys
+import json,os,sys,time
 from pathlib import Path
 state_path=Path(os.environ['FAKE_DOCKER_STATE'])
 state=json.loads(state_path.read_text())
@@ -73,6 +73,10 @@ elif args[:2]==['volume','rm']:
     state['rm_args']=args
     if args!=['volume','rm',name]:
         state_path.write_text(json.dumps(state));raise SystemExit(2)
+    if state.get('rm_timeout'):
+        time.sleep(11)
+    if 'clock_after_rm' in state:
+        state['clock']=state['clock_after_rm']
     if state.get('rm_fail'):
         state_path.write_text(json.dumps(state));raise SystemExit(1)
     state['removed']=True;state_path.write_text(json.dumps(state));print(name)
@@ -148,7 +152,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             [sys.executable, "-c", self.fixture_program(exhaust_budget), payload, "FRAME:"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=20,
             env=environment,
             check=True,
         )
@@ -168,7 +172,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             "def fixture_clock():\n"
             f"    if {exhaust_budget!r} and mount_reads[0]>=2: return 1e9\n"
             "    state=json.loads(read_text(Path(os.environ['FAKE_DOCKER_STATE'])))\n"
-            "    return float(len(state.get('calls',[])))\n"
+            "    return float(state.get('clock',len(state.get('calls',[]))))\n"
             "with patch.object(Path,'read_text',fixture_read), patch('time.monotonic',fixture_clock):\n"
             f"    exec({RETAINED_VOLUME_SWEEP_HOST_PROGRAM!r})\n"
         )
@@ -208,6 +212,38 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         self.assertEqual(self.run_program("apply")["reason_code"], "no_effect")
         self.assertEqual(self.run_program("readback")["reason_code"], "no_effect")
         self.assertFalse(json.loads(self.state_path.read_text()).get("removed", False))
+
+    def test_late_failed_removal_gets_a_fresh_no_effect_classification_budget(self) -> None:
+        self.state.update(rm_fail=True, clock_after_rm=80)
+        self.write_state()
+
+        result = self.run_program("apply")
+
+        self.assertEqual(result, {"status": "held", "reason_code": "no_effect"})
+        self.assertEqual(self.run_program("readback")["reason_code"], "no_effect")
+        self.assertFalse(json.loads(self.state_path.read_text()).get("removed", False))
+
+    def test_late_successful_removal_gets_a_fresh_absence_budget(self) -> None:
+        self.state["clock_after_rm"] = 80
+        self.write_state()
+
+        result = self.run_program("apply")
+
+        self.assertEqual(result, {"status": "removed", "reason_code": "removed"})
+        self.assertTrue(json.loads(self.state_path.read_text())["removed"])
+
+    def test_started_removal_timeout_remains_unknown(self) -> None:
+        self.state["rm_timeout"] = True
+        self.write_state()
+
+        result = self.run_program("apply")
+
+        self.assertEqual(result["status"], "unknown")
+        receipts = list(
+            (self.home / ".local" / "state" / "launchplane-retained-volume-sweep").glob("*.json")
+        )
+        self.assertEqual(len(receipts), 1)
+        self.assertNotIn("outcome", json.loads(receipts[0].read_text()))
 
     def test_nonempty_and_stopped_container_are_held(self) -> None:
         (self.data / "private-name").write_text("private-content")
