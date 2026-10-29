@@ -712,7 +712,14 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
             store = self._store(root)
             profile = store.read_product_profile_record(_PRODUCT)
             store.write_product_profile_record(
-                profile.model_copy(update={"product": "other-product"})
+                profile.model_copy(
+                    update={
+                        "product": "other-product",
+                        "preview": profile.preview.model_copy(
+                            update={"app_name_prefix": "other-product-preview"}
+                        ),
+                    }
+                )
             )
             app = self._app(store, root, "product_config.plan", "product_config.apply")
 
