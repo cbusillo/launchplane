@@ -1447,6 +1447,11 @@ label event. A crash or lost removal response can replay that same reservation,
 but a later label event or failure cannot spend it again. This route uses the
 existing current-head Ready admission. Independent causal setup recovery stays
 available on every base and retains its fresh-Ready floor.
+The reservation binds this unchanged head to the original failed candidate
+record and its exact applied label event even when no removal occurs. While
+that exact original hold remains, an unused reservation may follow a later
+protected base; a new failure or label event and an unknown removal effect never
+reset its budget or create new recovery state.
 
 Before ordinary planning, failed-candidate reflow or a smaller isolation retest creates a candidate, the
 controller checks persisted failure history, including superseded records. The

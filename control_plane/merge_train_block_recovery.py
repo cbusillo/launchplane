@@ -24,6 +24,7 @@ from control_plane.merge_train_base_retest_receipt import (
 )
 from control_plane.merge_train_candidate_failures import CandidateCheckFailures
 from control_plane.merge_train_pr_feedback import MergeTrainPrFeedbackRecordStore
+from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
@@ -287,7 +288,12 @@ def recover_candidate_block(
             except MergeTrainPolicyStoreMissingError:
                 return None
             if (
-                current_policy.policy_sha256 != failed.policy_sha256
+                not merge_train_policy_bindings_match(
+                    record_store=store,
+                    policy_key=policy.policy_key,
+                    recorded_sha256=failed.policy_sha256,
+                    current_sha256=current_policy.policy_sha256,
+                )
                 or current_policy.policy.find_repository_policy(
                     repository=snapshot.repository, base_branch=snapshot.base_branch
                 )

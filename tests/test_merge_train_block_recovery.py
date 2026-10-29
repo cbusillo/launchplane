@@ -882,6 +882,43 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             )
         )
 
+    def test_base_retest_allows_unrelated_repository_policy_edit(self) -> None:
+        self.setup_base_retest()
+        other = build_test_merge_train_policy(repository="example/other").policies[0]
+        changed_other = other.model_copy(update={"enqueue_label": "other-ready"})
+        self.policy = self.policy.model_copy(update={"policies": (self.target, changed_other)})
+        current = MergeTrainPolicyRecord(
+            record_id="unrelated-edit",
+            source="test",
+            updated_at="2026-10-18T00:04:00Z",
+            policy=self.policy,
+        )
+        self.store.write_merge_train_policy_record(current)
+        self.policy_digest = current.policy_sha256
+
+        self.assertEqual(
+            self.advance(mutate=True)["reason_code"], "candidate_block_new_base_retest"
+        )
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_base_retest_refuses_relevant_target_policy_edit(self) -> None:
+        self.setup_base_retest()
+        self.target = self.target.model_copy(update={"enqueue_label": "changed-ready"})
+        self.policy = self.policy.model_copy(update={"policies": (self.target,)})
+        current = MergeTrainPolicyRecord(
+            record_id="target-edit",
+            source="test",
+            updated_at="2026-10-18T00:04:00Z",
+            policy=self.policy,
+        )
+        self.store.write_merge_train_policy_record(current)
+        self.policy_digest = current.policy_sha256
+
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        self.assertEqual(self.mutations, [])
+
     def test_base_retest_ref_change_after_checkpoint_preserves_hold(self) -> None:
         self.setup_base_retest()
         prefix = f"/repos/{self.target.repository}"
