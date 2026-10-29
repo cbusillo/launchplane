@@ -4400,7 +4400,9 @@ Launchplane's fixed description, the kind of fix (`code`, `grant`,
 it read. `testing` checks the lane, the staff-testing hold and the last
 reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
 Testing reads its exact current reconcile target; preview history does not
-limit that lookup.
+limit that lookup. A terminal failed reconciliation without a deploy operation
+reports its safe error code (or `testing_reconcile_failed`) as blocked, with a
+fixed description and no invented operation id or exception text.
 A completed `already_deployed` no-op is clear when the recorded current and
 desired artifact ids, commit SHAs and immutable image digests all match and the
 plan is not held. It cites the artifact id without inventing a deploy operation.

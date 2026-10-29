@@ -34,6 +34,8 @@ from control_plane.contracts.artifact_identity import (
     ArtifactImageReference,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.operation_status_read import safe_operation_error_code
+from control_plane.product_reconcile import ProductReconcileError, run_product_reconcile_once
 from control_plane.product_path_check import (
     PathCheckInputs,
     ProductPathCheck,
@@ -954,6 +956,45 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 store.list_product_reconcile_requests(product="example-site"), (completed,)
             )
+            for error, expected_code in (
+                (RuntimeError("private upstream exception"), "testing_reconcile_failed"),
+                (
+                    ProductReconcileError("private upstream exception", code="ancestor_build"),
+                    "ancestor_build",
+                ),
+                (
+                    ProductReconcileError("private upstream exception", code="unsafe error text"),
+                    safe_operation_error_code("unsafe error text"),
+                ),
+            ):
+                with self.subTest(error=error):
+                    store.request_product_reconcile(
+                        ProductReconcileTarget(product="example-site", target_kind="testing"),
+                        completed.updated_at,
+                    )
+                    with patch(
+                        "control_plane.product_reconcile.reconcile_product_request",
+                        side_effect=error,
+                    ):
+                        failed = run_product_reconcile_once(
+                            record_store=store, lease_owner="test-worker"
+                        )
+                    assert failed is not None
+                    self.assertEqual(failed.state, "failed")
+                    self.assertNotIn("last_failed_operation_id", failed.last_plan)
+                    response = await _asgi_request(
+                        app_with(("product_environment.read",)), "GET", route, headers=headers
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    step = response.json()["check"]["steps"][-1]
+                    self.assertEqual((step["state"], step["code"]), ("blocked", expected_code))
+                    self.assertEqual(step["fix"], "code")
+                    self.assertEqual(step["record_ids"], [])
+                    self.assertNotIn("private upstream exception", response.text)
+                    self.assertNotIn("unsafe error text", response.text)
+                    self.assertEqual(
+                        store.read_product_reconcile_request(failed.target_key), failed
+                    )
             store.close()
 
         self.assertEqual(allowed.status_code, 200, allowed.text)

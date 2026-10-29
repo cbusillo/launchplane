@@ -250,6 +250,15 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             _testing_failure_fix(code),
             (failed,),
         )
+    if plan.get("reconcile_state") == "failed" and plan.get("last_failed_error_code"):
+        code = safe_operation_error_code(str(plan["last_failed_error_code"]))
+        return _step(
+            step_id,
+            "blocked",
+            code,
+            "The last testing reconciliation failed before recording a deploy operation.",
+            _testing_failure_fix(code),
+        )
     if _completed_testing_noop(plan):
         return _step(
             step_id,
