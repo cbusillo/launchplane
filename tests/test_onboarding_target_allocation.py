@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
@@ -150,22 +151,38 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
         self.assertEqual(self.store.list_product_profile_records(), (self.profile,))
         self.assert_production_unchanged()
 
+    async def read_allocation(self) -> dict[str, Any]:
+        readback = await self.post(mode="readback")
+        self.assertEqual(readback.status_code, 202, readback.text)
+        result: dict[str, Any] = readback.json()["result"]
+        return result
+
+    async def resume_allocation(self) -> None:
+        with self.expire_execution():
+            recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        target = self.store.read_dokploy_target_id_record(
+            context_name=self.intent.testing_context, instance_name="testing"
+        )
+        self.assertEqual(target.target_id, self.live["applicationId"])
+        self.assertEqual(
+            [call.args[2] for call in self.provider.call_args_list],
+            [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH, APPLICATION_CREATE_PATH],
+        )
+        calls = self.provider.call_args_list.copy()
+        replay = await self.post()
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(self.provider.call_args_list, calls)
+        self.assert_no_authority_applied()
+
     async def recover_lost_response(self, path: str) -> None:
         await self.plan()
         self.fail_after = path
         uncertain = await self.post()
         self.assertEqual(uncertain.status_code, 409, uncertain.text)
-        readback = await self.post(mode="readback")
-        self.assertEqual(readback.status_code, 202, readback.text)
+        await self.read_allocation()
         self.fail_after = ""
-        with self.expire_execution():
-            recovered = await self.post()
-        self.assertEqual(recovered.status_code, 202, recovered.text)
-        self.assertEqual(
-            [call.args[2] for call in self.provider.call_args_list],
-            [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH, APPLICATION_CREATE_PATH],
-        )
-        self.assert_no_authority_applied()
+        await self.resume_allocation()
 
     async def test_lost_project_response_recovers_without_duplicate_creates(self) -> None:
         await self.recover_lost_response(PROJECT_CREATE_PATH)
@@ -176,9 +193,11 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
     async def test_lost_application_response_recovers_without_duplicate_creates(self) -> None:
         await self.recover_lost_response(APPLICATION_CREATE_PATH)
 
-    async def recover_acknowledged_checkpoint(self, field: str) -> None:
+    async def interrupt_acknowledged_checkpoint(self, field: str) -> dict[str, Any]:
         await self.plan()
-        checkpoint = ApplicationStateVolumeAdapter._checkpoint_phase
+        checkpoint: Callable[[ApplicationStateVolumeAdapter, Any, str], None] = (
+            ApplicationStateVolumeAdapter._checkpoint_phase
+        )
 
         def interrupt(adapter: ApplicationStateVolumeAdapter, lease: Any, phase: str) -> None:
             checkpoint(adapter, lease, phase)
@@ -189,21 +208,11 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
         with patch.object(ApplicationStateVolumeAdapter, "_checkpoint_phase", new=interrupt):
             uncertain = await self.post()
         self.assertEqual(uncertain.status_code, 409, uncertain.text)
-        readback = await self.post(mode="readback")
-        self.assertEqual(readback.status_code, 202, readback.text)
-        self.assertTrue(json.loads(readback.json()["result"]["provider_effect_phase"])[field])
-        with self.expire_execution():
-            recovered = await self.post()
-        self.assertEqual(recovered.status_code, 202, recovered.text)
-        self.assertEqual(
-            [call.args[2] for call in self.provider.call_args_list],
-            [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH, APPLICATION_CREATE_PATH],
-        )
-        calls = self.provider.call_args_list.copy()
-        replay = await self.post()
-        self.assertEqual(replay.status_code, 202, replay.text)
-        self.assertEqual(self.provider.call_args_list, calls)
-        self.assert_no_authority_applied()
+        return await self.read_allocation()
+
+    async def recover_acknowledged_checkpoint(self, field: str) -> None:
+        await self.interrupt_acknowledged_checkpoint(field)
+        await self.resume_allocation()
 
     async def test_acknowledged_project_checkpoint_recovers_the_reviewed_plan(self) -> None:
         await self.recover_acknowledged_checkpoint("project")
@@ -219,12 +228,12 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
         self.fail_before = path
         uncertain = await self.post()
         self.assertEqual(uncertain.status_code, 409, uncertain.text)
-        readback = await self.post(mode="readback")
-        self.assertEqual(readback.status_code, 202, readback.text)
-        result = readback.json()["result"]
-        self.assertEqual(json.loads(result["provider_effect_phase"])["pending"], path)
+        result = await self.read_allocation()
+        self.assertEqual([call.args[2] for call in self.provider.call_args_list], expected_creates)
+        await self.retain_reviewed_custody(result["custody_sha256"])
+
+    async def retain_reviewed_custody(self, custody_sha256: str) -> None:
         calls = self.provider.call_args_list.copy()
-        self.assertEqual([call.args[2] for call in calls], expected_creates)
         fresh = await self.post(idempotency_key="different-key")
         self.assertEqual(fresh.status_code, 400, fresh.text)
         with self.expire_execution():
@@ -233,7 +242,7 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
             )
             self.assertEqual(stale.status_code, 409, stale.text)
             retained = await self.post(
-                retain_allocation=True, expected_allocation_custody_sha256=result["custody_sha256"]
+                retain_allocation=True, expected_allocation_custody_sha256=custody_sha256
             )
         self.assertEqual(retained.status_code, 202, retained.text)
         self.assertEqual(retained.json()["result"]["allocation_state"], "retained_uncertain")
@@ -242,6 +251,19 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
         self.assertFalse(replay.json()["result"]["applied"])
         self.assertEqual(self.provider.call_args_list, calls)
         self.assert_no_authority_applied()
+
+    async def retain_acknowledged_checkpoint(self, field: str) -> None:
+        result = await self.interrupt_acknowledged_checkpoint(field)
+        await self.retain_reviewed_custody(result["custody_sha256"])
+
+    async def test_reviewed_custody_can_retain_acknowledged_project(self) -> None:
+        await self.retain_acknowledged_checkpoint("project")
+
+    async def test_reviewed_custody_can_retain_acknowledged_environment(self) -> None:
+        await self.retain_acknowledged_checkpoint("environment")
+
+    async def test_reviewed_custody_can_retain_acknowledged_application(self) -> None:
+        await self.retain_acknowledged_checkpoint("application")
 
     async def test_reviewed_custody_can_retain_pending_project_allocation(self) -> None:
         await self.retain_reviewed_pending_phase(PROJECT_CREATE_PATH, [PROJECT_CREATE_PATH])
@@ -297,19 +319,34 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
         )
         self.assertEqual(response.status_code, 400, response.text)
         await self.plan()
+        self.fail_before = ENVIRONMENT_CREATE_PATH
+        uncertain = await self.post()
+        self.assertEqual(uncertain.status_code, 409, uncertain.text)
+        calls = self.provider.call_args_list.copy()
+        custody = await self.read_allocation()
         self.app = self.make_app(_local_operator_bearer_config())
-        response = await request(
-            self.app,
-            "POST",
-            "/v1/dokploy-targets/setup",
-            payload=self.payload,
-            headers={
-                "Authorization": "Bearer local-operator-token",
-                "Idempotency-Key": "new-site-allocation",
+        for changes in (
+            {},
+            {"mode": "readback"},
+            {
+                "retain_allocation": True,
+                "expected_allocation_custody_sha256": custody["custody_sha256"],
             },
-        )
-        self.assertEqual(response.status_code, 400, response.text)
-        self.provider.assert_not_called()
+        ):
+            with self.subTest(changes=changes):
+                response = await request(
+                    self.app,
+                    "POST",
+                    "/v1/dokploy-targets/setup",
+                    payload={**self.payload, **changes},
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "new-site-allocation",
+                    },
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.provider.call_args_list, calls)
+        self.assert_no_authority_applied()
 
     async def test_context_ownership_drift_after_project_preserves_custody_before_next_create(
         self,
@@ -468,9 +505,15 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
             reviewed_plan_sha256=planned.json()["result"]["plan_sha256"],
             resolved_target_id=identity.target_id,
         )
-        mismatched = await records(resolved_target_id=self.production_id.target_id)
+        mismatched = await records(resolved_target_id="unallocated-application")
         self.assertEqual(mismatched.status_code, 400, mismatched.text)
         self.assertEqual(self.store.list_product_profile_records(), (self.profile,))
+        self.assertEqual(
+            self.store.read_dokploy_target_id_record(
+                context_name=target.context, instance_name=target.instance
+            ),
+            identity,
+        )
         applied = await records()
         self.assertEqual(applied.status_code, 202, applied.text)
         registered_target = self.store.read_dokploy_target_record(
