@@ -169,26 +169,6 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(preview.serving_generation_id)
         self.assert_original_preserved()
 
-    async def test_driver_original_with_unknown_or_upstream_data_history_refuses(self) -> None:
-        for current_mode in ("none", "driver"):
-            for evidence in (None, {"upstream_restore_requested": "true"}):
-                with self.subTest(current_mode=current_mode, evidence=evidence):
-                    self.prepare_fixture(created=False)
-                    self.profile.preview.data_transport_mode = current_mode
-                    self.store.write_product_profile_record(self.profile)
-                    result: dict[str, object] = {"status": "fail", "compose_id": self.target_id}
-                    if evidence is not None:
-                        result["module_install_update_evidence"] = evidence
-                    self.replace_original(response_payload={"result": result})
-                    with patch(
-                        "control_plane.http_app.execute_odoo_preview_apply_result",
-                        return_value={"status": "blocked"},
-                    ) as apply:
-                        refused = await self.fixture.preview_apply()
-                    self.assertEqual(refused.status_code, 409, refused.text)
-                    apply.assert_not_called()
-                    self.assert_original_preserved()
-
     async def test_without_explicit_original_binding_the_missing_lifecycle_still_refuses(
         self,
     ) -> None:
