@@ -257,6 +257,12 @@ reservation. The webhook request never waits on a deploy.
   - The manifest is not recorded in the artifact store. The preview's slug
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
+  - An Odoo `preview_provenance_refused` retains its specific
+    `preview_result_error_code` and `failure_trace_id`. The existing
+    `handled_error_cause` service log binds that trace and plan ID to bounded
+    source locations, without exception text or record contents. Follow the
+    [existing-preview source-history contract](disposable-lanes.md) for missing
+    origin evidence and its independent-recipient review route.
   - A snapshot Odoo preview without its Launchplane lifecycle record needs
     native restore custody before a refresh can supersede its original operation.
     The receipt, physical storage binding and database witness must prove an
