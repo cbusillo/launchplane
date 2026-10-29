@@ -327,7 +327,8 @@ idempotency_key selects the original key during recovery. The Product Onboarding
 wrapper refuses key-only envelopes and normal onboarding. Retention additionally requires
 retain_allocation: true and expected_allocation_custody_sha256. The worker verifies
 the original target request artifact digest even during recovery. Recovery needs
-no product or authorization plan artifacts. Successful product registration keeps
+no product or authorization plan artifacts. For a target with missing product
+records, follow the [retention and fresh-context onboarding path](operations.md#compatibility-workflow-recovery). Successful product registration keeps
 the adopted target and project names, and compares both target and identity
 snapshots atomically before writing records.
 

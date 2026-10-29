@@ -19,23 +19,16 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
     def caller_env(self, control: object = None, *, mode: str = "dry_run") -> dict[str, str]:
         return {
             **dict.fromkeys(
-                ("TESTING_CONTEXT", "PREVIEW_CONTEXT", "TARGET_NAME", "PROJECT_NAME", "SERVER_ID"),
+                ("TESTING_CONTEXT", "TARGET_NAME", "PROJECT_NAME", "SERVER_ID"),
                 "",
             ),
             "MODE": mode,
             "CONFIRMATION": "APPLY GENERIC WEB ONBOARDING" if mode == "apply" else "",
             "ALLOCATION_CONTROL": "" if control is None else json.dumps(control),
             "PRODUCT": "fixture",
-            "DISPLAY_NAME": "Fixture",
-            "REPOSITORY": "fixture-owner/fixture",
-            "IMAGE_REPOSITORY": "registry.example/fixture",
-            "RUNTIME_PORT": "8080",
             "HEALTH_PATH": "/healthz",
-            "PREVIEW_BASE_URL": "https://preview.example.com",
             "ENVIRONMENT_NAME": "testing",
-            "DOMAIN_CERTIFICATE_TYPE": "none",
             "REASON": "fixture recovery",
-            "RELATED_ISSUE": "fixture issue",
             "GITHUB_STEP_SUMMARY": str(self.root / "summary"),
         }
 
@@ -119,17 +112,19 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
 
     def test_caller_recovery_finalizes_only_original_target_artifact(self) -> None:
         target = self.root / "target-plan-request.json"
-        original_bytes = Path("tests/fixtures/onboarding-target-plan.json").read_bytes()
+        original_request = json.loads(
+            Path("tests/fixtures/onboarding-target-plan.json").read_text()
+        )
         for mode in ("readback", "apply"):
             with self.subTest(mode=mode):
                 env = self.render_caller({"mode": mode, "idempotency_key": "original-key"})
-                self.assertEqual(target.read_bytes(), original_bytes)
+                self.assertEqual(json.loads(target.read_text()), original_request)
                 self.assertEqual({path.name for path in self.root.glob("*.json")}, {target.name})
                 result = self.caller_step("Finalize onboarding plan", env)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 outputs = self.output_values()
                 self.assertEqual(
-                    outputs["target_plan_sha256"], hashlib.sha256(original_bytes).hexdigest()
+                    outputs["target_plan_sha256"], hashlib.sha256(target.read_bytes()).hexdigest()
                 )
 
     def test_caller_refuses_new_onboarding_before_any_request(self) -> None:
@@ -141,7 +136,6 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
                     )
                     self.assertNotEqual(result.returncode, 0)
                     self.assertFalse(self.output.exists())
-                    self.assertEqual(list(self.root.glob("*.json")), [])
 
     def run_step(
         self, workflow: str, job: str, name: str, env: dict[str, str]

@@ -120,7 +120,6 @@ jobs:
       testing_context: ${{ steps.inputs.outputs.testing_context }}
       target_plan_sha256: ${{ steps.plan.outputs.target_plan_sha256 }}
     env:
-      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       MODE: ${{ inputs.mode }}
       ALLOCATION_CONTROL: ${{ inputs.allocation_control }}
       PRODUCT: ${{ inputs.product }}

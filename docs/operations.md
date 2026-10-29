@@ -3001,6 +3001,11 @@ request; never replace the old byte-artifact digest with a native canonical
 one. Recovery skips product and authorization record apply. Do not repin or
 retire the old worker until every old workflow allocation is accounted for;
 completed workflow history alone does not establish that custody is clear.
+If readback finds an old target whose product records were never applied,
+settle its custody through reviewed retention, then start native onboarding
+with fresh testing and preview contexts. Keep the retained resources; do not
+pass the old workflow allocation to native record apply, which requires its
+own same-actor native plan.
 The current-source worker is separate from this immutable recovery revision.
 
 Use `Generic Web Preview Authorization` for reviewed `onboard`, `expand`,

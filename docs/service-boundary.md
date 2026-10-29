@@ -2551,7 +2551,9 @@ original actor/key recovery and reviewed custody retention. The current-source
 worker is not that pinned revision. Keep the original pin and required recovery
 inputs until old custody is accounted for. No new repository token, record plan,
 authz plan or authz reconciliation is issued by the wrapper. Existing caller-rule
-retirement and independent absence readback remain available.
+retirement and independent absence readback remain available. An old target
+without product records follows the [retention and fresh-context path](operations.md#compatibility-workflow-recovery);
+native record apply cannot adopt that workflow allocation.
 
 The authz planning route requires `generic_web_preview_authz.plan`, reads the
 active DB-backed policy, retains unrelated managed rules, and returns a complete
