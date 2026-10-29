@@ -135,7 +135,10 @@ def _inventory_clear(
 ) -> bool:
     host, token = source.read_dokploy_config(control_plane_root=root)
     for project in api.fetch_dokploy_projects(host=host, token=token):
-        if exact and _environment_referenced(binding.volume_name, project):
+        if exact and (
+            not isinstance(project.get("env"), str)
+            or _environment_referenced(binding.volume_name, project)
+        ):
             return False
         environments = project.get("environments")
         if not isinstance(environments, list):
@@ -143,7 +146,10 @@ def _inventory_clear(
         for environment in environments:
             if not isinstance(environment, dict):
                 return False
-            if exact and _environment_referenced(binding.volume_name, environment):
+            if exact and (
+                not isinstance(environment.get("env"), str)
+                or _environment_referenced(binding.volume_name, environment)
+            ):
                 return False
             for kind, (target_type, identifier) in TARGET_COLLECTIONS.items():
                 targets = environment.get(kind)

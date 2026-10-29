@@ -182,12 +182,13 @@ class RecipientRetirementTests(unittest.TestCase):
 
     def projects(self, **kwargs: Any) -> tuple[dict[str, Any], ...]:
         environment: dict[str, Any] = {kind: [] for kind in TARGET_COLLECTIONS}
+        environment["env"] = ""
         environment["compose"] = [
             {"composeId": identifier}
             for identifier in self.fixture.provider
             if not (self.deleted and identifier == self.record.retained_target_id.target_id)
         ]
-        return ({"name": self.record.product, "environments": [environment]},)
+        return ({"name": self.record.product, "env": "", "environments": [environment]},)
 
     def inspect(self, root: Path, spec: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -470,6 +471,23 @@ class RecipientRetirementTests(unittest.TestCase):
                 rows = self.projects(**kwargs)
                 owner = rows[0] if scope == "project" else rows[0]["environments"][0]
                 owner["env"] = "OLD_PROJECT=" + self.record.retained_target.target_name
+                return rows
+
+            with (
+                self.subTest(scope=scope),
+                patch.object(api, "fetch_dokploy_projects", side_effect=projects),
+                self.assertRaises(ValueError),
+            ):
+                self.adapter.current()
+        self.assertFalse(self.effects)
+
+    def test_missing_shared_provider_environment_refuses_retirement(self) -> None:
+        for scope in ("project", "environment"):
+
+            def projects(**kwargs: Any) -> tuple[dict[str, Any], ...]:
+                rows = self.projects(**kwargs)
+                owner = rows[0] if scope == "project" else rows[0]["environments"][0]
+                del owner["env"]
                 return rows
 
             with (
