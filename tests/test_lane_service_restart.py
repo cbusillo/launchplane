@@ -5,10 +5,12 @@ from tests.support.auth import scoped_agent_test
 import asyncio
 from contextlib import redirect_stderr
 from contextlib import contextmanager
+from contextlib import closing
 from collections.abc import Callable, Iterator
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
+from functools import cache
 import json
 import hashlib
 import io
@@ -67,6 +69,17 @@ from tests.support.down_lanes import record_lane_health
 from tests.test_service import create_launchplane_fastapi_test_app
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from tests.test_odoo_prod_promotion_operation import _operation
+
+
+@cache
+def _empty_sqlite_schema() -> bytes:
+    with TemporaryDirectory() as directory:
+        database = Path(directory) / "schema.db"
+        with closing(
+            PostgresRecordStore(database_url="sqlite+pysqlite:///" + str(database))
+        ) as store:
+            store.ensure_schema()
+        return database.read_bytes()
 
 
 def seed_lane(
@@ -243,10 +256,9 @@ class ServiceRestartTests(unittest.TestCase):
         self.scratch = TemporaryDirectory()
         self.addCleanup(self.scratch.cleanup)
         self.root = Path(self.scratch.name)
-        self.store = PostgresRecordStore(
-            database_url="sqlite+pysqlite:///" + str(self.root / "state.db")
-        )
-        self.store.ensure_schema()
+        database = self.root / "state.db"
+        database.write_bytes(_empty_sqlite_schema())
+        self.store = PostgresRecordStore(database_url="sqlite+pysqlite:///" + str(database))
         self.addCleanup(self.store.close)
         self.expected = seed_lane(self.store)
         record_safety(self.store, self.expected.product, self.expected.context, "testing")
