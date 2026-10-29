@@ -175,16 +175,12 @@ def require_retirement_evidence(
 ) -> tuple[dict[str, Any], float]:
     request = adapter.request
     if (
-        record.actor,
-        record.scope,
-        record.plan_sha256,
-        record.publication.get("published_sha256"),
-    ) != (
-        adapter.actor,
-        adapter.scope,
-        request.preparation_plan_sha256,
-        request.publication_sha256,
-    ) or record.phase not in {"published", *RETIREMENT_PHASES}:
+        (record.plan_sha256, record.publication.get("published_sha256"))
+        != (request.preparation_plan_sha256, request.publication_sha256)
+        or record.phase not in {"published", *RETIREMENT_PHASES}
+        or request.mode != "dry-run"
+        and (record.actor, record.scope) != (adapter.actor, adapter.scope)
+    ):
         raise ValueError("Retirement requires the original preparer and exact current publication.")
     published = datetime.fromisoformat(record.publication["published_at"])
     if published.utcoffset() != timedelta(0):
@@ -383,6 +379,8 @@ class RecipientRetirementAdapter:
         return self.request.reviewed_plan_sha256
 
     def require_original(self, record: ProductionRecipientRecord) -> None:
+        if self.request.mode == "dry-run":
+            return
         owner = record.execution.get("retirement_owner")
         if owner and (
             (owner.get("actor"), owner.get("scope"), owner.get("key"))
@@ -433,13 +431,18 @@ class RecipientRetirementAdapter:
             self.root, probe, ignored_compose_id=manifest["target"], exact=True
         ):
             raise ValueError("Old Compose provider references are incomplete or protected.")
+        owner = (
+            record.execution.get("retirement_owner", {}) if self.request.mode == "dry-run" else {}
+        )
+        original_scope = owner.get("scope", self.scope)
+        original_key = owner.get("key", self.original_key)
         for reservation in self.store.list_held_provider_target_reservations(
             provider_target_key=self.target_key()
         ):
             if (reservation.scope, reservation.route_path, reservation.idempotency_key) != (
-                self.scope,
+                original_scope,
                 RETIREMENT_ROUTE.format(product=self.product),
-                self.original_key,
+                original_key,
             ):
                 raise ValueError("An unsettled provider operation retains custody.")
 
@@ -518,7 +521,6 @@ class RecipientRetirementAdapter:
                     response_payload=self.response(self.plan(record, manifest, reconciliation_key)),
                 )
             if not record.execution.get("retirement_compose_dispatched"):
-                self.references(record, manifest)
                 return ProviderObservation(
                     "absent", retry_safe=True, preserve_effect_checkpoint=True
                 )
@@ -583,13 +585,13 @@ class RecipientRetirementAdapter:
             record = updated
 
         try:
-            self.references(record, manifest)
             lease.assert_current()
             if record.phase == "published":
                 record = self.start(
                     record, manifest, authority, digest, provider_operation_key, lease
                 )
             if not record.execution.get("retirement_compose_dispatched"):
+                self.references(record, manifest)
                 if datetime.now(timezone.utc).timestamp() >= until:
                     raise ValueError("Retirement evidence expired before Compose dispatch.")
                 host, token = source.read_dokploy_config(control_plane_root=self.root)

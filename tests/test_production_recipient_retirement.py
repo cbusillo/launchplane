@@ -313,6 +313,29 @@ class RecipientRetirementTests(unittest.TestCase):
             self.adapter.current()
         self.assertFalse(self.effects)
 
+    def test_read_authorized_other_actor_can_plan_but_cannot_apply(self) -> None:
+        planned = replace(
+            self.adapter,
+            actor="another-reader",
+            scope="another-scope",
+            original_key="",
+            request=self.adapter.request.model_copy(
+                update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+            ),
+        )
+        record, manifest, authority, _ = planned.current()
+        self.assertTrue(
+            planned.plan(record, manifest, planned.digest(record, manifest, authority)).plan_sha256
+        )
+        with self.assertRaises(ValueError):
+            replace(planned, request=planned.request.model_copy(update={"mode": "apply"})).current()
+        self.assertFalse(self.effects)
+        self.unknown_volume = True
+        self.assertEqual(self.run_retirement().status, "reconcile_required")
+        record, manifest, authority, _ = planned.current()
+        result = planned.plan(record, manifest, planned.digest(record, manifest, authority))
+        self.assertTrue(any(row.status == "unknown" for row in result.volumes))
+
     def test_missing_post_window_sync_consumer_or_recovery_refuses(self) -> None:
         self.state.cycle = replace(self.state.cycle, started=self.published)
         with self.assertRaises(ValueError):
@@ -428,7 +451,10 @@ class RecipientRetirementTests(unittest.TestCase):
         original_write = self.store.write_production_recipient
 
         def rebind(**kwargs: Any) -> None:
-            if kwargs["replacement"]["phase"] == "retiring_old":
+            if (
+                kwargs["expected"]["phase"] == "published"
+                and kwargs["replacement"]["phase"] == "retiring_old"
+            ):
                 current = self.store.read_provider_target_record(
                     context_name=self.record.context, instance_name="prod"
                 )
