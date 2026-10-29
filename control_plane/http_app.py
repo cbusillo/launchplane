@@ -1980,6 +1980,7 @@ class ProductOnboardingApplyEnvelope(BaseModel):
     manifest: ProductOnboardingManifest | None = None
     generic_web: GenericWebOnboardingIntent | None = None
     resolved_target_id: str = ""
+    allocation_id: str = ""
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "ProductOnboardingApplyEnvelope":
@@ -1988,18 +1989,19 @@ class ProductOnboardingApplyEnvelope(BaseModel):
         self.product = "launchplane"
         self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
         self.resolved_target_id = self.resolved_target_id.strip()
+        self.allocation_id = self.allocation_id.strip()
         if (self.manifest is None) == (self.generic_web is None):
             raise ValueError("Product onboarding requires exactly one of manifest or generic_web.")
         if self.manifest is not None:
             if self.mode != "apply":
                 raise ValueError("Legacy product onboarding manifests support apply mode only.")
-            if self.reviewed_plan_sha256 or self.resolved_target_id:
+            if self.reviewed_plan_sha256 or self.resolved_target_id or self.allocation_id:
                 raise ValueError(
                     "Legacy product onboarding manifests reject generic-web plan fields."
                 )
             return self
         if self.mode == "dry_run":
-            if self.reviewed_plan_sha256 or self.resolved_target_id:
+            if self.reviewed_plan_sha256 or self.resolved_target_id or self.allocation_id:
                 raise ValueError(
                     "Generic-web onboarding dry-run rejects reviewed plan and target id."
                 )
@@ -17708,7 +17710,10 @@ def create_launchplane_fastapi_app(
             if onboarding_request.generic_web is not None and onboarding_request.mode == "dry_run"
             else "product_onboarding.apply"
         )
-        if not resolved_authz_policy_runtime.allows(
+        director_onboarding = (
+            onboarding_request.generic_web is not None and director_agent_identity(identity)
+        )
+        if not director_onboarding and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=onboarding_action,
             product=onboarding_request.product,
@@ -17719,6 +17724,16 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="Workflow cannot plan or apply Launchplane product onboarding.",
+            )
+        native_onboarding = onboarding_request.generic_web is not None and (
+            director_onboarding or isinstance(identity, GitHubHumanIdentity)
+        )
+        if native_onboarding and onboarding_request.mode == "apply" and not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Native onboarding apply requires an Idempotency-Key.",
             )
         database_store = require_product_onboarding_database_store(
             record_store=record_store,
@@ -17836,9 +17851,9 @@ def create_launchplane_fastapi_app(
                         instance_name="testing",
                     )
                 except FileNotFoundError as error:
-                    if isinstance(identity, GitHubHumanIdentity):
+                    if native_onboarding:
                         raise ValueError(
-                            "Browser onboarding requires the recorded testing application from target setup."
+                            "Native onboarding requires the recorded testing application from target setup."
                         ) from error
                 else:
                     adopted_onboarding_target_id = database_store.read_dokploy_target_id_record(
@@ -17852,6 +17867,19 @@ def create_launchplane_fastapi_app(
                     ):
                         raise ValueError(
                             "Generic-web onboarding must preserve the adopted application identity."
+                        )
+                    if native_onboarding:
+                        from control_plane.onboarding_target import (
+                            require_recorded_onboarding_allocation,
+                        )
+
+                        require_recorded_onboarding_allocation(
+                            database_store,
+                            intent=onboarding_request.generic_web,
+                            allocation_id=onboarding_request.allocation_id,
+                            scope=idempotency_scope(identity),
+                            target=adopted_onboarding_target,
+                            target_id=adopted_onboarding_target_id.target_id,
                         )
                     target = onboarding_manifest.provider_targets[0].model_copy(
                         update={
@@ -17927,17 +17955,22 @@ def create_launchplane_fastapi_app(
             result=driver_result,
         )
         try:
-            database_store.write_product_authority_bundle(
-                authority_bundle_with_apply_idempotency(
-                    bundle=authority_bundle,
-                    identity=identity,
-                    route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    request_fingerprint_value=payload_fingerprint,
-                    trace_id=trace_id,
-                    response=onboarding_response,
-                )
+            committed_bundle = authority_bundle_with_apply_idempotency(
+                bundle=authority_bundle,
+                identity=identity,
+                route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=onboarding_response,
             )
+            if native_onboarding:
+                assert onboarding_request.generic_web is not None
+                database_store.write_new_product_onboarding_bundle(
+                    committed_bundle, intent=onboarding_request.generic_web
+                )
+            else:
+                database_store.write_product_authority_bundle(committed_bundle)
         except (
             RuntimeEnvironmentConflictError,
             ProductProfileConflictError,
