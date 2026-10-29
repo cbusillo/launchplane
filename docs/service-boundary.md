@@ -1795,7 +1795,7 @@ requires an existing lifecycle `plan_id`; it defaults to `apply=false`
 report-only behavior and records the cleanup request/result next to the plan.
 Destructive provider cleanup is only attempted when `apply=true` is explicitly
 supplied by an authorized caller. The sweep accepts a signed-in administrator
-through the existing browser CSRF boundary, as well as its existing operator,
+through the existing browser CSRF boundary, as well as its existing `local_operator` and
 admin bearer and GitHub Actions callers. Each mode retains its existing lifecycle
 authorization per product/context; admitting a browser session does not add policy authority.
 Client, read-only and terminal-agent sessions cannot run the browser sweep.

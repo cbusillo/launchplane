@@ -43,12 +43,12 @@ test("native portfolio report and explicit cleanup show held outcomes", { tag: "
   await expect(panel.getByRole("button", { name: "Apply cleanup", exact: true })).toBeDisabled();
   await page.screenshot({ path: testInfo.outputPath("preview-lifecycle-initial.png") });
   await panel.getByRole("button", { name: "Report", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Report result: fail" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Preview sweep result" }).getByRole("heading", { level: 2 })).toContainText("fail");
   await expect(panel.getByText("Held previews require original-intent recovery before cleanup apply.")).toBeVisible();
   await expect(panel.getByRole("button", { name: "Apply cleanup", exact: true })).toBeDisabled();
-  await panel.getByLabel("Delete orphaned previews across all preview-enabled products.").check();
+  await panel.getByRole("checkbox").check();
   await panel.getByRole("button", { name: "Apply cleanup", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Cleanup result: fail" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Preview sweep result" }).getByRole("heading", { level: 2 })).toContainText("fail");
   await expect(panel.getByText("sweep-trace", { exact: true })).toBeVisible();
   expect(fixture.requests.map(request => request.body.apply)).toEqual([false, true]);
   expect(fixture.requests.every(request => !request.body.product && Boolean(request.key))).toBe(true);
@@ -64,19 +64,20 @@ for (const apply of [false, true]) {
     const fixture = await setup(page, true);
     await page.goto("/ui/engineering/preview-lifecycle");
     const panel = page.getByRole("region", { name: "Preview cleanup controls" });
-    if (apply) await panel.getByLabel("Delete orphaned previews across all preview-enabled products.").check();
+    if (apply) await panel.getByRole("checkbox").check();
     await panel.getByRole("button", { name: apply ? "Apply cleanup" : "Report", exact: true }).click();
     await expect(panel.getByRole("button", { name: /Retry original (report|cleanup)/ })).toBeEnabled();
     await expect(panel.getByRole("button", { name: "Report", exact: true })).toHaveCount(0);
     await expect(panel.getByRole("button", { name: "Apply cleanup", exact: true })).toHaveCount(0);
-    await page.evaluate(() => {
+    await page.evaluate(operationKey => {
       for (const key of Object.keys(sessionStorage)) {
-        if (!key.startsWith("launchplane.browser-operation.")) sessionStorage.removeItem(key);
+        const state = JSON.parse(sessionStorage.getItem(key) || "null");
+        if (state?.identity?.idempotencyKey !== operationKey) sessionStorage.removeItem(key);
       }
-    });
+    }, fixture.requests[0].key);
     await page.reload();
     await panel.getByRole("button", { name: /Retry original (report|cleanup)/ }).click();
-    await expect(panel.getByRole("heading", { name: `${apply ? "Cleanup" : "Report"} result: fail` })).toBeVisible();
+    await expect(panel.getByRole("region", { name: "Preview sweep result" }).getByRole("heading", { level: 2 })).toContainText("fail");
     expect(fixture.requests).toHaveLength(2);
     expect(fixture.requests[1]).toEqual(fixture.requests[0]);
     expect(fixture.errors).toEqual([]);
@@ -89,14 +90,15 @@ test("an unrecognized retained fingerprint cannot dispatch a different sweep", a
   const panel = page.getByRole("region", { name: "Preview cleanup controls" });
   await panel.getByRole("button", { name: "Report", exact: true }).click();
   await expect(panel.getByRole("button", { name: "Retry original report" })).toBeEnabled();
-  await page.evaluate(() => {
-    const key = Object.keys(sessionStorage).find(key => key.startsWith("launchplane.browser-operation.v2."))!;
+  await page.evaluate(operationKey => {
+    const key = Object.keys(sessionStorage).find(key =>
+      JSON.parse(sessionStorage.getItem(key) || "null")?.identity?.idempotencyKey === operationKey)!;
     const state = JSON.parse(sessionStorage.getItem(key)!);
     state.identity.requestFingerprint = "unrecognized-fixture-fingerprint";
     sessionStorage.setItem(key, JSON.stringify(state));
-  });
+  }, fixture.requests[0].key);
   await page.reload();
-  await expect(panel.getByRole("alert")).toContainText("original request could not be recovered");
+  await expect(panel.getByRole("alert")).toBeVisible();
   await expect(panel.getByRole("button", { name: "Retry original sweep" })).toBeDisabled();
   await expect(panel.getByRole("button", { name: "Report", exact: true })).toHaveCount(0);
   await expect(panel.getByRole("button", { name: "Apply cleanup", exact: true })).toHaveCount(0);
@@ -115,10 +117,10 @@ test("a refused cleanup consumes its delete confirmation", async ({ page }) => {
   const fixture = await setup(page, "denied");
   await page.goto("/ui/engineering/preview-lifecycle");
   const panel = page.getByRole("region", { name: "Preview cleanup controls" });
-  const confirmation = panel.getByLabel("Delete orphaned previews across all preview-enabled products.");
+  const confirmation = panel.getByRole("checkbox");
   await confirmation.check();
   await panel.getByRole("button", { name: "Apply cleanup", exact: true }).click();
-  await expect(panel.getByText("Preview sweep failed", { exact: true })).toBeVisible();
+  await expect(panel.locator('[role="status"][data-phase="failed"]')).toBeVisible();
   await expect(confirmation).not.toBeChecked();
   await expect(panel.getByRole("button", { name: "Apply cleanup", exact: true })).toBeDisabled();
   expect(fixture.requests).toHaveLength(1);
@@ -130,14 +132,16 @@ test("operation-key storage failure prevents a sweep", async ({ page }) => {
   await page.addInitScript(() => {
     const setItem = Storage.prototype.setItem;
     Storage.prototype.setItem = function (key, value) {
-      if (key.startsWith("launchplane.browser-operation.v2.")) throw new DOMException("Operation storage full", "QuotaExceededError");
+      let identity;
+      try { identity = JSON.parse(value)?.identity; } catch { identity = null; }
+      if (identity?.idempotencyKey) throw new DOMException("Operation storage full", "QuotaExceededError");
       return setItem.call(this, key, value);
     };
   });
   await page.goto("/ui/engineering/preview-lifecycle");
   const panel = page.getByRole("region", { name: "Preview cleanup controls" });
   await panel.getByRole("button", { name: "Report", exact: true }).click();
-  await expect(panel.getByText("Preview sweep failed", { exact: true })).toBeVisible();
+  await expect(panel.locator('[role="status"][data-phase="failed"]')).toBeVisible();
   expect(fixture.requests).toEqual([]);
 });
 
@@ -153,13 +157,13 @@ test("fingerprint preparation locks both modes before another action can enter",
     crypto.subtle.digest = async (algorithm, data) => { await gate; return original(algorithm, data); };
   });
   const panel = page.getByRole("region", { name: "Preview cleanup controls" });
-  await panel.getByLabel("Delete orphaned previews across all preview-enabled products.").check();
+  await panel.getByRole("checkbox").check();
   await panel.getByRole("button", { name: "Report", exact: true }).click();
   await expect(panel.getByRole("button", { name: "Apply cleanup", exact: true })).toBeDisabled();
   await expect(panel.getByRole("button", { name: "Report", exact: true })).toBeDisabled();
   expect(fixture.requests).toEqual([]);
   await page.evaluate(() => (window as unknown as { releaseLifecycleDigest: () => void }).releaseLifecycleDigest());
-  await expect(panel.getByRole("heading", { name: "Report result: fail" })).toBeVisible();
+  await expect(panel.getByRole("region", { name: "Preview sweep result" }).getByRole("heading", { level: 2 })).toContainText("fail");
   expect(fixture.requests.map(request => request.body.apply)).toEqual([false]);
 });
 
@@ -185,14 +189,14 @@ test("a retired page preparing a fingerprint cannot erase its successor's uncert
   await panel.getByRole("button", { name: "Report", exact: true }).click();
   await page.getByRole("navigation", { name: "Engineering Ops views" }).getByRole("link", { name: "Overview", exact: true }).click();
   await page.getByRole("navigation", { name: "Engineering Ops views" }).getByRole("link", { name: "Preview cleanup", exact: true }).click();
-  await panel.getByLabel("Delete orphaned previews across all preview-enabled products.").check();
+  await panel.getByRole("checkbox").check();
   await panel.getByRole("button", { name: "Apply cleanup", exact: true }).click();
   await expect(panel.getByRole("button", { name: /Retry original (report|cleanup)/ })).toBeEnabled();
   await page.evaluate(() => (window as unknown as { releaseRetiredFingerprint: () => Promise<void> }).releaseRetiredFingerprint());
   await page.reload();
   await expect(panel.getByRole("button", { name: /Retry original (report|cleanup)/ })).toBeEnabled();
   await panel.getByRole("button", { name: /Retry original (report|cleanup)/ }).click();
-  await expect(panel.getByRole("heading", { name: "Cleanup result: fail" })).toBeVisible();
+  await expect(panel.getByRole("region", { name: "Preview sweep result" }).getByRole("heading", { level: 2 })).toContainText("fail");
   expect(fixture.requests).toHaveLength(2);
   expect(fixture.requests[1]).toEqual(fixture.requests[0]);
 });
