@@ -28,10 +28,10 @@ uv run launchplane service serve --help
 (cd frontend && pnpm validate)
 ```
 
-Frontend validation runs unit tests, the agent-contract drift check, TypeScript,
-and the production Vite build. The canonical OpenAPI JSON, UI slice and TypeScript
-client are ignored build artifacts generated from Python source before frontend
-tests, development, type checks and production builds, including Docker and CI.
+`pnpm validate` prepares generated OpenAPI artifacts once; standalone commands
+prepare their own. The canonical OpenAPI JSON, UI slice and TypeScript client
+are ignored build artifacts generated from Python source before frontend tests, development, type
+checks and production builds, including Docker and CI.
 Python contract tests and inventory scripts also derive schemas from source.
 After a backend contract change, run `(cd frontend && pnpm generate:openapi)`
 and commit only the agent contract. CI still rejects drift in that runtime contract.
