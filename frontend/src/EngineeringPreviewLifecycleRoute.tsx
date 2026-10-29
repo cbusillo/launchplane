@@ -41,8 +41,6 @@ function SweepControls({ actorId }: { actorId: number }) {
     execute: async (payload, options) => {
       const fingerprint = await stableRequestFingerprint({ request: payload, scope });
       return sweepPreviewLifecycle(payload, { ...options, onDispatch: () => {
-        // The shared controller persists a submitting identity at this boundary.
-        // Verify it before requestJson can issue the sweep POST.
         options.onDispatch?.();
         const retained = recoverBrowserOperationState(scope);
         if (retained.identity?.idempotencyKey !== options.idempotencyKey ||
@@ -65,8 +63,6 @@ function SweepControls({ actorId }: { actorId: number }) {
     setRecovery(null);
     setError("");
     void (async () => {
-      // These are the only two requests this page can send. Match the retained
-      // fingerprint instead of relying on a separately persisted form draft.
       for (const apply of [false, true]) {
         const payload = sweepRequest(apply);
         if (await stableRequestFingerprint({ request: payload, scope }) === fingerprint) {

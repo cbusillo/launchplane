@@ -1796,8 +1796,8 @@ report-only behavior and records the cleanup request/result next to the plan.
 Destructive provider cleanup is only attempted when `apply=true` is explicitly
 supplied by an authorized caller. The sweep accepts a signed-in administrator
 through the existing browser CSRF boundary, as well as its existing operator,
-admin bearer and GitHub Actions callers. Both lifecycle actions remain authorized
-per product/context; admitting a browser session does not add policy authority.
+admin bearer and GitHub Actions callers. Each mode retains its existing lifecycle
+authorization per product/context; admitting a browser session does not add policy authority.
 Client, read-only and terminal-agent sessions cannot run the browser sweep.
 Engineering Ops → Preview cleanup provides report-only and explicit cleanup for
 all preview-enabled products. Both modes write evidence and retain the same

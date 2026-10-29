@@ -69,7 +69,6 @@ for (const apply of [false, true]) {
     await expect(panel.getByRole("button", { name: /Retry original (report|cleanup)/ })).toBeEnabled();
     await expect(panel.getByRole("button", { name: "Report", exact: true })).toHaveCount(0);
     await expect(panel.getByRole("button", { name: "Apply cleanup", exact: true })).toHaveCount(0);
-    // Recovery must not depend on any separately saved form draft.
     await page.evaluate(() => {
       for (const key of Object.keys(sessionStorage)) {
         if (!key.startsWith("launchplane.browser-operation.")) sessionStorage.removeItem(key);

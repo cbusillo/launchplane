@@ -186,21 +186,24 @@ class PreviewLifecycleBrowserTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIn(response.status_code, (401, 403), response.text)
                         sweep.assert_not_called()
 
-    async def test_terminal_and_ungranted_operator_bearers_remain_denied(self) -> None:
-        for token in ("test-terminal-token", "test-operator-token"):
-            for apply in (False, True):
-                with self.subTest(token=token, apply=apply), browser_sweep() as (app, _, _session):
-                    with patch("control_plane.http_app.build_preview_lifecycle_sweep") as sweep:
-                        response = await request(
-                            app,
-                            "POST",
-                            "/v1/previews/lifecycle-sweep",
-                            headers={"Authorization": f"Bearer {token}"},
-                            payload={"apply": apply},
-                        )
-                        self.assertEqual(response.status_code, 403, response.text)
-                        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
-                        sweep.assert_not_called()
+    async def test_terminal_sweeps_and_ungranted_operator_cleanup_remain_denied(self) -> None:
+        for token, apply in (
+            ("test-terminal-token", False),
+            ("test-terminal-token", True),
+            ("test-operator-token", True),
+        ):
+            with self.subTest(token=token, apply=apply), browser_sweep() as (app, _, _session):
+                with patch("control_plane.http_app.build_preview_lifecycle_sweep") as sweep:
+                    response = await request(
+                        app,
+                        "POST",
+                        "/v1/previews/lifecycle-sweep",
+                        headers={"Authorization": f"Bearer {token}"},
+                        payload={"apply": apply},
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+                    sweep.assert_not_called()
 
     async def test_admin_role_without_existing_product_authority_is_denied(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
