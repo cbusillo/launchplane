@@ -342,9 +342,10 @@ write automatically. For an inverse, review the verified current custom labels
 as expected and the saved original custom labels as desired, with fresh identity
 checks. Empty custom-label sets are valid inverses.
 
-`audit_delivery_pending` retains the terminal audit and observed mutation status.
+`audit_delivery_pending` reports the engine's observed mutation outcome.
 The native service keeps uncertain effects fenced under the original operation;
-use its `reconcile` or `recover-evidence` mode rather than resending audit packets.
+use `reconcile` for provider readback after terminal-audit failure.
+`recover-evidence` requires retained terminal success or rejection evidence.
 Audit acceptance is evidence acceptance, not execution authorization.
 
 ## Lifecycle Executors

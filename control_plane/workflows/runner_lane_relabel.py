@@ -204,8 +204,4 @@ def execute_relabel(
     except Exception:
         result["mutation_status"] = result["status"]
         result["status"] = "audit_delivery_pending"
-        result["terminal_audit"] = terminal.model_dump(mode="json")
-        result["terminal_idempotency_key"] = (
-            f"runner-lane-relabel:{request.audit_record_key}:terminal"
-        )
     return result
