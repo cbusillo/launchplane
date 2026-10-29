@@ -558,7 +558,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 raise TimeoutError("Fixture lost the removal reply")
             return proof
 
-        with patch.object(service, "retained_copy_operation", side_effect=lost):
+        with patch(
+            "control_plane.testing_rebuild_service.retained_copy_operation", side_effect=lost
+        ):
             with self.assertRaises(TimeoutError):
                 self.execute()
             self.assertIsNone(self.owned)
@@ -577,13 +579,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
             assert row is not None
             row.payload = allocation.model_dump(mode="json", exclude_none=True)
 
-        with patch.object(
-            service, "retained_copy_operation", side_effect=self.physical
+        with patch(
+            "control_plane.testing_rebuild_service.retained_copy_operation",
+            side_effect=self.physical,
         ) as physical:
             for _ in range(2):
-                with patch.object(
-                    service,
-                    "prepare_candidate_application",
+                with patch(
+                    "control_plane.testing_rebuild_service.prepare_candidate_application",
                     side_effect=NativeSourceUnavailable(
                         "Fixture dies before the first application save"
                     ),
@@ -609,7 +611,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
         self.admit_unavailable("stopped")
 
-        def interrupted(effect: Any, lease: Any) -> None:
+        def interrupted(_effect: Any, lease: Any) -> None:
             lease.checkpoint_effect(ROUTE_PREPARING)
             raise NativeSourceUnavailable("Fixture lost route preparation reply")
 
@@ -629,7 +631,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 self.apply_staff_hold(True, "Fixture holds the old testing data")
             return physical(**kwargs)
 
-        with patch.object(service, "retained_copy_operation", side_effect=held):
+        with patch(
+            "control_plane.testing_rebuild_service.retained_copy_operation", side_effect=held
+        ):
             with self.assertRaises(service.NativeTestingRebuildPending):
                 self.execute()
         self.assertFalse(hasattr(self, "removed_container_ids"))
@@ -649,7 +653,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                     raise NativeSourceUnavailable("Fixture interrupted container removal")
             return self.physical(**kwargs)
 
-        with patch.object(service, "retained_copy_operation", side_effect=interrupted):
+        with patch(
+            "control_plane.testing_rebuild_service.retained_copy_operation", side_effect=interrupted
+        ):
             with self.assertRaises(service.NativeTestingRebuildPending):
                 self.execute()
             changed = True
@@ -667,7 +673,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
         self.admit_unavailable("stopped")
 
-        def interrupted(effect: Any, lease: Any) -> None:
+        def interrupted(_effect: Any, lease: Any) -> None:
             lease.checkpoint_effect(ROUTE_PREPARING)
             raise NativeSourceUnavailable("Fixture interrupted route preparation")
 
@@ -818,9 +824,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
         retire = service.NativeTestingRebuildExecution.retire_old
 
         def in_use(executor: Any, plan: Any) -> None:
-            with patch.object(
-                service,
-                "read_odoo_testing_usage",
+            with patch(
+                "control_plane.testing_rebuild_service.read_odoo_testing_usage",
                 return_value=OdooTestingUsage("in_use", True, True, "complete"),
             ):
                 retire(executor, plan)
@@ -846,7 +851,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 raise TimeoutError("Fixture lost retired-container removal reply")
             return frame
 
-        with patch.object(service, "retained_copy_operation", side_effect=lost):
+        with patch(
+            "control_plane.testing_rebuild_service.retained_copy_operation", side_effect=lost
+        ):
             with self.assertRaises(TimeoutError):
                 self.execute()
             self.assertEqual(self.execute().deploy_status, "pass")
@@ -917,7 +924,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
         with (
             patch.object(service.NativeTestingRebuildExecution, "publish", new=later_stopped),
-            patch.object(service, "retained_copy_operation", side_effect=lost),
+            patch(
+                "control_plane.testing_rebuild_service.retained_copy_operation", side_effect=lost
+            ),
         ):
             with self.assertRaises(TimeoutError):
                 self.execute()
@@ -935,7 +944,9 @@ class NativeTestingWorkerTests(unittest.TestCase):
                 raise TimeoutError("Fixture interrupts the first removal")
             return physical(**kwargs)
 
-        with patch.object(service, "retained_copy_operation", side_effect=lost):
+        with patch(
+            "control_plane.testing_rebuild_service.retained_copy_operation", side_effect=lost
+        ):
             with self.assertRaises(TimeoutError):
                 self.execute()
         self.retained.update(
@@ -977,9 +988,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
             with self.assertRaises(service.NativeTestingRebuildPending):
                 self.execute()
         self.retained.update(stopped=False, web_stopped=False)
-        with patch.object(
-            service,
-            "read_odoo_testing_usage",
+        with patch(
+            "control_plane.testing_rebuild_service.read_odoo_testing_usage",
             return_value=OdooTestingUsage("in_use", True, True, "complete"),
         ):
             with self.assertRaises(service.NativeTestingRebuildPending):
@@ -993,10 +1003,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
         provider = self.provider_request
 
         def failed(**kwargs: Any) -> Any:
-            result = provider(**kwargs)
+            response = provider(**kwargs)
             if kwargs["path"] == "/api/compose.stop":
                 self.fail_public = True
-            return result
+            return response
 
         with patch.object(api, "dokploy_request", side_effect=failed):
             result = self.execute()
@@ -1015,10 +1025,10 @@ class NativeTestingWorkerTests(unittest.TestCase):
         provider = self.provider_request
 
         def failed(**kwargs: Any) -> Any:
-            result = provider(**kwargs)
+            response = provider(**kwargs)
             if kwargs["path"] == "/api/compose.stop":
                 self.fail_public = True
-            return result
+            return response
 
         with (
             patch.object(api, "dokploy_request", side_effect=failed),
@@ -5014,7 +5024,9 @@ class NativeHistoricalUseTests(unittest.TestCase):
                     )
             return physical(**kwargs)
 
-        with patch.object(service, "retained_copy_operation", side_effect=lost):
+        with patch(
+            "control_plane.testing_rebuild_service.retained_copy_operation", side_effect=lost
+        ):
             with self.assertRaises(TimeoutError):
                 fixture.execute()
             self.assertEqual(fixture.execute().deploy_status, "pass")
