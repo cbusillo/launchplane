@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from threading import Event
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
@@ -11,8 +11,13 @@ from control_plane.client_release import (
     ClientReleaseFailureView,
     ClientReleaseRunView,
     ClientReleaseStepView,
+    ClientReleaseStepStatus,
 )
-from control_plane.release_invitation import advance_release_invitations, ReleaseInvitationBackoff
+from control_plane.release_invitation import (
+    advance_release_invitations,
+    ReleaseInvitationBackoff,
+    release_candidate_issue_marker,
+)
 from control_plane.release_review_record import release_decision_marker
 from control_plane.release_event_waits import settle_product_release_waits
 from control_plane.storage.postgres import PostgresRecordStore
@@ -37,7 +42,9 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.issue: dict[str, Any] = {
             "number": 99,
             "state": "open",
-            "body": release_decision_marker(self.decision.record_id),
+            "body": release_candidate_issue_marker(self.decision.checklist_digest)
+            + "\n"
+            + release_decision_marker(self.decision.record_id),
         }
         self.comments: list[dict[str, Any]] = []
         self.calls: list[tuple[str, str]] = []
@@ -197,10 +204,8 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
                 "control_plane.release_invitation._client_release_requests_enabled",
                 return_value=True,
             ),
-            patch("control_plane.release_invitation._settle_completed_invitation") as settle,
         ):
             self.advance()
-            settle.assert_called_once()
             self.assertEqual(self.issue["state"], "closed")
 
     def test_worker_closes_release_record_without_invitation_or_equal_lanes(self) -> None:
@@ -412,7 +417,14 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.release_run = self.release_run.model_copy(
             update={"decision_record_id": rollback.record_id}
         )
-        self.advance()
+        completed = cast(ClientReleaseRunView, cast(object, self.release_run))
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: completed.model_copy(
+                update={"decision_record_id": kwargs["decision"].record_id}
+            ),
+        ):
+            self.advance()
         self.assertEqual(self.issue["state"], "closed")
         self.assertNotEqual(forward_outcome, self.comments[0]["body"].splitlines()[1:])
 
@@ -428,6 +440,211 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.store.create_release_review_decision_record_if_absent(newer)
         self.advance()
         self.assertEqual(self.issue["state"], "closed")
+
+    def test_finished_earlier_attempt_cannot_close_the_same_candidates_active_retry(self) -> None:
+        newer = self.decision.model_copy(
+            update={"record_id": "retry", "decided_at": "2026-09-24T01:00:00Z"}
+        )
+        self.store.create_release_review_decision_record_if_absent(newer)
+        self.issue["body"] += "\n" + release_decision_marker(newer.record_id)
+        assert self.release_run is not None
+        original = self.release_run
+        retry = original.model_copy(
+            update={"decision_record_id": newer.record_id, "state": "waiting", "steps": ()}
+        )
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: (
+                retry if kwargs["decision"].record_id == newer.record_id else original
+            ),
+        ):
+            self.advance()
+        self.assertEqual(self.issue["state"], "open")
+        self.assertEqual(len(self.comments), 1)
+        finished_retry = retry.model_copy(update={"state": "passed"})
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: (
+                finished_retry if kwargs["decision"].record_id == newer.record_id else original
+            ),
+        ):
+            self.advance()
+        self.assertEqual(self.issue["state"], "closed")
+        self.assertEqual(len(self.comments), 2)
+
+    def test_record_only_decision_does_not_hide_running_release_outcome(self) -> None:
+        newer = self.decision.model_copy(
+            update={
+                "record_id": "record-only",
+                "decided_at": "2026-09-24T01:00:00Z",
+                "release_start": "",
+                "decision": "overridden",
+                "reason": "Recorded override",
+            }
+        )
+        self.store.create_release_review_decision_record_if_absent(newer)
+        self.advance()
+        self.assertEqual(self.issue["state"], "closed")
+        self.assertEqual(len(self.comments), 1)
+
+    def test_superseded_unstarted_intent_does_not_hold_a_completed_candidate_open(self) -> None:
+        newer = self.decision.model_copy(
+            update={"record_id": "completed-retry", "decided_at": "2026-09-24T01:00:00Z"}
+        )
+        self.store.create_release_review_decision_record_if_absent(newer)
+        self.issue["body"] += "\n" + release_decision_marker(newer.record_id)
+        assert self.release_run is not None
+        completed = self.release_run.model_copy(update={"decision_record_id": newer.record_id})
+        statuses: tuple[ClientReleaseStepStatus, ...] = (
+            "not_started",
+            "pending",
+            "running",
+            "reconciliation_required",
+        )
+        for status in statuses:
+            with self.subTest(status=status):
+                self.issue["state"] = "open"
+                earlier = ClientReleaseRunView(
+                    decision_record_id=self.decision.record_id,
+                    rollback_drill=False,
+                    state="waiting",
+                    steps=(
+                        ClientReleaseStepView(
+                            step="backup-1",
+                            kind="backup",
+                            status=status,
+                            operation_id="" if status == "not_started" else "backup",
+                        ),
+                    ),
+                )
+                with patch(
+                    "control_plane.client_release.read_client_release_run",
+                    side_effect=lambda **kwargs: (
+                        completed if kwargs["decision"].record_id == newer.record_id else earlier
+                    ),
+                ):
+                    self.advance()
+                self.assertEqual(
+                    self.issue["state"], "closed" if status == "not_started" else "open"
+                )
+
+    def test_superseded_unpublished_retry_does_not_keep_polling_a_closed_issue(self) -> None:
+        pending = self.decision.model_copy(
+            update={
+                "record_id": "superseded-unpublished",
+                "decided_at": "2026-09-24T01:00:00Z",
+                "release_issue_url": "",
+            }
+        )
+        rejected = pending.model_copy(
+            update={
+                "record_id": "latest-rejection",
+                "decided_at": "2026-09-25T01:00:00Z",
+                "decision": "changes_requested",
+                "reason": "Revise it",
+                "release_start": "",
+                "release_issue_url": self.decision.release_issue_url,
+            }
+        )
+        for item in (pending, rejected):
+            self.store.create_release_review_decision_record_if_absent(item)
+        self.issue["state"] = "closed"
+        backoff = ReleaseInvitationBackoff()
+        assert self.release_run is not None
+        original = self.release_run
+        unstarted = ClientReleaseRunView(
+            decision_record_id=pending.record_id,
+            rollback_drill=False,
+            state="waiting",
+            steps=(
+                ClientReleaseStepView(
+                    step="backup-1", kind="backup", status="not_started", operation_id=""
+                ),
+            ),
+        )
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: (
+                unstarted if kwargs["decision"].record_id == pending.record_id else original
+            ),
+        ):
+            self.advance(backoff)
+            calls = self.calls.copy()
+            with patch("control_plane.release_invitation.monotonic", return_value=1e20):
+                self.advance(backoff)
+        self.assertEqual(self.calls, calls)
+        self.assertEqual(len(self.comments), 1)
+
+    def test_finished_earlier_attempt_keeps_the_same_candidates_hotfix_review_open(self) -> None:
+        hotfix = self.decision.model_copy(
+            update={
+                "record_id": "hotfix-retry",
+                "decided_at": "2026-09-24T01:00:00Z",
+                "decision": "temporary_hotfix",
+                "reason": "Repair live breakage",
+                "actor_github_id": "7001",
+            }
+        )
+        self.store.create_release_review_decision_record_if_absent(hotfix)
+        assert self.release_run is not None
+        original = self.release_run
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: original.model_copy(
+                update={"decision_record_id": kwargs["decision"].record_id}
+            ),
+        ):
+            self.advance()
+        self.assertEqual(self.issue["state"], "open")
+        self.assertEqual(len(self.comments), 1)
+
+    def test_closed_issue_and_unpublished_retry_preserve_outcomes_and_reconcile_closure(
+        self,
+    ) -> None:
+        self.issue["state"] = "closed"
+        self.advance()
+        self.assertEqual(len(self.comments), 1)
+        pending = self.decision.model_copy(
+            update={
+                "record_id": "unpublished-retry",
+                "decided_at": "2026-09-24T01:00:00Z",
+                "release_issue_url": "",
+            }
+        )
+        self.store.create_release_review_decision_record_if_absent(pending)
+        self.issue["state"] = "open"
+        assert self.release_run is not None
+        original = self.release_run
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: (
+                None if kwargs["decision"].record_id == pending.record_id else original
+            ),
+        ):
+            self.advance()
+            self.advance()
+        self.assertEqual(self.issue["state"], "open")
+        self.assertEqual(len(self.comments), 1)
+        self.store.record_release_review_decision_publication(
+            record_id=pending.record_id, release_issue_url=self.decision.release_issue_url
+        )
+        self.comments.append(
+            {
+                "id": 90,
+                "body": release_decision_marker(pending.record_id),
+                "performed_via_github_app": {"id": 77},
+            }
+        )
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: original.model_copy(
+                update={"decision_record_id": kwargs["decision"].record_id}
+            ),
+        ):
+            self.advance()
+            self.advance()
+        self.assertEqual(self.issue["state"], "closed")
+        self.assertEqual(len(self.comments), 3)
 
     def test_changed_run_after_issue_lookup_stays_open(self) -> None:
         github = self.github
@@ -461,13 +678,11 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
                     update={"decision_record_id": kwargs["decision"].record_id}
                 ),
             ),
-            patch("control_plane.release_invitation._settle_completed_invitation") as settle,
         ):
             self.store.write_product_profile_record(
                 self.profile.model_copy(update={"release_on_acceptance": "promote"})
             )
             self.advance()
-            settle.assert_called_once()
         self.assertEqual(self.issue["state"], "closed")
 
     def test_temporary_hotfix_keeps_its_pending_client_review_open(self) -> None:
@@ -521,3 +736,10 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         calls = self.calls.copy()
         self.advance(backoff)
         self.assertEqual(self.calls, calls)
+
+    def test_closed_legacy_decision_issue_does_not_receive_a_backfill_notice(self) -> None:
+        self.issue["state"] = "closed"
+        self.issue["body"] = release_decision_marker(self.decision.record_id)
+        self.advance()
+        self.assertEqual(self.comments, [])
+        self.assertEqual(self.issue["state"], "closed")
