@@ -72,7 +72,7 @@ The metadata adapter uses the existing App through one exact, configured
 `launchplane_service` context SecretRecord/SecretBinding under
 `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY`. Global, instance and
 ambiguous key bindings fail closed. It verifies the App client ID, installation
-owner, existing installation grants and complete runtime-derived repository
+account, existing installation grants and complete runtime-derived repository
 set. Every issued token is limited to Actions/Administration/Metadata read;
 extra existing installation permissions require no grant change. Short-lived
 read tokens stay in the service and are revoked after each metadata request,
