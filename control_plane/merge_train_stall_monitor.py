@@ -22,6 +22,8 @@ from control_plane.contracts.merge_train_stall import (
     MergeTrainStallObservation,
     MergeTrainStallRecord,
     MergeTrainStallWorkflow,
+    STALL_WORKFLOW_REF_KEY,
+    STALL_WORKFLOW_REPOSITORY_KEY,
 )
 from control_plane.launchplane_github_delivery import resolve_delivery_github_token
 from control_plane.merge_train import build_merge_train_dry_run_result
@@ -32,8 +34,6 @@ from control_plane.merge_train_release_hold import merge_train_release_hold_read
 from control_plane.workflows.ship import utc_now_timestamp
 
 STALL_SECONDS = 30 * 60
-STALL_WORKFLOW_REPOSITORY_KEY = "LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REPOSITORY"
-STALL_WORKFLOW_REF_KEY = "LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REF"
 STALL_ISSUE_MARKER = "<!-- launchplane:merge-train-stall -->"
 _LOGGER = logging.getLogger(__name__)
 

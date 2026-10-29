@@ -16,6 +16,13 @@ Each value is checked with the same parser its reader uses, so an invalid value
 is refused before review. Any other key, including a secret-shaped one, is
 refused. Secrets stay in [managed secret records](secrets.md).
 
+The declared merge-train stall sender routing keys are
+`LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REPOSITORY` and
+`LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REF`. They select the existing workflow
+sender described in [merge-train events](merge-train-events.md); setting them
+does not dispatch it or prove Discord delivery. Activation and delivery checks
+remain post-deployment local supported operations.
+
 The request names `key`, `value` and `reason`. `mode: dry-run` returns
 `result.plan_digest` and writes nothing. `mode: apply` repeats the same request with
 `expected_plan_digest` and an `Idempotency-Key` header. Apply refuses when the
