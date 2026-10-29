@@ -24,10 +24,16 @@ class MergeTrainControllerFeedbackTests(TestCase):
                     phase="controller",
                 )
 
-                self.assertIn("observed", message)
-                self.assertIn("reconciling", message)
-                self.assertNotIn("failed checks passed", message)
-                self.assertNotIn("budget is recorded", message)
+                self.assertEqual(
+                    message,
+                    feedback._feedback_message(
+                        controller_action="recover_candidate_block",
+                        event="waiting",
+                        result={"details": {"removal_observation": observation}},
+                        controller_record_id="failed-candidate",
+                        phase="controller",
+                    ),
+                )
 
     def test_build_feedback_payloads_emits_building_candidate_entries(self) -> None:
         response: dict[str, Any] = {
