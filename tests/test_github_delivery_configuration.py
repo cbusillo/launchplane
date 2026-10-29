@@ -8,6 +8,13 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from control_plane import secrets
+from control_plane.github_app_configuration import ONBOARDING_GITHUB_APP_INTEGRATION
+from control_plane.runtime_environments import build_runtime_environment_definition_from_records
+from control_plane.launchplane_github_delivery import (
+    DELIVERY_GITHUB_APP_ID_KEY,
+    DELIVERY_GITHUB_APP_INTEGRATION_KEY,
+    resolve_delivery_github_app_identity,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.github_delivery_configuration import (
     DeliveryGitHubAppConfigurationRequest,
@@ -16,6 +23,7 @@ from control_plane.github_delivery_configuration import (
     plan_delivery_github_configuration,
 )
 from control_plane.service_delivery_recovery import SERVICE_DELIVERY_APPLY_RECEIPT_ROUTE
+from control_plane.service_github_delivery_controls import read_service_github_delivery
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
     GitHubHumanIdentity,
@@ -121,6 +129,51 @@ class DeliveryConfigurationTests(unittest.TestCase):
             versions_before,
         )
         self.assertNotIn("fixture-key-material", str(result))
+
+    def test_onboarding_key_cannot_be_offered_or_selected_for_delivery(self) -> None:
+        integration = ONBOARDING_GITHUB_APP_INTEGRATION
+        secrets.write_secret_value(
+            record_store=self.store,
+            scope="context",
+            integration=integration,
+            name="private_key",
+            plaintext_value="synthetic-onboarding-key",
+            binding_key="private_key",
+            context_name="launchplane",
+            actor="test",
+        )
+        before = self.store.list_runtime_environment_records()
+        with self.assertRaises(ValueError):
+            self.call(self.request.model_copy(update={"integration": integration}))
+        status = read_service_github_delivery(store=self.store, trace_id="test-trace")
+        self.assertNotIn(integration, {key.integration for key in status.existing_keys})
+        self.assertEqual(self.store.list_runtime_environment_records(), before)
+        (record,) = before
+        definition = build_runtime_environment_definition_from_records(
+            (
+                record.model_copy(
+                    update={
+                        "env": {
+                            **record.env,
+                            DELIVERY_GITHUB_APP_ID_KEY: str(self.request.app_id),
+                            DELIVERY_GITHUB_APP_INTEGRATION_KEY: integration,
+                        }
+                    }
+                ),
+            )
+        )
+        with (
+            patch(
+                "control_plane.launchplane_github_delivery.runtime_environments.load_runtime_environment_definition",
+                return_value=definition,
+            ),
+            patch(
+                "control_plane.launchplane_github_delivery.secrets.resolve_context_secret_value",
+                side_effect=AssertionError("A Delivery read must not decrypt the onboarding key."),
+            ),
+            self.assertRaises(ValueError),
+        ):
+            resolve_delivery_github_app_identity(control_plane_root=Path("unused"))
 
     def test_stale_review_and_idempotency_conflict_write_nothing(self) -> None:
         plan = self.call(self.request)

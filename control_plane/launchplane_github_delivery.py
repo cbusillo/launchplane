@@ -16,7 +16,10 @@ from control_plane.github_app_identity import (
     GitHubAppInstallationToken,
     mint_delivery_installation_token,
 )
-from control_plane.github_app_configuration import service_github_app_values
+from control_plane.github_app_configuration import (
+    service_github_app_values,
+    validate_delivery_key_integration,
+)
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.product_repository_identity import current_tracked_inventory_record
 from control_plane.storage.factory import resolve_database_url
@@ -110,8 +113,10 @@ def resolve_delivery_github_app_identity(*, control_plane_root: Path) -> GitHubA
         )
     )
     app_id = values.get(DELIVERY_GITHUB_APP_ID_KEY, "").strip()
-    integration = values.get(DELIVERY_GITHUB_APP_INTEGRATION_KEY, "").strip()
-    if not app_id.isdecimal() or int(app_id) < 1 or not integration:
+    integration = validate_delivery_key_integration(
+        values.get(DELIVERY_GITHUB_APP_INTEGRATION_KEY, "")
+    )
+    if not app_id.isdecimal() or int(app_id) < 1:
         raise ValueError("Launchplane delivery GitHub App identity is not configured.")
     private_key = secrets.resolve_context_secret_value(
         integration=integration, context_name=_SERVICE_CONTEXT, binding_key="private_key"

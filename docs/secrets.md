@@ -23,6 +23,8 @@ write-only, context-scoped binding in its named integration, context
 `launchplane`, with no instance. The current DB policy must identify the signed-in
 human as an administrator, both when reading the form and at the atomic write.
 The private-key field preserves pasted line breaks and masks its text while entered.
+Its purpose is reserved: Delivery App configuration and credential resolution
+refuse the onboarding integration, even if it has a configured private key.
 Other humans, workflows and agents cannot submit through this form. Request
 revisions bind the exact purpose and current secret version; stale submissions
 write nothing. No secret value is returned, added to a runtime environment, or

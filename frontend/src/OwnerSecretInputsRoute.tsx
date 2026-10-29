@@ -84,7 +84,7 @@ function SecretInput({ field, request, onSaved, fixtureMode }: { field: OwnerSec
     {request.can_submit ? <>
       <label className="owner-secret-field">
         <span>{field.label}</span>
-        {field.multiline ? <textarea ref={element => { input.current = element; }} className="owner-secret-multiline" autoComplete="new-password" spellCheck={false} autoCapitalize="off" rows={5} maxLength={65536} disabled={busy} aria-label={field.label} /> : <input ref={element => { input.current = element; }} type="password" autoComplete="new-password" maxLength={65536} disabled={busy} aria-label={field.label} />}
+        {field.multiline ? <textarea ref={element => { input.current = element; }} className="owner-secret-multiline" autoComplete="off" spellCheck={false} autoCapitalize="off" rows={5} maxLength={65536} disabled={busy} aria-label={field.label} /> : <input ref={element => { input.current = element; }} type="password" autoComplete="new-password" maxLength={65536} disabled={busy} aria-label={field.label} />}
       </label>
       <button className="button button-primary" type="submit" disabled={busy}>{busy ? "Saving…" : field.submitted_at ? "Replace credential" : "Save credential"}</button>
     </> : <p>Only this product’s named Client can submit the requested credential.</p>}

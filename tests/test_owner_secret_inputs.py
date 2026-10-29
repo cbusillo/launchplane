@@ -110,6 +110,8 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(wrong_purpose.status_code, 409, wrong_purpose.text)
                 for human in (_human(), _human("operator", 9002, "admin")):
+                    denied_read = await self.service_read(human, environment)
+                    self.assertEqual(denied_read.status_code, 403, denied_read.text)
                     denied = await self.post(payload, human=human)
                     self.assertEqual(denied.status_code, 403, denied.text)
                 response = await self.post(payload, human=director)

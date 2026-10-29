@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from control_plane import secrets
 from control_plane.artifact_scan import GHCR_ARTIFACT_READ_INTEGRATION
+from control_plane.github_app_configuration import ONBOARDING_GITHUB_APP_INTEGRATION
 from control_plane.durable_operation_authorization import read_active_authz_policy_record
 from control_plane.product_config import _plan_product_config_secret_write
 from control_plane.contracts.product_profile_record import (
@@ -46,14 +47,17 @@ OWNER_SECRET_SUBMIT_ROUTE = "/v1/owner-secret-inputs/submit"
 _SERVICE_CREDENTIAL_FIELDS = {
     GHCR_ARTIFACT_READ_INTEGRATION: (
         "Artifact scan credentials",
+        "Only the Director can save this credential. It is used for artifact reads and is never shown again.",
         (("username", "GHCR pull-only username"), ("password", "GHCR pull-only token")),
     ),
-    "onboarding_github_app": (
+    ONBOARDING_GITHUB_APP_INTEGRATION: (
         "Onboarding App credential",
+        "Enter the independently held original onboarding App key. It is never shown again and does not change the App's installation or permissions.",
         (("private_key", "Existing onboarding App private key"),),
     ),
     "trusted_maintenance_webhook": (
         "Trusted maintenance webhook credential",
+        "Enter the independently held original trusted maintenance webhook secret. It is never shown again and does not change the webhook registration.",
         (("webhook_secret", "Existing trusted maintenance webhook secret"),),
     ),
 }
@@ -131,7 +135,7 @@ def register_owner_secret_input_routes(
     def service_projection(
         store: PostgresRecordStore, trace_id: str, environment: str
     ) -> OwnerSecretInputResponse:
-        display_name, requested_fields = _SERVICE_CREDENTIAL_FIELDS[environment]
+        display_name, instructions, requested_fields = _SERVICE_CREDENTIAL_FIELDS[environment]
         fields = []
         for key, label in requested_fields:
             record = store.find_secret_record(
@@ -147,7 +151,7 @@ def register_owner_secret_input_routes(
                     binding_key=key,
                     label=label,
                     multiline=key == "private_key",
-                    instructions="Only the Director can save this existing credential. It stays in this service purpose and is never shown again. Saving it does not change an App installation or webhook registration.",
+                    instructions=instructions,
                     environments=(LAUNCHPLANE_SERVICE_CONTEXT,),
                     request_revision=hashlib.sha256(
                         f"{LAUNCHPLANE_SERVICE_CONTEXT}:{environment}:{key}:{record.current_version_id if record else ''}".encode()

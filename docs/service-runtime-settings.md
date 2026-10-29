@@ -19,7 +19,7 @@ refused. Secrets stay in [managed secret records](secrets.md).
 `LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID` prepares the existing onboarding
 App selector for [service adoption](secrets.md#client-credential-input).
 Its value must be a nonempty identifier of at most 128 ASCII letters, digits or
-underscores. Recording it does not switch the current onboarding workflows away
+underscores or dots. Recording it does not switch the current onboarding workflows away
 from their Actions inputs, prove an installation, or create any credential.
 
 The request names `key`, `value` and `reason`. `mode: dry-run` returns

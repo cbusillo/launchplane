@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from pydantic import ValidationError
 
 from control_plane import secrets
+from control_plane.github_app_configuration import ONBOARDING_GITHUB_APP_CLIENT_ID_ENV_KEY
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.dokploy.memory_capacity import (
     PREVIEW_MEMORY_FLOORS_SETTING,
@@ -139,8 +140,8 @@ class ServiceRuntimeSettingTests(unittest.TestCase):
 
     def test_reviewed_onboarding_selector_write_preserves_other_service_settings(self) -> None:
         setting = ServiceRuntimeSettingRequest(
-            key="LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID",
-            value="Iv1SyntheticOnboardingApp",
+            key=ONBOARDING_GITHUB_APP_CLIENT_ID_ENV_KEY,
+            value="Iv1.syntheticOnboardingApp",
             reason="Record the existing onboarding App selector.",
         )
         preview = self.call(setting)
