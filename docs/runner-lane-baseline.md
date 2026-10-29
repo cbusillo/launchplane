@@ -342,14 +342,11 @@ write automatically. For an inverse, review the verified current custom labels
 as expected and the saved original custom labels as desired, with fresh identity
 checks. Empty custom-label sets are valid inverses.
 
-`audit_delivery_pending` retains the terminal audit, its original idempotency
-key and observed mutation status. `deliver_terminal_audit` validates that packet
-and sends only evidence through the injected poster; it cannot change labels.
-Validation is structural, not cryptographic provenance or a new provider
-observation. The native caller must bind packets to the original operation and
-actor, and retain uncertain outcomes for reconciliation. An absent result never
-proves that no provider write occurred. Audit acceptance is evidence acceptance,
-not execution authorization.
+`audit_delivery_pending` reports the engine's observed mutation outcome.
+The native service keeps uncertain effects fenced under the original operation;
+use `reconcile` for provider readback after terminal-audit failure.
+`recover-evidence` requires retained terminal success or rejection evidence.
+Audit acceptance is evidence acceptance, not execution authorization.
 
 ## Lifecycle Executors
 
