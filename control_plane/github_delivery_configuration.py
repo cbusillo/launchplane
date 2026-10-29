@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.delivery_apply_receipt import apply_reviewed_service_bundle
+from control_plane.github_app_configuration import validate_delivery_key_integration
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.launchplane_github_delivery import (
     DELIVERY_GITHUB_APP_ID_KEY,
@@ -59,6 +60,7 @@ class DeliveryGitHubAppConfigurationRequest(BaseModel):
 def _key_binding(
     store: PostgresRecordStore, integration: str
 ) -> tuple[SecretRecord, SecretBinding]:
+    integration = validate_delivery_key_integration(integration)
     bindings = tuple(
         binding
         for binding in store.list_secret_bindings(

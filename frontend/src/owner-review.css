@@ -143,13 +143,19 @@
 }
 
 .owner-review-action textarea,
-.owner-secret-field input {
+.owner-secret-field input,
+.owner-secret-field textarea {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface-muted);
   color: var(--text);
   padding: 0.7rem;
+}
+
+.owner-secret-multiline {
+  -webkit-text-security: disc;
+  resize: vertical;
 }
 
 .owner-review-action textarea {
