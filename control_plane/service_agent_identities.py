@@ -1,5 +1,4 @@
 import logging
-from typing import cast
 
 import click
 from sqlalchemy.exc import SQLAlchemyError
@@ -30,19 +29,6 @@ AGENT_BEARER_ENVIRONMENT_KEYS = {
         ("token_label", f"{prefix}_TOKEN_LABEL"),
     )
 }
-
-
-def product_config_changes_service_identity(payload: dict[str, object]) -> bool:
-    if payload.get("context") != "launchplane":
-        return False
-    runtime = cast(dict[str, object], payload.get("runtime_env") or {})
-    values = cast(dict[str, object], runtime.get("env") or {})
-    if values.keys() & (AGENT_SELECTOR_KEYS | {AGENT_BEARER_SOURCE_KEY}):
-        return True
-    return any(
-        secret.get("integration") == secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION
-        for secret in cast(list[dict[str, object]], payload.get("secrets") or [])
-    )
 
 
 def load_service_agent_identities(

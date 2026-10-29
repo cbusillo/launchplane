@@ -635,6 +635,7 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
     authz_policy_allows_immutable_github_id_administration,
     effective_administrator_quorum,
     strict_immutable_github_human_administrator_ids,
@@ -658,6 +659,7 @@ from control_plane.storage.product_authority_bundle import (
     require_absent_products,
     require_runtime_key_safety_policies,
     ProductAuthorityBundle,
+    ServiceIdentityAuthorityError,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
     OdooInstanceOverrideConflictError,
@@ -6480,8 +6482,10 @@ class PostgresRecordStore(HumanSessionStore):
             payload=self._payload_dict(record),
         )
 
-    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
-        self._write_product_authority_bundle(bundle)
+    def write_product_authority_bundle(
+        self, bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity | None = None
+    ) -> None:
+        self._write_product_authority_bundle(bundle, caller_identity=identity)
 
     def write_new_product_onboarding_bundle(
         self, bundle: ProductAuthorityBundle, *, intent: GenericWebOnboardingIntent
@@ -6497,10 +6501,16 @@ class PostgresRecordStore(HumanSessionStore):
         self._write_product_authority_bundle(bundle, guard_provider=guard)
 
     def compare_and_write_product_authority_bundle(
-        self, bundle: ProductAuthorityBundle, *, mutation: DbOnlyMutationRequest
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        mutation: DbOnlyMutationRequest,
+        identity: LaunchplaneIdentity | None = None,
     ) -> tuple[str, LaunchplaneIdempotencyRecord]:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if identity is not None:
+                self._lock_active_authz_policy(session)
             status, reservation_row, reservation = self._reserve_db_only_mutation_in_session(
                 session=session, mutation=mutation
             )
@@ -6508,7 +6518,11 @@ class PostgresRecordStore(HumanSessionStore):
                 return status, reservation
             assert reservation_row is not None
             self._write_product_authority_bundle(
-                bundle, write_session=session, write_transaction_started=True, commit=False
+                bundle,
+                write_session=session,
+                write_transaction_started=True,
+                commit=False,
+                caller_identity=identity,
             )
             completion = complete_launchplane_mutation_reservation(
                 reservation,
@@ -6522,17 +6536,159 @@ class PostgresRecordStore(HumanSessionStore):
             return "written", completion
 
     def write_director_secret_bundle(
-        self, bundle: ProductAuthorityBundle, *, identity: GitHubHumanIdentity
+        self, bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity
     ) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_active_authz_policy(session)
             active = self._locked_active_authz_policy_record(session)
-            if not active.policy.names_administrator(identity):
-                raise PermissionError("Only the Director can store service credentials.")
+            self._require_service_identity_administrator(active.policy, identity)
             self._write_product_authority_bundle(
-                bundle, write_session=session, write_transaction_started=True
+                bundle,
+                write_session=session,
+                write_transaction_started=True,
+                caller_identity=identity,
             )
+
+    @staticmethod
+    def _require_service_identity_administrator(
+        policy: LaunchplaneAuthzPolicy, identity: LaunchplaneIdentity | None
+    ) -> None:
+        from control_plane.service_auth import AuthorizationTarget, LocalAdminIdentity
+
+        administrator = (
+            isinstance(identity, GitHubHumanIdentity) and policy.names_administrator(identity)
+        ) or isinstance(identity, LocalAdminIdentity)
+        if (
+            not administrator
+            or identity is None
+            or not policy.allows(
+                identity=identity,
+                action="authz_policy_grant.write",
+                product="launchplane",
+                context="launchplane",
+                target=AuthorizationTarget(scope="context"),
+            )
+        ):
+            raise ServiceIdentityAuthorityError(
+                "Service identity changes require an admin with policy-write authority."
+            )
+
+    @staticmethod
+    def _bundle_changes_service_identity(session: Session, bundle: ProductAuthorityBundle) -> bool:
+        from control_plane.service_agent_identities import (
+            AGENT_BEARER_ENVIRONMENT_KEYS,
+            AGENT_BEARER_SOURCE_KEY,
+            AGENT_SELECTOR_KEYS,
+        )
+        from control_plane.secrets import LAUNCHPLANE_SERVICE_SECRET_INTEGRATION
+
+        selector_keys = AGENT_SELECTOR_KEYS | {AGENT_BEARER_SOURCE_KEY}
+        runtime_records = (
+            *bundle.runtime_environments,
+            *(write.record for write in bundle.runtime_environment_writes),
+        )
+        runtime_changes = [(record, record.env) for record in runtime_records]
+        runtime_changes.extend(
+            (deletion.expected_record, {}) for deletion in bundle.delete_runtime_environments
+        )
+        for record, values in runtime_changes:
+            if (record.scope, record.context, record.instance) != ("context", "launchplane", ""):
+                continue
+            current = session.get(
+                LaunchplaneRuntimeEnvironmentRow, (record.scope, record.context, record.instance)
+            )
+            previous_values = (
+                RuntimeEnvironmentRecord.model_validate(current.payload).env if current else {}
+            )
+            previous = {
+                key: previous_values[key] for key in selector_keys if key in previous_values
+            }
+            proposed = {key: values[key] for key in selector_keys if key in values}
+            if json.dumps(previous, sort_keys=True) != json.dumps(proposed, sort_keys=True):
+                return True
+
+        if not (bundle.secret_bindings or bundle.secret_records or bundle.secret_versions):
+            return False
+        token_keys = frozenset(
+            key for field, key in AGENT_BEARER_ENVIRONMENT_KEYS.items() if field.endswith("_token")
+        )
+        bindings = {
+            row.binding_id: SecretBinding.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneSecretBindingRow).where(
+                    LaunchplaneSecretBindingRow.integration
+                    == LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                    LaunchplaneSecretBindingRow.context == "launchplane",
+                    LaunchplaneSecretBindingRow.instance == "",
+                    LaunchplaneSecretBindingRow.binding_key.in_(token_keys),
+                )
+            ).all()
+        }
+        binding_fields = {
+            "binding_id",
+            "integration",
+            "binding_key",
+            "context",
+            "instance",
+            "secret_id",
+            "status",
+        }
+        for binding in bundle.secret_bindings:
+            previous_binding = bindings.get(binding.binding_id)
+            selected = (
+                binding.integration == LAUNCHPLANE_SERVICE_SECRET_INTEGRATION
+                and binding.context == "launchplane"
+                and not binding.instance
+                and binding.binding_key in token_keys
+            )
+            if not selected and previous_binding is None:
+                continue
+            if previous_binding is None or previous_binding.model_dump(
+                include=binding_fields
+            ) != binding.model_dump(include=binding_fields):
+                return True
+
+        if not (bundle.secret_records or bundle.secret_versions):
+            return False
+        secret_ids = {binding.secret_id for binding in bindings.values()}
+        if not secret_ids:
+            return False
+        records = {
+            row.secret_id: SecretRecord.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneSecretRow).where(LaunchplaneSecretRow.secret_id.in_(secret_ids))
+            ).all()
+        }
+        record_fields = {
+            "secret_id",
+            "scope",
+            "integration",
+            "context",
+            "instance",
+            "current_version_id",
+            "policy",
+            "status",
+        }
+        for secret_record in bundle.secret_records:
+            if secret_record.secret_id not in secret_ids:
+                continue
+            previous_record = records.get(secret_record.secret_id)
+            if previous_record is None or previous_record.model_dump(
+                include=record_fields
+            ) != secret_record.model_dump(include=record_fields):
+                return True
+        version_ids = {record.current_version_id for record in records.values()}
+        version_fields = {"version_id", "secret_id", "ciphertext", "key_id"}
+        for version in bundle.secret_versions:
+            if version.version_id not in version_ids:
+                continue
+            previous_version = session.get(LaunchplaneSecretVersionRow, version.version_id)
+            if previous_version is None or SecretVersion.model_validate(
+                previous_version.payload
+            ).model_dump(include=version_fields) != version.model_dump(include=version_fields):
+                return True
+        return False
 
     def write_product_public_hosts_bundle(
         self,
@@ -6728,6 +6884,7 @@ class PostgresRecordStore(HumanSessionStore):
         commit: bool = True,
         validate_only: bool = False,
         write_transaction_started: bool = False,
+        caller_identity: LaunchplaneIdentity | None = None,
     ) -> None:
         if not bundle.requires_write():
             return
@@ -6738,7 +6895,21 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             if not write_transaction_started:
                 self._begin_serialized_write(session)
+            if caller_identity is not None:
+                self._lock_active_authz_policy(session)
             self._lock_product_authority_bundle_write(session)
+            if self._bundle_changes_service_identity(session, bundle):
+                if caller_identity is None:
+                    raise ServiceIdentityAuthorityError(
+                        "General configuration cannot change service identities."
+                    )
+                try:
+                    active_policy = self._locked_active_authz_policy_record(session).policy
+                except OwnerControlShadowVerifierConflictError as error:
+                    raise ServiceIdentityAuthorityError(
+                        "Current administrator authority is unavailable."
+                    ) from error
+                self._require_service_identity_administrator(active_policy, caller_identity)
             reservation_reader = getattr(
                 self._provider_evidence_context, "reservation_reader", None
             )
@@ -32689,7 +32860,11 @@ class PostgresRecordStore(HumanSessionStore):
                 else (),
             )
             self._write_product_authority_bundle(
-                bundle, write_session=session, commit=False, write_transaction_started=True
+                bundle,
+                write_session=session,
+                commit=False,
+                write_transaction_started=True,
+                caller_identity=identity,
             )
             session.flush()
             written_row = session.scalar(

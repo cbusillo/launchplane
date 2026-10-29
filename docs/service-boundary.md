@@ -1118,11 +1118,16 @@ process. Independent admin verification is retained; active-policy DB access
 is still required by non-health routes.
 
 Product-config apply may change these authentication selectors, the source
-setting or `launchplane_service` secrets in the service context only for an authenticated admin with existing
-`authz_policy_grant.write` authority on Launchplane. A general configuration
-grant cannot create a Director-agent credential. The supported write-only
-product-config input remains available to that admin; its use still follows
-the Director's credential and access stop boundaries. No grant is added here.
+setting or the two authentication token bindings only for an authenticated
+administrator with current `authz_policy_grant.write` authority on Launchplane.
+The bundle transaction checks the stored and proposed authentication state,
+including displaced binding IDs and changes to referenced secret records or
+current versions. General writers, including product onboarding, cannot create,
+rebind, rotate or remove that authority, even before record mode is active.
+Unrelated settings and service credentials remain configurable. The supported
+write-only product-config input remains available to the administrator; its use
+still follows the Director's credential and access stop boundaries. No grant is
+added here.
 
 This source capability does not transfer credentials or authorize activation.
 Before activation, qualify a supported write-only input from independent custody

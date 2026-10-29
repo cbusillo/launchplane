@@ -6,9 +6,21 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from control_plane import secrets
-from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord, ScalarValue
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.runtime_environment_record import (
+    RuntimeEnvironmentRecord,
+    ScalarValue,
+    RuntimeEnvironmentDeleteEvent,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.secret_record import SecretScope
+from control_plane.dokploy.memory_capacity import PREVIEW_MEMORY_FLOORS_SETTING
+from control_plane.http_routes.mutation_support import idempotency_scope
+from control_plane.product_config import plan_product_config_authority_bundle
+from control_plane.service_runtime_settings import (
+    ServiceRuntimeSettingRequest,
+    apply_service_runtime_setting,
+)
 from control_plane.service_agent_identities import (
     AGENT_BEARER_SOURCE_KEY,
     load_service_agent_identities,
@@ -23,7 +35,12 @@ from control_plane.service_auth import (
     bearer_identity_from_token,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import PostgresRecordStore, DbOnlyMutationRequest
+from control_plane.storage.product_authority_bundle import (
+    ProductAuthorityBundle,
+    RuntimeEnvironmentWrite,
+    RuntimeEnvironmentDelete,
+)
 from tests.support.auth import _StubVerifier, _identity
 from tests.support.http import get as http_get
 from tests.support.stores import sqlite_database_url
@@ -97,6 +114,25 @@ class ServiceAgentIdentityTests(unittest.TestCase):
             context_name=context,
             instance_name=instance,
             actor="isolated-test",
+        )
+
+    def admin_policy(self) -> LaunchplaneAuthzPolicy:
+        return LaunchplaneAuthzPolicy.model_validate(
+            {
+                "local_admins": [
+                    {
+                        "subjects": [self.bootstrap.local_admin_subject],
+                        "token_labels": [self.bootstrap.local_admin_token_label],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [
+                            "product_config.plan",
+                            "product_config.apply",
+                            "authz_policy_grant.write",
+                        ],
+                    }
+                ]
+            }
         )
 
     def load(self) -> BearerIdentityConfig:
@@ -267,7 +303,6 @@ class ServiceAgentIdentityTests(unittest.TestCase):
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
             authz_policy=_product_environment_read_policy(
-                context="launchplane",
                 products=("launchplane",),
                 actions=("product_config.plan", "product_config.apply"),
             ),
@@ -280,16 +315,6 @@ class ServiceAgentIdentityTests(unittest.TestCase):
                     {
                         "integration": secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
                         "binding_key": "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN",
-                        "value": "untrusted-fixture",
-                    }
-                ]
-            },
-            {
-                "secrets": [
-                    {
-                        "integration": secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
-                        "name": "existing-identity-record",
-                        "binding_key": "OTHER_SETTING",
                         "value": "untrusted-fixture",
                     }
                 ]
@@ -315,28 +340,337 @@ class ServiceAgentIdentityTests(unittest.TestCase):
         self.assertEqual(self.store.list_secret_records(), ())
         self.assertEqual(self.store.list_runtime_environment_records(), ())
 
+    def test_general_bundle_cannot_activate_or_remove_authentication_selectors(self) -> None:
+        self.write_selectors()
+        (before,) = self.store.list_runtime_environment_records(
+            scope="context", context_name="launchplane"
+        )
+        for env in (
+            {"OTHER_SETTING": "kept"},
+            {**before.env, "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "other-fixture"},
+        ):
+            with self.subTest(env=env):
+                after = before.model_copy(update={"env": env})
+                with self.assertRaises(PermissionError):
+                    self.store.write_product_authority_bundle(
+                        ProductAuthorityBundle(
+                            runtime_environment_writes=(
+                                RuntimeEnvironmentWrite(record=after, expected_record=before),
+                            )
+                        )
+                    )
+                self.assertEqual(
+                    self.store.list_runtime_environment_records(
+                        scope="context", context_name="launchplane"
+                    ),
+                    (before,),
+                )
+
+    def test_general_bundle_cannot_displace_authentication_binding_with_unrelated_identity(
+        self,
+    ) -> None:
+        self.write_token(
+            key="LAUNCHPLANE_LOCAL_OPERATOR_TOKEN", value=self.bootstrap.local_operator_token
+        )
+        (before,) = self.store.list_secret_bindings()
+        after = before.model_copy(
+            update={"integration": "runtime_environment", "binding_key": "OTHER_SETTING"}
+        )
+        with self.assertRaises(PermissionError):
+            self.store.write_product_authority_bundle(
+                ProductAuthorityBundle(secret_bindings=(after,))
+            )
+        self.assertEqual(self.store.list_secret_bindings(), (before,))
+
+    def test_general_bundle_cannot_delete_the_authentication_source_record(self) -> None:
+        self.write_selectors()
+        (before,) = self.store.list_runtime_environment_records(
+            scope="context", context_name="launchplane"
+        )
+        event = RuntimeEnvironmentDeleteEvent(
+            event_id="fixture-deletion",
+            recorded_at=before.updated_at,
+            scope=before.scope,
+            context=before.context,
+            env_keys=tuple(before.env),
+            env_value_count=len(before.env),
+        )
+        with self.assertRaises(PermissionError):
+            self.store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    delete_runtime_environments=(
+                        RuntimeEnvironmentDelete(expected_record=before, event=event),
+                    )
+                )
+            )
+        self.assertEqual(
+            self.store.list_runtime_environment_records(
+                scope="context", context_name="launchplane"
+            ),
+            (before,),
+        )
+
+    def test_administrator_authority_is_rechecked_after_planning(self) -> None:
+        active = LaunchplaneAuthzPolicyRecord(
+            record_id="active-admin",
+            source="test",
+            updated_at="2026-10-28T00:00:00Z",
+            policy=self.admin_policy(),
+        )
+        active = self.store.seed_authz_policy_if_absent(active)
+        _, bundle = plan_product_config_authority_bundle(
+            record_store=self.store,
+            payload={
+                "product": "launchplane",
+                "context": "launchplane",
+                "runtime_env": {AGENT_BEARER_SOURCE_KEY: "records"},
+            },
+            mode="apply",
+            actor="isolated-test",
+            source_label="isolated-test",
+        )
+        revoked = LaunchplaneAuthzPolicyRecord(
+            record_id="revoked-admin",
+            revision=active.revision + 1,
+            source="test",
+            updated_at=active.updated_at,
+            policy=LaunchplaneAuthzPolicy(),
+        )
+        change = self.store.compare_and_write_authz_policy_record(
+            expected_record=active, replacement_record=revoked
+        )
+        self.assertEqual(change.status, "written")
+        identity = LocalAdminIdentity(
+            subject=self.bootstrap.local_admin_subject,
+            token_label=self.bootstrap.local_admin_token_label,
+        )
+        with self.assertRaises(PermissionError):
+            self.store.write_product_authority_bundle(bundle, identity=identity)
+        self.assertEqual(self.store.list_runtime_environment_records(), ())
+        self.assertEqual(
+            bearer_identity_from_token(token=self.bootstrap.local_admin_token, config=self.load()),
+            identity,
+        )
+
+    def test_general_bundle_cannot_rotate_a_token_through_an_innocuous_alias(self) -> None:
+        self.write_selectors()
+        self.write_token(
+            key="LAUNCHPLANE_LOCAL_OPERATOR_TOKEN", value=self.bootstrap.local_operator_token
+        )
+        (record,) = self.store.list_secret_records()
+        _, bundle = plan_product_config_authority_bundle(
+            record_store=self.store,
+            payload={
+                "product": "launchplane",
+                "context": "launchplane",
+                "secrets": [
+                    {
+                        "integration": secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                        "name": record.name,
+                        "binding_key": "OTHER_SETTING",
+                        "value": "untrusted-fixture",
+                    }
+                ],
+            },
+            mode="apply",
+            actor="isolated-test",
+            source_label="isolated-test",
+        )
+        with self.assertRaises(PermissionError):
+            self.store.write_product_authority_bundle(bundle)
+        self.assertEqual(self.load().local_operator_token, self.bootstrap.local_operator_token)
+
+    def test_onboarding_cannot_activate_preposition_or_displace_authentication(self) -> None:
+        self.write_token(
+            key="LAUNCHPLANE_LOCAL_OPERATOR_TOKEN", value=self.bootstrap.local_operator_token
+        )
+        (binding,) = self.store.list_secret_bindings()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_environment_read_policy(
+                products=("launchplane",), actions=("product_onboarding.apply",)
+            ),
+            record_store_factory=lambda: self.store,
+        )
+        cases: tuple[dict[str, object], ...] = (
+            {
+                "runtime_environments": [
+                    {
+                        "scope": "context",
+                        "context": "launchplane",
+                        "env": {AGENT_BEARER_SOURCE_KEY: "records"},
+                    }
+                ]
+            },
+            {
+                "secret_bindings": [
+                    {
+                        "integration": secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                        "context": "launchplane",
+                        "binding_key": "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN",
+                        "secret_id": binding.secret_id,
+                        "status": "configured",
+                    }
+                ]
+            },
+            {
+                "secret_bindings": [
+                    {
+                        "binding_id": binding.binding_id,
+                        "integration": "runtime_environment",
+                        "context": "launchplane",
+                        "binding_key": "OTHER_SETTING",
+                        "secret_id": binding.secret_id,
+                        "status": "configured",
+                    }
+                ]
+            },
+        )
+        for index, fields in enumerate(cases):
+            with self.subTest(fields=fields):
+                key = f"onboarding-identity-{index}"
+                response = asyncio.run(
+                    http_request(
+                        app,
+                        "POST",
+                        "/v1/product-onboarding/apply",
+                        headers={"Authorization": "Bearer valid-token", "Idempotency-Key": key},
+                        payload={
+                            "product": "launchplane",
+                            "manifest": {
+                                "product": "launchplane",
+                                "display_name": "Synthetic Service",
+                                "repository": "example/synthetic-service",
+                                "image_repository": "ghcr.io/example/synthetic-service",
+                                "lanes": [{"instance": "testing", "context": "launchplane"}],
+                                **fields,
+                            },
+                        },
+                    )
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertIsNone(
+                    self.store.read_idempotency_record(
+                        scope=idempotency_scope(_identity()),
+                        route_path="/v1/product-onboarding/apply",
+                        idempotency_key=key,
+                    )
+                )
+                self.assertEqual(self.store.list_secret_bindings(), (binding,))
+                self.assertEqual(self.store.list_product_profile_records(), ())
+                self.assertEqual(self.store.list_runtime_environment_records(), ())
+
+    def test_unrelated_service_setting_and_credentials_preserve_authentication(self) -> None:
+        self.write_selectors()
+        self.write_token(
+            key="LAUNCHPLANE_LOCAL_OPERATOR_TOKEN", value=self.bootstrap.local_operator_token
+        )
+        before = self.load()
+        request = ServiceRuntimeSettingRequest(
+            key=PREVIEW_MEMORY_FLOORS_SETTING,
+            value='{"synthetic-host":5368709120}',
+            reason="Synthetic setting qualification.",
+        )
+
+        def apply_setting(setting: ServiceRuntimeSettingRequest) -> dict[str, object]:
+            return apply_service_runtime_setting(
+                store=self.store,
+                request=setting,
+                actor="isolated-test",
+                trace_id="setting-fixture",
+                idempotency_key="setting-fixture",
+            )
+
+        plan = apply_setting(request)
+        apply_setting(
+            request.model_copy(
+                update={"mode": "apply", "expected_plan_digest": plan["plan_digest"]}
+            )
+        )
+        _, bundle = plan_product_config_authority_bundle(
+            record_store=self.store,
+            payload={
+                "product": "launchplane",
+                "context": "launchplane",
+                "secrets": [
+                    {
+                        "integration": secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                        "binding_key": "OTHER_SERVICE_CREDENTIAL",
+                        "value": "unrelated-fixture",
+                    }
+                ],
+            },
+            mode="apply",
+            actor="isolated-test",
+            source_label="isolated-test",
+        )
+        self.store.write_product_authority_bundle(bundle)
+        self.assertEqual(self.load(), before)
+
+    def test_current_token_version_cannot_be_overwritten_by_a_general_bundle(self) -> None:
+        self.write_selectors()
+        self.write_token(
+            key="LAUNCHPLANE_LOCAL_OPERATOR_TOKEN", value=self.bootstrap.local_operator_token
+        )
+        (record,) = self.store.list_secret_records()
+        version = self.store.read_secret_version(record.current_version_id)
+        ciphertext, key_id = secrets._encrypt_secret_value("untrusted-fixture")
+        with self.assertRaises(PermissionError):
+            self.store.write_product_authority_bundle(
+                ProductAuthorityBundle(
+                    secret_versions=(
+                        version.model_copy(update={"ciphertext": ciphertext, "key_id": key_id}),
+                    )
+                )
+            )
+        self.assertEqual(self.load().local_operator_token, self.bootstrap.local_operator_token)
+
+    def test_refused_reserved_bundle_leaves_no_mutation_receipt(self) -> None:
+        bundle = ProductAuthorityBundle(
+            runtime_environments=(
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="launchplane",
+                    env={AGENT_BEARER_SOURCE_KEY: "records"},
+                    updated_at="2026-10-28T00:00:00Z",
+                ),
+            )
+        )
+        mutation = DbOnlyMutationRequest(
+            scope="fixture",
+            route_path="/fixture",
+            idempotency_key="refused-fixture",
+            request_fingerprint="fixture",
+            lease_owner="fixture",
+            response_status_code=200,
+            response_trace_id="fixture",
+            response_payload={"status": "ok"},
+        )
+        with self.assertRaises(PermissionError):
+            self.store.compare_and_write_product_authority_bundle(bundle, mutation=mutation)
+        self.assertEqual(self.store.list_runtime_environment_records(), ())
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=mutation.scope,
+                route_path=mutation.route_path,
+                idempotency_key=mutation.idempotency_key,
+            )
+        )
+
     def test_authorized_admin_has_a_reviewed_write_only_path_for_existing_identity(self) -> None:
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(
                 _generic_site_profile_payload("launchplane")
             )
         )
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "local_admins": [
-                    {
-                        "subjects": [self.bootstrap.local_admin_subject],
-                        "token_labels": [self.bootstrap.local_admin_token_label],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": [
-                            "product_config.plan",
-                            "product_config.apply",
-                            "authz_policy_grant.write",
-                        ],
-                    }
-                ]
-            }
+        policy = self.admin_policy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="identity-admin-policy",
+                source="test",
+                updated_at="2026-10-28T00:00:00Z",
+                policy=policy,
+            )
         )
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),

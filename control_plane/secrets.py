@@ -444,7 +444,7 @@ def resolve_context_secret_value_from_store(
     bindings = tuple(
         binding
         for binding in record_store.list_secret_bindings(
-            integration=integration, context_name=context_name, limit=None
+            integration=integration, context_name=context_name
         )
         if binding.integration == integration
         and binding.context == context_name
