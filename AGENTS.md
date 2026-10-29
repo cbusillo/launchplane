@@ -32,6 +32,7 @@ Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product 
   or another explicit state directory, not in git-tracked history. Shared
   runtime truth is DB-backed.
 - Follow the shared [Runtime Authority Boundary](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/SKILL.md#runtime-authority-boundary).
+  See [coding standards](docs/policies/coding-standards.md) for the docs/tests boundary.
 - The only runtime configuration exception for checked-in or process-level
   config is Launchplane's own minimal bootstrap/root-of-trust wiring required
   for the service to start and reach DB-backed records and managed secrets.
@@ -41,6 +42,8 @@ Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product 
 - Follow [DIRECTION.md](DIRECTION.md) for delivery authority and retired designs.
   Use the shared [merging procedure](https://github.com/cbusillo/codex-skills/blob/main/skills/github/SKILL.md#merging)
   for handoff and train routing.
+  Without explicit train authority, use the checked `gh-pr.py ready` handoff
+  on the current PR head.
   The train admits trusted, proven current-head handoffs between candidates;
   see [train admission](docs/merge-train-policy.md#ready-handoffs). Until that
   source is deployed, the Supervisor's interim watcher supplies enqueue labels.
@@ -62,6 +65,9 @@ Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product 
 - Keep cross-repo boundaries explicit; do not move release ownership back into
   tenant, shared-addon, or local-DX repos.
 - Never commit secrets or admin-local overrides.
+- Do not use local CLI live-target commands from an arbitrary checkout as a
+  fallback; use a supported service capability or record the exact missing
+  service/activation prerequisite. See [operations](docs/operations.md).
 - Treat service-host env as bootstrap-only unless a repo doc explicitly calls
   out a narrower scoped bootstrap or rehearsal exception.
 - Update docs in the same change when behavior or ownership changes.

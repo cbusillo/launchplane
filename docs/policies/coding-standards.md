@@ -9,8 +9,10 @@ title: Coding Standards
   into a permanent abstraction.
 - Do not parse logs when explicit records or typed contracts should exist.
 - Follow the shared [Runtime Authority Boundary](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/SKILL.md#runtime-authority-boundary).
-- Real-world examples may appear only in docs or tests, and they must not be
-  reachable by production code without a stored runtime record or admin-supplied input.
+- Do not hard-code real tenant, product, repository, branch, domain, or admin
+  values in smoke fixtures. Real-world examples may appear only in docs or tests,
+  and they must not be reachable by production code without a stored runtime
+  record or admin-supplied input.
 - The only checked-in/process-level runtime config exception is Launchplane's
   minimal self-bootstrap/root-of-trust wiring needed to reach DB-backed records
   and managed secrets.

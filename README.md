@@ -59,8 +59,8 @@ preview, runtime-environment, authorization, and encrypted managed-secret
 records. File-backed records and local CLI operations support development,
 rehearsal, and explicit bootstrap repair; they are not shared runtime authority.
 
-Follow the shared [Runtime Authority Boundary](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/SKILL.md#runtime-authority-boundary).
-Direct DB mutation flags are local/bootstrap repair tools. See the
+Use the deployed service API or Launchplane UI for routine shared/runtime
+mutations. Direct DB mutation flags are local/bootstrap repair tools. See the
 [configuration boundary](docs/config-boundary.md),
 [service boundary](docs/service-boundary.md), and [operations](docs/operations.md)
 for supported paths and their prerequisites.
