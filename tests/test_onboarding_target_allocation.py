@@ -1,6 +1,6 @@
 import json
-from collections.abc import Callable
 from datetime import timedelta
+from types import MethodType
 from typing import Any
 from unittest.mock import patch
 
@@ -152,9 +152,15 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
         self.assert_production_unchanged()
 
     async def read_allocation(self) -> dict[str, Any]:
+        targets = self.store.list_dokploy_target_id_records()
+        calls = self.provider.call_args_list.copy()
         readback = await self.post(mode="readback")
         self.assertEqual(readback.status_code, 202, readback.text)
         result: dict[str, Any] = readback.json()["result"]
+        self.assertNotEqual(result["allocation_state"], "adopted")
+        self.assertEqual(self.store.list_dokploy_target_id_records(), targets)
+        self.assertEqual(self.provider.call_args_list, calls)
+        self.assert_no_authority_applied()
         return result
 
     async def resume_allocation(self) -> None:
@@ -195,12 +201,10 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
 
     async def interrupt_acknowledged_checkpoint(self, field: str) -> dict[str, Any]:
         await self.plan()
-        checkpoint: Callable[[ApplicationStateVolumeAdapter, Any, str], None] = (
-            ApplicationStateVolumeAdapter._checkpoint_phase
-        )
+        checkpoint = ApplicationStateVolumeAdapter._checkpoint_phase
 
         def interrupt(adapter: ApplicationStateVolumeAdapter, lease: Any, phase: str) -> None:
-            checkpoint(adapter, lease, phase)
+            MethodType(checkpoint, adapter)(lease, phase)
             acknowledged = json.loads(phase)
             if field in acknowledged and "pending" not in acknowledged:
                 raise OSError("fixture: stopped after acknowledged allocation")
