@@ -406,9 +406,8 @@ class PromotionRecoveryTests(unittest.TestCase):
         effects = list(self.provider.deployed_artifacts)
         with (
             patch.object(monitor, "fetch_private_health_url", side_effect=observe),
-            patch.object(
-                promotion_workflow,
-                "wait_for_runtime_identity_healthcheck_with_retry",
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
                 side_effect=check,
             ),
         ):
