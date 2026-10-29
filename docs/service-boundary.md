@@ -1326,6 +1326,16 @@ writes, and distinguishes Launchplane-managed runtime repos from awareness-only
 Every Code work-request repos. Managed runtime entries come from product profile
 records and include product, contexts, stable environments, driver id, and
 preview context; awareness entries do not imply Launchplane runtime ownership.
+When multiple active profiles share a repository name or repository id, the
+existing ambiguous repository list remains unchanged and each listed name can
+carry the product ids in `ambiguous_repository_product_references` from that
+complete ambiguity group. Product ids are
+filtered independently through each product's existing `product_profile.read`
+grant. `product_reference_coverage` reports the product-profile collection source and whether
+authorization scoped the returned ids, including when no reference is visible.
+Consumers use an authorized product-profile read and the existing scoped
+product/environment reads to inspect release inputs; this mapping does not read
+artifact manifests, release tuples, addon repositories, or addon pins.
 
 `GET /v1/agent/context` is a native FastAPI thin read-only aggregation endpoint
 for public-safe skill preflight. It requires `product_environment.read` for
@@ -1336,6 +1346,13 @@ Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
 writes no
 records, fetches no issue bodies, and must preserve the lower-level
 redaction/provenance rules.
+
+Full train Client qualification remains independent of this discovery hint.
+`control_plane/client_release_repositories.py::client_release_profiles` starts
+from active product profiles, reads each Odoo stable lane's release tuple, and
+then reads its artifact manifest to match recorded addon sources. Its caller is
+`control_plane/merge_train_github.py::client_review_intent`; the mapping route
+does not replace or short-circuit those product/artifact store reads.
 
 `POST /v1/work-graph/merge-train/run-once` is the authenticated service ingress
 for one ordered-queue read or mutation pass. It resolves repository/base policy

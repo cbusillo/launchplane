@@ -13,6 +13,9 @@ from control_plane.contracts.release_review import (
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
 )
+from control_plane.contracts.repo_product_mapping_read_model import (
+    build_repo_product_mapping_service_payload,
+)
 from control_plane.release_review import (
     build_release_review,
     checklist_blockers,
@@ -180,6 +183,21 @@ class SharedReleaseReviewTests(unittest.TestCase):
         )
         self.assertEqual(
             client_release_profiles(store=self.store, repository="example/unrelated"), ()
+        )
+        other = profile().model_copy(update={"product": "site-next-version"})
+        self.store.write_product_profile_record(other)
+        mapping = cast(
+            dict[str, Any],
+            build_repo_product_mapping_service_payload(
+                generated_at="2026-10-29T12:00:00Z",
+                product_store=self.store,
+                work_request_store=self.store,
+            )["mapping"],
+        )
+        references = mapping["ambiguous_repository_product_references"]
+        self.assertEqual(
+            references,
+            [{"repository": profile().repository, "products": [profile().product, other.product]}],
         )
         reader = GitHubMergeTrainSnapshotReader(
             transport=RecordingMergeTrainGitHubTransport(responses=()),
