@@ -1328,9 +1328,10 @@ records and include product, contexts, stable environments, driver id, and
 preview context; awareness entries do not imply Launchplane runtime ownership.
 When multiple active profiles share a repository name or repository id, the
 existing ambiguous repository list remains unchanged and each listed name can
-carry the product ids from that complete ambiguity group. Product ids are
+carry the product ids in `ambiguous_repository_product_references` from that
+complete ambiguity group. Product ids are
 filtered independently through each product's existing `product_profile.read`
-grant. Coverage reports both the product-profile collection source and whether
+grant. `product_reference_coverage` reports the product-profile collection source and whether
 authorization scoped the returned ids, including when no reference is visible.
 Consumers use an authorized product-profile read and the existing scoped
 product/environment reads to inspect release inputs; this mapping does not read

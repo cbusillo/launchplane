@@ -266,7 +266,6 @@ class RepoProductMappingServiceTests(unittest.TestCase):
             product_store=_CoveredProductStore(profiles, "complete"),
             work_request_store=_WorkRequestStore(()),
             product_reference_allowed=lambda product: product != "hidden-client",
-            authorization_complete=False,
         )
 
         mapping = cast(dict[str, object], payload["mapping"])

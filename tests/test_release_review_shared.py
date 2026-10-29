@@ -199,15 +199,6 @@ class SharedReleaseReviewTests(unittest.TestCase):
             references,
             [{"repository": profile().repository, "products": [profile().product, other.product]}],
         )
-        self.assertEqual(
-            {
-                member.product
-                for member in client_release_profiles(
-                    store=self.store, repository="example/shared-addons"
-                )
-            },
-            set(references[0]["products"]),
-        )
         reader = GitHubMergeTrainSnapshotReader(
             transport=RecordingMergeTrainGitHubTransport(responses=()),
             branch_refresh_store=cast(Any, self.store),

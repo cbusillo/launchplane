@@ -116,6 +116,22 @@ def build_repo_product_mapping_from_records(
 ) -> RepoProductMapping:
     entries: dict[str, RepoProductMappingEntry] = {}
     ambiguous, reference_products = _ambiguous_repository_groups(product_profiles)
+    readable_products = {
+        profile.product
+        for profile in product_profiles
+        if product_reference_allowed is None or product_reference_allowed(profile.product)
+    }
+    if product_reference_coverage is not None and any(
+        profile.product not in readable_products for profile in product_profiles
+    ):
+        product_reference_coverage = product_reference_coverage.model_copy(
+            update={
+                "authorization": "scoped",
+                "status": "scoped"
+                if product_reference_coverage.source == "complete"
+                else product_reference_coverage.source,
+            }
+        )
     for profile in product_profiles:
         repository = profile.repository.strip()
         if not repository or "/" not in repository:
@@ -148,11 +164,7 @@ def build_repo_product_mapping_from_records(
         ambiguous_repository_product_references=tuple(
             AmbiguousRepositoryProductReference(
                 repository=repository,
-                products=tuple(
-                    product
-                    for product in products
-                    if product_reference_allowed is None or product_reference_allowed(product)
-                ),
+                products=tuple(product for product in products if product in readable_products),
             )
             for repository, products in sorted(reference_products.items())
         ),
@@ -230,7 +242,6 @@ def build_repo_product_mapping_service_payload(
     product_store: RepoProductMappingProductStore,
     work_request_store: RepoProductMappingWorkRequestStore,
     product_reference_allowed: Callable[[str], bool] | None = None,
-    authorization_complete: bool = True,
 ) -> dict[str, object]:
     product_profiles = tuple(
         profile for profile in product_store.list_product_profile_records() if profile.is_active
@@ -245,7 +256,7 @@ def build_repo_product_mapping_service_payload(
             product_store,
             collections=("product_profiles",),
             population="active_product_profiles",
-            authorization_complete=authorization_complete,
+            authorization_complete=True,
             exclusions=("inactive_products",),
         ),
     )

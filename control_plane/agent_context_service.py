@@ -53,7 +53,6 @@ def build_agent_context_service_payload(
     preview_readiness_store: object,
     tenant_admission_section: AgentContextSection | None = None,
     product_reference_allowed: Callable[[str], bool] | None = None,
-    product_reference_authorization_complete: bool = True,
 ) -> AgentContextPayload:
     normalized_repository = repository.strip()
     sections = {
@@ -63,7 +62,6 @@ def build_agent_context_service_payload(
                 product_store=product_store,  # type: ignore[arg-type]
                 work_request_store=work_request_store,
                 product_reference_allowed=product_reference_allowed,
-                authorization_complete=product_reference_authorization_complete,
             )
         ),
         "preview_readiness": _available_section(
