@@ -1171,6 +1171,8 @@ The service exposes product profile records through `GET /v1/product-profiles`,
 `GET /v1/product-profiles/{product}`, and `POST /v1/product-profiles`. Writes
 require the `product_profile.write` action for the target product in the
 Launchplane service context; reads use `product_profile.read`.
+Stored profiles with retired preview settings remain readable in the catalog
+and declaration client; new writes still require the reviewed transition.
 An existing full-profile write preserves classification provenance when an
 older payload omits it, and refuses explicit classification or provenance
 changes. Use the reviewed production-use endpoint for those changes.

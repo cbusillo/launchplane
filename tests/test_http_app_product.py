@@ -2261,6 +2261,35 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             ["sellyouroutboard"],
         )
 
+    async def test_list_product_profiles_preserves_read_only_stored_transport(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            profile_payload = _product_profile_payload()
+            preview = cast(dict[str, object], profile_payload["preview"])
+            preview.update(
+                transport_extension="verireel-postgres",
+                data_transport_mode="driver",
+                app_name_prefix="preview-app",
+                transport_database_prefix="preview_db",
+            )
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                profile_payload, context={"stored_product_profile": True}
+            )
+            with self.assertRaises(ValueError):
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            store.write_product_profile_record(profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_read_policy(product="launchplane"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_product_profiles(app, driver_id=profile.driver_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["profiles"], [profile.model_dump(mode="json")])
+        self.assertEqual(response.json()["coverage"]["status"], "complete")
+
     async def test_show_product_profile_returns_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

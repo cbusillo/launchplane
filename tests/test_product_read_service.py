@@ -24,7 +24,6 @@ from control_plane.product_read_service import (
     ProductReadModelStoreCapabilityError,
     build_product_environment_list_service_payload,
     build_product_environment_read_service_result,
-    build_product_profile_list_service_payload,
     require_product_environment_read_model_store,
 )
 
@@ -223,16 +222,6 @@ class ProductReadServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.profile = LaunchplaneProductProfileRecord.model_validate(_profile_payload())
         self.store = _ProductReadStore(self.profile)
-
-    def test_product_profile_list_payload_preserves_driver_filter(self) -> None:
-        payload = build_product_profile_list_service_payload(
-            record_store=self.store,
-            driver_id="generic-web",
-        )
-
-        self.assertEqual(payload["driver_id"], "generic-web")
-        profiles = cast(list[dict[str, object]], payload["profiles"])
-        self.assertEqual(len(profiles), 1)
 
     def test_product_read_model_store_requires_db_summary_capabilities(self) -> None:
         class PartialStore:
