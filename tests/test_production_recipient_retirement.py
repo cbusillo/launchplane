@@ -524,11 +524,14 @@ class RetirementProtectionTests(unittest.TestCase):
     def test_existing_backup_guard_and_post_window_capture_both_apply(self) -> None:
         import click
         from tests.test_production_promotion_backup import ProductionPromotionBackupTests
+        from control_plane.workflows.production_promotion_backup import (
+            GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+        )
 
         fixture = ProductionPromotionBackupTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
-        store = fixture.capture(retirement.GENERIC_WEB_PROMOTION_BACKUP_ACTION)
+        store = fixture.capture(GENERIC_WEB_PROMOTION_BACKUP_ACTION)
         capture = store.read_backup_gate_record("backup-example")
         record: Any = SimpleNamespace(product=capture.context, context=capture.context)
         request: Any = SimpleNamespace(backup_record_id=capture.record_id)
