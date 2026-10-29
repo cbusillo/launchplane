@@ -24044,6 +24044,8 @@ def create_launchplane_fastapi_app(
                     odoo_usage=odoo_usage,
                 )
                 resource_facts: dict[str, str] | None = None
+                if preview_reference and facts.production_resources == "shared":
+                    raise ValueError("preview_production_resources_shared")
                 if preview_reference:
                     resource_facts = {
                         "production_resources": "isolated",

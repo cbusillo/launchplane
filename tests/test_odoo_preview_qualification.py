@@ -1,4 +1,7 @@
 from pathlib import Path
+import hashlib
+import base64
+import json
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -8,6 +11,7 @@ from control_plane.contracts.product_profile_record import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     LaunchplaneProductProfileRecord,
 )
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 from control_plane.odoo_preview_apply_http import (
@@ -146,11 +150,14 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             "authenticated_sessions": False,
             "resources_qualified": True,
         }
+        self.preview_candidates = ["fixture-local-password"]
+        self.production_status = "done"
 
     def provider(self, **kwargs: Any) -> dict[str, object]:
         if kwargs["target_id"] == "production-target":
             return {
                 "name": "production",
+                "composeStatus": self.production_status,
                 "env": "\n".join(f"{key}={value}" for key, value in self.production.items()),
             }
         return {
@@ -160,7 +167,80 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         }
 
     def read_frame(self, **kwargs: Any) -> None:
-        kwargs["receive"](self.frame)
+        frame = dict(self.frame)
+        if frame.get("resources_qualified"):
+            nonce = kwargs["payload"]["preview_spec"]["credential_nonce"]
+            frame["credential_hashes"] = [
+                hashlib.sha256((nonce + value).encode()).hexdigest()
+                for value in self.preview_candidates
+            ]
+        kwargs["receive"](frame)
+
+    async def test_production_url_password_in_preview_standalone_value_refuses(self) -> None:
+        self.production["SMTP_URL"] = "smtps://sender:private-production-token@mail.example.invalid"
+        self.preview_candidates = ["private-production-token"]
+        response = await self.collect()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("preview_production_credentials_shared", response.text)
+        spec = self.remote.call_args.kwargs["payload"]["preview_spec"]
+        self.assertNotIn("production_credential_hashes", spec)
+        self.assertNotIn("private-production", str(spec))
+
+    async def test_other_integrations_and_encoded_provider_secrets_are_compared(self) -> None:
+        secret = "private-extra-production-token"
+        binding = SecretBinding(
+            binding_id="fixture-binding",
+            secret_id="fixture-secret",
+            integration="custom-provider",
+            binding_key="API_TOKEN",
+            context="cm",
+            instance="prod",
+            created_at=self.profile.updated_at,
+            updated_at=self.profile.updated_at,
+        )
+        self.preview_candidates = [secret]
+
+        def values(**kwargs: Any) -> dict[str, str]:
+            return (
+                {"API_TOKEN": secret}
+                if kwargs["integration"] == binding.integration
+                else {key: self.production[key] for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS}
+            )
+
+        with (
+            patch(
+                "control_plane.storage.postgres.PostgresRecordStore.list_secret_bindings",
+                return_value=(binding,),
+            ),
+            patch(
+                "control_plane.odoo_preview_qualification.secrets.resolve_secret_values_for_integration_from_store",
+                side_effect=values,
+            ),
+        ):
+            response = await self.collect()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("preview_production_credentials_shared", response.text)
+        self.production["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"] = base64.b64encode(
+            json.dumps(
+                {
+                    "config_parameters": [
+                        {"key": "custom.api_token", "value": {"source": "literal", "value": secret}}
+                    ]
+                }
+            ).encode()
+        ).decode()
+        response = await self.collect()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("preview_production_credentials_shared", response.text)
+
+    async def test_production_status_ticks_do_not_invalidate_credential_authority(self) -> None:
+        def status_tick(**kwargs: Any) -> None:
+            self.production_status = "idle"
+            self.read_frame(**kwargs)
+
+        self.remote.side_effect = status_tick
+        response = await self.collect()
+        self.assertEqual(response.status_code, 202, response.text)
 
     async def collect(self) -> Any:
         scope = dict(
@@ -260,6 +340,28 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                         self.profile.product, "cm", self.issued.preview_slug
                     )
                 )
+
+    async def test_current_shared_alias_cannot_be_overwritten_by_preview_probe(self) -> None:
+        self.store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="cm", instance=self.issued.preview_slug, updated_at=self.profile.updated_at
+            )
+        )
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context="cm",
+                instance=self.issued.preview_slug,
+                target_id="production-target",
+                updated_at=self.profile.updated_at,
+            )
+        )
+        response = await self.collect()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, "cm", self.issued.preview_slug
+            )
+        )
 
     async def test_generation_drift_and_provider_denial_cannot_publish(self) -> None:
         def changed(**kwargs: Any) -> None:

@@ -1,6 +1,10 @@
 """Value-free occupancy reads through the service's existing provider transport."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import base64
+import inspect
+import json
+from urllib.parse import parse_qsl, unquote, urlsplit
 from pathlib import Path
 from typing import Literal
 import click
@@ -21,6 +25,7 @@ ODOO_USAGE_PROBE_REASON_CODES = frozenset(
         "container_identity_changed",
         "container_inventory_unavailable",
         "container_probe_unavailable",
+        "credential_inventory_unavailable",
         "database_cleanup_unavailable",
         "database_connection_unavailable",
         "database_driver_unavailable",
@@ -84,6 +89,7 @@ class OdooTestingUsage:
     proof_sha256: str = ""
     never_served_candidate: bool = False
     resources_qualified: bool = False
+    credential_hashes: tuple[str, ...] = field(default=(), repr=False)
 
     def payload(self) -> dict[str, object]:
         return {
@@ -99,9 +105,9 @@ class OdooTestingUsage:
 
 # Runs inside the existing web container. No ORM, registry, HTTP authentication,
 # session-store get/save/GC, account names, tokens or session IDs leave it.
-ODOO_TESTING_USAGE_CONTAINER_PROGRAM = r"""
+ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE = r"""
 import argparse, configparser, json, os, re, stat
-EXPECTED_INSTANCE='testing'
+EXPECTED_INSTANCE=__EXPECTED_INSTANCE__
 from pathlib import Path
 CONFIG_PATH=__CONFIG_PATH__
 checkpoint='testing_environment_unavailable'
@@ -244,8 +250,52 @@ if __name__=='__main__':
 """.replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH))
 
 
+def odoo_usage_container_program(instance: str) -> str:
+    if instance not in {"testing", "preview"}:
+        raise ValueError("unsupported_lane")
+    return ODOO_USAGE_CONTAINER_PROGRAM_TEMPLATE.replace("__EXPECTED_INSTANCE__", repr(instance))
+
+
+ODOO_TESTING_USAGE_CONTAINER_PROGRAM = odoo_usage_container_program("testing")
+
+
+def credential_candidates(values: list[str]) -> set[str]:
+    candidates: set[str] = set()
+    pending: list[object] = list(values)
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            pending.extend(value.values())
+            continue
+        if isinstance(value, list):
+            pending.extend(value)
+            continue
+        if not isinstance(value, str) or not value or value in candidates:
+            continue
+        if len(candidates) >= 4096 or len(value) > 1024 * 1024:
+            raise ValueError("credential_inventory_unavailable")
+        candidates.add(value)
+        try:
+            address = urlsplit(value)
+        except ValueError:
+            address = urlsplit("")
+        password = address.password
+        if password:
+            pending.append(unquote(password))
+        pending.extend(item for _, item in parse_qsl(address.query))
+        for encoded in (False, True):
+            try:
+                pending.append(
+                    json.loads(base64.b64decode(value, validate=True) if encoded else value)
+                )
+            except (ValueError, UnicodeError):
+                continue
+    return candidates
+
+
 ODOO_TESTING_USAGE_HOST_PROGRAM = (
     COPY_RUNTIME_INSPECTION_LIBRARY
+    + inspect.getsource(credential_candidates)
     + r"""
 import base64,hashlib,json,subprocess,sys
 from urllib.parse import parse_qsl,unquote,urlsplit
@@ -304,7 +354,10 @@ def containers():
                  'StartedAt':value['State']['StartedAt']} for key,value in services.items()}
 
 def one_inspection(identifier):
-    rows=json.loads(docker('inspect',identifier))
+    try:
+        rows=json.loads(docker('inspect',identifier))
+    except subprocess.CalledProcessError:
+        raise UsageUnavailable('container_inventory_unavailable')
     if not isinstance(rows,list) or len(rows)!=1:
         raise UsageUnavailable('container_inventory_unavailable')
     return rows[0]
@@ -312,23 +365,22 @@ def one_inspection(identifier):
 def preview_resources():
     resource_spec=spec['preview_spec']
     inspected=inspect_copy_runtime(resource_spec,expected_instance='preview')
+    candidates=set()
+    snapshots={}
     for service,(_,container) in inspected.items():
         environment=dict(item.split('=',1) for item in container['Config']['Env'] if '=' in item)
-        candidates=set(environment.values())
-        for value in environment.values():
-            try:
-                address=urlsplit(value)
-                if address.password:
-                    candidates.add(unquote(address.password))
-                candidates.update(value for _,value in parse_qsl(address.query))
-            except ValueError:
-                continue
-        hashes={hashlib.sha256((resource_spec['credential_nonce']+value).encode()).hexdigest() for value in candidates}
-        if hashes.intersection(resource_spec['production_credential_hashes']) or any(environment.get(key) for key in resource_spec['forbidden_credential_keys']):
+        try:
+            candidates.update(credential_candidates(list(environment.values())))
+        except ValueError:
+            raise UsageUnavailable('credential_inventory_unavailable')
+        if any(environment.get(key) for key in resource_spec['forbidden_credential_keys']):
             raise CopyReadbackRefused(ReadbackPredicate.CREDENTIALS)
         if service!='database' and json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))!=resource_spec['runtime_identity']:
             raise CopyReadbackRefused(ReadbackPredicate.RUNTIME_IDENTITY)
-    return inspected
+        snapshots[service]={key:container.get(key) for key in ('Id','Image','Config','Mounts','NetworkSettings','HostConfig')}
+        snapshots[service]['State']={key:container['State'].get(key) for key in ('Running','StartedAt','FinishedAt','Restarting','Paused')}
+    hashes=sorted(hashlib.sha256((resource_spec['credential_nonce']+value).encode()).hexdigest() for value in candidates)
+    return snapshots,hashes
 
 try:
     checkpoint='resource_resources_qualified' if spec.get('preview_spec') else checkpoint
@@ -350,7 +402,7 @@ try:
     # mounts and network changes invalidate the observation.
     if before!=after:
         raise UsageUnavailable('runtime_changed')
-    if resources_before is not None:
+    if resources_before is not None and before and before['web']['Running']:
         resource_spec=spec['preview_spec']
         checkpoint='resource_integrations_isolated'
         isolation=docker('exec','-i',before['web']['Id'],'python3','-',resource_spec['database_name'],resource_spec['integration_spec'],stdin=resource_spec['integration_program'].encode())
@@ -364,6 +416,7 @@ try:
         raise UsageUnavailable('probe_result_invalid')
     if resources_before is not None and 'unavailable' not in result:
         result['resources_qualified']=True
+        result['credential_hashes']=resources_before[1]
     print(prefix+json.dumps(result),flush=True)
 except CopyReadbackRefused as error:
     print(prefix+json.dumps({'type':'complete','unavailable':True,'reason_code':'resource_'+error.predicate}),flush=True)
@@ -410,11 +463,9 @@ def read_odoo_testing_usage(
                 "project": project,
                 "context": target.context,
                 "instance": "preview" if preview_spec is not None else "testing",
-                "container_program": ODOO_TESTING_USAGE_CONTAINER_PROGRAM.replace(
-                    "EXPECTED_INSTANCE='testing'", "EXPECTED_INSTANCE='preview'"
-                )
-                if preview_spec is not None
-                else ODOO_TESTING_USAGE_CONTAINER_PROGRAM,
+                "container_program": odoo_usage_container_program(
+                    "preview" if preview_spec is not None else "testing"
+                ),
                 **(
                     {
                         "preview_spec": {
@@ -468,7 +519,7 @@ def read_odoo_testing_usage(
             len(frames) != 1
             or set(frames[0])
             != {"type", "recent_signins", "authenticated_sessions"}
-            | ({"resources_qualified"} if preview_spec is not None else set())
+            | ({"resources_qualified", "credential_hashes"} if preview_spec is not None else set())
             or frames[0]["type"] != "complete"
             or preview_spec is not None
             and frames[0].get("resources_qualified") is not True
@@ -477,12 +528,26 @@ def read_odoo_testing_usage(
         recent, sessions = frames[0]["recent_signins"], frames[0]["authenticated_sessions"]
         if type(recent) is not bool or type(sessions) is not bool:
             return OdooTestingUsage(reason_code="probe_result_invalid")
+        hashes = frames[0].get("credential_hashes", [])
+        if not isinstance(hashes, list):
+            return OdooTestingUsage(reason_code="probe_result_invalid")
+        if preview_spec is not None and (
+            not 0 < len(hashes) <= 4096
+            or any(
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+                for value in hashes
+            )
+        ):
+            return OdooTestingUsage(reason_code="probe_result_invalid")
         return OdooTestingUsage(
             "in_use" if recent or sessions else "unused",
             recent,
             sessions,
             "complete",
             resources_qualified=preview_spec is not None,
+            credential_hashes=tuple(hashes),
         )
     except NativeSourceAuthorizationDenied:
         raise

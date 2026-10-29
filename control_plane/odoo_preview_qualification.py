@@ -1,5 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.integration_readback import (
     INTEGRATION_READBACK_PROGRAM,
+    IntegrationFamily,
     integration_readback_policy,
 )
 from control_plane.odoo_preview_apply_http import build_odoo_preview_runtime_identity
@@ -25,7 +28,11 @@ from control_plane.odoo_runtime_reads import (
     assert_selection_current,
     select_preview_runtime,
 )
-from control_plane.odoo_testing_usage import OdooTestingUsage, read_odoo_testing_usage
+from control_plane.odoo_testing_usage import (
+    OdooTestingUsage,
+    credential_candidates,
+    read_odoo_testing_usage,
+)
 from control_plane.preview_reservation_recovery import original_preview_intent
 from control_plane.preview_serving_evidence import PreviewServingEvidenceError
 from control_plane.runtime_platform_credentials import (
@@ -155,6 +162,37 @@ def production_credentials(
     )
     if any(not managed.get(key) for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS):
         raise PreviewQualificationMissing("preview_production_credential_versions_unavailable")
+    production_bindings = [
+        binding
+        for binding in store.list_secret_bindings(context_name=context)
+        if binding.context == context
+        and binding.instance in {"", "prod"}
+        and binding.status == secrets.SECRET_STATUS_CONFIGURED
+    ]
+    for integration in {binding.integration for binding in production_bindings}:
+        values = (
+            managed
+            if integration == secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+            else secrets.resolve_secret_values_for_integration_from_store(
+                record_store=store,
+                integration=integration,
+                context_name=context,
+                instance_name="prod",
+                scopes=frozenset[SecretScope]({"context", "context_instance"}),
+            )
+        )
+        if {
+            binding.binding_key
+            for binding in production_bindings
+            if binding.integration == integration
+        } - values.keys():
+            raise PreviewQualificationMissing(
+                "preview_production_integration_credentials_unavailable"
+            )
+        if integration == secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION:
+            continue
+        for key, value in values.items():
+            managed[f"{integration}:{key}"] = value
     target = store.read_dokploy_target_record(context_name=context, instance_name="prod")
     target_id = store.read_dokploy_target_id_record(context_name=context, instance_name="prod")
     host, token = source.read_dokploy_config(
@@ -172,16 +210,60 @@ def production_credentials(
         not current.get(key) for key in ("ODOO_DATA_VOLUME", "ODOO_DB_VOLUME", "ODOO_LOG_VOLUME")
     ):
         raise PreviewQualificationMissing("preview_production_resource_identity_unavailable")
+    encoded_values: dict[str, str] = {}
+    encoded = current.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "")
+    if encoded:
+        encoded_payload = json.loads(base64.b64decode(encoded, validate=True))
+        for item in [
+            *encoded_payload.get("config_parameters", []),
+            *encoded_payload.get("addon_settings", []),
+        ]:
+            key = str(item.get("key") or item.get("setting") or "")
+            value = item.get("value", {}).get("value")
+            if isinstance(value, str) and looks_like_credential(key, value):
+                encoded_values[f"encoded:{key}"] = value
+    try:
+        overrides = store.read_odoo_instance_override_record(
+            context_name=context, instance_name="prod"
+        )
+    except FileNotFoundError:
+        overrides = None
+    parameter_keys = (
+        sorted(
+            item.key
+            for item in overrides.config_parameters
+            if item.value.source == "secret_binding"
+        )
+        if overrides
+        else []
+    )
     return {
+        "parameters:keys": json.dumps(parameter_keys),
         "target:binding": canonical_json_sha256(
             {
                 "target": target.model_dump(mode="json"),
                 "id": target_id.model_dump(mode="json"),
-                "provider": payload,
+                "provider": {
+                    key: payload.get(key)
+                    for key in (
+                        "composeId",
+                        "name",
+                        "appName",
+                        "serverId",
+                        "env",
+                        "composeFile",
+                        "sourceType",
+                        "composePath",
+                        "randomize",
+                        "isolatedDeployment",
+                    )
+                },
+                "overrides": overrides.model_dump(mode="json") if overrides else None,
             }
         ),
         **{f"managed:{key}": value for key, value in managed.items() if value},
         **{f"provider:{key}": value for key, value in current.items() if value},
+        **encoded_values,
     }
 
 
@@ -204,6 +286,15 @@ def collect_odoo_preview_qualification(
         policy = integration_readback_policy(
             instance_name="preview", policies=DokployTargetPolicies(), workflow_mode="restore"
         )
+        parameter_keys = tuple(json.loads(credentials["parameters:keys"]))
+        if parameter_keys:
+            policy = replace(
+                policy,
+                families=(
+                    *policy.families,
+                    IntegrationFamily("production_credentials", config_parameters=parameter_keys),
+                ),
+            )
         checkpoint = "preview_usage_and_resources_unavailable"
         credential_nonce = os.urandom(32).hex()
         usage = read_odoo_testing_usage(
@@ -224,21 +315,25 @@ def collect_odoo_preview_qualification(
                 "usage_only": True,
                 "credential_nonce": credential_nonce,
                 "forbidden_credential_keys": sorted(PLATFORM_CREDENTIAL_KEYS),
-                "production_credential_hashes": sorted(
-                    {
-                        hashlib.sha256((credential_nonce + value).encode()).hexdigest()
-                        for key, value in credentials.items()
-                        if key.startswith("managed:")
-                        or key.startswith("provider:")
-                        and looks_like_credential(key, value)
-                    }
-                ),
                 "integration_spec": policy.encoded_spec(),
                 "integration_program": INTEGRATION_READBACK_PROGRAM,
             },
         )
         if usage.usage == "unknown" or not usage.resources_qualified:
             raise PreviewQualificationMissing("preview_qualification_missing:" + usage.reason_code)
+        candidates = credential_candidates(
+            [
+                value
+                for key, value in credentials.items()
+                if key.startswith(("managed:", "encoded:"))
+                or key.startswith("provider:")
+                and looks_like_credential(key, value)
+            ]
+        )
+        if {
+            hashlib.sha256((credential_nonce + value).encode()).hexdigest() for value in candidates
+        }.intersection(usage.credential_hashes):
+            raise PreviewQualificationMissing("preview_production_credentials_shared")
         checkpoint = "preview_qualification_authority_changed"
         assert_selection_current(store, authority.selection)
         if (

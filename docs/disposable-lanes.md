@@ -22,9 +22,13 @@ mounts, backing storage, network membership and ports. It checks the running
 web and runner identities, compares their actual environments and the database
 container against current managed and provider production credentials, and runs
 the existing integration readback with no preview integration allowances.
-Only per-read salted credential digests reach the host probe. Production
-credential values, user identities, session identifiers and provider details
-are never returned. Authenticated sessions and recent sign-ins are independent
+The host returns per-read salted digests of preview credential candidates to
+the service. Production values and digests stay inside the service. The same
+candidate reader handles URLs, JSON and encoded payloads on both sides. The
+comparison includes all configured production-context integrations, provider
+credentials and secret-backed configuration parameters. Credential digests,
+user identities, session identifiers and provider details never reach the
+API response. Authenticated sessions and recent sign-ins are independent
 boolean facts; this read creates no login or Odoo session.
 
 The reader rechecks provider, runtime, completed-operation and production

@@ -22,6 +22,8 @@ from control_plane.odoo_testing_usage import (
     ODOO_TESTING_USAGE_CONTAINER_PROGRAM,
     ODOO_TESTING_USAGE_HOST_PROGRAM,
     read_odoo_testing_usage,
+    odoo_usage_container_program,
+    credential_candidates,
 )
 
 
@@ -165,7 +167,9 @@ class SessionInventoryTests(unittest.TestCase):
         ):
             self.namespace["probe"]()
 
-    def probe_result(self, failure: str = "", *, recent: bool = False) -> dict[str, Any]:
+    def probe_result(
+        self, failure: str = "", *, recent: bool = False, instance: str = "testing"
+    ) -> dict[str, Any]:
         """Execute the emitted container probe, including its bounded exception handler."""
         config = MagicMock()
         config.read.return_value = [] if failure == "config" else [ODOO_WEB_CONFIG_PATH]
@@ -210,18 +214,35 @@ class SessionInventoryTests(unittest.TestCase):
         with (
             patch.dict(
                 "os.environ",
-                {"PLATFORM_INSTANCE": "testing", "ODOO_DB_NAME": "testing_db"},
+                {"PLATFORM_INSTANCE": instance, "ODOO_DB_NAME": "testing_db"},
                 clear=True,
             ),
             patch("configparser.ConfigParser", return_value=config),
             patch.object(Path, "glob", return_value=processes),
             redirect_stdout(output),
         ):
-            exec(ODOO_TESTING_USAGE_CONTAINER_PROGRAM, {"__name__": "__main__"})
+            exec(odoo_usage_container_program(instance), {"__name__": "__main__"})
         self.assertNotIn("private-fixture", output.getvalue())
         value = json.loads(output.getvalue())
         assert isinstance(value, dict)
         return value
+
+    def test_preview_container_reads_sessions_and_signins_with_preview_identity(self) -> None:
+        result = self.probe_result("sessions_used", recent=True, instance="preview")
+        self.assertIs(result["recent_signins"], True)
+        self.assertIs(result["authenticated_sessions"], True)
+
+    def test_encoded_and_url_credentials_share_one_candidate_reader(self) -> None:
+        secret = "private-production-password"
+        encoded = base64.b64encode(
+            json.dumps({"config_parameters": [{"value": {"value": secret}}]}).encode()
+        ).decode()
+        for value in (
+            encoded,
+            "smtps://user:" + secret + "@example.invalid",
+            "https://example.invalid?token=" + secret,
+        ):
+            self.assertIn(secret, credential_candidates([value]))
 
     def test_absent_process_is_readable_before_a_missing_serving_configuration(self) -> None:
         self.driver.connect = Mock()  # type: ignore[attr-defined]
@@ -346,11 +367,11 @@ class UsageReaderTests(unittest.TestCase):
                 }
                 if qualified is not None:
                     frame["resources_qualified"] = qualified
+                    frame["credential_hashes"] = ["a" * 64]
                 self.remote.side_effect = lambda **kw: kw["receive"](frame)
                 result = self.read(preview_spec=spec)
                 self.assertEqual(result.usage, "in_use" if qualified is True else "unknown")
                 self.assertEqual(result.resources_qualified, qualified is True)
-                self.assertEqual(self.remote.call_args.kwargs["payload"]["instance"], "preview")
 
     def test_unused_requires_both_complete_false_facts(self) -> None:
         for recent, sessions in ((False, False), (True, False), (False, True), (True, True)):

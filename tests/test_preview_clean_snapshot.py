@@ -51,7 +51,12 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
     containers: dict[str, dict[str, Any]]
 
     def preview_usage(
-        self, *, integration_ok: bool = True, changed: bool = False
+        self,
+        *,
+        integration_ok: bool = True,
+        changed: bool = False,
+        health_tick: bool = False,
+        stopped: bool = False,
     ) -> dict[str, Any]:
         from control_plane.dokploy.compose import ODOO_WEB_START_COMMAND
         from control_plane.odoo_testing_usage import ODOO_TESTING_USAGE_HOST_PROGRAM
@@ -73,6 +78,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                     container["Config"]["Env"].append(
                         "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + json.dumps(identity)
                     )
+        if stopped:
+            self.containers["web"]["State"]["Running"] = False
         payload = {
             "context": "fixture",
             "instance": "preview",
@@ -93,9 +100,6 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 "runtime_identity": identity,
                 "credential_nonce": "fixture-nonce",
                 "forbidden_credential_keys": [],
-                "production_credential_hashes": [
-                    hashlib.sha256(b"fixture-nonceprivate-production-password").hexdigest()
-                ],
                 "integration_spec": "fixture-policy",
                 "integration_program": "fixture-integrations",
             },
@@ -122,6 +126,12 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                     self.containers["script-runner"]["Config"]["Env"].append(
                         "OTHER_SETTING=changed"
                     )
+                if health_tick:
+                    for value in self.containers.values():
+                        value["State"]["Health"] = {
+                            "Status": "healthy",
+                            "Log": [{"End": "new-tick"}],
+                        }
             return subprocess.CompletedProcess(arguments, 0, stdout=frame_bytes, stderr=b"")
 
         output = io.StringIO()
@@ -148,11 +158,13 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         original = copy.deepcopy(self.containers)
         for scenario, expected in (
             ("complete", ""),
-            ("credentials", "resource_copy_execution_credentials_absent"),
-            ("ports", "resource_copy_host_ports_absent"),
-            ("identity", "resource_copy_runtime_identity_matches"),
-            ("integrations", "resource_integrations_isolated"),
+            ("health_tick", ""),
+            ("credentials", ""),
+            ("ports", "resource_" + ReadbackPredicate.PORTS),
+            ("identity", "resource_" + ReadbackPredicate.RUNTIME_IDENTITY),
+            ("integrations", "resource_" + ReadbackPredicate.INTEGRATIONS),
             ("changed", "runtime_changed"),
+            ("stopped", "serving_container_stopped"),
         ):
             with self.subTest(scenario=scenario):
                 self.containers = copy.deepcopy(original)
@@ -169,7 +181,10 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                         "LAUNCHPLANE_RUNTIME_IDENTITY_JSON={}"
                     )
                 result = self.preview_usage(
-                    integration_ok=scenario != "integrations", changed=scenario == "changed"
+                    integration_ok=scenario != "integrations",
+                    changed=scenario == "changed",
+                    health_tick=scenario == "health_tick",
+                    stopped=scenario == "stopped",
                 )
                 if expected:
                     self.assertTrue(result["unavailable"], result)
@@ -178,6 +193,11 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 else:
                     self.assertIs(result["resources_qualified"], True)
                     self.assertIs(result["authenticated_sessions"], True)
+                    if scenario == "credentials":
+                        self.assertIn(
+                            hashlib.sha256(b"fixture-nonceprivate-production-password").hexdigest(),
+                            result["credential_hashes"],
+                        )
 
     def setUp(self) -> None:
         temporary = self.enterContext(TemporaryDirectory())
