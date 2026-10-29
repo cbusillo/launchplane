@@ -71,3 +71,26 @@ test("Director saves both service bindings on the existing credential route", { 
   for (const input of await page.locator('input[type="password"]').all()) await expect(input).toHaveValue("");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test("multiline service input preserves line breaks, masks text and clears before dispatch", { tag: "@layout" }, async ({ page }) => {
+  const value = "synthetic-first-line\nsynthetic-second-line\n";
+  const field = { ...request.fields[0], integration: "onboarding_github_app", binding_key: "private_key", label: "Existing onboarding App private key", multiline: true };
+  const serviceRequest = { ...request, application_required: false, product: "launchplane", environment: field.integration, fields: [field] };
+  await page.route("**/v1/owner-secret-inputs?*", route => route.fulfill({ json: serviceRequest }));
+  await page.route("**/v1/owner-secret-inputs/submit", async route => {
+    expect(route.request().postDataJSON().value).toBe(value);
+    expect(route.request().postDataJSON().environment).toBe(field.integration);
+    await expect(page.getByLabel(field.label, { exact: true })).toHaveValue("");
+    await route.fulfill({ json: { ...serviceRequest, fields: [{ ...field, submitted_at: "2026-10-28T12:00:00Z", submission_version_id: "synthetic-version" }] } });
+  });
+  await page.goto(`/ui/owner-secrets?product=launchplane&environment=${field.integration}`);
+  const input = page.getByLabel(field.label, { exact: true });
+  await input.fill(value);
+  await expect(input).toHaveValue(value);
+  await expect(input).toHaveCSS("-webkit-text-security", "disc");
+  await page.getByRole("button", { name: "Save credential" }).click();
+  await expect(page.getByText("Last received:", { exact: false })).toBeVisible();
+  await expect(input).toHaveValue("");
+  await expect(page.locator("body")).not.toContainText(value);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

@@ -14,6 +14,31 @@ at the [artifact credential path](artifact-security.md#verified-artifact-scannin
 That fixed service request writes the managed-secret bindings directly; the
 product-requested Client flow below remains a submission for admin application.
 
+The Director's same write-only form also prepares the existing onboarding App
+and trusted-maintenance credentials for service adoption. Select product
+`launchplane` and environment `onboarding_github_app` or
+`trusted_maintenance_webhook` at `/ui/owner-secrets`. The first stores only
+`private_key`; the second stores only `webhook_secret`. Each creates a separate
+write-only, context-scoped binding in its named integration, context
+`launchplane`, with no instance. The current DB policy must identify the signed-in
+human as an administrator, both when reading the form and at the atomic write.
+The private-key field preserves pasted line breaks and masks its text while entered.
+Other humans, workflows and agents cannot submit through this form. Request
+revisions bind the exact purpose and current secret version; stale submissions
+write nothing. No secret value is returned, added to a runtime environment, or
+delivered to an application.
+
+Enter only an independently held original through the signed-in form. Agents
+must not retrieve an Actions/host copy or supply a value. This preparation does
+not change the existing onboarding workflow or trusted-maintenance receiver,
+mint a token, update an installation, or re-register a webhook. Their current
+Actions and host inputs remain required until the record-backed consumers are
+delivered and qualified under [the migration issue](https://github.com/cbusillo/launchplane/issues/3511).
+The App selector can be recorded separately as the declared non-secret service
+setting `LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID`; use the exact existing
+selector, not a different App. If independent custody is unavailable, retain
+the existing inputs and resolve the migration path on that issue.
+
 An admin can request a credential by setting `owner_input` on one managed-secret
 requirement in the stored product profile. It contains a human-readable `label` and
 `instructions` and requires an explicit product context. An optional instance

@@ -43,6 +43,21 @@ from control_plane.storage.product_authority_bundle import (
 OWNER_SECRET_INPUT_ROUTE = "/v1/owner-secret-inputs"
 OWNER_SECRET_SUBMIT_ROUTE = "/v1/owner-secret-inputs/submit"
 
+_SERVICE_CREDENTIAL_FIELDS = {
+    GHCR_ARTIFACT_READ_INTEGRATION: (
+        "Artifact scan credentials",
+        (("username", "GHCR pull-only username"), ("password", "GHCR pull-only token")),
+    ),
+    "onboarding_github_app": (
+        "Onboarding App credential",
+        (("private_key", "Existing onboarding App private key"),),
+    ),
+    "trusted_maintenance_webhook": (
+        "Trusted maintenance webhook credential",
+        (("webhook_secret", "Existing trusted maintenance webhook secret"),),
+    ),
+}
+
 
 class OwnerSecretInputField(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -55,6 +70,7 @@ class OwnerSecretInputField(BaseModel):
     request_revision: str
     submitted_at: str = ""
     submission_version_id: str = ""
+    multiline: bool = False
 
 
 class OwnerSecretInputResponse(BaseModel):
@@ -112,27 +128,29 @@ def register_owner_secret_input_routes(
             )
         return record_store
 
-    def service_projection(store: PostgresRecordStore, trace_id: str) -> OwnerSecretInputResponse:
+    def service_projection(
+        store: PostgresRecordStore, trace_id: str, environment: str
+    ) -> OwnerSecretInputResponse:
+        display_name, requested_fields = _SERVICE_CREDENTIAL_FIELDS[environment]
         fields = []
-        for key in ("username", "password"):
+        for key, label in requested_fields:
             record = store.find_secret_record(
                 scope="context",
-                integration=GHCR_ARTIFACT_READ_INTEGRATION,
+                integration=environment,
                 name=key,
                 context=LAUNCHPLANE_SERVICE_CONTEXT,
                 instance="",
             )
             fields.append(
                 OwnerSecretInputField(
-                    integration=GHCR_ARTIFACT_READ_INTEGRATION,
+                    integration=environment,
                     binding_key=key,
-                    label="GHCR pull-only username"
-                    if key == "username"
-                    else "GHCR pull-only token",
-                    instructions="Only the Director can save this credential. It is used for artifact reads and is never shown again.",
+                    label=label,
+                    multiline=key == "private_key",
+                    instructions="Only the Director can save this existing credential. It stays in this service purpose and is never shown again. Saving it does not change an App installation or webhook registration.",
                     environments=(LAUNCHPLANE_SERVICE_CONTEXT,),
                     request_revision=hashlib.sha256(
-                        f"{LAUNCHPLANE_SERVICE_CONTEXT}:{GHCR_ARTIFACT_READ_INTEGRATION}:{key}:{record.current_version_id if record else ''}".encode()
+                        f"{LAUNCHPLANE_SERVICE_CONTEXT}:{environment}:{key}:{record.current_version_id if record else ''}".encode()
                     ).hexdigest(),
                     submitted_at=record.updated_at if record else "",
                     submission_version_id=record.current_version_id if record else "",
@@ -141,8 +159,8 @@ def register_owner_secret_input_routes(
         return OwnerSecretInputResponse(
             trace_id=trace_id,
             product=LAUNCHPLANE_SERVICE_CONTEXT,
-            display_name="Artifact scan credentials",
-            environment=GHCR_ARTIFACT_READ_INTEGRATION,
+            display_name=display_name,
+            environment=environment,
             can_submit=True,
             application_required=False,
             fields=tuple(fields),
@@ -158,7 +176,7 @@ def register_owner_secret_input_routes(
         field = next(
             (
                 field
-                for field in service_projection(store, trace_id).fields
+                for field in service_projection(store, trace_id, envelope.environment).fields
                 if field.request_revision == envelope.request_revision
             ),
             None,
@@ -174,7 +192,7 @@ def register_owner_secret_input_routes(
             secrets.validate_secret_key_configuration()
             existing = store.find_secret_record(
                 scope="context",
-                integration=GHCR_ARTIFACT_READ_INTEGRATION,
+                integration=field.integration,
                 name=field.binding_key,
                 context=LAUNCHPLANE_SERVICE_CONTEXT,
                 instance="",
@@ -184,7 +202,7 @@ def register_owner_secret_input_routes(
             plan = _plan_product_config_secret_write(
                 record_store=store,
                 scope="context",
-                integration=GHCR_ARTIFACT_READ_INTEGRATION,
+                integration=field.integration,
                 name=field.binding_key,
                 plaintext_value=envelope.value.get_secret_value(),
                 binding_key=field.binding_key,
@@ -225,7 +243,7 @@ def register_owner_secret_input_routes(
                 code="secret_storage_unavailable",
                 message="Encrypted credential storage is unavailable.",
             ) from error
-        return service_projection(store, trace_id)
+        return service_projection(store, trace_id, envelope.environment)
 
     def target(
         product: str,
@@ -318,8 +336,10 @@ def register_owner_secret_input_routes(
     ) -> OwnerSecretInputResponse:
         response.headers["Cache-Control"] = "no-store"
         trace_id = common.next_trace_id()
-        if product == LAUNCHPLANE_SERVICE_CONTEXT and environment == GHCR_ARTIFACT_READ_INTEGRATION:
-            return service_projection(service_target(identity, record_store, trace_id), trace_id)
+        if product == LAUNCHPLANE_SERVICE_CONTEXT and environment in _SERVICE_CREDENTIAL_FIELDS:
+            return service_projection(
+                service_target(identity, record_store, trace_id), trace_id, environment
+            )
         store, profile, lane = target(product, environment, identity, record_store, trace_id)
         return projection(store, profile, lane, identity, trace_id)
 
@@ -335,7 +355,7 @@ def register_owner_secret_input_routes(
         trace_id = common.next_trace_id()
         if (
             envelope.product == LAUNCHPLANE_SERVICE_CONTEXT
-            and envelope.environment == GHCR_ARTIFACT_READ_INTEGRATION
+            and envelope.environment in _SERVICE_CREDENTIAL_FIELDS
         ):
             return submit_service_input(envelope, identity, record_store, trace_id)
         store, profile, lane = target(

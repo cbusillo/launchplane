@@ -137,6 +137,26 @@ class ServiceRuntimeSettingTests(unittest.TestCase):
             self.call(self.apply_request(preview["plan_digest"]))
         self.assertEqual(_service_env(self.store), EXISTING_ENV)
 
+    def test_reviewed_onboarding_selector_write_preserves_other_service_settings(self) -> None:
+        setting = ServiceRuntimeSettingRequest(
+            key="LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID",
+            value="Iv1SyntheticOnboardingApp",
+            reason="Record the existing onboarding App selector.",
+        )
+        preview = self.call(setting)
+        self.assertEqual(_service_env(self.store), EXISTING_ENV)
+        self.call(
+            setting.model_copy(
+                update={"mode": "apply", "expected_plan_digest": preview["plan_digest"]}
+            ),
+            "onboarding-selector",
+        )
+        self.assertEqual(_service_env(self.store), {**EXISTING_ENV, setting.key: setting.value})
+        self.assertEqual(self.store.list_secret_records(), ())
+        for value in ("", "not a client id", "line\nbreak", "key=value"):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                ServiceRuntimeSettingRequest(key=setting.key, value=value, reason=setting.reason)
+
     def test_undeclared_secret_shaped_or_invalid_settings_are_refused(self) -> None:
         for key, value in (
             ("LAUNCHPLANE_UNDECLARED_SETTING", "1"),
