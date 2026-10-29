@@ -28,7 +28,8 @@ export type EngineeringView =
   | "governance-projection"
   | "github-delivery"
   | "privileged-operations"
-  | "runtime-setting-removal";
+  | "runtime-setting-removal"
+  | "preview-lifecycle";
 
 export function productIndexPath(): string {
   return "/ui/products";
@@ -66,6 +67,7 @@ export function ownerReviewPath(): string {
 
 export function engineeringViewLabel(view: EngineeringView): string {
   if (view === "runtime-setting-removal") return "Remove stored settings";
+  if (view === "preview-lifecycle") return "Preview cleanup";
   if (view === "github-delivery") {
     return "GitHub delivery";
   }
@@ -113,6 +115,7 @@ export function parseAppRoute(pathname: string): AppRoute {
         "tenant-admission",
         "governance-projection",
         "github-delivery",
+        "preview-lifecycle",
         "privileged-operations",
         "runtime-setting-removal",
       ].includes(view)

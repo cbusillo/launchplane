@@ -1081,6 +1081,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             attribution_requirements=None,
         ).status
 
+    def read_base_branch_sha(self, *, repository: str, base_branch: str) -> str:
+        return _base_branch_sha(
+            transport=self.transport,
+            repository_path=_repository_path(repository),
+            base_branch=base_branch,
+        )
+
     def read_base_check_observation(
         self,
         *,
@@ -3037,6 +3044,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         mutate: bool,
         before_remove: Callable[[], None],
         setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
+        new_base_retest_evidence: Callable[[int], object | None] | None = None,
     ) -> bool:
         from control_plane.merge_train_github_block_recovery import recover_candidate_block
 
@@ -3050,6 +3058,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             mutate=mutate,
             before_remove=before_remove,
             setup_failure_evidence=setup_failure_evidence,
+            new_base_retest_evidence=new_base_retest_evidence,
         )
 
     def update_pull_request_branch(

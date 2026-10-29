@@ -320,11 +320,11 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
     async def test_cas_rejects_a_change_after_authorization(self) -> None:
         write = self.store.write_product_authority_bundle
 
-        def concurrent_write(bundle: ProductAuthorityBundle) -> None:
+        def concurrent_write(bundle: ProductAuthorityBundle, **write_options: Any) -> None:
             self.store.write_product_profile_record(
                 self.before.model_copy(update={"display_name": "Concurrent"})
             )
-            write(bundle)
+            write(bundle, **write_options)
 
         with patch.object(
             self.store, "write_product_authority_bundle", side_effect=concurrent_write

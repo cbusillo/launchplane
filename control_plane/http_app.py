@@ -910,6 +910,7 @@ from control_plane.storage.product_authority_bundle import (
     SecretRecordConflictError,
     ProductAuthorityBundle,
     ProductContextOwnershipError,
+    ServiceIdentityAuthorityError,
     ProductProfileConflictError,
     RuntimeEnvironmentConflictError,
 )
@@ -16808,7 +16809,9 @@ def create_launchplane_fastapi_app(
                     response=product_config_response,
                 )
                 if public_hosts_plan is None:
-                    database_store.write_product_authority_bundle(completed_bundle)
+                    database_store.write_product_authority_bundle(
+                        completed_bundle, identity=identity
+                    )
                 else:
                     await asyncio.to_thread(
                         database_store.write_product_public_hosts_bundle,
@@ -16833,6 +16836,13 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     code="public_hosts_target_changed",
                     message="The public-host target changed. Review a fresh dry-run.",
+                ) from error
+            except ServiceIdentityAuthorityError as error:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message=str(error),
                 ) from error
             except ProductContextOwnershipError as error:
                 raise _launchplane_http_error(
@@ -17971,6 +17981,13 @@ def create_launchplane_fastapi_app(
                 )
             else:
                 database_store.write_product_authority_bundle(committed_bundle)
+        except ServiceIdentityAuthorityError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=str(error),
+            ) from error
         except (
             RuntimeEnvironmentConflictError,
             ProductProfileConflictError,
@@ -23710,7 +23727,7 @@ def create_launchplane_fastapi_app(
     async def apply_preview_lifecycle_sweep(
         request: Request,
         sweep_request: PreviewLifecycleSweepEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_operator_mutation_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:

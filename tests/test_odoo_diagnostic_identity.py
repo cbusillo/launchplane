@@ -598,7 +598,7 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
 
             original = store.write_product_authority_bundle
 
-            def changed_context(bundle: ProductAuthorityBundle) -> None:
+            def changed_context(bundle: ProductAuthorityBundle, **write_options: Any) -> None:
                 store.write_product_profile_record(
                     profile.model_copy(
                         update={
@@ -610,7 +610,7 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
                         }
                     )
                 )
-                original(bundle)
+                original(bundle, **write_options)
 
             identity["password"] = "rotated-synthetic-password"
             changed = deepcopy(payload)

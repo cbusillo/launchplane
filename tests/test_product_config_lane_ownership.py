@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -318,7 +318,7 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 )
             original_write = store.write_product_authority_bundle
 
-            def change_then_write(bundle: ProductAuthorityBundle) -> None:
+            def change_then_write(bundle: ProductAuthorityBundle, **write_options: Any) -> None:
                 if add_foreign_claim_on_commit:
                     foreign_profile = store.read_product_profile_record("other-site")
                     store.write_product_profile_record(
@@ -337,7 +337,7 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     )
                 else:
                     store.write_product_profile_record(profile.model_copy(update={"lanes": ()}))
-                original_write(bundle)
+                original_write(bundle, **write_options)
 
             with (
                 self._app_for_store(store, product=product) as app,

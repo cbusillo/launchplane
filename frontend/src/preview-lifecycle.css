@@ -1,0 +1,11 @@
+.preview-lifecycle-panel { display: grid; gap: 1rem; padding: 1.25rem; border: 1px solid var(--border); border-radius: 0.75rem; }
+.preview-lifecycle-panel p, .preview-lifecycle-panel h2, .preview-lifecycle-panel h3 { margin: 0; }
+.preview-lifecycle-confirm { display: flex; align-items: flex-start; gap: 0.6rem; }
+.preview-lifecycle-confirm input { flex: none; margin-top: 0.25rem; }
+.preview-lifecycle-key, .preview-lifecycle-result code { overflow-wrap: anywhere; }
+.preview-lifecycle-result { display: grid; gap: 1rem; min-width: 0; }
+.preview-lifecycle-products { list-style: none; padding: 0; display: grid; gap: 1rem; margin: 0; }
+.preview-lifecycle-products > li { display: grid; gap: 0.6rem; padding: 1rem; border: 1px solid var(--border); border-radius: 0.5rem; min-width: 0; overflow-wrap: anywhere; }
+.preview-lifecycle-products dl { display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; margin: 0; }
+.preview-lifecycle-products dd { margin: 0; font-weight: 600; }
+.preview-lifecycle-products details p { margin-top: 0.5rem; }

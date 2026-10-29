@@ -1085,6 +1085,66 @@ idempotency records; both identity values are required whenever the bearer token
 is configured. Admission and authority follow each endpoint
 and the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission).
 
+### Record-backed Director-agent verification
+
+The service can load these two Director-agent identities from its own records
+at startup. This is separate from retired ordinary-agent enrollment, sessions
+and leases. The service context's `RuntimeEnvironmentRecord` must explicitly
+set `LAUNCHPLANE_AGENT_BEARER_SOURCE` to `records` to activate this reader.
+Without that setting, or with its value explicitly set to `bootstrap`, the
+existing bootstrap identities remain in use. An independent local admin can
+restore `bootstrap` through the same reviewed product-config path without
+depending on GitHub OAuth or the human setting-removal route.
+
+In record mode, that same context record supplies the existing
+`LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT`, `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`,
+`LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and `LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL`
+selectors. Each token comes from exactly one configured, write-only,
+context-scoped `launchplane_service` secret binding in context `launchplane`,
+using its existing token key. Other contexts, global secrets and lane secrets
+cannot supply it. Missing, ambiguous or unreadable token material, or incomplete
+selectors, disable the affected identity. Record mode never falls back to its
+environment token. An unavailable selector read, or an invalid
+source setting, disables both Director-agent identities.
+
+`LAUNCHPLANE_LOCAL_ADMIN_*` and engineering-review bootstrap credentials stay
+independent of this reader. Keeping the admin token available does not bypass
+the active-policy DB requirement or confer authority on a failed agent identity.
+Authentication still produces the same principal types, subjects and labels;
+existing endpoint and policy rules decide authority.
+
+All identity changes, including revocation, require a service restart to take
+effect; the durable testing-rebuild worker resolves current records again at
+each authority checkpoint. Even before record mode is activated, an unreadable
+service-context record disables Director-agent authentication for that service
+process. Independent admin verification is retained; active-policy DB access
+is still required by non-health routes.
+
+Product-config apply may change these authentication selectors, the source
+setting or the two authentication token bindings only for an authenticated
+administrator with current `authz_policy_grant.write` authority on Launchplane.
+The bundle transaction checks the stored and proposed authentication state,
+including displaced binding IDs and changes to referenced secret records or
+current versions. General writers, including product onboarding, cannot create,
+rebind, rotate or remove that authority, even before record mode is active.
+Unrelated settings and service credentials remain configurable. The supported
+write-only product-config input remains available to the administrator; its use
+still follows the Director's credential and access stop boundaries. No grant is
+added here.
+Authentication changes use a standalone product-config apply; record public-host
+changes in a separate request.
+
+This source capability does not transfer credentials or authorize activation.
+Before activation, qualify a supported write-only input from independent custody
+or a separately reviewed service-side transfer, exact principal equivalence,
+independent recovery and rollback in isolation. Do not extract or copy credentials
+or generate replacements. Keep the existing host and Actions inputs until live
+readback and rollback proof support their removal. Rolling back the source
+selection requires the preserved bootstrap inputs and an authorized record
+change followed by restart. No Actions input is removed by this reader.
+
+### Independent local-admin verification
+
 Rare `local_admin` operations use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` with configured
 `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT` and `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`.
 Both identity values are required whenever the bearer token is configured. Those
@@ -1811,7 +1871,15 @@ keep/orphaned/missing sets. Cleanup execution uses a second endpoint that
 requires an existing lifecycle `plan_id`; it defaults to `apply=false`
 report-only behavior and records the cleanup request/result next to the plan.
 Destructive provider cleanup is only attempted when `apply=true` is explicitly
-supplied by an authorized GitHub Actions workflow.
+supplied by an authorized caller. The sweep accepts a signed-in administrator
+through the existing browser CSRF boundary, as well as its existing `local_operator` and
+admin bearer and GitHub Actions callers. Each mode retains its existing lifecycle
+authorization per product/context; admitting a browser session does not add policy authority.
+Client, read-only and terminal-agent sessions cannot run the browser sweep.
+Engineering Ops → Preview cleanup provides report-only and explicit cleanup for
+all preview-enabled products. Both modes write evidence and retain the same
+request/key after an uncertain response; HTTP acceptance does not turn an inner
+`fail`, `partial` or held-reservation result into success.
 
 `POST /v1/previews/desired-state`, `POST /v1/previews/lifecycle-plan`,
 `POST /v1/previews/lifecycle-cleanup`, and

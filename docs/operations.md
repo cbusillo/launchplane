@@ -623,7 +623,9 @@ mutation_in_progress`; a completed effect replays; a different request
 
 For a held event-driven testing deploy, a scoped admin can first call
 `GET /v1/admin/generic-web/deploy-recovery/{product}/testing` under the existing
-`product_environment.read` authority. This database-only read returns one opaque
+`product_environment.read` authority. An authenticated Director agent's existing
+service marker also admits only this GET without a product grant; ordinary terminal
+agents and all terminal-agent recovery POSTs remain refused. This database-only read returns one opaque
 `recovery_reference`, lane and reservation state/attempt. It requires one exact
 held reservation in the event reconciler's scope and an original deploy request
 whose retained request or saved reconcile inputs match the reservation fingerprint.
@@ -4770,7 +4772,24 @@ anchors from open GitHub pull requests, including drafts, writes lifecycle plans
 results, which Product Ops shows per product. Destructive provider cleanup
 still requires an explicit `apply=true` request to
 `POST /v1/previews/lifecycle-sweep` from a separately authorized caller; the
-manual `Preview Lifecycle` workflow dispatch remains that route.
+native **Engineering Ops → Preview cleanup** page offers **Report** and
+**Apply cleanup** for all preview-enabled products. Cleanup requires the explicit
+delete confirmation; it discovers current desired state again, rather than
+applying a previously displayed report. The page shows per-product failures,
+held reservations and record/trace evidence even when the HTTP request completes.
+A dropped response locks both modes in this browser tab until the original
+request is retried with its retained operation key, including after a reload.
+The page reconstructs the original report or cleanup request by matching that key's
+retained fingerprint; it does not depend on a separately saved form draft.
+Each new cleanup attempt consumes its delete confirmation, including a refused
+attempt. Retrying an uncertain cleanup preserves the originally confirmed
+request and key.
+
+The manual `Preview Lifecycle` workflow and its URL/audience/source settings stay
+supported during #3514's migration. Do not remove them until deployed native
+report/apply behavior, current binding/default and rollback evidence qualify the
+replacement and Chris's fresh settings-deletion table. Source tests alone do
+not establish that deployed proof.
 An authenticated Director agent may run the report-only sweep without cleanup
 mutation authority. Apply requests keep their existing authorization checks.
 Preview-disabled products are excluded from the sweep. PR feedback goes through
