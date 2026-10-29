@@ -650,7 +650,9 @@ class CutoverWebsiteTests(unittest.TestCase):
             cutover_reconciliation_uses_budget,
         )
 
-        for interrupted_save in (1, 2, 3, 5, 6):
+        for interrupted_save, expected_state in enumerate(
+            (None, "fencing", "fencing", "drained", "resuming", "complete"), 1
+        ):
             with self.subTest(interrupted_save=interrupted_save):
                 fixture = CutoverWebsiteTests()
                 fixture.setUp()
@@ -685,6 +687,10 @@ class CutoverWebsiteTests(unittest.TestCase):
                     )
                 held = fixture.store.load(fixture.record_id)
                 self.assertEqual(held.step, "rolling_back")
+                self.assertEqual(
+                    held.rollback_pause.state if held.rollback_pause is not None else None,
+                    expected_state,
+                )
                 self.assertTrue(cutover_reconciliation_eligible(held))
                 self.assertFalse(cutover_reconciliation_uses_budget(held))
                 self.assertFalse(
