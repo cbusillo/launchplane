@@ -7,6 +7,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import Mock, patch
+from contextlib import nullcontext
+from click.testing import CliRunner
+from click import Command
 
 from fastapi import FastAPI
 from pydantic import ValidationError
@@ -42,6 +45,8 @@ from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 from control_plane.workflows import runner_host_hygiene_service_executor as client
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorResult
+from control_plane.workflows.runner_host_hygiene_executor import _github_binding_subject_key
+from control_plane.contracts.runner_host_hygiene_idle import RunnerHostHygieneIdleObservation
 from tests.support.http import request as http_request
 from tests.support.stores import sqlite_database_url
 
@@ -104,6 +109,28 @@ def workflow_identity() -> GitHubActionsIdentity:
     )
 
 
+def idle_sample(
+    configured: RunnerHostHygieneConfiguration,
+) -> tuple[RunnerHostHygieneIdleObservation, ...]:
+    return tuple(
+        RunnerHostHygieneIdleObservation.model_validate(
+            {
+                "source": source,
+                "scope": "full_host",
+                "scope_key": "host",
+                "subject_key": _github_binding_subject_key(binding),
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "availability": "available",
+                "state": "idle",
+                "active_count": 0,
+                "total_count": 1,
+            }
+        )
+        for binding in configured.github_idle_bindings
+        for source in ("github_jobs", "github_runners")
+    )
+
+
 class HygieneConfigurationFixture(unittest.TestCase):
     def setUp(self) -> None:
         directory = TemporaryDirectory()
@@ -133,11 +160,12 @@ class HygieneConfigurationFixture(unittest.TestCase):
             configuration_sha256=digest,
             intent=RunnerHostHygieneDispatchIntent.model_validate(
                 {
-                    "audit_record_key": "audit/current",
+                    "audit_record_key": "audit/current" if intent.get("mode") == "manual" else "",
                     "current_runner_name": "ops-runner",
                     **intent,
                 }
             ),
+            current_run_id=42,
         ).requests
 
 
@@ -179,13 +207,13 @@ class HygieneConfigurationTests(HygieneConfigurationFixture):
     def test_consumer_attempts_every_action_and_retains_terminal_acceptance(self) -> None:
         intent = RunnerHostHygieneDispatchIntent(
             mode="maintenance",
-            audit_record_key="audit/current",
             current_runner_name="ops-runner",
         )
         dispatch = build_runner_host_hygiene_dispatch(
             configuration=self.configuration,
             configuration_sha256="a" * 64,
             intent=intent,
+            current_run_id=42,
         )
         accepted = RunnerHostHygieneExecutorResult(
             status="completed",
@@ -223,6 +251,9 @@ class HygieneConfigurationTests(HygieneConfigurationFixture):
         self.assertEqual(configured, self.configuration)
         self.assertEqual(require_current_hygiene_configuration(self.store, digest), configured)
         self.write_configuration("2026-10-29T00:01:00Z")
+        self.assertEqual(require_current_hygiene_configuration(self.store, digest), configured)
+        self.configuration = self.configuration.model_copy(update={"service_user": "other-user"})
+        self.write_configuration()
         with self.assertRaises(ValueError):
             require_current_hygiene_configuration(self.store, digest)
         request = ServiceRuntimeSettingRequest(
@@ -263,13 +294,22 @@ class HygieneConfigurationTests(HygieneConfigurationFixture):
         self.assertFalse(report.mutate)
         self.assertEqual(report.max_used_space_bytes, self.configuration.default_cache_budget_bytes)
         maintenance = self.dispatch(mode="maintenance")
-        self.assertEqual(
-            [item.action for item in maintenance],
+        self.assertCountEqual(
             [
-                "prune_docker_cache",
-                "prune_dangling_images",
-                "prune_docker_cache",
-                "prune_generated_run_cache",
+                (item.action, item.target_buildkit_builder, item.target_generated_cache_key)
+                for item in maintenance
+            ],
+            [
+                ("prune_docker_cache", "", ""),
+                ("prune_dangling_images", "", ""),
+                *(
+                    ("prune_docker_cache", builder, "")
+                    for builder in self.configuration.buildkit_cache_budgets
+                ),
+                *(
+                    ("prune_generated_run_cache", "", root.key)
+                    for root in self.configuration.generated_run_cache_roots
+                ),
             ],
         )
         self.assertEqual(len({item.audit_record_key for item in maintenance}), len(maintenance))
@@ -296,6 +336,14 @@ class HygieneConfigurationTests(HygieneConfigurationFixture):
             self.dispatch(mode="manual", target_buildkit_builder="unconfigured")
         with self.assertRaises(ValidationError):
             self.dispatch(mode="maintenance", mutate=True)
+        configured, digest = load_runner_host_hygiene_configuration(self.store)
+        next_run = build_runner_host_hygiene_dispatch(
+            configuration=configured,
+            configuration_sha256=digest,
+            intent=RunnerHostHygieneDispatchIntent(current_runner_name="ops-runner"),
+            current_run_id=43,
+        )
+        self.assertNotEqual(report.audit_record_key, next_run.requests[0].audit_record_key)
 
     def test_service_reader_preserves_binding_order_and_scopes_runs(self) -> None:
         (request,) = self.dispatch()
@@ -308,18 +356,30 @@ class HygieneConfigurationTests(HygieneConfigurationFixture):
             return {
                 "configuration_sha256": digest,
                 "run_states": {run_id: "completed" for run_id in selected.run_ids},
+                "observations": [
+                    item.model_dump(mode="json") for item in idle_sample(self.configuration)
+                ]
+                if selected.kind == "idle"
+                else [],
             }
 
         idle, runs = client.build_service_hygiene_readers(
             request=request, configuration_sha256=digest, post=post
         )
-        idle("example/control", "ops", "ops-runner", True)
-        self.assertEqual(
-            self.configuration.github_idle_bindings[
-                RunnerHostHygieneMetadataRequest.model_validate(calls[-1]).binding_index
-            ].runner_name,
-            "ops-runner",
-        )
+        for sample_number in (1, 2):
+            for binding in request.github_idle_bindings:
+                observations = idle(
+                    binding.repository_scope,
+                    binding.execution_lane,
+                    binding.runner_name,
+                    binding.repository_scope == request.repository_scope
+                    and binding.execution_lane == request.execution_lane,
+                )
+                self.assertEqual(
+                    {item.subject_key for item in observations},
+                    {_github_binding_subject_key(binding)},
+                )
+            self.assertEqual(len(calls), sample_number)
         self.assertEqual(runs("example/other", (21, 22)), {21: "completed", 22: "completed"})
         with self.assertRaises(ValueError):
             runs("unconfigured/repo", (21,))
@@ -343,7 +403,7 @@ class HygieneMetadataTests(HygieneConfigurationFixture):
                     "id": 9,
                     "app_id": 8,
                     "account": {"login": "example"},
-                    "permissions": READ_PERMISSIONS,
+                    "permissions": {**READ_PERMISSIONS, "checks": "read"},
                 }
             if path.endswith("/access_tokens"):
                 return {
@@ -382,6 +442,42 @@ class HygieneMetadataTests(HygieneConfigurationFixture):
             self.assertEqual(result.run_states, {21: "completed"})
             self.assertNotIn("service-private", result.model_dump_json())
             self.assertEqual(calls[-1]["method"], "DELETE")
+            calls.clear()
+            sample = idle_sample(configured)
+
+            def read_idle(
+                repository: str, lane: str, runner: str, _exclude: bool
+            ) -> tuple[RunnerHostHygieneIdleObservation, ...]:
+                binding = next(
+                    binding
+                    for binding in configured.github_idle_bindings
+                    if (binding.repository_scope, binding.execution_lane, binding.runner_name)
+                    == (repository, lane, runner)
+                )
+                return tuple(
+                    item
+                    for item in sample
+                    if item.subject_key == _github_binding_subject_key(binding)
+                )
+
+            with patch(
+                "control_plane.runner_host_hygiene_metadata.build_github_idle_evidence_reader",
+                return_value=read_idle,
+            ):
+                batch = read_runner_host_hygiene_metadata(
+                    configuration=configured,
+                    store=self.store,
+                    request=request.model_copy(
+                        update={"kind": "idle", "cache_key": "", "run_ids": ()}
+                    ),
+                    current_run_id=42,
+                )
+            self.assertEqual(batch.observations, sample)
+            self.assertEqual(len([call for call in calls if call.get("method") == "POST"]), 1)
+            body = next(call["body"] for call in calls if call.get("method") == "POST")
+            assert isinstance(body, dict)
+            self.assertTrue(all(value == "read" for value in body["permissions"].values()))
+            self.assertEqual(calls[-1]["method"], "DELETE")
             scope.return_value = frozenset({"example/control", "example/other", "example/extra"})
             with self.assertRaises(ValueError):
                 read_runner_host_hygiene_metadata(
@@ -410,11 +506,10 @@ class HygieneRouteTests(HygieneConfigurationFixture, unittest.IsolatedAsyncioTes
                 error_response_model=LaunchplaneErrorResponse,
             ),
         )
-        payload = {"audit_record_key": "audit/current", "current_runner_name": "ops-runner"}
+        payload = {"current_runner_name": "ops-runner"}
         response = await http_request(app, "POST", DISPATCH_ROUTE, payload=payload)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["execution_lane"], self.configuration.execution_lane)
-        self.assertNotIn("private_key", response.text)
         allowed = False
         denied = await http_request(app, "POST", DISPATCH_ROUTE, payload=payload)
         self.assertEqual(denied.status_code, 403)
@@ -436,3 +531,68 @@ class HygieneRouteTests(HygieneConfigurationFixture, unittest.IsolatedAsyncioTes
             )
             self.assertEqual(stale.status_code, 409)
             secret_read.assert_not_called()
+        _, digest = load_runner_host_hygiene_configuration(self.store)
+        with (
+            patch.object(
+                metadata, "_read_token", return_value=nullcontext("service-private-token")
+            ),
+            patch(
+                "control_plane.runner_host_hygiene_metadata.build_github_run_state_reader",
+                return_value=lambda repository, ids: {run_id: "completed" for run_id in ids},
+            ),
+        ):
+            accepted = await http_request(
+                app,
+                "POST",
+                METADATA_ROUTE,
+                payload={
+                    "configuration_sha256": digest,
+                    "current_runner_name": "ops-runner",
+                    "kind": "run_states",
+                    "cache_key": "generated",
+                    "run_ids": [21],
+                },
+            )
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.json()["run_states"], {"21": "completed"})
+        self.assertNotIn("service-private-token", accepted.text)
+
+
+class HygieneConsumerExitTests(unittest.TestCase):
+    def test_exit_policy_preserves_dry_runs_and_fails_mutations_or_delivery_errors(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            intent = root / "intent.json"
+            intent.write_text(
+                RunnerHostHygieneDispatchIntent(current_runner_name="ops-runner").model_dump_json()
+            )
+            cases: tuple[tuple[dict[str, object], int], ...] = (
+                ({"status": "blocked", "mutate": False}, 0),
+                ({"status": "blocked", "mutate": True}, 1),
+                ({"status": "blocked", "audit_delivery_pending": True}, 1),
+                ({"status": "failed", "execution_failed": True}, 1),
+            )
+            for result, exit_code in cases:
+                with (
+                    self.subTest(result=result),
+                    patch.object(
+                        client, "execute_service_hygiene_dispatch", return_value=(result,)
+                    ),
+                ):
+                    invoked = CliRunner().invoke(
+                        cast(Command, cast(object, client.main)),
+                        [
+                            "--intent-file",
+                            str(intent),
+                            "--service-url",
+                            "https://service.invalid",
+                            "--execution-lane",
+                            "ops",
+                            "--audit-spool-root",
+                            directory,
+                            "--artifact-directory",
+                            directory,
+                        ],
+                        env={"RUNNER_NAME": "ops-runner"},
+                    )
+                self.assertEqual(invoked.exit_code, exit_code, invoked.output)

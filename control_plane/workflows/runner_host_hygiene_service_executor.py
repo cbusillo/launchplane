@@ -26,6 +26,7 @@ from control_plane.workflows.runner_host_hygiene_executor import (
     build_refreshing_service_audit_poster,
     execute_runner_host_hygiene_executor,
     validate_local_executor_environment,
+    _github_binding_subject_key,
 )
 
 PostServiceJson = Callable[[str, dict[str, object]], object]
@@ -40,6 +41,7 @@ def build_service_hygiene_post(
     *,
     service_url: str,
     bearer_token_provider: BearerTokenProvider,
+    timeout_seconds: int = 900,
 ) -> PostServiceJson:
     base = service_url.rstrip("/")
     parsed = urlparse(base)
@@ -63,7 +65,9 @@ def build_service_hygiene_post(
                 "Content-Type": "application/json",
             },
         )
-        with build_opener(_NoRedirect()).open(request, timeout=30) as response:
+        with build_opener(_NoRedirect()).open(
+            request, timeout=timeout_seconds if path == "metadata" else 30
+        ) as response:
             if response.status != 200:
                 raise ValueError("Hygiene service read failed; local action remains blocked.")
             return json.load(response)
@@ -77,6 +81,8 @@ def build_service_hygiene_readers(
     configuration_sha256: str,
     post: PostServiceJson,
 ) -> tuple[GitHubIdleEvidenceReader, GitHubRunStateReader]:
+    pending_sample: dict[str, tuple[RunnerHostHygieneIdleObservation, ...]] = {}
+
     def read_metadata(**selection: object) -> RunnerHostHygieneMetadata:
         payload = RunnerHostHygieneMetadataRequest.model_validate(
             {
@@ -102,14 +108,28 @@ def build_service_hygiene_readers(
         if exclude != expected_exclusion:
             raise ValueError("Hygiene self-exclusion must match the dispatched executor.")
         matches = [
-            index
-            for index, binding in enumerate(request.github_idle_bindings)
+            binding
+            for binding in request.github_idle_bindings
             if (binding.repository_scope, binding.execution_lane, binding.runner_name)
             == (repository, lane, runner)
         ]
         if len(matches) != 1:
             raise ValueError("Hygiene evidence requires an exact dispatched binding.")
-        return read_metadata(kind="idle", binding_index=matches[0]).observations
+        subject = _github_binding_subject_key(matches[0])
+        if subject not in pending_sample:
+            observations = read_metadata(kind="idle").observations
+            pending_sample.clear()
+            pending_sample.update(
+                {
+                    _github_binding_subject_key(binding): tuple(
+                        observation
+                        for observation in observations
+                        if observation.subject_key == _github_binding_subject_key(binding)
+                    )
+                    for binding in request.github_idle_bindings
+                }
+            )
+        return pending_sample.pop(subject)
 
     def runs(repository: str, run_ids: tuple[int, ...]) -> Mapping[int, str]:
         roots = [
@@ -182,9 +202,15 @@ def execute_service_hygiene_dispatch(
                 github_idle_evidence_reader=idle,
                 github_run_state_reader=runs,
             )
-            results.append(result.model_dump(mode="json"))
+            results.append({**result.model_dump(mode="json"), "mutate": request.mutate})
         except (click.ClickException, OSError, ValueError):
-            results.append({"status": "failed", "audit_record_key": request.audit_record_key})
+            results.append(
+                {
+                    "status": "failed",
+                    "audit_record_key": request.audit_record_key,
+                    "execution_failed": True,
+                }
+            )
     return tuple(results)
 
 
@@ -213,7 +239,11 @@ def main(
             service_url=service_url, token_env="LAUNCHPLANE_TOKEN"
         )
 
-    post = build_service_hygiene_post(service_url=service_url, bearer_token_provider=bearer_token)
+    post = build_service_hygiene_post(
+        service_url=service_url,
+        bearer_token_provider=bearer_token,
+        timeout_seconds=intent.timeout_seconds if intent.mode == "manual" else 900,
+    )
     results = execute_service_hygiene_dispatch(
         intent=intent,
         post=post,
@@ -226,8 +256,9 @@ def main(
     )
     click.echo(json.dumps(results, sort_keys=True))
     if any(
-        result.get("audit_delivery_pending")
-        or result["status"] not in {"completed", "not_needed", "planned"}
+        result.get("execution_failed")
+        or result.get("audit_delivery_pending")
+        or (result.get("mutate") and result["status"] not in {"completed", "not_needed"})
         for result in results
     ):
         raise click.ClickException("Hygiene actions require attention; inspect accepted audits.")

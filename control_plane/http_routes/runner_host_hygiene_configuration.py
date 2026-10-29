@@ -63,7 +63,7 @@ def register_runner_host_hygiene_configuration_routes(
     ) -> RunnerHostHygieneDispatch:
         workflow = executor_identity(identity)
         try:
-            current_run_id(workflow)
+            run_id = current_run_id(workflow)
             configuration, digest = load_runner_host_hygiene_configuration(
                 cast(HygieneStore, record_store)
             )
@@ -73,6 +73,7 @@ def register_runner_host_hygiene_configuration_routes(
                 configuration=configuration,
                 configuration_sha256=digest,
                 intent=intent,
+                current_run_id=run_id,
             )
         except (LookupError, ValueError, TypeError) as error:
             raise dependencies.http_error(

@@ -58,10 +58,11 @@ the complete host manifest; local service-unit discovery still rejects extra
 or omitted services. Named budgets still select the Sunday builder actions.
 Changing the budget list is therefore a scope change, not routine tuning.
 
-`POST /v1/service/runner-host-hygiene/dispatch` returns the record revision
+`POST /v1/service/runner-host-hygiene/dispatch` returns the normalized configuration
 digest, execution lane and validated executor requests. It accepts `report`,
 `maintenance` and `manual` intent. Scheduled intent accepts no manual overrides;
-manual intent selects existing targets without replacing stored roots,
+scheduled audit keys use the service's UTC date, host and authenticated run ID.
+Manual intent selects existing targets without replacing stored roots,
 retained builders, budgets or allowlists. Both this route and
 `POST /v1/service/runner-host-hygiene/metadata` require the existing authorized
 hygiene workflow's `runner_host_hygiene_audit.write` identity, its signed run ID
@@ -71,9 +72,13 @@ The metadata adapter uses the existing App through one exact, configured
 `launchplane_service` context SecretRecord/SecretBinding under
 `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY`. Global, instance and
 ambiguous key bindings fail closed. It verifies the App client ID, installation
-owner, exact Actions/Administration/Metadata read permissions and complete
-runtime-derived repository set. Short-lived read tokens stay in the service
-and are revoked after each metadata request, including failed scope checks.
+owner, existing installation grants and complete runtime-derived repository
+set. Every issued token is limited to Actions/Administration/Metadata read;
+extra existing installation permissions require no grant change. Short-lived
+read tokens stay in the service and are revoked after each metadata request,
+including failed scope checks. One idle request reads the complete host sample
+with one token; the consumer consumes that sample once across all bindings,
+then obtains a fresh sample for the next observation. It retains no token cache.
 Only bounded typed idle samples or generated-cache run states leave it. Each
 sample rechecks the configuration digest; local process, open-handle and
 service-unit evidence remain separate executor observations.
@@ -82,17 +87,18 @@ The consumer entrypoint is
 `uv run python -m control_plane.workflows.runner_host_hygiene_service_executor`.
 It takes `--intent-file`, `--service-url`, `--execution-lane`,
 `--audit-spool-root` and `--artifact-directory`; intent is the dispatch request
-JSON, including the current runner name and audit key. It authenticates with
-the existing workflow OIDC path and verifies the local host/user and scheduling
+JSON, including the current runner name and a manual audit key when applicable.
+It authenticates with the existing workflow OIDC path and verifies the local host/user and scheduling
 repository before running any action. A minimal scheduler must still select
 the explicit execution lane **before** starting the job. Retain that bootstrap
 until a service scheduler selects it; a job-step lookup cannot set `runs-on`.
 
-The consumer attempts every dispatched action, preserves the existing durable
-audit envelopes and accepted terminal fields, and fails aggregate execution
-when any action fails or audit delivery remains pending. Run the existing
-`runner-host-hygiene-qualify` command on its per-action artifact files to assess
-report and maintenance qualification. No helper performs live import or
+The consumer attempts every dispatched action and preserves the existing durable
+audit envelopes and accepted terminal fields. Like the existing executor CLI,
+it fails for invocation exceptions, pending audit delivery or a mutation that
+does not complete. Run the existing `runner-host-hygiene-qualify` command on the
+per-action artifact files to assess report and maintenance qualification,
+including report-only and manual dry runs. No helper performs live import or
 settings deletion. Until qualified activation, rollback is the retained
 workflow with its existing settings; do not run both schedulers together.
 

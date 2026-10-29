@@ -33,7 +33,6 @@ class RunnerHostHygieneMetadataRequest(BaseModel):
     configuration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     current_runner_name: str = Field(min_length=1, max_length=255)
     kind: Literal["idle", "run_states"]
-    binding_index: int = Field(default=0, ge=0, le=255)
     cache_key: str = Field(default="", max_length=64)
     run_ids: tuple[int, ...] = Field(default=(), max_length=128)
 
@@ -42,7 +41,7 @@ class RunnerHostHygieneMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     configuration_sha256: str
-    observations: tuple[RunnerHostHygieneIdleObservation, ...] = ()
+    observations: tuple[RunnerHostHygieneIdleObservation, ...] = Field(default=(), max_length=512)
     run_states: dict[int, str] = Field(default_factory=dict)
 
 
@@ -113,9 +112,13 @@ def _read_token(
         or installation["id"] <= 0
         or not isinstance(installation.get("account"), dict)
         or str(installation["account"].get("login", "")).casefold() != owner.casefold()
-        or installation.get("permissions") != READ_PERMISSIONS
+        or not isinstance(installation.get("permissions"), dict)
+        or any(
+            installation["permissions"].get(permission) not in {"read", "write"}
+            for permission in READ_PERMISSIONS
+        )
     ):
-        raise ValueError("Hygiene App installation must retain its exact read-only scope.")
+        raise ValueError("Hygiene App installation lacks the existing read permissions.")
     issued = github_api_request(
         method="POST",
         path=f"/app/installations/{installation['id']}/access_tokens",
@@ -174,33 +177,31 @@ def read_runner_host_hygiene_metadata(
     ):
         raise ValueError("The current runner is not configured for this scheduler.")
     if request.kind == "idle":
-        if (
-            request.binding_index >= len(configuration.github_idle_bindings)
-            or request.cache_key
-            or request.run_ids
-        ):
-            raise ValueError("Idle metadata requires exactly one configured binding.")
+        if request.cache_key or request.run_ids:
+            raise ValueError("Idle metadata covers only the complete configured host manifest.")
     elif (
-        request.binding_index
-        or not request.run_ids
+        not request.run_ids
         or any(run_id <= 0 for run_id in request.run_ids)
         or request.cache_key not in {root.key for root in configuration.generated_run_cache_roots}
     ):
         raise ValueError("Run metadata requires a configured cache and bounded positive run IDs.")
     with _read_token(configuration, store) as token:
         if request.kind == "idle":
-            binding = configuration.github_idle_bindings[request.binding_index]
             reader = build_github_idle_evidence_reader(
                 bearer_token=token,
                 current_run_id=current_run_id,
                 current_runner_name=request.current_runner_name,
             )
-            observations = reader(
-                binding.repository_scope,
-                binding.execution_lane,
-                binding.runner_name,
-                binding.repository_scope == configuration.repository_scope.lower()
-                and binding.execution_lane == configuration.execution_lane.lower(),
+            observations = tuple(
+                observation
+                for binding in configuration.github_idle_bindings
+                for observation in reader(
+                    binding.repository_scope,
+                    binding.execution_lane,
+                    binding.runner_name,
+                    binding.repository_scope == configuration.repository_scope.lower()
+                    and binding.execution_lane == configuration.execution_lane.lower(),
+                )
             )
             return RunnerHostHygieneMetadata(
                 configuration_sha256=request.configuration_sha256,

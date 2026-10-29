@@ -1,4 +1,5 @@
 from typing import Literal
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -92,7 +93,7 @@ class RunnerHostHygieneDispatchIntent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["report", "maintenance", "manual"] = "report"
-    audit_record_key: str = Field(min_length=1, max_length=512)
+    audit_record_key: str = Field(default="", max_length=512)
     current_runner_name: str = Field(min_length=1, max_length=255)
     action: Literal[
         "prune_docker_cache",
@@ -111,6 +112,10 @@ class RunnerHostHygieneDispatchIntent(BaseModel):
 
     @model_validator(mode="after")
     def validate_scheduled_intent(self) -> "RunnerHostHygieneDispatchIntent":
+        if self.mode == "manual" and not self.audit_record_key.strip():
+            raise ValueError("Manual dispatch requires an audit record key.")
+        if self.mode != "manual" and self.audit_record_key:
+            raise ValueError("Scheduled audit keys are derived from the authenticated run.")
         if self.mode != "manual" and any(
             getattr(self, key) != field.default
             for key, field in type(self).model_fields.items()
@@ -145,12 +150,7 @@ def load_runner_host_hygiene_configuration(
     if not isinstance(value, str):
         raise ValueError("The service hygiene configuration must be JSON.")
     configuration = RunnerHostHygieneConfiguration.model_validate_json(value)
-    digest = nonvalidating_compact_sorted_json_sha256(
-        {
-            "configuration": configuration.model_dump(mode="json"),
-            "updated_at": records[0].updated_at,
-        }
-    )
+    digest = nonvalidating_compact_sorted_json_sha256(configuration.model_dump(mode="json"))
     return configuration, digest
 
 
@@ -159,7 +159,12 @@ def build_runner_host_hygiene_dispatch(
     configuration: RunnerHostHygieneConfiguration,
     configuration_sha256: str,
     intent: RunnerHostHygieneDispatchIntent,
+    current_run_id: int | None = None,
 ) -> RunnerHostHygieneDispatch:
+    if intent.mode != "manual" and (current_run_id is None or current_run_id <= 0):
+        raise ValueError("Scheduled dispatch requires its authenticated run ID.")
+    date = datetime.now(timezone.utc).date().isoformat()
+    prefix = f"runner-host-hygiene/{date}/{configuration.host_name}-scheduled"
     common: dict[str, object] = {"current_runner_name": intent.current_runner_name}
     requests: tuple[RunnerHostHygieneExecutorRequest, ...]
     if intent.mode == "manual":
@@ -187,7 +192,7 @@ def build_runner_host_hygiene_dispatch(
     elif intent.mode == "report":
         requests = (
             configuration.executor_request(
-                audit_record_key=f"{intent.audit_record_key}-report",
+                audit_record_key=f"{prefix}-report-{current_run_id}",
                 prune_until="720h",
                 timeout_seconds=900,
                 **common,
@@ -196,14 +201,14 @@ def build_runner_host_hygiene_dispatch(
     else:
         requests = (
             configuration.executor_request(
-                audit_record_key=f"{intent.audit_record_key}-default-cache",
+                audit_record_key=f"{prefix}-default-cache-{current_run_id}",
                 mutate=True,
                 prune_until="720h",
                 timeout_seconds=900,
                 **common,
             ),
             configuration.executor_request(
-                audit_record_key=f"{intent.audit_record_key}-dangling-images",
+                audit_record_key=f"{prefix}-dangling-images-{current_run_id}",
                 action="prune_dangling_images",
                 max_used_space_bytes=0,
                 mutate=True,
@@ -212,7 +217,7 @@ def build_runner_host_hygiene_dispatch(
             ),
             *(
                 configuration.executor_request(
-                    audit_record_key=f"{intent.audit_record_key}-builder-{builder}",
+                    audit_record_key=f"{prefix}-builder-{builder}-{current_run_id}",
                     target_buildkit_builder=builder,
                     allowed_buildkit_builders=tuple(configuration.buildkit_cache_budgets),
                     max_used_space_bytes=budget,
@@ -224,7 +229,7 @@ def build_runner_host_hygiene_dispatch(
             ),
             *(
                 configuration.executor_request(
-                    audit_record_key=f"{intent.audit_record_key}-generated-{root.key}",
+                    audit_record_key=f"{prefix}-generated-{root.key}-{current_run_id}",
                     action="prune_generated_run_cache",
                     target_generated_cache_key=root.key,
                     max_used_space_bytes=0,
