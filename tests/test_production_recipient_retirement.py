@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+import json
 import unittest
 from unittest.mock import patch
 
@@ -22,12 +23,16 @@ from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.dokploy import api
 from control_plane.production_recipient_recovery import RecipientRecoveryAdapter
 from control_plane.production_consumer_reads import QualifiedSourceCycle
-from control_plane.production_recipient import custody, runtime_values
+from control_plane.production_recipient import custody, runtime_values, read_provider_compose
 from control_plane.production_recipient_retirement_names import require_unretired_provider_name
 from control_plane.production_recipient_retirement_names import (
     provider_name_guard,
     require_available_name,
 )
+from control_plane.dokploy_inventory import TARGET_COLLECTIONS
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.retained_volume_sweep_execution import compose_volume_names
 from control_plane.provider_operations import run_durable_provider_operation
 from tests import test_production_recipient_publication as publication_tests
 
@@ -123,7 +128,7 @@ class RecipientRetirementTests(unittest.TestCase):
                 side_effect=lambda: (self.record, self.recovery),
             ),
             patch.object(retirement, "require_retirement_protection"),
-            patch.object(retirement, "_inventory_clear", return_value=True),
+            patch.object(api, "fetch_dokploy_projects", side_effect=self.projects),
             patch.object(api, "list_dokploy_schedules", return_value=[]),
             patch.object(retirement, "inspect_retirement_resources", side_effect=self.inspect),
             patch.object(api, "fetch_dokploy_target_payload", side_effect=self.fetch),
@@ -153,12 +158,32 @@ class RecipientRetirementTests(unittest.TestCase):
 
     def customize(self) -> None:
         fixture = self.publication.fixture
+        project = fixture.context + "-prod-a1b2c3"
+        fixture.old = fixture.old.model_copy(update={"target_name": project})
+        fixture.store.write_dokploy_target_record(fixture.old)
+        fixture.store.write_provider_target_record(
+            ProviderTargetRecord.from_dokploy_records(
+                target_record=fixture.old, target_id_record=fixture.old_id
+            )
+        )
         fixture.provider[fixture.old_id.target_id].update(
+            appName=project,
             composeType="docker-compose",
             autoDeploy=False,
             backups=[],
-            composeFile='{"services":{"web":{}},"volumes":{"config":{"name":"old-config"},"database":{"name":"old-database"}}}',
+            mounts=[],
+            composeFile=json.dumps(fixture.document),
+            env="DB_VOLUME=old-database\nCONFIG_VOLUME=old-config",
         )
+
+    def projects(self, **kwargs: Any) -> tuple[dict[str, Any], ...]:
+        environment: dict[str, Any] = {kind: [] for kind in TARGET_COLLECTIONS}
+        environment["compose"] = [
+            {"composeId": identifier}
+            for identifier in self.fixture.provider
+            if not (self.deleted and identifier == self.record.retained_target_id.target_id)
+        ]
+        return ({"name": self.record.product, "environments": [environment]},)
 
     def inspect(self, root: Path, spec: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -176,7 +201,9 @@ class RecipientRetirementTests(unittest.TestCase):
             raise DokployRequestFailed(
                 method="GET", path="/fixture", detail="absent", status_code=404
             )
-        return deepcopy(self.fixture.provider[kwargs["target_id"]])
+        payload = deepcopy(self.fixture.provider[kwargs["target_id"]])
+        payload.setdefault("mounts", [])
+        return payload
 
     def delete(self, **kwargs: Any) -> Any:
         self.effects.append(kwargs["payload"])
@@ -353,6 +380,102 @@ class RecipientRetirementTests(unittest.TestCase):
         with patch.object(api, "dokploy_request", side_effect=competing):
             self.assertEqual(self.run_retirement().status, "completed")
         self.assertEqual(len(self.effects), 1)
+
+    def test_reviewed_environment_volume_names_require_unique_qualified_inputs(self) -> None:
+        payload = self.fixture.provider[self.record.retained_target_id.target_id]
+        document = read_provider_compose(payload["composeFile"])
+        self.assertEqual(
+            set(compose_volume_names(document, payload)), {row["name"] for row in self.resources}
+        )
+        for environment in (
+            "DB_VOLUME=old-database",
+            "DB_VOLUME=old-database\nCONFIG_VOLUME=one\nCONFIG_VOLUME=two",
+            'DB_VOLUME=old-database\nCONFIG_VOLUME="$UNRESOLVED"',
+        ):
+            with self.subTest(environment=environment), self.assertRaises(ValueError):
+                compose_volume_names(document, {**payload, "env": environment})
+
+    def test_other_compose_resolved_volume_reference_is_held(self) -> None:
+        payload = self.fixture.provider[self.record.target_id]
+        key = self.record.request.volume_keys["database"]
+        values = api.parse_dokploy_env_text(payload["env"])
+        values[key] = "old-database"
+        from control_plane.dokploy.environment import serialize_dokploy_env_text
+
+        payload["env"] = serialize_dokploy_env_text(values, target_type="compose")
+        result = self.run_retirement()
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(self.removed, {"old-config"})
+        self.assertEqual(
+            {row["status"] for row in result.response_payload["result"]["volumes"]},
+            {"held", "absent"},
+        )
+
+    def test_new_stopped_host_mount_after_admission_is_protected(self) -> None:
+        original_delete = self.delete
+
+        def shared(**kwargs: Any) -> Any:
+            result = original_delete(**kwargs)
+            self.resources[0]["held"] = True
+            return result
+
+        with patch.object(api, "dokploy_request", side_effect=shared):
+            self.assertEqual(self.run_retirement().status, "completed")
+        self.assertEqual(self.removed, {"old-database"})
+        self.assertNotIn(("apply", "old-config"), self.volume_calls)
+
+    def test_rebind_before_retirement_commit_is_detected_before_delete(self) -> None:
+        original_write = self.store.write_production_recipient
+
+        def rebind(**kwargs: Any) -> None:
+            if kwargs["replacement"]["phase"] == "retiring_old":
+                current = self.store.read_provider_target_record(
+                    context_name=self.record.context, instance_name="prod"
+                )
+                self.store.write_provider_target_record(
+                    current.model_copy(
+                        update={
+                            "context": "other-context",
+                            "instance": "testing",
+                            "target_id": self.record.retained_target_id.target_id,
+                        }
+                    )
+                )
+            original_write(**kwargs)
+
+        with patch.object(self.store, "write_production_recipient", side_effect=rebind):
+            self.assertEqual(self.run_retirement().status, "reconcile_required")
+        self.assertFalse(self.effects)
+
+    def test_post_marker_direct_and_bundle_target_id_rebinds_refuse(self) -> None:
+        self.assertEqual(self.run_retirement().status, "completed")
+        old = self.record.retained_target_id.model_copy(
+            update={"context": "other-context", "instance": "testing"}
+        )
+        with self.assertRaises(ValueError):
+            self.store.write_dokploy_target_id_record(old)
+        with self.assertRaises(ValueError):
+            self.store.write_product_authority_bundle(
+                ProductAuthorityBundle(dokploy_target_ids=(old,))
+            )
+        current = self.store.read_provider_target_record(
+            context_name=self.record.context, instance_name="prod"
+        )
+        self.store.write_provider_target_record(
+            current.model_copy(update={"display_name": self.record.product})
+        )
+
+    def test_only_exact_or_generatable_old_provider_names_are_reserved(self) -> None:
+        self.assertEqual(self.run_retirement().status, "completed")
+        project = self.record.retained_target.target_name
+        require_unretired_provider_name(self.store, self.record.product)
+        with provider_name_guard(self.store, self.record.product):
+            pass
+        with (
+            self.assertRaises(ValueError),
+            provider_name_guard(self.store, project.rsplit("-", 1)[0]),
+        ):
+            self.fail("A creation base capable of reusing the retired project was admitted")
 
     def test_retirement_reserves_old_target_without_holding_replacement_release_target(
         self,
@@ -532,8 +655,9 @@ class RetirementProtectionTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         store = fixture.capture(GENERIC_WEB_PROMOTION_BACKUP_ACTION)
-        capture = store.read_backup_gate_record("backup-example")
-        record: Any = SimpleNamespace(product=capture.context, context=capture.context)
+        operation = store.list_verireel_prod_backup_gate_operation_records()[0]
+        capture = store.read_backup_gate_record(operation.backup_record_id)
+        record: Any = SimpleNamespace(product=operation.product, context=capture.context)
         request: Any = SimpleNamespace(backup_record_id=capture.record_id)
         oldest = min(
             datetime.fromisoformat(capture.evidence[key])

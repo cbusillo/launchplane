@@ -682,6 +682,14 @@ reports retained custody without claiming fresh eligibility. A completed operati
 can report protected volumes as `held`; it does not claim those volumes were
 removed. Recovery archives, execution tombstones, writer witnesses, shared backups
 and testing resources remain in custody.
+If changed or unreadable original authority prevents continuation after a step,
+retain the original key, manifest, reservation and observed effects. Record the
+exact authority and stopped step on the owning issue. Diagnose through supported
+service reads and plans. If readable original authority cannot be restored through
+its supported procedure, escalate to the Director for the operational decision or
+scope service-owned reconciliation as separate source work. A receipt, a newer
+release or an authorization response does not authorize replaying a dispatched
+delete, recapturing recovery or rewriting custody.
 An original volume attempt positively fenced before dispatch can continue as a
 new recorded step under the same service operation. A volume protected by a real
 reference remains `held`; a transient no-effect attempt does not mark it retired.

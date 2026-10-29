@@ -6073,6 +6073,8 @@ class PostgresRecordStore(HumanSessionStore):
             if authority_row:
                 self._begin_serialized_write(session)
                 self._lock_product_authority_bundle_write(session)
+                if isinstance(row, LaunchplaneDokployTargetIdRow):
+                    self._require_unretired_provider_identity(session, row.target_id)
                 if isinstance(row, LaunchplaneDokployTargetRow):
                     self._assert_available_target_hosts(
                         session, DokployTargetRecord.model_validate(row.payload)
@@ -6525,6 +6527,8 @@ class PostgresRecordStore(HumanSessionStore):
         return None
 
     def _merge_authority_row(self, session: Any, row: Base, *, step_name: str) -> None:
+        if isinstance(row, LaunchplaneDokployTargetIdRow):
+            self._require_unretired_provider_identity(session, row.target_id)
         if isinstance(row, LaunchplaneDokployTargetRow):
             self._protect_testing_hold_non_use(
                 session, DokployTargetRecord.model_validate(row.payload)
@@ -7656,17 +7660,8 @@ class PostgresRecordStore(HumanSessionStore):
         session: Any,
         write: ProviderTargetWrite,
     ) -> None:
-        from control_plane.production_recipient_retirement_names import require_available_name
-
         if write.record.provider_id == "dokploy":
-            require_available_name(
-                (
-                    dict(row.payload)
-                    for row in session.scalars(select(LaunchplaneProductionRecipientRow))
-                ),
-                write.record.display_name,
-                write.record.target_id,
-            )
+            self._require_unretired_provider_identity(session, write.record.target_id)
         conflicting_identity_statement = select(LaunchplaneProviderTargetRow).where(
             LaunchplaneProviderTargetRow.provider_id == write.record.provider_id,
             LaunchplaneProviderTargetRow.target_category == write.record.target_category,
@@ -14268,6 +14263,18 @@ class PostgresRecordStore(HumanSessionStore):
                 dict(row.payload)
                 for row in session.scalars(select(LaunchplaneProductionRecipientRow)).all()
             )
+
+    def _require_unretired_provider_identity(self, session: Any, target_id: str) -> None:
+        from control_plane.production_recipient_retirement_names import require_available_name
+
+        require_available_name(
+            (
+                dict(row.payload)
+                for row in session.scalars(select(LaunchplaneProductionRecipientRow))
+            ),
+            "",
+            target_id,
+        )
 
     def write_production_recipient(
         self,

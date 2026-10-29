@@ -673,17 +673,16 @@ def create_dokploy_application_target(
 
     application_payload: JsonObject = {
         "name": normalized_target_name,
+        "appName": app_name.strip() or normalized_target_name,
         "environmentId": created_environment_id,
     }
-    if app_name.strip():
-        application_payload["appName"] = app_name.strip()
     if application_description.strip():
         application_payload["description"] = application_description.strip()
     if server_id.strip():
         application_payload["serverId"] = server_id.strip()
     from control_plane.production_recipient_retirement_names import provider_name_guard
 
-    with provider_name_guard(record_store, app_name.strip() or "application"):
+    with provider_name_guard(record_store, app_name.strip() or normalized_target_name):
         created_application = mutate_provider(
             host, token, APPLICATION_CREATE_PATH, application_payload
         )
@@ -1139,10 +1138,9 @@ def planned_application_provider_requests(
         requests.append({"path": ENVIRONMENT_CREATE_PATH, "payload": environment_payload})
     application_payload: dict[str, object] = {
         "name": target_name,
+        "appName": app_name.strip() or target_name,
         "environmentId": environment_id or "<created-environment-id>",
     }
-    if app_name.strip():
-        application_payload["appName"] = app_name.strip()
     if application_description.strip():
         application_payload["description"] = application_description.strip()
     if server_id.strip():

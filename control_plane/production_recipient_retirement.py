@@ -42,6 +42,7 @@ from control_plane.provider_operations import (
     provider_operation_response_payload,
 )
 from control_plane.retained_volume_sweep_execution import (
+    compose_volume_names,
     _host_result,
     _inventory_clear,
     _volume_referenced,
@@ -261,10 +262,15 @@ def service_references(
     )
     for rows in collections:
         for row in rows:
-            if any(_volume_referenced(name, row.model_dump(mode="json")) for name in names):
+            if any(
+                _volume_referenced(name, row.model_dump(mode="json"), exact=True) for name in names
+            ):
                 return True
     with closing(store.retained_volume_recovery_payloads()) as payloads:
-        if any(any(_volume_referenced(name, payload) for name in names) for payload in payloads):
+        if any(
+            any(_volume_referenced(name, payload, exact=True) for name in names)
+            for payload in payloads
+        ):
             return True
     return False
 
@@ -296,15 +302,7 @@ def retained_manifest(root: Path, record: ProductionRecipientRecord) -> dict[str
             host=host, token=token, compose_id=record.retained_target_id.target_id
         )
     )
-    names = []
-    for key, definition in document.get("volumes", {}).items():
-        if (
-            not isinstance(definition, dict)
-            or not isinstance(definition.get("name"), str)
-            or "${" in definition["name"]
-        ):
-            raise ValueError("Retirement requires exact named volume definitions.")
-        names.append(definition["name"])
+    names = compose_volume_names(document, payload, set(record.request.volume_keys.values()))
     declared = set(document.get("volumes", {}))
     if document.get("configs") or document.get("secrets"):
         raise ValueError("Old file-backed configuration requires separate retained custody.")
@@ -431,7 +429,9 @@ class RecipientRetirementAdapter:
             application_id=manifest["target"],
             application_name=manifest["project"],
         )
-        if not _inventory_clear(self.root, probe, ignored_compose_id=manifest["target"]):
+        if not _inventory_clear(
+            self.root, probe, ignored_compose_id=manifest["target"], exact=True
+        ):
             raise ValueError("Old Compose provider references are incomplete or protected.")
         for reservation in self.store.list_held_provider_target_reservations(
             provider_target_key=self.target_key()
@@ -518,6 +518,7 @@ class RecipientRetirementAdapter:
                     response_payload=self.response(self.plan(record, manifest, reconciliation_key)),
                 )
             if not record.execution.get("retirement_compose_dispatched"):
+                self.references(record, manifest)
                 return ProviderObservation(
                     "absent", retry_safe=True, preserve_effect_checkpoint=True
                 )
@@ -622,11 +623,21 @@ class RecipientRetirementAdapter:
                 if current_authority != authority:
                     raise ValueError("Current publication authority changed.")
                 host_observed = self.require_compose_absent(manifest)
+                observed_volume = next(
+                    (item for item in host_observed["volumes"] if item["name"] == row["name"]), None
+                )
+                if (
+                    observed_volume is None
+                    or observed_volume["identity"] != row["identity"]
+                    or observed_volume["engine_identity"] != row["engine_identity"]
+                ):
+                    raise ValueError("Retained volume identity changed before its step.")
                 binding = volume_binding(manifest, row)
                 held = (
                     row["held"]
+                    or observed_volume["held"]
                     or service_references(self.store, record, (row["name"],))
-                    or not _inventory_clear(self.root, binding)
+                    or not _inventory_clear(self.root, binding, exact=True)
                 )
                 if held:
                     save(**{"retirement_volume:" + identity: "held"})
@@ -649,7 +660,7 @@ class RecipientRetirementAdapter:
                         authority_snapshot(self.store, record.product, record.context) != authority
                         or datetime.now(timezone.utc).timestamp() >= min(until, current_until)
                         or service_references(self.store, record, (row["name"],))
-                        or not _inventory_clear(self.root, binding)
+                        or not _inventory_clear(self.root, binding, exact=True)
                     ):
                         raise ValueError("Volume custody changed before dispatch.")
                     current_source(self.store, self.root, record.product, record.context)

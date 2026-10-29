@@ -1,10 +1,11 @@
 from collections.abc import Iterator, Iterable
 from contextlib import contextmanager
 from typing import Any
+import re
 
 
 def require_available_name(
-    payloads: Iterable[dict[str, Any]], name: str, target_id: str = ""
+    payloads: Iterable[dict[str, Any]], name: str, target_id: str = "", *, creation: bool = False
 ) -> None:
     for payload in payloads:
         execution = payload.get("execution", {})
@@ -17,7 +18,9 @@ def require_available_name(
                 normalized
                 and (
                     normalized == manifest["project"]
-                    or manifest["project"].startswith(normalized + "-")
+                    or creation
+                    and re.fullmatch(re.escape(normalized) + r"-[a-z0-9]{6}", manifest["project"])
+                    is not None
                 )
             )
             or target_id
@@ -45,6 +48,6 @@ def provider_name_guard(store: object, name: str) -> Iterator[None]:
         return
     with store._session_factory() as session:
         store._lock_landing_authority(session, "retiring-provider-names")
-        require_unretired_provider_name(store, name)
+        require_available_name(store.list_production_recipient_payloads(), name, creation=True)
         yield
         session.commit()

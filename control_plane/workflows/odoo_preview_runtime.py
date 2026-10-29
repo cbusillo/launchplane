@@ -1313,6 +1313,7 @@ def execute_odoo_preview_dokploy_apply(
             provider_lease_check=provider_lease_check,
         )
     return _execute_refresh(
+        record_store=record_store,
         database_url=database_url,
         host=host,
         token=token,
@@ -1777,6 +1778,7 @@ def _preview_refresh_environment_values(
 
 def _execute_refresh(
     *,
+    record_store: object | None = None,
     host: str,
     token: str,
     request: OdooPreviewDokployApplyRequest,
@@ -1831,6 +1833,7 @@ def _execute_refresh(
         )
         source_server_id = str(target_payload.get("serverId") or "").strip()
         compose_id, created_compose = _resolve_or_create_compose(
+            record_store=record_store,
             database_url=database_url,
             host=host,
             token=token,
@@ -2273,6 +2276,7 @@ def _execute_destroy(
 
 def _resolve_or_create_compose(
     *,
+    record_store: object | None = None,
     host: str,
     token: str,
     plan: OdooPreviewDokployDryRunPlan,
@@ -2304,13 +2308,10 @@ def _resolve_or_create_compose(
     memory_capacity.require_preview_host_memory_capacity(
         host=host, token=token, server_id=server_id, database_url=database_url
     )
-    from control_plane.storage.postgres import PostgresRecordStore
-
-    name_store = PostgresRecordStore(database_url=database_url) if database_url else None
     provider_effect_checkpoint("compose_create")
     from control_plane.production_recipient_retirement_names import provider_name_guard
 
-    with provider_name_guard(name_store, plan.compose_name):
+    with provider_name_guard(record_store, plan.compose_name):
         created = dokploy_api.dokploy_request(
             host=host,
             token=token,
