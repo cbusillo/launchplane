@@ -289,7 +289,7 @@ def credential_candidates(values: dict[str, str]) -> set[tuple[str, str]]:
             continue
         if not isinstance(value, str) or not value or (name, value) in candidates:
             continue
-        if len(candidates) >= MAX_CREDENTIAL_CANDIDATES or len(value) > 1024 * 1024:
+        if len(value) > 1024 * 1024:
             raise ValueError("credential_inventory_unavailable")
         candidates.add((name, value))
         try:
@@ -394,6 +394,8 @@ def preview_resources():
         environment=dict(item.split('=',1) for item in container['Config']['Env'] if '=' in item)
         try:
             candidates.update(value for _,value in credential_candidates(environment))
+            if len(candidates)>MAX_CREDENTIAL_CANDIDATES:
+                raise ValueError('credential_inventory_unavailable')
         except ValueError:
             raise UsageUnavailable('credential_inventory_unavailable')
         if any(environment.get(key) for key in resource_spec['forbidden_credential_keys']):
@@ -444,6 +446,7 @@ try:
         isolation=docker('exec','-i',before['web']['Id'],'python3','-',resource_spec['database_name'],resource_spec['integration_spec'],stdin=resource_spec['integration_program'].encode())
         if b'integration_readback_ok=true' not in isolation.splitlines():
             raise UsageUnavailable(checkpoint)
+        checkpoint='resource_resources_qualified'
         if resources_before!=preview_resources() or before!=containers():
             raise UsageUnavailable('runtime_changed')
     checkpoint='probe_result_invalid'

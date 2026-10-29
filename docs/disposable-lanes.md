@@ -30,8 +30,13 @@ credentials, including literal and secret-backed configuration parameters.
 Production candidates retain whole managed secrets and credential-named fragments,
 so shared URL or JSON metadata is not treated as a shared credential. A collision
 names only the production key. Database parameters are read in a read-only
-transaction through the pinned database image; other database tables, such as
-user API keys, are outside this inventory. Credential digests,
+transaction through the pinned database image; the production database is not
+inventoried. Preview parameters are compared only against known managed and
+provider production values. This does not establish that `database.secret` or
+other database-only production secrets have been rotated; sanitation proof
+belongs to the sanitized-copy work. Other tables, such as user API keys, are
+outside this inventory. The isolation evidence explicitly names this managed
+and provider comparison scope. Credential digests,
 user identities, session identifiers and provider details never reach the
 API response. Authenticated sessions and recent sign-ins are independent
 boolean facts; this read creates no login or Odoo session. Under Director decision

@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 import os
+from urllib.parse import urlsplit
+
+import click
 from pathlib import Path
 
 from control_plane import secrets
@@ -150,6 +153,21 @@ class ProductionCredentialInventory:
     volumes: frozenset[str]
 
 
+def production_credential_fragment(key: str, value: str) -> bool:
+    name = key.rsplit(".", 1)[-1]
+    if not looks_like_credential(name, value):
+        return False
+    address = urlsplit(value)
+    return not (
+        name.upper().endswith(("_URI", "_URL"))
+        and address.scheme in {"http", "https"}
+        and address.hostname
+        and not address.password
+        and not address.query
+        and not address.fragment
+    )
+
+
 def production_credentials(
     store: PostgresRecordStore, *, product: str, root: Path
 ) -> ProductionCredentialInventory:
@@ -219,9 +237,14 @@ def production_credentials(
         candidates = {(key, value) for key, value in managed.items() if value}
         candidates.update(
             (key, value)
+            for key, value in current.items()
+            if value and looks_like_credential(key, value)
+        )
+        candidates.update(
+            (key, value)
             for values in (managed, current)
             for key, value in credential_candidates(values)
-            if key.lower() != "token_uri" and looks_like_credential(key, value)
+            if production_credential_fragment(key, value)
         )
         if len(candidates) > MAX_CREDENTIAL_CANDIDATES:
             raise ValueError("credential_inventory_unavailable")
@@ -310,7 +333,9 @@ def collect_odoo_preview_qualification(
             or production_credentials(store, product=identity.product, root=root) != credentials
         ):
             raise PreviewQualificationMissing(checkpoint)
-        return PreviewQualification(usage, "service:odoo-preview-inspection:" + authority.sha256)
+        return PreviewQualification(
+            usage, "service:odoo-preview-inspection:managed-provider-comparison:" + authority.sha256
+        )
     except NativeSourceAuthorizationDenied:
         raise
     except api.DokployRequestFailed as error:
@@ -325,5 +350,5 @@ def collect_odoo_preview_qualification(
         raise PreviewQualificationMissing("preview_qualification_missing:" + error.code) from None
     except ValueError:
         raise PreviewQualificationMissing(checkpoint) from None
-    except (OSError, RuntimeError, TypeError, AttributeError, KeyError):
+    except (OSError, RuntimeError, TypeError, AttributeError, KeyError, click.ClickException):
         raise PreviewQualificationMissing(checkpoint) from None

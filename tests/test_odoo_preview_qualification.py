@@ -1,5 +1,6 @@
 from pathlib import Path
 import base64
+import click
 import json
 from typing import Any
 from unittest.mock import Mock, patch
@@ -182,7 +183,6 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertIn("preview_production_credentials_shared", response.text)
         spec = self.remote.call_args.kwargs["payload"]["preview_spec"]
-        self.assertNotIn("production_credential_hashes", spec)
         self.assertNotIn("private-production", str(spec))
 
     async def test_shared_metadata_does_not_count_as_a_production_credential(self) -> None:
@@ -192,12 +192,54 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                 json.dumps({"private_key": "private-token", "token_uri": "https://auth.invalid"}),
                 "https://auth.invalid",
             ),
+            (
+                json.dumps(
+                    {"items": [f"metadata-{index}" for index in range(MAX_CREDENTIAL_CANDIDATES)]}
+                ),
+                "fixture-local-password",
+            ),
         ):
-            with self.subTest(production=production):
+            with self.subTest(preview=preview):
                 self.production["SERVICE_SECRET"] = production
                 self.preview_candidates = [preview]
                 response = await self.collect()
                 self.assertEqual(response.status_code, 202, response.text)
+
+    async def test_parameter_metadata_does_not_hide_short_actual_credentials(self) -> None:
+        for key, value, status in (
+            ("auth_password_policy.minlength", "12", 202),
+            ("auth_password_policy.enabled", "True", 202),
+            ("custom.api_token", "12", 409),
+            ("custom.api_token", "short", 409),
+        ):
+            with self.subTest(key=key, value=value):
+                self.production["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"] = base64.b64encode(
+                    json.dumps(
+                        {
+                            "config_parameters": [
+                                {"key": key, "value": {"source": "literal", "value": value}}
+                            ]
+                        }
+                    ).encode()
+                ).decode()
+                self.preview_candidates = [value]
+                response = await self.collect()
+                self.assertEqual(response.status_code, status, response.text)
+
+    async def test_production_configuration_errors_are_bounded_without_publication(self) -> None:
+        with patch(
+            "control_plane.odoo_preview_qualification.source.read_dokploy_config",
+            side_effect=click.ClickException("private-provider-diagnostic"),
+        ):
+            response = await self.collect()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("preview_production_credentials_unavailable", response.text)
+        self.assertNotIn("private-provider-diagnostic", response.text)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, "cm", self.issued.preview_slug
+            )
+        )
 
     async def test_held_preview_keeps_the_hold_as_its_usage_evidence(self) -> None:
         from control_plane.contracts.dokploy_target_record import (

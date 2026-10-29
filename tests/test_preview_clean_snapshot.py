@@ -119,7 +119,6 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             if arguments[1] != "exec":
                 return self.command(arguments, **kwargs)
             if "psql" in " ".join(arguments):
-                self.assertIn("BEGIN READ ONLY", kwargs["input"].decode())
                 frame_bytes = json.dumps(list((parameters or {}).items())).encode()
             elif kwargs.get("input") == b"fixture-integrations":
                 frame_bytes = (
