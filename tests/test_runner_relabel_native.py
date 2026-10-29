@@ -174,15 +174,16 @@ class RunnerRelabelNativeTests(unittest.TestCase):
         )
 
     def assert_terminal_audit_matches_reply(self, result: DurableProviderOperationResult) -> None:
-        assert result.record is not None
+        record = result.record
+        assert record is not None
         audit = self.store.read_runner_relabel_document(
             "terminal-audit",
             build_provider_operation_key(
-                scope=result.record.scope,
-                route_path=result.record.route_path,
-                idempotency_key=result.record.idempotency_key,
-                request_fingerprint=result.record.request_fingerprint,
-                reconciliation_key=result.record.reconciliation_key,
+                scope=record.scope,
+                route_path=record.route_path,
+                idempotency_key=record.idempotency_key,
+                request_fingerprint=record.request_fingerprint,
+                reconciliation_key=record.reconciliation_key,
             ),
         )
         assert audit is not None
