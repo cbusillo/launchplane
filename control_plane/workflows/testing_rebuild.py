@@ -452,7 +452,7 @@ def execute_testing_rebuild(
                         step="complete",
                         route=observation,
                         ended_at=clock(),
-                        error="candidate_public_health_failed",
+                        error="candidate_public_health_failed_after_retirement",
                     )
                 else:
                     if isinstance(plan.old, UnavailableTestingPredecessor):

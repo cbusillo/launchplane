@@ -1006,7 +1006,34 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
         self.assertFalse(_target_replacement_result_passed(result))
         self.assertEqual(result.health_status, "fail")
-        self.assertEqual(result.error_code, "candidate_public_health_failed")
+        self.assertEqual(result.error_code, self.checkpoint().error)
+        self.assertEqual(result.target_id, self.fixture.candidate.compose_id)
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_failed_terminal_health_survives_lost_outer_response(self) -> None:
+        self.admit_unavailable("stopped", partial=True)
+        provider = self.provider_request
+
+        def failed(**kwargs: Any) -> Any:
+            result = provider(**kwargs)
+            if kwargs["path"] == "/api/compose.stop":
+                self.fail_public = True
+            return result
+
+        with (
+            patch.object(api, "dokploy_request", side_effect=failed),
+            patch.object(
+                service,
+                "rebuild_result",
+                side_effect=NativeSourceUnavailable("Fixture lost terminal response"),
+            ),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.fail_public = False
+        result = self.execute()
+        self.assertEqual(result.health_status, "fail")
+        self.assertEqual(result.error_code, self.checkpoint().error)
         self.assertEqual(result.target_id, self.fixture.candidate.compose_id)
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
@@ -1021,7 +1048,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
         result = self.execute()
         self.assertEqual(result.deploy_status, "pass")
         self.assertEqual(result.health_status, "fail")
-        self.assertEqual(result.error_code, "candidate_public_health_failed")
+        self.assertEqual(result.error_code, self.checkpoint().error)
         self.assertTrue(result.error_message)
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
         self.assertEqual(result.target_id, self.fixture.candidate.compose_id)

@@ -183,6 +183,7 @@ class TestingRebuildRecord(FrozenRecord):
     error: Literal[
         "",
         "candidate_public_health_failed",
+        "candidate_public_health_failed_after_retirement",
         "candidate_preparation_failed",
         "candidate_route_not_applied",
         "candidate_private_readiness_failed",

@@ -302,11 +302,14 @@ Once an old-target stop or post-verification cleanup has dispatched, retirement
 finishes forward. A later candidate health failure never restores the already
 retired copy. The final probe remains required and a failed probe is reported as
 failed health with the new copy still selected, leaving an ordinary fresh rebuild
-available. Pending/skipped health never proves completion. Pre-start removal does
+available. A distinct terminal error keeps older checkpoint readers from
+recomputing a failed final probe as green after a lost outer response.
+Pending/skipped health never proves completion. Pre-start removal does
 not cross this boundary; before retirement dispatch, health failure still restores
 the captured original ingress and metadata, including stopped/absent originals.
 Holds, positive use and active old-target work pause the queued operation with
-their exact reason. After those conditions end, the existing queued operation
+their exact reason. The lane safety record still protects positive use, including
+a report awaiting fresh collection after cutover. After those conditions end, the existing queued operation
 continues automatically on its original keys. No provider-console stop or separate
 Resume request is required for an observation-pending operation.
 Both removal stages use Docker removal without force or volume

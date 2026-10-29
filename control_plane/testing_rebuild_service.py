@@ -2511,7 +2511,7 @@ def rebuild_result(
         deploy_status="pass" if complete else "fail",
         post_deploy_status="pass" if complete else "fail",
         health_status="fail"
-        if complete and record.error == "candidate_public_health_failed"
+        if complete and record.error == "candidate_public_health_failed_after_retirement"
         else "pass"
         if complete
         else "skipped"
@@ -2535,7 +2535,7 @@ def rebuild_result(
         or "The candidate failed; the original testing copy remains selected."
         if not complete
         else "The new testing copy failed its final health check and remains selected."
-        if record.error == "candidate_public_health_failed"
+        if record.error == "candidate_public_health_failed_after_retirement"
         else "",
     )
 
