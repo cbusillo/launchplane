@@ -6505,12 +6505,9 @@ class PostgresRecordStore(HumanSessionStore):
         bundle: ProductAuthorityBundle,
         *,
         mutation: DbOnlyMutationRequest,
-        identity: LaunchplaneIdentity | None = None,
     ) -> tuple[str, LaunchplaneIdempotencyRecord]:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            if identity is not None:
-                self._lock_active_authz_policy(session)
             status, reservation_row, reservation = self._reserve_db_only_mutation_in_session(
                 session=session, mutation=mutation
             )
@@ -6522,7 +6519,6 @@ class PostgresRecordStore(HumanSessionStore):
                 write_session=session,
                 write_transaction_started=True,
                 commit=False,
-                caller_identity=identity,
             )
             completion = complete_launchplane_mutation_reservation(
                 reservation,
@@ -6901,7 +6897,7 @@ class PostgresRecordStore(HumanSessionStore):
             if self._bundle_changes_service_identity(session, bundle):
                 if caller_identity is None:
                     raise ServiceIdentityAuthorityError(
-                        "General configuration cannot change service identities."
+                        "Service identity changes require a separate apply by an authorized administrator."
                     )
                 try:
                     active_policy = self._locked_active_authz_policy_record(session).policy

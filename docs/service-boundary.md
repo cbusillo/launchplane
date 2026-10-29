@@ -1091,7 +1091,10 @@ The service can load these two Director-agent identities from its own records
 at startup. This is separate from retired ordinary-agent enrollment, sessions
 and leases. The service context's `RuntimeEnvironmentRecord` must explicitly
 set `LAUNCHPLANE_AGENT_BEARER_SOURCE` to `records` to activate this reader.
-Without that setting, the existing bootstrap identities remain in use.
+Without that setting, or with its value explicitly set to `bootstrap`, the
+existing bootstrap identities remain in use. An independent local admin can
+restore `bootstrap` through the same reviewed product-config path without
+depending on GitHub OAuth or the human setting-removal route.
 
 In record mode, that same context record supplies the existing
 `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT`, `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`,
@@ -1128,6 +1131,8 @@ Unrelated settings and service credentials remain configurable. The supported
 write-only product-config input remains available to the administrator; its use
 still follows the Director's credential and access stop boundaries. No grant is
 added here.
+Authentication changes use a standalone product-config apply; record public-host
+changes in a separate request.
 
 This source capability does not transfer credentials or authorize activation.
 Before activation, qualify a supported write-only input from independent custody

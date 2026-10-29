@@ -657,7 +657,7 @@ class ServiceAgentIdentityTests(unittest.TestCase):
             )
         )
 
-    def test_authorized_admin_has_a_reviewed_write_only_path_for_existing_identity(self) -> None:
+    def test_local_admin_can_store_identity_and_restore_bootstrap_without_oauth(self) -> None:
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(
                 _generic_site_profile_payload("launchplane")
@@ -709,3 +709,21 @@ class ServiceAgentIdentityTests(unittest.TestCase):
             self.assertEqual(response.status_code, 202, response.text)
             self.assertNotIn(self.bootstrap.local_operator_token, response.text)
         self.assertEqual(self.load().local_operator_token, self.bootstrap.local_operator_token)
+        for mode in ("dry-run", "apply"):
+            response = asyncio.run(
+                http_request(
+                    app,
+                    "POST",
+                    "/v1/product-config/apply",
+                    headers={**headers, "Idempotency-Key": f"rollback-fixture-{mode}"},
+                    payload={
+                        "mode": mode,
+                        "product": "launchplane",
+                        "context": "launchplane",
+                        "reason": "Restore retained fixture bootstrap identities.",
+                        "runtime_env": {AGENT_BEARER_SOURCE_KEY: "bootstrap"},
+                    },
+                )
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(self.load(), self.bootstrap)

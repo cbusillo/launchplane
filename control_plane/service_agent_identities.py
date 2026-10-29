@@ -39,7 +39,7 @@ def load_service_agent_identities(
             scope="context", context_name="launchplane"
         )
         values = records[0].env if records else {}
-        if AGENT_BEARER_SOURCE_KEY not in values:
+        if values.get(AGENT_BEARER_SOURCE_KEY) in (None, "bootstrap"):
             return bootstrap
         if values[AGENT_BEARER_SOURCE_KEY] != "records":
             raise ValueError("Invalid service identity source")
