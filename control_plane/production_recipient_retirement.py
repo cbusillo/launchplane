@@ -153,21 +153,27 @@ def require_retirement_protection(
     record: ProductionRecipientRecord,
     request: RecipientRetirementRequest,
     after: datetime,
-) -> None:
-    require_production_promotion_backup(
+) -> float:
+    evidence = require_production_promotion_backup(
         record_store=store,
         product=record.product,
         context=record.context,
         instance="prod",
         promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
         backup_record_id=request.backup_record_id,
-    )
-    capture = store.read_backup_gate_record(request.backup_record_id)
+    ).evidence
     if any(
-        datetime.fromisoformat(capture.evidence[key]) < after
+        datetime.fromisoformat(evidence[key]) < after
         for key in ("snapshot_finished_at", "independent_backup_finished_at")
     ):
         raise ValueError("Current protection must follow the observation window.")
+    policy = store.read_production_backup_policy_record(evidence["policy_record_id"])
+    return min(
+        datetime.fromisoformat(evidence["snapshot_finished_at"]).timestamp()
+        + policy.fast_snapshot.max_evidence_age_seconds,
+        datetime.fromisoformat(evidence["independent_backup_finished_at"]).timestamp()
+        + policy.independent_backup.max_evidence_age_seconds,
+    )
 
 
 def require_retirement_evidence(
@@ -233,8 +239,9 @@ def require_retirement_evidence(
         or recovered.publication_sha256 != request.publication_sha256
     ):
         raise ValueError("Fresh post-window populated restored-data recovery is required.")
-    require_retirement_protection(adapter.store, record, request, after)
+    protection_until = require_retirement_protection(adapter.store, record, request, after)
     return authority_snapshot(adapter.store, record.product, record.context), min(
+        protection_until,
         datetime.fromisoformat(recovered.recovery_fresh_until).timestamp(),
         (state.cycle.observed + MAX_OBSERVATION_AGE).timestamp(),
         (datetime.fromisoformat(consumers.completed_at) + MAX_OBSERVATION_AGE).timestamp(),
@@ -407,6 +414,16 @@ class RecipientRetirementAdapter:
             parsed = urlsplit(url)
             return parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
 
+        probe = RetainedVolumeBinding(
+            volume_name=manifest["project"],
+            server_id=manifest["server"],
+            application_id=manifest["target"],
+            application_name=manifest["project"],
+        )
+        if not _inventory_clear(
+            self.root, probe, ignored_compose_id=manifest["target"], exact=True
+        ):
+            raise ValueError("Old Compose provider references are incomplete or protected.")
         retained_endpoints = {
             endpoint(row["url"]) for row in record.publication["before"]["health_endpoints"]
         }
@@ -421,16 +438,6 @@ class RecipientRetirementAdapter:
             (manifest["target"], manifest["project"], manifest["project"] + "_default"),
         ):
             raise ValueError("The old Compose retains service or recovery references.")
-        probe = RetainedVolumeBinding(
-            volume_name=manifest["project"],
-            server_id=manifest["server"],
-            application_id=manifest["target"],
-            application_name=manifest["project"],
-        )
-        if not _inventory_clear(
-            self.root, probe, ignored_compose_id=manifest["target"], exact=True
-        ):
-            raise ValueError("Old Compose provider references are incomplete or protected.")
         owner = (
             record.execution.get("retirement_owner", {}) if self.request.mode == "dry-run" else {}
         )
@@ -558,6 +565,9 @@ class RecipientRetirementAdapter:
     ) -> ProviderMutationOutcome:
         try:
             record, manifest, authority, until = self.current()
+            observation_end = (
+                datetime.fromisoformat(record.publication["published_at"]) + ROLLBACK_WINDOW
+            )
             digest = self.digest(record, manifest, authority)
             if (
                 digest != self.request.reviewed_plan_sha256
@@ -592,6 +602,7 @@ class RecipientRetirementAdapter:
                 )
             if not record.execution.get("retirement_compose_dispatched"):
                 self.references(record, manifest)
+                require_retirement_protection(self.store, record, self.request, observation_end)
                 if datetime.now(timezone.utc).timestamp() >= until:
                     raise ValueError("Retirement evidence expired before Compose dispatch.")
                 host, token = source.read_dokploy_config(control_plane_root=self.root)
@@ -638,8 +649,8 @@ class RecipientRetirementAdapter:
                 held = (
                     row["held"]
                     or observed_volume["held"]
-                    or service_references(self.store, record, (row["name"],))
                     or not _inventory_clear(self.root, binding, exact=True)
+                    or service_references(self.store, record, (row["name"],))
                 )
                 if held:
                     save(**{"retirement_volume:" + identity: "held"})
@@ -658,15 +669,17 @@ class RecipientRetirementAdapter:
                 save(**{permit_key: permit})
 
                 def validate_volume_dispatch() -> None:
+                    if not _inventory_clear(self.root, binding, exact=True):
+                        raise ValueError("Volume provider references changed before dispatch.")
+                    current_source(self.store, self.root, record.product, record.context)
+                    self.references(record, manifest)
+                    require_retirement_protection(self.store, record, self.request, observation_end)
                     if (
                         authority_snapshot(self.store, record.product, record.context) != authority
                         or datetime.now(timezone.utc).timestamp() >= min(until, current_until)
                         or service_references(self.store, record, (row["name"],))
-                        or not _inventory_clear(self.root, binding, exact=True)
                     ):
                         raise ValueError("Volume custody changed before dispatch.")
-                    current_source(self.store, self.root, record.product, record.context)
-                    self.references(record, manifest)
 
                 status, reason = _host_result(
                     self.root,

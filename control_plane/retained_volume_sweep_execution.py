@@ -157,9 +157,18 @@ def _inventory_clear(
                         ):
                             return False
                         payload = database_payload
+                    reference_payload: object = payload
+                    if exact:
+                        environment_text = payload.get("env")
+                        if environment_text is not None and not isinstance(environment_text, str):
+                            return False
+                        reference_payload = (
+                            payload,
+                            api.parse_dokploy_env_text(environment_text or ""),
+                        )
                     mounts = payload.get("mounts")
                     if not isinstance(mounts, list) or _volume_referenced(
-                        binding.volume_name, payload, exact=exact
+                        binding.volume_name, reference_payload, exact=exact
                     ):
                         return False
                     if target_type == "compose":

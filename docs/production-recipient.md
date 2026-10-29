@@ -655,6 +655,7 @@ Populated storage is allowed only through this retirement's bound, expiring
 permission; ordinary prelaunch kept-volume cleanup still requires emptiness.
 The host permission uses its observed boot identity and monotonic deadline, so
 a wall-clock offset cannot extend freshness or carry permission across a reboot.
+The earliest recovery, sync, consumer or protection expiry bounds that permission.
 
 Before provider dispatch, a leased compare-and-write records `fallback_ended_at`
 and enters `retiring_old`. Old-target inverse, writer resume and release recovery
@@ -664,6 +665,8 @@ its monitors and backup policies continue, and retirement does not
 block later Client releases.
 Target creation and retirement admission share a short database exclusion;
 requested names that can generate the retired project name are reserved too.
+When an omitted provider name could reuse retained custody, creation accepts an
+independent explicit `app_name` through the existing target-creation interface.
 
 Dokploy metadata deletion uses `deleteVolumes=false`. Neither an acknowledgement
 nor a missing provider record proves host cleanup. Host inventory must separately

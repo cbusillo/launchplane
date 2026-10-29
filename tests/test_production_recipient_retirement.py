@@ -32,7 +32,7 @@ from control_plane.production_recipient_retirement_names import (
 from control_plane.dokploy_inventory import TARGET_COLLECTIONS
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
-from control_plane.retained_volume_sweep_execution import compose_volume_names
+from control_plane.retained_volume_sweep_execution import compose_volume_names, _inventory_clear
 from control_plane.provider_operations import run_durable_provider_operation
 from tests import test_production_recipient_publication as publication_tests
 
@@ -127,7 +127,11 @@ class RecipientRetirementTests(unittest.TestCase):
                 "current",
                 side_effect=lambda: (self.record, self.recovery),
             ),
-            patch.object(retirement, "require_retirement_protection"),
+            patch.object(
+                retirement,
+                "require_retirement_protection",
+                return_value=(self.now + timedelta(minutes=10)).timestamp(),
+            ),
             patch.object(api, "fetch_dokploy_projects", side_effect=self.projects),
             patch.object(api, "list_dokploy_schedules", return_value=[]),
             patch.object(retirement, "inspect_retirement_resources", side_effect=self.inspect),
@@ -434,6 +438,22 @@ class RecipientRetirementTests(unittest.TestCase):
             {"held", "absent"},
         )
 
+    def test_other_compose_environment_alias_protects_old_project_files(self) -> None:
+        self.fixture.provider["other-compose"] = {
+            "composeId": "other-compose",
+            "appName": "independent-project",
+            "mounts": [],
+            "env": "OLD_PROJECT="
+            + self.record.retained_target.target_name
+            + "\nUNRELATED=preserve",
+            "composeFile": json.dumps(
+                {"services": {"worker": {"env_file": "/etc/dokploy/compose/${OLD_PROJECT}/.env"}}}
+            ),
+        }
+        with self.assertRaises(ValueError):
+            self.adapter.current()
+        self.assertFalse(self.effects)
+
     def test_new_stopped_host_mount_after_admission_is_protected(self) -> None:
         original_delete = self.delete
 
@@ -473,6 +493,89 @@ class RecipientRetirementTests(unittest.TestCase):
             self.assertEqual(self.run_retirement().status, "reconcile_required")
         self.assertFalse(self.effects)
 
+    def test_testing_volume_reference_added_during_provider_reads_is_protected(self) -> None:
+        original_inventory = _inventory_clear
+        inserted = False
+
+        def add_reference(*args: Any, **kwargs: Any) -> bool:
+            nonlocal inserted
+            clear = original_inventory(*args, **kwargs)
+            record = custody(self.store, self.record.product, self.record.context)
+            if (
+                not inserted
+                and args[1].volume_name == "old-config"
+                and record is not None
+                and any(key.startswith("retirement_permit:") for key in record.execution)
+            ):
+                inserted = True
+                self.store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="new-testing-reference",
+                        instance="testing",
+                        env={"DB_VOLUME": "old-config"},
+                        updated_at=self.now.isoformat(),
+                    )
+                )
+            return clear
+
+        with patch.object(retirement, "_inventory_clear", side_effect=add_reference):
+            self.assertEqual(self.run_retirement().status, "reconcile_required")
+            self.assertTrue(inserted)
+            self.assertNotIn("old-config", self.removed)
+            self.assertEqual(self.run_retirement().status, "completed")
+        self.assertEqual(self.removed, {"old-database"})
+
+    def test_project_reference_added_during_provider_reads_prevents_compose_delete(self) -> None:
+        original_inventory = _inventory_clear
+        inserted = False
+
+        def add_reference(*args: Any, **kwargs: Any) -> bool:
+            nonlocal inserted
+            clear = original_inventory(*args, **kwargs)
+            record = custody(self.store, self.record.product, self.record.context)
+            if not inserted and record is not None and record.phase == "retiring_old":
+                inserted = True
+                self.store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="new-testing-reference",
+                        instance="testing",
+                        env={"RETAINED_COMPOSE": record.retained_target_id.target_id},
+                        updated_at=self.now.isoformat(),
+                    )
+                )
+            return clear
+
+        with patch.object(retirement, "_inventory_clear", side_effect=add_reference):
+            self.assertEqual(self.run_retirement().status, "reconcile_required")
+        self.assertTrue(inserted)
+        self.assertFalse(self.effects)
+
+    def test_protection_expiring_during_provider_reads_prevents_compose_delete(self) -> None:
+        original_inventory = _inventory_clear
+        observed_time = [self.now]
+
+        def expire_protection(*args: Any, **kwargs: Any) -> bool:
+            clear = original_inventory(*args, **kwargs)
+            record = custody(self.store, self.record.product, self.record.context)
+            if record is not None and record.phase == "retiring_old":
+                observed_time[0] = self.now + timedelta(seconds=3)
+            return clear
+
+        with (
+            patch.object(retirement, "datetime", wraps=datetime) as clock,
+            patch.object(
+                retirement,
+                "require_retirement_protection",
+                return_value=(self.now + timedelta(seconds=2)).timestamp(),
+            ),
+            patch.object(retirement, "_inventory_clear", side_effect=expire_protection),
+        ):
+            clock.now.side_effect = lambda *a, **k: observed_time[0]
+            self.assertEqual(self.run_retirement().status, "reconcile_required")
+        self.assertFalse(self.effects)
+
     def test_post_marker_direct_and_bundle_target_id_rebinds_refuse(self) -> None:
         self.assertEqual(self.run_retirement().status, "completed")
         old = self.record.retained_target_id.model_copy(
@@ -502,6 +605,21 @@ class RecipientRetirementTests(unittest.TestCase):
             provider_name_guard(self.store, project.rsplit("-", 1)[0]),
         ):
             self.fail("A creation base capable of reusing the retired project was admitted")
+        payload = deepcopy(
+            self.store.read_production_recipient(self.record.product, self.record.context)
+        )
+        assert payload is not None
+        payload["execution"]["retirement_manifest"]["project"] = "app-" + project
+        with patch.object(
+            self.store, "list_production_recipient_payloads", return_value=(payload,)
+        ):
+            with (
+                self.assertRaises(ValueError),
+                provider_name_guard(self.store, "", generated_prefix="app-"),
+            ):
+                self.fail("Provider-generated names bypassed retained namespace custody")
+            with provider_name_guard(self.store, "independent-explicit-base"):
+                pass
 
     def test_retirement_reserves_old_target_without_holding_replacement_release_target(
         self,
@@ -689,8 +807,20 @@ class RetirementProtectionTests(unittest.TestCase):
             datetime.fromisoformat(capture.evidence[key])
             for key in ("snapshot_finished_at", "independent_backup_finished_at")
         )
-        retirement.require_retirement_protection(
+        deadline = retirement.require_retirement_protection(
             store, record, request, oldest - timedelta(seconds=1)
+        )
+        policy = store.read_production_backup_policy_record(capture.evidence["policy_record_id"])
+        self.assertGreater(deadline, oldest.timestamp())
+        self.assertLessEqual(
+            deadline,
+            datetime.fromisoformat(capture.evidence["snapshot_finished_at"]).timestamp()
+            + policy.fast_snapshot.max_evidence_age_seconds,
+        )
+        self.assertLessEqual(
+            deadline,
+            datetime.fromisoformat(capture.evidence["independent_backup_finished_at"]).timestamp()
+            + policy.independent_backup.max_evidence_age_seconds,
         )
         with self.assertRaises(ValueError):
             retirement.require_retirement_protection(

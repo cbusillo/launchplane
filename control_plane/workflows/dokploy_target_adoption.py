@@ -39,14 +39,6 @@ COMPOSE_CREATE_PATH = "/api/compose.create"
 APPLICATION_CREATE_PATH = "/api/application.create"
 
 
-def _application_create_base(app_name: str, target_name: str) -> str:
-    return (
-        app_name.strip()
-        or re.sub(r"[^A-Za-z0-9._-]+", "-", target_name).strip("-")
-        or "application"
-    )
-
-
 class DokployTargetAdoptionRecordStore(ProductAuthorityBundleStore, Protocol):
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None: ...
 
@@ -579,9 +571,7 @@ def create_dokploy_application_target(
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
     normalized_target_name = _require_non_empty(target_name, "target_name")
-    require_unretired_provider_name(
-        record_store, _application_create_base(app_name, normalized_target_name)
-    )
+    require_unretired_provider_name(record_store, app_name.strip())
     normalized_project_id = project_id.strip()
     normalized_project_name = project_name.strip()
     normalized_environment_id = environment_id.strip()
@@ -683,9 +673,10 @@ def create_dokploy_application_target(
 
     application_payload: JsonObject = {
         "name": normalized_target_name,
-        "appName": _application_create_base(app_name, normalized_target_name),
         "environmentId": created_environment_id,
     }
+    if app_name.strip():
+        application_payload["appName"] = app_name.strip()
     if application_description.strip():
         application_payload["description"] = application_description.strip()
     if server_id.strip():
@@ -693,7 +684,7 @@ def create_dokploy_application_target(
     from control_plane.production_recipient_retirement_names import provider_name_guard
 
     with provider_name_guard(
-        record_store, _application_create_base(app_name, normalized_target_name)
+        record_store, app_name.strip(), generated_prefix="" if app_name.strip() else "app-"
     ):
         created_application = mutate_provider(
             host, token, APPLICATION_CREATE_PATH, application_payload
@@ -1150,9 +1141,10 @@ def planned_application_provider_requests(
         requests.append({"path": ENVIRONMENT_CREATE_PATH, "payload": environment_payload})
     application_payload: dict[str, object] = {
         "name": target_name,
-        "appName": _application_create_base(app_name, target_name),
         "environmentId": environment_id or "<created-environment-id>",
     }
+    if app_name.strip():
+        application_payload["appName"] = app_name.strip()
     if application_description.strip():
         application_payload["description"] = application_description.strip()
     if server_id.strip():

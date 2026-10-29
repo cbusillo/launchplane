@@ -1213,12 +1213,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                     return {"environmentId": "env-123"}
                 if path == "/api/application.create":
                     self.assertEqual(payload["environmentId"], "env-123")
-                    base = payload["appName"]
-                    self.assertIsInstance(base, str)
-                    assert isinstance(base, str)
-                    self.assertTrue(base.isascii())
-                    self.assertFalse(any(c.isspace() for c in base))
-                    self.assertNotIn("/", base)
+                    self.assertNotIn("appName", payload)
                     return {"applicationId": "app-123"}
                 raise AssertionError(path)
 
