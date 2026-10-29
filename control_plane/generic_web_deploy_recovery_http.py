@@ -55,6 +55,7 @@ from control_plane.provider_operations import (
 )
 from control_plane.service_auth import (
     AuthorizationTarget,
+    director_agent_identity,
     LaunchplaneIdentity,
     LocalAdminIdentity,
     LocalOperatorIdentity,
@@ -1646,7 +1647,8 @@ def authorized_event_deploy_coordinates(
     admin = isinstance(identity, LocalAdminIdentity | LocalOperatorIdentity) or (
         isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
     )
-    if not admin:
+    director_read = not apply and director_agent_identity(identity)
+    if not admin and not director_read:
         raise dependencies.http_error(
             status_code=403,
             trace_id=trace_id,
