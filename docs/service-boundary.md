@@ -1101,7 +1101,7 @@ context-scoped `launchplane_service` secret binding in context `launchplane`,
 using its existing token key. Other contexts, global secrets and lane secrets
 cannot supply it. Missing, ambiguous or unreadable token material, or incomplete
 selectors, disable the affected identity. Record mode never falls back to its
-environment token. An unavailable or ambiguous selector read, or an invalid
+environment token. An unavailable selector read, or an invalid
 source setting, disables both Director-agent identities.
 
 `LAUNCHPLANE_LOCAL_ADMIN_*` and engineering-review bootstrap credentials stay
@@ -1109,6 +1109,20 @@ independent of this reader. Keeping the admin token available does not bypass
 the active-policy DB requirement or confer authority on a failed agent identity.
 Authentication still produces the same principal types, subjects and labels;
 existing endpoint and policy rules decide authority.
+
+All identity changes, including revocation, require a service restart to take
+effect; the durable testing-rebuild worker resolves current records again at
+each authority checkpoint. Even before record mode is activated, an unreadable
+service-context record disables Director-agent authentication for that service
+process. Independent admin verification is retained; active-policy DB access
+is still required by non-health routes.
+
+Product-config apply may change these authentication selectors, the source
+setting or `launchplane_service` secrets in the service context only for an authenticated admin with existing
+`authz_policy_grant.write` authority on Launchplane. A general configuration
+grant cannot create a Director-agent credential. The supported write-only
+product-config input remains available to that admin; its use still follows
+the Director's credential and access stop boundaries. No grant is added here.
 
 This source capability does not transfer credentials or authorize activation.
 Before activation, qualify a supported write-only input from independent custody

@@ -1,4 +1,5 @@
 import logging
+from typing import cast
 
 import click
 from sqlalchemy.exc import SQLAlchemyError
@@ -15,6 +16,33 @@ _AGENT_KEYS = (
     ("local_operator", "LAUNCHPLANE_LOCAL_OPERATOR", "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN"),
     ("terminal_agent", "LAUNCHPLANE_TERMINAL_AGENT", "LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN"),
 )
+AGENT_SELECTOR_KEYS = frozenset(
+    f"{prefix}_{suffix}"
+    for _identity, prefix, _token in _AGENT_KEYS
+    for suffix in ("SUBJECT", "TOKEN_LABEL")
+)
+AGENT_BEARER_ENVIRONMENT_KEYS = {
+    f"{identity}_{field}": key
+    for identity, prefix, token_key in _AGENT_KEYS
+    for field, key in (
+        ("token", token_key),
+        ("subject", f"{prefix}_SUBJECT"),
+        ("token_label", f"{prefix}_TOKEN_LABEL"),
+    )
+}
+
+
+def product_config_changes_service_identity(payload: dict[str, object]) -> bool:
+    if payload.get("context") != "launchplane":
+        return False
+    runtime = cast(dict[str, object], payload.get("runtime_env") or {})
+    values = cast(dict[str, object], runtime.get("env") or {})
+    if values.keys() & (AGENT_SELECTOR_KEYS | {AGENT_BEARER_SOURCE_KEY}):
+        return True
+    return any(
+        secret.get("integration") == secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION
+        for secret in cast(list[dict[str, object]], payload.get("secrets") or [])
+    )
 
 
 def load_service_agent_identities(
@@ -24,8 +52,6 @@ def load_service_agent_identities(
         records = store.list_runtime_environment_records(
             scope="context", context_name="launchplane"
         )
-        if len(records) > 1:
-            raise ValueError("Ambiguous service identity selectors")
         values = records[0].env if records else {}
         if AGENT_BEARER_SOURCE_KEY not in values:
             return bootstrap

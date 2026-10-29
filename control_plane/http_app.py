@@ -16380,6 +16380,28 @@ def create_launchplane_fastapi_app(
         diagnostic_admin = isinstance(identity, LocalAdminIdentity) or (
             isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         )
+        from control_plane.service_agent_identities import product_config_changes_service_identity
+
+        if (
+            product_config_request.mode == "apply"
+            and product_config_changes_service_identity(request_payload)
+            and (
+                not diagnostic_admin
+                or not resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action="authz_policy_grant.write",
+                    product=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    target=AuthorizationTarget(scope="context"),
+                )
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Service identity changes require an admin with policy-write authority.",
+            )
         if (
             product_config_request.mode == "apply"
             and not diagnostic_admin
