@@ -180,7 +180,7 @@ class RecipientRetirementTests(unittest.TestCase):
             env="DB_VOLUME=old-database\nCONFIG_VOLUME=old-config",
         )
 
-    def projects(self, **kwargs: Any) -> tuple[dict[str, Any], ...]:
+    def projects(self, **_kwargs: Any) -> tuple[dict[str, Any], ...]:
         environment: dict[str, Any] = {kind: [] for kind in TARGET_COLLECTIONS}
         environment["env"] = ""
         environment["compose"] = [
@@ -190,7 +190,7 @@ class RecipientRetirementTests(unittest.TestCase):
         ]
         return ({"name": self.record.product, "env": "", "environments": [environment]},)
 
-    def inspect(self, root: Path, spec: dict[str, Any]) -> dict[str, Any]:
+    def inspect(self, _root: Path, _spec: dict[str, Any]) -> dict[str, Any]:
         return {
             "project_absent": self.deleted,
             "containers": [],
@@ -225,10 +225,10 @@ class RecipientRetirementTests(unittest.TestCase):
 
     def volume(
         self,
-        root: Path,
+        _root: Path,
         binding: Any,
         mode: str,
-        key: str,
+        _key: str,
         lease: Any = None,
         *,
         retirement: Any = None,
@@ -243,6 +243,7 @@ class RecipientRetirementTests(unittest.TestCase):
                 else ("held", "never_started")
             )
         self.assertTrue(self.deleted)
+        assert retirement is not None and lease is not None
         self.assertEqual(retirement["binding"], self.adapter.request.reviewed_plan_sha256)
         lease.checkpoint_effect("retirement_volume")
         self.removed.add(binding.volume_name)

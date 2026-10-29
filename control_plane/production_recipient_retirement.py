@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -194,7 +194,7 @@ def require_retirement_evidence(
     after = published + ROLLBACK_WINDOW
     if datetime.now(timezone.utc) < after:
         raise ValueError("The successful cutover observation window has not ended.")
-    require_owned_publication_rows(adapter.store, record, inventory_timestamp_required=False)
+    require_owned_publication_rows(adapter.store, record)
     state = current_source(adapter.store, adapter.root, record.product, record.context)
     if state.cycle is None or state.cycle.observed < after or state.cycle.started < after:
         raise ValueError("Fresh post-window healthy incremental sync is required.")
@@ -248,9 +248,7 @@ def require_retirement_evidence(
     )
 
 
-def service_references(
-    store: PostgresRecordStore, record: ProductionRecipientRecord, names: tuple[str, ...]
-) -> bool:
+def service_references(store: PostgresRecordStore, names: tuple[str, ...]) -> bool:
     collections = (
         store.list_dokploy_target_records(),
         store.list_dokploy_target_id_records(),
@@ -361,6 +359,7 @@ class RecipientRetirementAdapter:
     trace_id: str
     original_key: str
     can_read: Callable[[str, str, str], bool]
+    reconciled: dict[str, str] = field(default_factory=dict, init=False)
 
     def record(self) -> ProductionRecipientRecord:
         result = custody(self.store, self.product, self.request.context)
@@ -388,7 +387,7 @@ class RecipientRetirementAdapter:
     def require_original(self, record: ProductionRecipientRecord) -> None:
         if self.request.mode == "dry-run":
             return
-        owner = record.execution.get("retirement_owner")
+        owner = record.execution.get("retirement_owner") or {}
         if owner and (
             (owner.get("actor"), owner.get("scope"), owner.get("key"))
             != (self.actor, self.scope, self.original_key)
@@ -434,7 +433,6 @@ class RecipientRetirementAdapter:
             raise ValueError("A current monitor still references the old placement.")
         if service_references(
             self.store,
-            record,
             (manifest["target"], manifest["project"], manifest["project"] + "_default"),
         ):
             raise ValueError("The old Compose retains service or recovery references.")
@@ -622,7 +620,7 @@ class RecipientRetirementAdapter:
                 if record.execution.get("retirement_volume:" + identity):
                     continue
                 permit_key, previous_permit = latest_volume_permit(record, identity)
-                reconciled = getattr(self, "reconciled", {}).get(identity)
+                reconciled = self.reconciled.get(identity)
                 if reconciled == "absent":
                     save(**{"retirement_volume:" + identity: "absent"})
                     continue
@@ -639,9 +637,10 @@ class RecipientRetirementAdapter:
                 observed_volume = next(
                     (item for item in host_observed["volumes"] if item["name"] == row["name"]), None
                 )
+                if observed_volume is None:
+                    raise ValueError("Retained volume identity changed before its step.")
                 if (
-                    observed_volume is None
-                    or observed_volume["identity"] != row["identity"]
+                    observed_volume["identity"] != row["identity"]
                     or observed_volume["engine_identity"] != row["engine_identity"]
                 ):
                     raise ValueError("Retained volume identity changed before its step.")
@@ -650,7 +649,7 @@ class RecipientRetirementAdapter:
                     row["held"]
                     or observed_volume["held"]
                     or not _inventory_clear(self.root, binding, exact=True)
-                    or service_references(self.store, record, (row["name"],))
+                    or service_references(self.store, (row["name"],))
                 )
                 if held:
                     save(**{"retirement_volume:" + identity: "held"})
@@ -677,7 +676,7 @@ class RecipientRetirementAdapter:
                     if (
                         authority_snapshot(self.store, record.product, record.context) != authority
                         or datetime.now(timezone.utc).timestamp() >= min(until, current_until)
-                        or service_references(self.store, record, (row["name"],))
+                        or service_references(self.store, (row["name"],))
                     ):
                         raise ValueError("Volume custody changed before dispatch.")
 

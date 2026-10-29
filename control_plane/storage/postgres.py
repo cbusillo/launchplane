@@ -14264,7 +14264,8 @@ class PostgresRecordStore(HumanSessionStore):
                 for row in session.scalars(select(LaunchplaneProductionRecipientRow)).all()
             )
 
-    def _require_unretired_provider_identity(self, session: Any, target_id: str) -> None:
+    @staticmethod
+    def _require_unretired_provider_identity(session: Any, target_id: str) -> None:
         from control_plane.production_recipient_retirement_names import require_available_name
 
         require_available_name(

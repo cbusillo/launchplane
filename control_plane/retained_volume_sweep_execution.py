@@ -112,7 +112,7 @@ def compose_volume_names(
         if not isinstance(actual, str):
             raise ValueError("Compose volume identity is unavailable.")
         if "$" in actual:
-            match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", actual)
+            match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)}", actual)
             if match is None or allowed_keys is not None and match[1] not in allowed_keys:
                 raise ValueError("Compose volume identity uses an unreviewed input.")
             environment = require_unique_compose_inputs(str(payload.get("env") or ""), (match[1],))
