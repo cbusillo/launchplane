@@ -91,9 +91,9 @@ def collect_disposable_lane_facts(
 
 def disposable_collection_coverage() -> dict[str, str]:
     return {
-        "usage": "staff_testing_hold; odoo_testing_recent_logins_and_authenticated_session_files; durable_never_served_generation",
+        "usage": "staff_testing_hold; odoo_recent_logins_and_authenticated_session_files; serving_preview_generation; durable_never_served_testing_generation",
         "data": "qualified_resettable_odoo_generation; retained_compose_activation_and_current_physical_inspection; other_custody_unavailable",
-        "production_resources": "qualified_odoo_receiver_inspection; retained_compose_current_mounts_ports_credentials; same_kind_production_target_alias",
+        "production_resources": "qualified_odoo_receiver_inspection; serving_preview_runtime_and_production_comparison; retained_compose_current_mounts_ports_credentials; same_kind_production_target_alias",
         "historical_generations": "not_current_executor_evidence",
     }
 
