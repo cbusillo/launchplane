@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, unquote, urlparse
-from urllib.request import Request, urlopen
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -21,10 +20,10 @@ from control_plane import runtime_environments as control_plane_runtime_environm
 from control_plane.runtime_platform_credentials import looks_like_credential
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
-    health_payload_runtime_identity_status,
     runtime_identity_env,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.preview_namespaces import POSTGRES_PREVIEW_TRANSPORTS
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.workflows.preview_resource_destroy import (
     PREVIEW_CLEANUP_SAFETY_UNKNOWN,
@@ -37,6 +36,7 @@ from control_plane.workflows.generic_web_application_lifecycle import (
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 from control_plane.workflows.generic_web_preview import (
+    _wait_for_preview_health as _wait_for_preview_health,
     _configure_application,
     _ensure_domain,
     _delete_application,
@@ -56,7 +56,6 @@ from control_plane.dokploy.api import JsonObject
 
 DEFAULT_PREVIEW_TIMEOUT_SECONDS = 300
 PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
-_HARD_RUNTIME_IDENTITY_FIELDS = frozenset({"product", "context", "instance", "environment_kind"})
 
 
 def _build_preview_runtime_identity(
@@ -131,7 +130,6 @@ class PostgresPreviewDestroyRequest(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     context: str
     anchor_repo: str
-    anchor_pr_url: str = ""
     anchor_pr_number: int = Field(ge=1)
     preview_slug: str
     slug_template: str = snapshot_protocol_default("pr-{number}")
@@ -389,12 +387,14 @@ def _build_admin_database_url(database_url: str) -> str:
 
 
 def _build_preview_database_url(
-    *, host: str, port: int, database_name: str, role_name: str, password: str
+    *, template_database_url: str, database_name: str, role_name: str, password: str
 ) -> str:
-    encoded_role = quote(role_name, safe="")
-    encoded_password = quote(password, safe="")
-    encoded_database = quote(database_name, safe="")
-    return f"postgresql://{encoded_role}:{encoded_password}@{host}:{port}/{encoded_database}?schema=public"
+    parsed = urlparse(template_database_url)
+    authority = parsed.netloc.rpartition("@")[2]
+    userinfo = f"{quote(role_name, safe='')}:{quote(password, safe='')}"
+    return parsed._replace(
+        netloc=f"{userinfo}@{authority}", path=f"/{quote(database_name, safe='')}"
+    ).geturl()
 
 
 def _random_password(length: int = 32) -> str:
@@ -443,8 +443,7 @@ def _render_postgres_preview_env(
             generate=_random_base64_secret if encoding == "base64" else _random_urlsafe_secret,
         )
     updates["DATABASE_URL"] = _build_preview_database_url(
-        host=database_parts.host,
-        port=database_parts.port,
+        template_database_url=template_env_map["DATABASE_URL"],
         database_name=database_parts.database,
         role_name=database_parts.username,
         password=database_parts.password,
@@ -508,11 +507,12 @@ def _template_application_payload(
 
 
 def _declared_template_options(
-    profile: LaunchplaneProductProfileRecord,
+    profile: LaunchplaneProductProfileRecord, *, for_destroy: bool = False
 ) -> dict[str, str]:
     if (
-        profile.driver_id != "generic-web"
-        or profile.preview.transport_extension != "postgres"
+        profile.driver_id not in ({"generic-web", "verireel"} if for_destroy else {"generic-web"})
+        or profile.preview.transport_extension
+        not in (POSTGRES_PREVIEW_TRANSPORTS if for_destroy else {"postgres"})
         or not profile.preview.transport_database_prefix
         or not profile.preview.app_name_prefix
     ):
@@ -895,66 +895,6 @@ def _build_preview_database_command(
     )
 
 
-def _wait_for_preview_health(
-    *,
-    preview_url: str,
-    timeout_seconds: int,
-    expected_runtime_identity: RuntimeIdentity,
-    health_path: str,
-) -> RuntimeIdentity:
-    health_url = f"{preview_url.rstrip('/')}{health_path}"
-    started_at = time.monotonic()
-    request = Request(
-        health_url,
-        headers={
-            "Accept": "application/json",
-            "Cache-Control": "no-store",
-        },
-    )
-    last_detail = "health endpoint did not return matching runtime identity"
-    while time.monotonic() - started_at <= timeout_seconds:
-        remaining_seconds = max(1, timeout_seconds - int(time.monotonic() - started_at))
-        try:
-            with urlopen(request, timeout=min(15, remaining_seconds)) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            if not isinstance(payload, dict):
-                last_detail = "health endpoint returned non-object JSON"
-            elif payload.get("ok") is not True:
-                last_detail = "health endpoint did not report ok=true"
-            else:
-                status, detail, observed = health_payload_runtime_identity_status(
-                    expected=expected_runtime_identity,
-                    payload=payload,
-                    json_parse_failed=False,
-                )
-                if status == "match" and observed is not None:
-                    return observed
-                if status == "mismatch" and _runtime_identity_mismatch_is_hard(detail):
-                    raise click.ClickException(
-                        "Preview runtime identity did not match the expected deployment identity: "
-                        f"{detail}."
-                    )
-                last_detail = detail
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError):
-            last_detail = "health endpoint request failed or returned invalid JSON"
-        elapsed_seconds = time.monotonic() - started_at
-        if elapsed_seconds >= timeout_seconds:
-            break
-        sleep_seconds = min(5, timeout_seconds - elapsed_seconds)
-        time.sleep(sleep_seconds)
-    raise click.ClickException(
-        f"Timed out waiting for {health_url} to report the expected runtime identity: {last_detail}."
-    )
-
-
-def _runtime_identity_mismatch_is_hard(detail: str) -> bool:
-    prefix = "Runtime identity mismatched fields: "
-    if not detail.startswith(prefix):
-        return False
-    fields = {field.strip() for field in detail.removeprefix(prefix).split(",") if field.strip()}
-    return bool(fields & _HARD_RUNTIME_IDENTITY_FIELDS)
-
-
 def _resolve_existing_preview_database(
     existing_application: JsonObject | None,
     *,
@@ -1193,6 +1133,10 @@ def execute_postgres_preview_refresh(
             expected_runtime_identity=expected_runtime_identity,
             health_path=profile.health_path,
         )
+        if observed_runtime_identity is None:
+            raise click.ClickException(
+                "Preview health did not return its observed runtime identity."
+            )
         lifecycle.complete()
         for stale_domain_id in stale_domain_ids:
             _delete_domain(host=host, token=token, domain_id=stale_domain_id)
@@ -1285,7 +1229,7 @@ def execute_postgres_preview_destroy(
         control_plane_root=control_plane_root,
         host=host,
         token=token,
-        **_declared_template_options(profile),
+        **_declared_template_options(profile, for_destroy=True),
     )
     template_env_map = dokploy_api.parse_dokploy_env_text(
         str(template_application.get("env") or "")

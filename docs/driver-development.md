@@ -119,8 +119,11 @@ driver is `generic-web`, declaring its isolated database namespace through
 namespace and runtime product identity come from the profile, as do its port,
 health path, URL environment keys and generated secrets. The testing template
 must expose a PostgreSQL `DATABASE_URL` and its image must provide Node and `pg`
-for database administration. Its health endpoint must return `ok: true` and
-the injected runtime identity. Choose application and database prefixes unique
+for database administration. Application database URLs retain the template's
+scheme and connection options, replacing only credentials and the database name;
+see [PostgreSQL connection URIs](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING-URIS).
+The shared preview health contract requires the observed runtime identity to
+match and rejects an explicit `ok: false`. Choose application and database prefixes unique
 to the product; storage checks the prospective profile set and provisioning and
 cleanup refuse overlapping rendered namespaces, including default prefixes and
 slug prefixes. Clean up retained previews before changing their resource names,
@@ -133,8 +136,12 @@ product-specific URL rewriting. Maintenance and schedules remain profile-owned.
 This uses the existing isolated PostgreSQL preparation and cleanup rather than
 the plain preview path. Stored `verireel-postgres` declarations remain unchanged
 when read, including profiles embedded in retirement records and their hash
-fences. The retired transport does not execute. Before preview refresh, cleanup or
-other profile edits, apply a reviewed generic-web transition from the product's
+fences. Historical declarations support database-aware cleanup using their
+stored resource names and testing template, including when the product is
+retiring or previews are disabled. Use `/v1/drivers/generic-web/preview-destroy`
+through the existing authorized agent route. Retired products remain refused;
+cleanup does not rewrite the profile or its retirement hash fence.
+Before preview refresh or other profile edits, apply a reviewed generic-web transition from the product's
 Shared web driver panel. Declare `postgres`, `generated_secret_env`,
 `preview_url_env_keys` and `preview_domain_env_keys` explicitly from the product's
 runtime contract. Empty collections mean the product requires none; Launchplane
@@ -149,6 +156,12 @@ Historical deployment
 and backup records and retired instance-scoped policy grants remain readable;
 no retired release endpoint is enabled by those grants. Production still changes only through an
 accepted release.
+
+Historical lifecycle translation remains in
+[`product_application_lifecycle_migration.py`](../control_plane/contracts/product_application_lifecycle_migration.py).
+[Issue 3856](https://github.com/cbusillo/launchplane/issues/3856) tracks its removal
+after persisted profile declarations and retirement/snapshot compatibility are
+qualified; this refactor does not rewrite live records to remove that reader.
 
 Application-only product retirement cannot clean PostgreSQL databases or roles.
 Destroy retained PostgreSQL previews through their normal preview cleanup route

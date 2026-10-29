@@ -3,6 +3,8 @@ import json
 import subprocess
 import unittest
 from pathlib import Path
+from urllib.parse import urlparse, parse_qsl
+from psycopg.conninfo import conninfo_to_dict
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
@@ -22,13 +24,13 @@ from control_plane.workflows.postgres_preview import _preview_application_name
 from control_plane.workflows.postgres_preview import _preview_database_identifiers
 from control_plane.workflows.postgres_preview import _build_preview_runtime_identity
 from control_plane.workflows.postgres_preview import _build_preview_database_command
+from control_plane.workflows.postgres_preview import _build_preview_database_url
 from control_plane.workflows.postgres_preview import _build_admin_database_url
 from control_plane.workflows.postgres_preview import _ensure_application
 from control_plane.workflows.postgres_preview import _resolve_preview_secret
 from control_plane.workflows.postgres_preview import _resolve_preview_url
 from control_plane.workflows.postgres_preview import _run_application_command
 from control_plane.workflows.postgres_preview import _run_application_command_with_retries
-from control_plane.workflows.postgres_preview import _wait_for_preview_health
 from control_plane.workflows.postgres_preview import _template_runtime_secret_keys
 from control_plane.workflows.postgres_preview import execute_postgres_preview_destroy
 from control_plane.workflows.postgres_preview import execute_postgres_preview_refresh
@@ -69,6 +71,33 @@ def _refresh_request() -> PostgresPreviewRefreshRequest:
 
 
 class PostgresPreviewDriverTests(unittest.TestCase):
+    def test_preview_database_url_preserves_template_options_for_application_clients(self) -> None:
+        for template in (
+            "postgresql://template:old@[2001:db8::7]:5433/testing?sslmode=require&application_name=&application_name=preview",
+            "postgres://template:old@db.example/testing?schema=tenant&sslmode=require",
+            "postgresql://template:old@db.example/testing",
+        ):
+            with self.subTest(template=template):
+                rendered = _build_preview_database_url(
+                    template_database_url=template,
+                    database_name="preview_name",
+                    role_name="preview_role",
+                    password="secret@:/?%",
+                )
+                before, after = urlparse(template), urlparse(rendered)
+                self.assertEqual(after.scheme, before.scheme)
+                self.assertEqual(after.hostname, before.hostname)
+                self.assertEqual(after.port, before.port)
+                self.assertEqual(
+                    parse_qsl(after.query, keep_blank_values=True),
+                    parse_qsl(before.query, keep_blank_values=True),
+                )
+                if "schema=" not in before.query:
+                    parsed = conninfo_to_dict(rendered)
+                    self.assertEqual(parsed["user"], "preview_role")
+                    self.assertEqual(parsed["password"], "secret@:/?%")
+                    self.assertEqual(parsed["dbname"], "preview_name")
+
     def test_long_database_names_remain_distinct_and_within_postgres_limit(self) -> None:
         prefix = "sample_product_preview_database_"
         first = _preview_database_identifiers("change-for-a-very-long-preview-one-41", prefix)
@@ -155,13 +184,16 @@ class PostgresPreviewDriverTests(unittest.TestCase):
                     {**payload, "generated_secret_env": {key: "urlsafe"}}
                 )
 
-    def test_production_template_refuses_before_database_or_application_effects(self) -> None:
-        profile = _driver_profile()
-        profile = profile.model_copy(
-            update={
-                "preview": profile.preview.model_copy(update={"template_instance": "prod"}),
-                "lanes": (profile.lanes[0].model_copy(update={"instance": "prod"}),),
-            }
+    def test_stored_legacy_production_template_refuses_cleanup_before_provider_effects(
+        self,
+    ) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+
+        payload = _driver_profile().model_dump(mode="json")
+        payload["preview"].update(transport_extension="verireel-postgres", template_instance="prod")
+        payload["lanes"][0]["instance"] = "prod"
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            payload, context={"stored_product_profile": True}
         )
         with (
             patch(
@@ -173,11 +205,17 @@ class PostgresPreviewDriverTests(unittest.TestCase):
             ) as provider,
             self.assertRaises(PostgresPreviewRefreshConfigError),
         ):
-            execute_postgres_preview_refresh(
+            execute_postgres_preview_destroy(
                 record_store=_preview_store(),
                 control_plane_root=Path("."),
-                request=_refresh_request(),
                 profile=profile,
+                request=PostgresPreviewDestroyRequest(
+                    context=profile.preview.context,
+                    anchor_repo="verireel",
+                    anchor_pr_number=71,
+                    preview_slug="pr-71",
+                    destroy_reason="closed",
+                ),
             )
         provider.assert_not_called()
 
@@ -995,7 +1033,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
         )
         self.assertEqual(len(base64.b64decode(captured_env["ENCRYPTION_KEY"])), 32)
         self.assertIn(
-            f"/{profile.preview.transport_database_prefix}pr_71?", captured_env["DATABASE_URL"]
+            f"/{profile.preview.transport_database_prefix}pr_71", captured_env["DATABASE_URL"]
         )
         self.assertEqual(result.application_name, f"{profile.preview.app_name_prefix}-pr-71-app")
         self.assertEqual(
@@ -1160,86 +1198,6 @@ class PostgresPreviewDriverTests(unittest.TestCase):
             base64.b64encode(bytes(range(32))).decode("ascii"),
         )
         self.lifecycle.maintain.assert_called_once()
-
-    def test_wait_for_preview_health_returns_matching_runtime_identity(self) -> None:
-        expected = _build_preview_runtime_identity(product="verireel", request=_refresh_request())
-        response = MagicMock()
-        response.read.return_value = json.dumps(
-            {
-                "ok": True,
-                "runtime_identity": expected.model_dump(mode="json"),
-            }
-        ).encode("utf-8")
-        response.__enter__.return_value = response
-        with patch("control_plane.workflows.postgres_preview.urlopen", return_value=response):
-            observed = _wait_for_preview_health(
-                health_path=_driver_profile().health_path,
-                preview_url="https://pr-71.preview.example.test",
-                timeout_seconds=30,
-                expected_runtime_identity=expected,
-            )
-
-        self.assertEqual(observed, expected)
-
-    def test_wait_for_preview_health_rejects_runtime_identity_mismatch(self) -> None:
-        expected = _build_preview_runtime_identity(product="verireel", request=_refresh_request())
-        mismatched = expected.model_copy(update={"source_git_ref": "a" * 40})
-        response = MagicMock()
-        response.read.return_value = json.dumps(
-            {
-                "ok": True,
-                "runtime_identity": mismatched.model_dump(mode="json"),
-            }
-        ).encode("utf-8")
-        response.__enter__.return_value = response
-        with (
-            patch("control_plane.workflows.postgres_preview.urlopen", return_value=response),
-            patch(
-                "control_plane.workflows.postgres_preview.time.monotonic",
-                side_effect=(0.0, 0.0, 0.0, 2.0),
-            ),
-            patch("control_plane.workflows.postgres_preview.time.sleep") as sleep,
-        ):
-            with self.assertRaisesRegex(click.ClickException, "source_git_ref"):
-                _wait_for_preview_health(
-                    health_path=_driver_profile().health_path,
-                    preview_url="https://pr-71.preview.example.test",
-                    timeout_seconds=1,
-                    expected_runtime_identity=expected,
-                )
-
-        sleep.assert_not_called()
-
-    def test_wait_for_preview_health_fails_immediately_on_hard_identity_mismatch(
-        self,
-    ) -> None:
-        expected = _build_preview_runtime_identity(product="verireel", request=_refresh_request())
-        mismatched = expected.model_copy(update={"product": "different-product"})
-        response = MagicMock()
-        response.read.return_value = json.dumps(
-            {
-                "ok": True,
-                "runtime_identity": mismatched.model_dump(mode="json"),
-            }
-        ).encode("utf-8")
-        response.__enter__.return_value = response
-        with (
-            patch("control_plane.workflows.postgres_preview.urlopen", return_value=response),
-            patch(
-                "control_plane.workflows.postgres_preview.time.monotonic",
-                side_effect=(0.0, 0.0, 0.0),
-            ),
-            patch("control_plane.workflows.postgres_preview.time.sleep") as sleep,
-        ):
-            with self.assertRaisesRegex(click.ClickException, "product"):
-                _wait_for_preview_health(
-                    health_path=_driver_profile().health_path,
-                    preview_url="https://pr-71.preview.example.test",
-                    timeout_seconds=30,
-                    expected_runtime_identity=expected,
-                )
-
-        sleep.assert_not_called()
 
     def test_preview_destroy_request_requires_pr_scoped_preview_slug(self) -> None:
         with self.assertRaisesRegex(ValueError, "preview_slug to match anchor_pr_number"):

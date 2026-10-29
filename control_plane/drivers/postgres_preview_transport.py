@@ -7,8 +7,6 @@ from typing import ContextManager, Protocol, cast
 
 from pydantic import Field, model_validator
 
-from control_plane.preview_namespaces import POSTGRES_PREVIEW_TRANSPORTS
-
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
@@ -79,6 +77,7 @@ def _postgres_preview_operation(
     preview_id: str,
     profile: LaunchplaneProductProfileRecord,
     preview_slug: str,
+    for_destroy: bool = False,
 ) -> Iterator[None]:
     with (
         _preview_refresh_serialization(
@@ -91,7 +90,9 @@ def _postgres_preview_operation(
         current = cast(_ProductProfileStore, record_store).read_product_profile_record(
             profile.product
         )
-        if current != profile or not current.is_active:
+        if current != profile or not (
+            current.is_active or for_destroy and current.lifecycle_state == "retiring"
+        ):
             raise PostgresPreviewRefreshConfigError(
                 "Product preview authority changed before execution."
             )
@@ -143,32 +144,13 @@ def apply_postgres_preview_refresh_result(
             anchor_pr_number=request.refresh.anchor_pr_number,
         )
         if existing is not None and existing.state != "destroyed":
-            profile = None
+            profile = execution_profile
             desired = LaneBuild(
                 request.refresh.image_reference,
                 request.refresh.anchor_head_sha,
                 request.refresh.image_reference,
             )
             try:
-                read_profile = getattr(record_store, "read_product_profile_record", None)
-                if not callable(read_profile):
-                    raise LaneMovementRefused("source_authority_unavailable")
-                try:
-                    profile = LaunchplaneProductProfileRecord.model_validate(
-                        cast(_ProductProfileStore, record_store).read_product_profile_record(
-                            request.product
-                        )
-                    )
-                except (FileNotFoundError, ValueError) as error:
-                    raise LaneMovementRefused("source_authority_unavailable") from error
-                if (
-                    not profile.is_active
-                    or profile.driver_id != "generic-web"
-                    or profile.preview.transport_extension not in POSTGRES_PREVIEW_TRANSPORTS
-                    or profile.preview.context != request.refresh.context
-                    or profile.repository.partition("/")[2] != request.refresh.anchor_repo
-                ):
-                    raise LaneMovementRefused("source_authority_unavailable")
                 require_forward_preview_build(
                     record_store=record_store,
                     profile=profile,
@@ -253,6 +235,7 @@ def apply_postgres_preview_destroy_result(
         preview_id=preview_id,
         profile=execution_profile,
         preview_slug=request.destroy.preview_slug,
+        for_destroy=True,
     ):
         return _apply_postgres_preview_destroy_result_unserialized(
             control_plane_root=control_plane_root,

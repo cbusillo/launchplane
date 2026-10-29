@@ -110,6 +110,10 @@ those declarations fixed between operations. This also applies to plain previews
 clean them up before changing resource names, source or template. Inert refresh
 configuration failures preserve serving evidence. Destroy never creates a record
 for an unrecorded preview; an already destroyed record is an idempotent success.
+PostgreSQL destroy also accepts complete historical declarations for active or
+retiring products, including disabled previews, while refresh still requires an
+active canonical profile. Cleanup preserves the stored profile and retirement
+hash fence; retired products cannot execute cleanup.
 
 Because product callers pin reusable workflows while the service deploys
 independently, add any future destroy outcome to the `reusable-preview-feedback-status.yml` allowlist

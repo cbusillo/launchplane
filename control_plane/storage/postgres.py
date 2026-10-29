@@ -29809,7 +29809,10 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.product_retirement import ProductRetirementBlockedError
 
         profile = bound.profile
-        require_postgres_preview_cleanup(profile, bound.previews)
+        try:
+            require_postgres_preview_cleanup(profile, bound.previews)
+        except ValueError as error:
+            raise ProductRetirementBlockedError(str(error)) from error
         contexts = (
             {lane.context for lane in profile.lanes}
             | {

@@ -4,6 +4,8 @@ from pathlib import Path
 
 import click
 
+from control_plane.preview_namespaces import POSTGRES_PREVIEW_TRANSPORTS
+
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.drivers.generic_web_preview_dispatch import (
     _generic_web_preview_anchor_head_sha,
@@ -170,7 +172,7 @@ def apply_generic_web_preview_driver_destroy(
 ) -> tuple[dict[str, object], dict[str, object]] | None:
     if profile.preview.data_transport_mode != "driver":
         return None
-    if not _uses_postgres_transport(profile):
+    if not _uses_postgres_transport(profile, for_destroy=True):
         raise click.ClickException(
             f"Driver {profile.driver_id!r} has no declared generic-web PostgreSQL capability; use a reviewed shared-web transition for a generic-web product."
         )
@@ -222,5 +224,11 @@ def apply_generic_web_preview_driver_destroy(
     return records, generic_result.model_dump(mode="json")
 
 
-def _uses_postgres_transport(profile: LaunchplaneProductProfileRecord) -> bool:
-    return profile.driver_id == "generic-web" and profile.preview.transport_extension == "postgres"
+def _uses_postgres_transport(
+    profile: LaunchplaneProductProfileRecord, *, for_destroy: bool = False
+) -> bool:
+    return profile.driver_id in (
+        {"generic-web", "verireel"} if for_destroy else {"generic-web"}
+    ) and profile.preview.transport_extension in (
+        POSTGRES_PREVIEW_TRANSPORTS if for_destroy else {"postgres"}
+    )

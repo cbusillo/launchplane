@@ -1080,7 +1080,7 @@ def _wait_for_preview_health(
     health_path: str,
     timeout_seconds: int,
     expected_runtime_identity: RuntimeIdentity | None = None,
-) -> None:
+) -> RuntimeIdentity | None:
     parsed = urlparse(preview_url.rstrip("/"))
     health_url = parsed._replace(path=health_path, params="", query="", fragment="").geturl()
     deadline = timeout_seconds
@@ -1102,32 +1102,32 @@ def _wait_for_preview_health(
             if 200 <= response.status < 400:
                 if not body.strip():
                     if expected_runtime_identity is None:
-                        return
+                        return None
                     last_detail = "health endpoint returned an empty response"
                 else:
                     try:
                         payload = json.loads(body)
                     except json.JSONDecodeError:
                         if expected_runtime_identity is None:
-                            return
+                            return None
                         last_detail = "health endpoint did not return parseable JSON"
                     else:
                         if not isinstance(payload, dict):
                             if expected_runtime_identity is None:
-                                return
+                                return None
                             last_detail = "health endpoint returned non-object JSON"
                         elif payload.get("ok") is False:
                             last_detail = "health endpoint reported ok=false"
                         elif expected_runtime_identity is None:
-                            return
+                            return None
                         else:
-                            status, detail, _observed = health_payload_runtime_identity_status(
+                            status, detail, observed = health_payload_runtime_identity_status(
                                 expected=expected_runtime_identity,
                                 payload=payload,
                                 json_parse_failed=False,
                             )
-                            if status == "match":
-                                return
+                            if status == "match" and observed is not None:
+                                return observed
                             if status == "mismatch":
                                 if _preview_runtime_identity_mismatch_is_converging(detail):
                                     last_detail = detail

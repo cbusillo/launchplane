@@ -3,7 +3,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+import json
+import click
+from unittest.mock import MagicMock, patch
 
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -24,6 +26,8 @@ from control_plane.workflows.postgres_preview import (
 )
 from tests.test_generic_web_preview_extensions import _driver_profile
 from tests.test_postgres_preview import _refresh_request
+from control_plane.workflows.generic_web_preview import _wait_for_preview_health
+from control_plane.workflows.postgres_preview import _build_preview_runtime_identity
 from tests.test_product_retirement import _Store, _observation, _plan, _request
 from control_plane.product_retirement_no_target import bind_no_target_retirement
 from control_plane.product_retirement import ProductRetirementBlockedError
@@ -66,6 +70,46 @@ def _preview(profile: LaunchplaneProductProfileRecord) -> PreviewRecord:
 
 
 class PreviewNamespaceTests(unittest.TestCase):
+    def test_shared_health_returns_observed_identity_without_an_ok_flag_and_rejects_false(
+        self,
+    ) -> None:
+        expected = _build_preview_runtime_identity(product="sample", request=_refresh_request())
+        response = MagicMock()
+        response.status = 200
+        response.__enter__.return_value = response
+        for ok in (None, False):
+            payload: dict[str, object] = {"runtime_identity": expected.model_dump(mode="json")}
+            if ok is not None:
+                payload["ok"] = ok
+            response.read.return_value = json.dumps(payload).encode()
+            with (
+                self.subTest(ok=ok),
+                patch("control_plane.workflows.generic_web_preview.urlopen", return_value=response),
+                patch("control_plane.workflows.generic_web_preview.time.sleep"),
+                patch(
+                    "control_plane.workflows.generic_web_preview.time.monotonic",
+                    side_effect=(0.0, 0.0, 2.0),
+                ),
+            ):
+                if ok is False:
+                    with self.assertRaises(click.ClickException):
+                        _wait_for_preview_health(
+                            preview_url="https://preview.example.test",
+                            health_path="/ready",
+                            timeout_seconds=1,
+                            expected_runtime_identity=expected,
+                        )
+                else:
+                    self.assertEqual(
+                        _wait_for_preview_health(
+                            preview_url="https://preview.example.test",
+                            health_path="/ready",
+                            timeout_seconds=1,
+                            expected_runtime_identity=expected,
+                        ),
+                        expected,
+                    )
+
     def test_stale_profile_refuses_provider_execution(self) -> None:
         for backend in ("filesystem", "postgres"):
             with self.subTest(backend=backend), self.store(backend) as store:
