@@ -10,6 +10,7 @@ import unittest
 from typing import cast
 
 from control_plane._retained_volume_sweep_program import RETAINED_VOLUME_SWEEP_HOST_PROGRAM
+from control_plane.retained_volume_capture import retained_volume_identity
 
 
 DOCKER_FIXTURE = r"""#!/usr/bin/env python3
@@ -59,6 +60,8 @@ elif args[:2]==['volume','rm']:
     state['rm_args']=args
     if args!=['volume','rm',name]:
         state_path.write_text(json.dumps(state));raise SystemExit(2)
+    if state.get('rm_fail'):
+        state_path.write_text(json.dumps(state));raise SystemExit(1)
     state['removed']=True;state_path.write_text(json.dumps(state));print(name)
 else:
     print('unsupported '+repr(args),file=sys.stderr);raise SystemExit(2)
@@ -102,14 +105,12 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
 
     def identity(self) -> str:
         metadata = self.data.stat()
-        value = {
-            "volume": self.volume(),
-            "engine_id": self.state.get("engine", "engine-one"),
-            "backing_device": metadata.st_dev,
-            "backing_inode": metadata.st_ino,
-        }
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        return hashlib.sha256(encoded.encode()).hexdigest()
+        return retained_volume_identity(
+            self.volume(),
+            str(self.state.get("engine", "engine-one")),
+            metadata.st_dev,
+            metadata.st_ino,
+        )
 
     def run_program(
         self, mode: str = "dry-run", identity: str | None = None, operation: str = "provider/key"
@@ -178,6 +179,14 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         self.assertEqual(self.run_program("readback")["status"], "absent")
         self.assertEqual(self.run_program("apply")["status"], "absent")
 
+    def test_confirmed_no_effect_and_never_started_readbacks_settle_without_removal(self) -> None:
+        self.assertEqual(self.run_program("readback")["reason_code"], "never_started")
+        self.state["rm_fail"] = True
+        self.write_state()
+        self.assertEqual(self.run_program("apply")["reason_code"], "no_effect")
+        self.assertEqual(self.run_program("readback")["reason_code"], "no_effect")
+        self.assertFalse(json.loads(self.state_path.read_text()).get("removed", False))
+
     def test_nonempty_and_stopped_container_are_held(self) -> None:
         (self.data / "private-name").write_text("private-content")
         self.assertEqual(self.run_program()["status"], "held")
@@ -210,7 +219,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         self.assertEqual(self.run_program("readback")["status"], "unknown")
 
     def test_root_filesystem_mount_does_not_disqualify_candidate(self) -> None:
-        self.assertEqual(self.run_program(), {"reason_code": "qualified", "status": "eligible"})
+        self.assertEqual(self.run_program()["status"], "eligible")
 
 
 if __name__ == "__main__":

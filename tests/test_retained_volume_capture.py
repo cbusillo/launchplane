@@ -15,7 +15,10 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from control_plane.contracts.product_retirement import ProductRetirementProviderObservation
+from control_plane.contracts.product_retirement import (
+    ProductRetirementProviderObservation,
+    canonical_sha256,
+)
 from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.product_retirement import (
     _same_planned_observation,
@@ -168,7 +171,11 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
         )
         planned = build_provider_observation(
             target_id="application-a",
-            payload={"applicationId": "application-a", "status": "idle"},
+            payload={
+                "applicationId": "application-a",
+                "status": "idle",
+                "mounts": [{"type": "volume", "volumeName": "site-data"}],
+            },
             domains=(),
             latest_deployment={"status": "done"},
             observed_at="2026-10-29T12:00:00Z",
@@ -176,10 +183,16 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
             retained_volume_inventory_complete=True,
         )
         changed = planned.model_copy(
-            update={"retained_volumes": (binding.model_copy(update={"volume_name": "other-data"}),)}
+            update={
+                "mounts_sha256": canonical_sha256([{"type": "volume", "volumeName": "other-data"}])
+            }
         )
         legacy = planned.model_copy(
-            update={"retained_volumes": (), "retained_volume_inventory_complete": False}
+            update={
+                "retained_volumes": (),
+                "retained_volume_inventory_complete": False,
+                "mounts_sha256": "",
+            }
         )
 
         self.assertFalse(_same_planned_observation(planned=planned, current=changed))
@@ -232,6 +245,30 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
             observed_at=planned.observed_at,
         )
         self.assertFalse(_same_planned_observation(planned=planned, current=changed))
+
+    def test_capture_availability_does_not_change_retirement_authority(self) -> None:
+        from tests.test_product_retirement import _observation
+
+        binding = RetainedVolumeBinding(
+            volume_name="kept-data", server_id="", application_id="app", application_name="app"
+        )
+        incomplete = _observation().model_copy(update={"retained_volumes": (binding,)})
+        complete = incomplete.model_copy(
+            update={
+                "retained_volumes": (
+                    binding.model_copy(
+                        update={"server_id": "server", "volume_identity_sha256": "a" * 64}
+                    ),
+                ),
+                "retained_volume_inventory_complete": True,
+            }
+        )
+        for planned, current in (
+            (incomplete, incomplete),
+            (incomplete, complete),
+            (complete, incomplete),
+        ):
+            self.assertTrue(_same_planned_observation(planned=planned, current=current))
 
     def test_legacy_observation_dump_keeps_its_original_digest_shape(self) -> None:
         dumped = _observation_for_capture().model_dump(mode="json")
@@ -291,7 +328,9 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                     elif arguments[:3] == ["inspect", "--type", "service"]:
                         value = json.dumps([service])
                     elif arguments[:3] == ["inspect", "--type", "container"]:
-                        value = json.dumps([container])
+                        value = json.dumps(
+                            [{**container, "State": {"Health": {"Log": [container_reads]}}}]
+                        )
                     elif arguments[:3] == ["inspect", "--type", "volume"]:
                         value = json.dumps([volume])
                     else:

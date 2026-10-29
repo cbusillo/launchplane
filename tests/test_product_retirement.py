@@ -14,6 +14,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.preview_record import PreviewRecord, PreviewState
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.contracts.product_retirement import (
     MAX_PRODUCT_RETIREMENT_ERROR_MESSAGE_LENGTH,
     ProductRetirementIdentity,
@@ -627,7 +628,19 @@ class ProductRetirementTests(unittest.TestCase):
         store.secret_records = (guest_key, application_key)
         store.secret_bindings = (binding, application_binding)
         store.guest_secret_ids = frozenset((guest_key.secret_id,))
-        observation = _observation(domains=("domain-1",))
+        observation = _observation(domains=("domain-1",)).model_copy(
+            update={
+                "retained_volumes": (
+                    RetainedVolumeBinding(
+                        volume_name="kept-data",
+                        server_id="",
+                        application_id=TARGET_ID,
+                        application_name="example-site-prod",
+                    ),
+                ),
+                "retained_volume_inventory_complete": False,
+            }
+        )
         plan = _plan(store, observation)
         retained = redacted_product_retirement_response(plan)["result"]
         assert isinstance(retained, dict)

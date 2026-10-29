@@ -1,4 +1,12 @@
-RETAINED_VOLUME_SWEEP_HOST_PROGRAM = r"""
+import inspect
+
+from control_plane.retained_volume_capture import retained_volume_identity
+
+
+RETAINED_VOLUME_SWEEP_HOST_PROGRAM = (
+    "from collections.abc import Mapping\nimport hashlib,json\n"
+    + inspect.getsource(retained_volume_identity)
+    + r"""
 import base64,fcntl,hashlib,json,os,re,stat,subprocess,sys,time
 from pathlib import Path
 
@@ -95,10 +103,6 @@ def binding(volume,root):
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(resolved_metadata.st_mode) or resolved!=expected:
         raise Held()
     return resolved,resolved_metadata
-
-def identity(volume,engine_id,metadata):
-    value={'volume':volume,'engine_id':engine_id,'backing_device':metadata.st_dev,'backing_inode':metadata.st_ino}
-    return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
 
 def path_overlap(first,second):
     return first==second or first in second.parents or second in first.parents
@@ -252,7 +256,7 @@ def read_receipt(path):
         value=json.loads(path.read_text())
     except (OSError,ValueError):
         raise Unknown() from None
-    if (not isinstance(value,dict) or set(value)!={'operation','identity','volume','started','engine_id'}
+    if (not isinstance(value,dict) or not {'operation','identity','volume','started','engine_id'}<=set(value)<= {'operation','identity','volume','started','engine_id','outcome'}
         or value['operation']!=operation or value['identity']!=captured or value['volume']!=name
         or value['started'] is not True or not isinstance(value['engine_id'],str) or not value['engine_id']):
         raise Unknown()
@@ -288,19 +292,33 @@ try:
         receipt=read_receipt(receipt_path)
         engine_id,root=engine()
         if receipt is not None:
+            if receipt.get('outcome') not in (None,'no_effect'):
+                raise Unknown()
             if receipt['engine_id']!=engine_id:
                 raise Unknown()
             if absence(engine_id):
                 emit('absent','removed')
+            elif receipt.get('outcome')=='no_effect':
+                volume=one_volume(name)
+                _,metadata=binding(volume,root)
+                if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:
+                    raise Unknown()
+                emit('held','no_effect')
             else:
                 emit('unknown','effect_unknown')
             raise SystemExit
         if mode=='readback':
-            emit('held','present' if not absence(engine_id) else 'never_started')
+            if absence(engine_id):
+                raise Unknown()
+            volume=one_volume(name)
+            _,metadata=binding(volume,root)
+            if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:
+                raise Unknown()
+            emit('held','never_started')
             raise SystemExit
         volume=one_volume(name)
         backing,metadata=binding(volume,root)
-        if identity(volume,engine_id,metadata)!=captured:
+        if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:
             raise Held()
         inventory(backing,root)
         empty(backing)
@@ -309,7 +327,7 @@ try:
             raise SystemExit
         volume=one_volume(name)
         backing,metadata=binding(volume,root)
-        if identity(volume,engine_id,metadata)!=captured:
+        if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:
             raise Held()
         inventory(backing,root)
         empty(backing)
@@ -317,6 +335,13 @@ try:
         result=docker('volume','rm',name,allow_failure=True)
         if result.returncode==0 and absence(engine_id):
             emit('removed','removed')
+        elif result.returncode!=0:
+            current=one_volume(name)
+            _,current_metadata=binding(current,root)
+            if retained_volume_identity(current,engine_id,current_metadata.st_dev,current_metadata.st_ino)!=captured:
+                raise Unknown()
+            persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id,'outcome':'no_effect'})
+            emit('held','no_effect')
         else:
             emit('unknown','effect_unknown')
 except Held:
@@ -328,3 +353,4 @@ except SystemExit:
 except BaseException:
     emit('unknown','inventory_unavailable')
 """
+)

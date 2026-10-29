@@ -189,12 +189,14 @@ def capture():
     container_rows={}
     for container_id in container_ids:
         container=inspect('container',container_id)
+        if container.get('Id')!=container_id:
+            raise ValueError('container identity unavailable')
         labels=container.get('Config',{}).get('Labels') or {}
         if not isinstance(labels,dict):
             raise ValueError('container attribution unavailable')
         if labels.get('com.docker.swarm.service.id')==service['ID']:
             mounts(container.get('Mounts',[]),referenced)
-        container_rows[container_id]=container
+            container_rows[container_id]=(labels.get('com.docker.swarm.service.id'),container.get('Mounts'))
     engine=json.loads(docker('info','--format','{{json .ID}}'))
     root=Path(json.loads(docker('info','--format','{{json .DockerRootDir}}')))
     if not isinstance(engine,str) or not engine or not root.is_absolute() or root.is_symlink():
@@ -215,13 +217,26 @@ def capture():
             raise ValueError('volume backing unavailable')
         stat=expected.stat()
         volumes.append({'volume':volume,'engine_id':engine,'backing_device':stat.st_dev,'backing_inode':stat.st_ino})
-    if single_local_swarm_node(docker)!=nodes or inspect('service',spec['application_name'])!=service:
+    if single_local_swarm_node(docker)!=nodes or inspect('service',spec['application_name']).get('Spec')!=service.get('Spec'):
         raise ValueError('service inventory changed')
-    if identifiers('service','ps','--no-trunc','--quiet',service['ID'])!=task_ids or identifiers('ps','-aq','--no-trunc')!=container_ids or identifiers('volume','ls','--quiet')!=available:
+    if identifiers('service','ps','--no-trunc','--quiet',service['ID'])!=task_ids:
         raise ValueError('resource membership changed')
-    for kind,rows in (('task',task_rows),('container',container_rows)):
-        if any(inspect(kind,key)!=row for key,row in rows.items()):
-            raise ValueError('resource metadata changed')
+    for task_id,task in task_rows.items():
+        current=inspect('task',task_id)
+        if any(current.get(key)!=task.get(key) for key in ('ServiceID','NodeID','Spec')):
+            raise ValueError('task storage changed')
+    current_containers={}
+    for container_id in identifiers('ps','-aq','--no-trunc'):
+        current=inspect('container',container_id)
+        if current.get('Id')!=container_id:
+            raise ValueError('container identity unavailable')
+        labels=current.get('Config',{}).get('Labels') or {}
+        if not isinstance(labels,dict):
+            raise ValueError('container attribution unavailable')
+        if labels.get('com.docker.swarm.service.id')==service['ID']:
+            current_containers[container_id]=(labels.get('com.docker.swarm.service.id'),current.get('Mounts'))
+    if current_containers!=container_rows:
+        raise ValueError('container storage changed')
     if json.loads(docker('info','--format','{{json .ID}}'))!=engine:
         raise ValueError('engine identity changed')
     for row in volumes:

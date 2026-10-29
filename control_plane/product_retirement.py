@@ -307,6 +307,7 @@ def observe_tracked_dokploy_application(
     control_plane_root: Path,
     target_id: str,
     observed_at: str,
+    capture_volume_custody: bool = True,
 ) -> ProductRetirementProviderObservation:
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     try:
@@ -338,8 +339,10 @@ def observe_tracked_dokploy_application(
         target_id=target_id,
     )
     try:
-        retained_volumes, retained_volume_inventory_complete = capture_retained_volumes(
-            host=host, token=token, payload=payload
+        retained_volumes, retained_volume_inventory_complete = (
+            capture_retained_volumes(host=host, token=token, payload=payload)
+            if capture_volume_custody
+            else ((), False)
         )
     except (
         ValueError,
@@ -678,6 +681,7 @@ class DokployProductRetirementAdapter:
                 control_plane_root=self._control_plane_root,
                 target_id=self._plan.provider_observation.target_id,
                 observed_at=self._requested_at,
+                capture_volume_custody=False,
             )
         except (click.ClickException, OSError, TimeoutError, ValueError):
             return ProviderObservation(outcome="unknown")
@@ -730,6 +734,7 @@ class DokployProductRetirementAdapter:
                 control_plane_root=self._control_plane_root,
                 target_id=self._plan.provider_observation.target_id,
                 observed_at=self._requested_at,
+                capture_volume_custody=False,
             )
             if self._finalization_record is not None:
                 if current_observation.state != "absent":
@@ -891,6 +896,7 @@ class DokployProductRetirementAdapter:
                 control_plane_root=self._control_plane_root,
                 target_id=current_observation.target_id,
                 observed_at=self._requested_at,
+                capture_volume_custody=False,
             )
         except (click.ClickException, OSError, TimeoutError, ValueError) as error:
             raise self._unknown_provider_error(error) from error
@@ -1710,13 +1716,6 @@ def _observation_allows_reconciliation(
             and current.source_fingerprint_sha256 != planned.source_fingerprint_sha256
         )
         or (planned.mounts_sha256 and current.mounts_sha256 != planned.mounts_sha256)
-        or (
-            planned.retained_volume_inventory_complete
-            and (
-                not current.retained_volume_inventory_complete
-                or current.retained_volumes != planned.retained_volumes
-            )
-        )
     ):
         return False
     planned_domains = dict(zip(planned.domain_id_sha256, planned.domain_host_sha256, strict=True))
@@ -1743,12 +1742,8 @@ def _same_planned_observation(
             "application_app_name": current.application_app_name
             if planned.application_app_name
             else "",
-            "retained_volumes": current.retained_volumes
-            if planned.retained_volume_inventory_complete
-            else (),
-            "retained_volume_inventory_complete": current.retained_volume_inventory_complete
-            if planned.retained_volume_inventory_complete
-            else False,
+            "retained_volumes": planned.retained_volumes,
+            "retained_volume_inventory_complete": planned.retained_volume_inventory_complete,
             "mounts_sha256": current.mounts_sha256 if planned.mounts_sha256 else "",
         }
     )

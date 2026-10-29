@@ -26,7 +26,11 @@ from control_plane.product_retirement import (
     bind_product_retirement_authority,
     build_product_retirement_plan_record,
 )
-from control_plane.retained_volume_sweep_execution import build_retained_volume_sweep
+from control_plane.retained_volume_sweep_execution import (
+    build_retained_volume_sweep,
+    _inventory_clear,
+)
+from control_plane.dokploy_inventory import TARGET_COLLECTIONS
 from control_plane.service_auth import LocalOperatorIdentity
 from control_plane.storage.postgres import (
     PostgresRecordStore,
@@ -106,6 +110,7 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         self.present = True
         self.unknown_apply = False
         self.fail_readback = False
+        self.never_started = False
         self.host_keys: list[str] = []
         self.patches = (
             patch(
@@ -134,17 +139,19 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             guard = kwargs["dispatch_guard"]
             assert callable(guard)
             guard(lambda: self.apply_calls.append(str(key)))
-            self.present = False
-            status = "unknown" if self.unknown_apply else "removed"
+            if not self.never_started:
+                self.present = False
+            status = "unknown" if self.unknown_apply or self.never_started else "removed"
         elif mode == "readback":
             status = "unknown" if self.fail_readback or self.present else "absent"
         else:
             status = "eligible" if self.present else "held"
         receive = kwargs["receive"]
         assert callable(receive)
-        receive(
-            {"type": "complete", "result": {"status": status, "reason_code": "test_host_evidence"}}
-        )
+        reason = "test_host_evidence"
+        if mode == "readback" and self.never_started:
+            status, reason = "held", "never_started"
+        receive({"type": "complete", "result": {"status": status, "reason_code": reason}})
 
     def payload(self, **updates: object) -> dict[str, object]:
         return {"retirement_record_id": self.record.record_id, "minimum_age_seconds": 1, **updates}
@@ -292,7 +299,10 @@ class RetainedVolumeSweepTests(unittest.TestCase):
                 return_value=(
                     {
                         "environments": [
-                            {"applications": [{"applicationId": "another-app"}], "compose": []}
+                            {
+                                **{kind: [] for kind in TARGET_COLLECTIONS},
+                                "applications": [{"applicationId": "another-app"}],
+                            }
                         ]
                     },
                 ),
@@ -307,3 +317,79 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             )
         self.assertEqual(plan.items[0].reason, "provider_reference_unavailable")
         self.assertEqual(self.apply_calls, [])
+
+    def test_never_started_original_settles_then_allows_a_new_reviewed_sweep(self) -> None:
+        app = self.app()
+        reviewed = self.post(app, self.payload()).json()["plan_sha256"]
+        self.never_started = True
+        first = self.post(
+            app, self.payload(mode="apply", reviewed_plan_sha256=reviewed), "no-effect-key"
+        )
+        self.assertEqual(first.status_code, 409)
+        settled = self.post(
+            app, self.payload(mode="readback", reviewed_plan_sha256=reviewed), "no-effect-key"
+        )
+        self.assertEqual(settled.status_code, 200, settled.text)
+        self.assertEqual(settled.json()["items"][0]["status"], "held")
+        self.never_started = False
+        reviewed = self.post(app, self.payload()).json()["plan_sha256"]
+        completed = self.post(
+            app, self.payload(mode="apply", reviewed_plan_sha256=reviewed), "new-reviewed-key"
+        )
+        self.assertEqual(completed.status_code, 200, completed.text)
+        self.assertEqual(completed.json()["items"][0]["status"], "removed")
+
+    def test_database_and_converted_compose_references_are_checked(self) -> None:
+        environment: dict[str, object] = {kind: [] for kind in TARGET_COLLECTIONS}
+        environment["postgres"] = [{"postgresId": "other-database"}]
+        with (
+            patch(
+                "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_projects",
+                return_value=({"environments": [environment]},),
+            ),
+            patch(
+                "control_plane.retained_volume_sweep_execution.api.dokploy_request",
+                return_value={
+                    "postgresId": "other-database",
+                    "mounts": [{"volumeName": self.binding.volume_name}],
+                },
+            ),
+        ):
+            self.assertFalse(_inventory_clear(self.root, self.binding))
+        environment["postgres"] = []
+        environment["compose"] = [{"composeId": "other-compose"}]
+        with (
+            patch(
+                "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_projects",
+                return_value=({"environments": [environment]},),
+            ),
+            patch(
+                "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_target_payload",
+                return_value={"mounts": [], "appName": "other-stack"},
+            ),
+            patch(
+                "control_plane.retained_volume_sweep_execution.compose.fetch_dokploy_converted_compose_file",
+                return_value='{"services":{"web":{"volumes":["retired-data:/data"]}},"volumes":{"data":{"external":true,"name":"retired-data"}}}',
+            ),
+        ):
+            self.assertFalse(_inventory_clear(self.root, self.binding))
+
+    def test_other_retirement_cannot_bypass_an_uncertain_volume_reservation(self) -> None:
+        app = self.app()
+        reviewed = self.post(app, self.payload()).json()["plan_sha256"]
+        self.unknown_apply = True
+        self.assertEqual(
+            self.post(
+                app, self.payload(mode="apply", reviewed_plan_sha256=reviewed), "held-effect-key"
+            ).status_code,
+            409,
+        )
+        other = self.record.model_copy(update={"record_id": "other-retirement"})
+        self.store.write_product_retirement_record(other)
+        plan, _ = build_retained_volume_sweep(
+            self.store,
+            self.root,
+            RetainedVolumeSweepRequest(retirement_record_id=other.record_id, minimum_age_seconds=1),
+        )
+        self.assertEqual(plan.items[0].reason, "recovery_custody_unreleased")
+        self.assertEqual(len(self.apply_calls), 1)

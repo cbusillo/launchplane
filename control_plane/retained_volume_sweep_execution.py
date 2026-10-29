@@ -15,7 +15,9 @@ from control_plane.contracts.retained_volume_sweep import (
     RetainedVolumeSweepRequest,
     RetainedVolumeSweepResponse,
 )
-from control_plane.dokploy import api, native_copy_stream, source
+from control_plane.dokploy import api, compose, native_copy_stream, source
+from control_plane.dokploy_inventory import TARGET_COLLECTIONS
+from control_plane.production_recipient import read_provider_compose
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
@@ -40,7 +42,9 @@ def _strings(value: object) -> set[str]:
 
 def _volume_referenced(name: str, payload: object) -> bool:
     return any(
-        value == name or name.startswith(value + "-") or name in value.split("/")
+        value == name
+        or name.startswith((value + "-", value + "_"))
+        or name in value.replace(":", "/").split("/")
         for value in _strings(payload)
         if value
     )
@@ -49,6 +53,9 @@ def _volume_referenced(name: str, payload: object) -> bool:
 def _custody_clear(
     store: PostgresRecordStore, record: ProductRetirementRecord, binding: RetainedVolumeBinding
 ) -> bool:
+    profile = store.read_product_profile_record(record.product)
+    if profile.lifecycle_state != "retired" or profile.production_use != "prelaunch":
+        return False
     contexts = {record.context} | {preview.preview.context for preview in record.preview_plans}
     if any(store.list_backup_gate_records(context_name=context) for context in contexts):
         return False
@@ -64,7 +71,7 @@ def _custody_clear(
     ):
         return False
     return not any(
-        not row.provider_target_key.startswith("retained-volume-sweep:")
+        row.provider_target_key != "retained-volume-sweep:" + record.record_id
         for row in store.list_held_provider_target_reservations()
     )
 
@@ -78,7 +85,7 @@ def _inventory_clear(root: Path, binding: RetainedVolumeBinding) -> bool:
         for environment in environments:
             if not isinstance(environment, dict):
                 return False
-            for kind, identifier in (("applications", "applicationId"), ("compose", "composeId")):
+            for kind, (target_type, identifier) in TARGET_COLLECTIONS.items():
                 targets = environment.get(kind)
                 if not isinstance(targets, list):
                     return False
@@ -87,17 +94,63 @@ def _inventory_clear(root: Path, binding: RetainedVolumeBinding) -> bool:
                         return False
                     target_id = target[identifier]
                     assert isinstance(target_id, str)
-                    payload = api.fetch_dokploy_target_payload(
-                        host=host,
-                        token=token,
-                        target_type="application" if kind == "applications" else "compose",
-                        target_id=target_id,
-                    )
+                    if target_type in {"application", "compose"}:
+                        payload = api.fetch_dokploy_target_payload(
+                            host=host, token=token, target_type=target_type, target_id=target_id
+                        )
+                    else:
+                        database_payload = api.as_json_object(
+                            api.dokploy_request(
+                                host=host,
+                                token=token,
+                                path=f"/api/{target_type}.one",
+                                query={identifier: target_id},
+                            )
+                        )
+                        if (
+                            database_payload is None
+                            or database_payload.get(identifier) != target_id
+                        ):
+                            return False
+                        payload = database_payload
                     mounts = payload.get("mounts")
                     if not isinstance(mounts, list) or _volume_referenced(
-                        binding.volume_name, mounts
+                        binding.volume_name, payload
                     ):
                         return False
+                    if target_type == "compose":
+                        document = read_provider_compose(
+                            compose.fetch_dokploy_converted_compose_file(
+                                host=host, token=token, compose_id=target_id
+                            )
+                        )
+                        volumes = document.get("volumes", {})
+                        if not isinstance(volumes, dict):
+                            return False
+                        for name, definition in volumes.items():
+                            if not isinstance(name, str) or not isinstance(
+                                definition, dict | type(None)
+                            ):
+                                return False
+                            declared = definition or {}
+                            actual = declared.get("name")
+                            if actual is None:
+                                if declared.get("external"):
+                                    actual = name
+                                else:
+                                    prefix = document.get("name") or payload.get("appName")
+                                    if not isinstance(prefix, str) or not prefix:
+                                        return False
+                                    actual = prefix + "_" + name
+                            if (
+                                not isinstance(actual, str)
+                                or "${" in actual
+                                or actual == binding.volume_name
+                            ):
+                                return False
+                        if _volume_referenced(binding.volume_name, document):
+                            return False
+
     return True
 
 
@@ -175,6 +228,8 @@ def build_retained_volume_sweep(
         or record.retained_volume_production_use != "prelaunch"
     ):
         reason = "production_disposition_required"
+    elif profile.lifecycle_state != "retired":
+        reason = "product_not_retired"
     elif not all(observed.retained_volume_inventory_complete for observed in observations):
         reason = "retained_inventory_unavailable"
     else:
@@ -278,6 +333,9 @@ class RetainedVolumeSweepAdapter:
                 status, reason = _host_result(
                     self.root, binding, "readback", provider_operation_key
                 )
+                if status == "held" and reason in {"never_started", "no_effect"}:
+                    items.append(item.model_copy(update={"status": status, "reason": reason}))
+                    continue
                 if status != "absent":
                     return ProviderObservation("unknown")
                 items.append(item.model_copy(update={"status": status, "reason": reason}))

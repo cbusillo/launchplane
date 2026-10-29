@@ -4,7 +4,9 @@ title: Retained volume sweep
 
 Product retirement records retain a private inventory of the named volumes kept
 by the testing application and its owned previews, together with product, lane,
-retirement time and production-use snapshot. Capture uses the registered remote
+retirement time and production-use snapshot. Capture runs at planning; later
+retirement observations keep the existing provider guards without requiring host
+inspection to remain available. Capture uses the registered remote
 server transport to inspect the actual Swarm service, all its tasks and its
 containers, including stopped containers. Complete capture binds the Docker
 engine, full volume metadata and backing directory device and inode. Configured
@@ -20,7 +22,10 @@ only identity digests, eligibility/refusal reasons and `plan_sha256`. Apply uses
 the same inputs with `mode: apply`, `reviewed_plan_sha256` and an
 `Idempotency-Key`. Readback repeats the original inputs, digest and key with
 `mode: readback`; changing any bound input refuses reuse. Successful receipts
-replay without another host mutation. An unfinished operation only reconciles
+replay without another host mutation. A readback that proves the original host
+program never began removal, or records a completed failed removal with unchanged
+identity, settles as held. After that settled receipt, a new dry-run and reviewed
+key can continue. Unknown or partial effects without this proof remain held. An unfinished operation only reconciles
 its original host receipt; it never blindly redispatches removal.
 
 The sweep requires completed provider absence and a prelaunch snapshot and
@@ -40,3 +45,9 @@ exact-name `docker volume rm` without force or prune. It writes a durable host
 receipt before dispatch and verifies same-engine absence afterward. Uncertain
 effects stay attached to the original operation for readback. No deployment,
 production disposition or live deletion is performed by this source delivery.
+
+Provider database resources need explicit complete mount details; absent details
+are unknown. Compose declarations are checked through converted provider source.
+Recovery custody reads are bounded to 10,000 rows per existing table; exceeding
+that bound holds eligibility. Namespace references, ancestor bind mounts and
+unrelated held provider reservations also conservatively retain volumes.
