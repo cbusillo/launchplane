@@ -24,6 +24,11 @@ MAX_ROW_BYTES = 16 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_GROUP_BYTES = 128 * 1024 * 1024
 MAX_ROWS = 2_000_000
+ARCHIVE_UNAVAILABLE_CODES = (
+    "snapshot_unavailable",
+    "archive_tool_unavailable",
+    "archive_unreadable",
+)
 
 
 class AggregateQuery(BaseModel):
@@ -353,11 +358,7 @@ def read_aggregates(
     )
     if len(frames) != 1 or set(frames[0]) != {"type", "counts"} or frames[0]["type"] != "complete":
         reason = frames[0].get("unavailable") if len(frames) == 1 else None
-        code = (
-            reason
-            if reason in {"snapshot_unavailable", "archive_tool_unavailable", "archive_unreadable"}
-            else "aggregate_unavailable"
-        )
+        code = reason if reason in ARCHIVE_UNAVAILABLE_CODES else "aggregate_unavailable"
         raise OdooRuntimeReadError(
             str(code), "The qualified snapshot aggregate read did not complete.", 503
         )

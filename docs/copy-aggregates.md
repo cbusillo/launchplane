@@ -80,15 +80,21 @@ qualification rather than changing those unknown observations into a pass.
 
 `GET /v1/products/{product}/preview-snapshot-version` accepts only
 `original_reservation_id`, `expected_snapshot_id` and
-`expected_database_sha256`. It uses the product's existing `preview.read`
-authority. The service validates the reservation-owned original intent, selects
+`expected_database_sha256`. It requires existing `preview.read` authority
+and `operations.read` on the exact testing instance used as the archive utility.
+The service validates the reservation-owned original intent, selects
 its immutable clean snapshot and checks all three requested bindings before
-any provider read. It never substitutes the latest published snapshot, the
+any provider read. Missing originals return `404 snapshot_original_unavailable`;
+unverifiable or mismatched original bindings return `409 snapshot_binding_mismatch`.
+The decoder retains `snapshot_unavailable`, `archive_tool_unavailable` and
+`archive_unreadable` failures so custody and utility prerequisites stay distinct.
+It never substitutes the latest published snapshot, the
 current testing database or the preview image version. Original records and
 operation state are unchanged, including failed or held operations.
 
 The read reuses the same bounded, hash-verified, read-only archive descriptor
-and [inert decoder](https://www.postgresql.org/docs/current/app-pgrestore.html) described above, with the fixed table `ir_module_module`.
+and [inert decoder](https://www.postgresql.org/docs/current/app-pgrestore.html)
+described above, with the fixed table `ir_module_module`.
 It requires exactly one installed `base` row with a numeric recorded version;
 missing, ambiguous, malformed, incomplete or changed evidence refuses. Only
 that version is returned, with snapshot hash/capture and original-reservation

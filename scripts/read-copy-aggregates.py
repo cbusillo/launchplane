@@ -22,11 +22,22 @@ def main() -> int:
     selector.add_argument("--original-reservation-id")
     for name in ("key", "partition", "expected-snapshot-id", "expected-database-sha256"):
         parser.add_argument(f"--{name}")
-    parser.add_argument("--active", default="active")
+    parser.add_argument("--active")
     parser.add_argument("--config")
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
+    if args.original_reservation_id:
+        if not args.expected_snapshot_id or not args.expected_database_sha256:
+            parser.error(
+                "Version reads require --expected-snapshot-id and --expected-database-sha256."
+            )
+        if args.key or args.partition or args.active is not None:
+            parser.error("Version reads do not accept aggregate column options.")
+    elif not args.key:
+        parser.error("Aggregate reads require --key.")
+    elif args.expected_snapshot_id or args.expected_database_sha256:
+        parser.error("Original snapshot bindings require --original-reservation-id.")
     helper = args.operator_helper.expanduser().resolve(strict=True)
     if helper.name != "launchplane-write-action.py":
         parser.error("Select the installed Launchplane operator helper.")
@@ -41,7 +52,10 @@ def main() -> int:
             path = version.ROUTE.format(product=quote(args.product, safe=""))
         else:
             query = AggregateQuery(
-                table=args.table, key=args.key, partition=args.partition, active=args.active
+                table=args.table,
+                key=args.key,
+                partition=args.partition,
+                active=args.active or "active",
             )
             path = ROUTE.format(product=quote(args.product, safe=""), environment="testing")
         transport = runpy.run_path(str(helper), run_name="copy_aggregate_transport")
@@ -87,6 +101,8 @@ def main() -> int:
             code = raw.get("error", {}).get("code", "aggregate_unavailable")
             if code not in {
                 "snapshot_version_unavailable",
+                "snapshot_original_unavailable",
+                "snapshot_binding_mismatch",
                 "snapshot_unavailable",
                 "archive_tool_unavailable",
                 "archive_unreadable",

@@ -188,10 +188,19 @@ class SnapshotReaderTests(unittest.TestCase):
                 self.assertEqual(frame[field], expected)
                 arguments = decode.call_args.args[0]
                 self.assertIn("--file=-", arguments)
-                self.assertEqual(arguments[4:7], ["env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin"])
+                environment = arguments.index("env")
+                decoder = arguments.index("pg_restore")
+                self.assertLess(environment, decoder)
+                self.assertEqual(arguments[environment + 1], "-i")
+                self.assertTrue(
+                    all(
+                        argument.startswith("PATH=")
+                        for argument in arguments[environment + 2 : decoder]
+                    )
+                )
                 self.assertEqual(
-                    arguments[-1],
-                    "--table=" + (QUERY.table if field == "counts" else "ir_module_module"),
+                    [argument for argument in arguments if argument.startswith("--table=")],
+                    ["--table=" + (QUERY.table if field == "counts" else "ir_module_module")],
                 )
                 self.assertIs(decode.call_args.kwargs["stdin"].closed, True)
                 self.assertFalse(any(arg.startswith(("-d", "--dbname")) for arg in arguments))

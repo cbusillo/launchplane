@@ -172,6 +172,26 @@ class SnapshotVersionBindingTests(unittest.TestCase):
             )
         archive.assert_not_called()
 
+    def test_archive_failure_stage_is_retained_without_provider_detail(self) -> None:
+        from unittest.mock import patch
+        from control_plane import odoo_snapshot_version as version
+        from control_plane.odoo_runtime_reads import OdooRuntimeReadError
+
+        for reason in reader.ARCHIVE_UNAVAILABLE_CODES:
+            with (
+                self.subTest(reason=reason),
+                patch.object(
+                    version,
+                    "read_snapshot_archive",
+                    return_value=[{"type": "complete", "unavailable": reason}],
+                ),
+            ):
+                with self.assertRaises(OdooRuntimeReadError) as raised:
+                    version.read_snapshot_version(
+                        store=self.store, product=self.profile.product, query=self.query
+                    )
+                self.assertEqual(raised.exception.code, reason)
+
     def test_invalid_retained_intent_or_malformed_decoder_result_never_qualifies(self) -> None:
         from unittest.mock import patch
         from control_plane import odoo_snapshot_version as version
@@ -255,7 +275,11 @@ class SnapshotVersionBindingTests(unittest.TestCase):
             )
             self.assertIsNone(response.json()["result"]["metadata"]["preparation_stage"])
             self.assertEqual(response.headers["cache-control"], "no-store")
-            self.assertEqual(allowed.call_args.kwargs["action"], "preview.read")
+            self.assertEqual(
+                [call.kwargs["action"] for call in allowed.call_args_list],
+                ["preview.read", "operations.read"],
+            )
+            self.assertEqual(allowed.call_args.kwargs["target"].instances, ("testing",))
             self.assertEqual(allowed.call_args.kwargs["context"], self.profile.preview.context)
             self.assertEqual(allowed.call_args.kwargs["product"], self.profile.product)
             archive.reset_mock()
@@ -263,13 +287,35 @@ class SnapshotVersionBindingTests(unittest.TestCase):
             self.assertEqual(asyncio.run(request(app, "GET", path)).status_code, 403)
             archive.assert_not_called()
             allowed.return_value = True
+            allowed.side_effect = lambda **kwargs: kwargs["action"] != "operations.read"
+            self.assertEqual(asyncio.run(request(app, "GET", path)).status_code, 403)
+            archive.assert_not_called()
+            allowed.side_effect = None
             for field in ("host", "sql", "table", "database", "server_id"):
                 self.assertEqual(
                     asyncio.run(request(app, "GET", path + "&" + field + "=private")).status_code,
                     422,
                 )
             archive.assert_not_called()
+            import click
+
             for failure, status, code in (
+                (FileNotFoundError("private missing path"), 404, "not_found"),
+                (
+                    click.ClickException("private provider token"),
+                    503,
+                    "snapshot_version_unavailable",
+                ),
+                (
+                    OdooRuntimeReadError("snapshot_binding_mismatch", "private binding", 409),
+                    409,
+                    "snapshot_binding_mismatch",
+                ),
+                (
+                    OdooRuntimeReadError("archive_tool_unavailable", "private utility", 503),
+                    503,
+                    "archive_tool_unavailable",
+                ),
                 (ValueError("private token row"), 503, "snapshot_version_unavailable"),
                 (
                     OdooRuntimeReadError("authorization_denied", "private token", 403),
@@ -286,13 +332,18 @@ class SnapshotVersionBindingTests(unittest.TestCase):
     def test_parser_bounds_apply_before_any_version_result(self) -> None:
         from unittest.mock import patch
 
-        for limit in ("MAX_ROW_BYTES", "MAX_EXTRACTED_BYTES", "MAX_ROWS"):
+        for limit in ("MAX_EXTRACTED_BYTES", "MAX_ROWS"):
             with (
                 self.subTest(limit=limit),
                 patch.object(reader, limit, 1),
                 self.assertRaises(ValueError),
             ):
                 reader.read_base_module_version(BytesIO(MODULE_ROWS))
+        header = next(
+            line for line in MODULE_ROWS.splitlines(keepends=True) if line.startswith(b"COPY ")
+        )
+        with patch.object(reader, "MAX_ROW_BYTES", len(header) - 1), self.assertRaises(ValueError):
+            reader.read_base_module_version(BytesIO(MODULE_ROWS))
 
 
 class SnapshotVersionClientTests(unittest.TestCase):
@@ -378,3 +429,51 @@ class SnapshotVersionClientTests(unittest.TestCase):
                     read.call_args.kwargs["query"],
                     query.model_dump(),
                 )
+
+    def test_missing_or_cross_mode_flags_are_usage_errors_before_transport(self) -> None:
+        from contextlib import redirect_stderr
+        from io import StringIO
+        from pathlib import Path
+        import runpy
+        import sys
+        from unittest.mock import patch
+
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/read-copy-aggregates.py"),
+            run_name="snapshot_usage_test",
+        )
+        for arguments in (
+            ["--table", "product_template"],
+            ["--table", "product_template", "--key", "name", "--expected-snapshot-id", "a" * 64],
+            ["--original-reservation-id", "mutation-reservation-" + "a" * 64],
+            [
+                "--original-reservation-id",
+                "mutation-reservation-" + "a" * 64,
+                "--expected-snapshot-id",
+                "a" * 64,
+                "--expected-database-sha256",
+                "b" * 64,
+                "--active=enabled",
+            ],
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                patch.object(runpy, "run_path") as transport,
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "read",
+                        "--operator-helper",
+                        "/unused/launchplane-write-action.py",
+                        "--product",
+                        "example-odoo",
+                        *arguments,
+                    ],
+                ),
+                redirect_stderr(StringIO()),
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    client["main"]()
+                self.assertEqual(raised.exception.code, 2)
+                transport.assert_not_called()

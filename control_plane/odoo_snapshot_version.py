@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.odoo_copy_aggregates import (
     BASE_VERSION_PATTERN,
+    ARCHIVE_UNAVAILABLE_CODES,
     SNAPSHOT_VERSION_PROGRAM,
     read_snapshot_archive,
 )
@@ -59,8 +60,17 @@ def read_snapshot_version(
         raise ValueError("Snapshot version reads require an active Odoo product.")
     reservation = store.read_idempotency_record_by_id(query.original_reservation_id)
     if reservation is None or reservation.record_id != query.original_reservation_id:
-        raise ValueError("The original preview reservation is unavailable.")
-    original = original_preview_intent(reservation, profile=profile, store=store)
+        raise OdooRuntimeReadError(
+            "snapshot_original_unavailable", "The original preview reservation is unavailable.", 404
+        )
+    try:
+        original = original_preview_intent(reservation, profile=profile, store=store)
+    except ValueError as error:
+        raise OdooRuntimeReadError(
+            "snapshot_binding_mismatch",
+            "The retained original snapshot binding could not be verified.",
+            409,
+        ) from error
     snapshot = original.issued_plan.dry_run_plan.clean_snapshot
     if (
         original.issued_plan.operation != "refresh"
@@ -69,8 +79,10 @@ def read_snapshot_version(
         or snapshot.snapshot_id != query.expected_snapshot_id
         or snapshot.database_sha256 != query.expected_database_sha256
     ):
-        raise ValueError(
-            "The original preview snapshot binding differs from the requested evidence."
+        raise OdooRuntimeReadError(
+            "snapshot_binding_mismatch",
+            "The original preview snapshot binding differs from the requested evidence.",
+            409,
         )
     frames = read_snapshot_archive(
         store=store,
@@ -84,11 +96,11 @@ def read_snapshot_version(
         or set(frames[0]) != {"type", "metadata"}
         or frames[0]["type"] != "complete"
     ):
-        raise OdooRuntimeReadError(
-            "snapshot_version_unavailable",
-            "The bound snapshot metadata read did not complete.",
-            503,
+        reason = frames[0].get("unavailable") if len(frames) == 1 else None
+        code = (
+            str(reason) if reason in ARCHIVE_UNAVAILABLE_CODES else "snapshot_version_unavailable"
         )
+        raise OdooRuntimeReadError(code, "The bound snapshot metadata read did not complete.", 503)
     return SnapshotVersionEvidence(
         product=product,
         context=snapshot.context,
