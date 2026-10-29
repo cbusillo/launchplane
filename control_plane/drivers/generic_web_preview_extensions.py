@@ -11,11 +11,11 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     _generic_web_preview_anchor_pr_url,
     _generic_web_preview_anchor_repo,
 )
-from control_plane.drivers.verireel_postgres_transport import (
-    VeriReelPreviewDestroyEnvelope,
-    VeriReelPreviewRefreshEnvelope,
-    apply_verireel_preview_destroy_result,
-    apply_verireel_preview_refresh_result,
+from control_plane.drivers.postgres_preview_transport import (
+    PostgresPreviewDestroyEnvelope,
+    PostgresPreviewRefreshEnvelope,
+    apply_postgres_preview_destroy_result,
+    apply_postgres_preview_refresh_result,
 )
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyRequest,
@@ -30,9 +30,9 @@ from control_plane.workflows.generic_web_preview import (
     preview_pr_number_from_slug,
     resolve_generic_web_preview_slug,
 )
-from control_plane.workflows.verireel_preview_driver import (
-    VeriReelPreviewDestroyRequest,
-    VeriReelPreviewRefreshRequest,
+from control_plane.workflows.postgres_preview import (
+    PostgresPreviewDestroyRequest,
+    PostgresPreviewRefreshRequest,
 )
 
 
@@ -103,7 +103,7 @@ def apply_generic_web_preview_driver_refresh(
         )
     if profile.preview.data_transport_mode != "driver":
         return None
-    if not _uses_verireel_transport(profile):
+    if not _uses_postgres_transport(profile):
         raise click.ClickException(
             f"Driver {profile.driver_id!r} does not register a generic-web preview refresh extension."
         )
@@ -118,7 +118,7 @@ def apply_generic_web_preview_driver_refresh(
         anchor_pr_number=anchor_pr_number,
         label="Generic web preview refresh",
     )
-    verireel_refresh_request = VeriReelPreviewRefreshRequest(
+    postgres_refresh_request = PostgresPreviewRefreshRequest(
         context=profile.preview.context,
         anchor_repo=_generic_web_preview_anchor_repo(profile),
         anchor_pr_number=anchor_pr_number,
@@ -129,17 +129,18 @@ def apply_generic_web_preview_driver_refresh(
         ),
         anchor_head_sha=_generic_web_preview_anchor_head_sha(request),
         preview_slug=preview_slug,
+        slug_template=profile.preview.slug_template,
         preview_url=request.preview_url,
         image_reference=request.image_reference,
         timeout_seconds=request.timeout_seconds,
     )
-    records, result = apply_verireel_preview_refresh_result(
+    records, result = apply_postgres_preview_refresh_result(
         control_plane_root=control_plane_root,
         record_store=record_store,
-        execution_profile=profile if profile.preview.transport_extension else None,
-        request=VeriReelPreviewRefreshEnvelope(
+        execution_profile=profile,
+        request=PostgresPreviewRefreshEnvelope(
             product=profile.product,
-            refresh=verireel_refresh_request,
+            refresh=postgres_refresh_request,
         ),
     )
     driver_evidence = _successful_driver_refresh_evidence(
@@ -169,7 +170,7 @@ def apply_generic_web_preview_driver_destroy(
 ) -> tuple[dict[str, object], dict[str, object]] | None:
     if profile.preview.data_transport_mode != "driver":
         return None
-    if not _uses_verireel_transport(profile):
+    if not _uses_postgres_transport(profile):
         raise click.ClickException(
             f"Driver {profile.driver_id!r} does not register a generic-web preview destroy extension."
         )
@@ -188,17 +189,18 @@ def apply_generic_web_preview_driver_destroy(
         anchor_pr_number=anchor_pr_number,
         label="Generic web preview destroy",
     )
-    records, result = apply_verireel_preview_destroy_result(
+    records, result = apply_postgres_preview_destroy_result(
         control_plane_root=control_plane_root,
         record_store=record_store,
-        execution_profile=profile if profile.preview.transport_extension else None,
-        request=VeriReelPreviewDestroyEnvelope(
+        execution_profile=profile,
+        request=PostgresPreviewDestroyEnvelope(
             product=profile.product,
-            destroy=VeriReelPreviewDestroyRequest(
+            destroy=PostgresPreviewDestroyRequest(
                 context=profile.preview.context,
                 anchor_repo=_generic_web_preview_anchor_repo(profile),
                 anchor_pr_number=anchor_pr_number,
                 preview_slug=preview_slug,
+                slug_template=profile.preview.slug_template,
                 destroy_reason=request.destroy_reason,
                 timeout_seconds=request.timeout_seconds,
             ),
@@ -220,8 +222,5 @@ def apply_generic_web_preview_driver_destroy(
     return records, generic_result.model_dump(mode="json")
 
 
-def _uses_verireel_transport(profile: LaunchplaneProductProfileRecord) -> bool:
-    return (
-        profile.driver_id == "generic-web"
-        and profile.preview.transport_extension == "verireel-postgres"
-    )
+def _uses_postgres_transport(profile: LaunchplaneProductProfileRecord) -> bool:
+    return profile.driver_id == "generic-web" and profile.preview.transport_extension == "postgres"

@@ -78,8 +78,11 @@ API clients alongside the service when deploying this contract change.
 
 When the stored product profile declares `preview.data_transport_mode="driver"`,
 the generic-web lifecycle route delegates refresh and destroy execution to the
-registered product-driver extension. This keeps product-specific database,
-secret, migration, seed, and cleanup behavior inside Launchplane. Missing driver
+registered shared capability. The `postgres` capability provides an isolated
+database and role, profile-declared generated secrets and application lifecycle
+commands for any generic-web product with a PostgreSQL testing template. Its
+configuration and legacy conversion are described in
+[driver development](driver-development.md). Missing driver
 extensions fail closed instead of falling back to generic environment copying.
 Driver-owned application commands must invoke executables already present in the
 immutable image instead of relying on package-runner download or discovery

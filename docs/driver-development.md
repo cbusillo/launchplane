@@ -113,12 +113,23 @@ replay a previous failed attempt. Command text names an executable in the
 product artifact; runtime settings and managed bindings supply its secrets.
 
 Preview profiles using driver data transport can explicitly select the
-`verireel-postgres` transport extension through `transport_extension` while their
+`postgres` transport extension through `transport_extension` while their
 driver is `generic-web`, declaring its isolated database namespace through
 `transport_database_prefix`. The template lane, application prefix, database
-namespace and runtime product identity come from the profile. This uses the existing isolated PostgreSQL preparation
-and cleanup rather than the plain preview path. The VeriReel testing transition
-has qualified this declared shared path; the parallel deploy, promotion and rollback driver is removed. Historical deployment
+namespace and runtime product identity come from the profile, as do its port,
+health path, URL environment keys and generated secrets. The testing template
+must expose a PostgreSQL `DATABASE_URL` and its image must provide Node and `pg`
+for database administration. `preview.generated_secret_env` maps application
+environment keys to `urlsafe` or `base64`; values are generated for each preview
+and retained on refresh, never copied from testing. Other template credentials
+are removed. `preview_url_env_keys` and `preview_domain_env_keys` replace the
+product-specific URL rewriting. Maintenance and schedules remain profile-owned.
+This uses the existing isolated PostgreSQL preparation and cleanup rather than
+the plain preview path. Stored `verireel-postgres` declarations convert to these
+fields when parsed, preserving their prefixes and generated-secret encodings;
+subsequent profile writes use `postgres`. New products declare their own keys
+and prefixes through the product profile or reviewed generic-web transition.
+Historical deployment
 and backup records and retired instance-scoped policy grants remain readable;
 no retired release endpoint is enabled by those grants. Production still changes only through an
 accepted release.

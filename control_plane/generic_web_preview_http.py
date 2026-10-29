@@ -28,7 +28,7 @@ from control_plane.drivers.generic_web_preview_extensions import (
     apply_generic_web_preview_driver_destroy,
     apply_generic_web_preview_driver_refresh,
 )
-from control_plane.drivers.verireel_postgres_transport import _preview_refresh_serialization
+from control_plane.drivers.postgres_preview_transport import _preview_refresh_serialization
 from control_plane.launchplane_mutations import resolve_launchplane_preview_id
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.generic_web_preview import (

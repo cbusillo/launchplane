@@ -6,6 +6,10 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+from control_plane.contracts.postgres_preview import (
+    PreviewSecretEncoding,
+    migrate_legacy_postgres_preview,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION,
@@ -30,10 +34,18 @@ class GenericWebPreviewDeclaration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     data_transport_mode: Literal["none", "driver"]
-    transport_extension: Literal["", "verireel-postgres"] = ""
+    transport_extension: Literal["", "postgres"] = ""
     transport_database_prefix: str = ""
+    generated_secret_env: dict[str, PreviewSecretEncoding] = Field(default_factory=dict)
+    preview_url_env_keys: tuple[str, ...] = ()
+    preview_domain_env_keys: tuple[str, ...] = ()
     app_name_suffix: str = ""
     generic_web_extensions: GenericWebLaneExtensions | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_postgres_transport(cls, value: object) -> object:
+        return migrate_legacy_postgres_preview(value)
 
 
 class ProductGenericWebTransitionRequest(BaseModel):

@@ -5,6 +5,10 @@ import re
 from typing import Annotated, Literal, get_args
 
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
+from control_plane.contracts.postgres_preview import (
+    PreviewSecretEncoding,
+    migrate_legacy_postgres_preview,
+)
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverLane
 from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
@@ -419,7 +423,7 @@ class ProductPreviewProfile(BaseModel):
     domain_certificate_type: Literal["none", "letsencrypt"] = "none"
     required_provider_fields: tuple[str, ...] = ()
     data_transport_mode: Literal["none", "driver"] = "none"
-    transport_extension: Literal["", "verireel-postgres"] = Field(
+    transport_extension: Literal["", "postgres"] = Field(
         default="",
         exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
@@ -430,6 +434,17 @@ class ProductPreviewProfile(BaseModel):
         exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+    generated_secret_env: dict[str, PreviewSecretEncoding] = Field(
+        default_factory=dict,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_postgres_transport(cls, value: object) -> object:
+        return migrate_legacy_postgres_preview(value)
+
     historical_transport: dict[str, str] = Field(
         default_factory=dict,
         exclude_if=lambda value: not value,
@@ -520,6 +535,14 @@ class ProductPreviewProfile(BaseModel):
             )
         if self.transport_database_prefix and not self.transport_extension:
             raise ValueError("preview transport database prefix requires a transport extension")
+        if self.generated_secret_env and self.transport_extension != "postgres":
+            raise ValueError("generated preview secrets require PostgreSQL transport")
+        reserved_keys = {"DATABASE_URL", *self.preview_url_env_keys, *self.preview_domain_env_keys}
+        for key in self.generated_secret_env:
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or key.startswith("LAUNCHPLANE_"):
+                raise ValueError("generated preview secret requires an application environment key")
+            if key in reserved_keys:
+                raise ValueError("generated preview secret conflicts with a managed preview key")
 
         return self
 
@@ -922,7 +945,7 @@ class LaunchplaneProductProfileRecord(BaseModel):
             raise ValueError(
                 "Use managed product configuration with instance preview instead of preview.override_env."
             )
-        legacy_extensions = self.preview.transport_extension == "verireel-postgres" or any(
+        legacy_extensions = self.preview.transport_extension == "postgres" or any(
             lane.generic_web_extensions.verification_extension == "verireel-testing"
             for lane in self.lanes
         )

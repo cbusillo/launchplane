@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import ContextManager, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
 
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
@@ -13,7 +13,6 @@ from control_plane.contracts.preview_mutation_request import (
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
-    ProductLaneProfile,
 )
 from control_plane.drivers.dispatch import (
     _ProductRouteEnvelope,
@@ -36,16 +35,19 @@ from control_plane.lane_movement import (
     require_forward_preview_build,
 )
 from control_plane.workflows.launchplane import PreviewMutationRecordStore, find_preview_record
-from control_plane.workflows.verireel_preview_driver import (
-    VeriReelPreviewDestroyRequest,
-    VeriReelPreviewDestroyResult,
-    VeriReelPreviewRefreshConfigError,
-    VeriReelPreviewRefreshRequest,
-    VeriReelPreviewRefreshResult,
-    VeriReelPreviewRefreshTransportError as VeriReelPreviewRefreshTransportError,
-    execute_verireel_preview_destroy,
-    execute_verireel_preview_refresh,
+from control_plane.workflows.postgres_preview import (
+    PostgresPreviewDestroyRequest,
+    PostgresPreviewDestroyResult,
+    PostgresPreviewRefreshConfigError,
+    PostgresPreviewRefreshRequest,
+    PostgresPreviewRefreshResult,
+    execute_postgres_preview_destroy,
+    execute_postgres_preview_refresh,
 )
+
+
+class _ProductProfileStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
 
 class _PreviewRefreshSerializationStore(Protocol):
@@ -66,87 +68,32 @@ def _preview_refresh_serialization(
     return store.serialize_preview_refresh(preview_id=preview_id)
 
 
-class VeriReelRouteDependencyError(ValueError):
-    pass
-
-
-class VeriReelProductMismatchError(ValueError):
-    pass
-
-
-class VeriReelResolvedDriverContext(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    profile: LaunchplaneProductProfileRecord | None = None
-    lane: ProductLaneProfile | None = None
-
-
-class VeriReelPreviewRefreshEnvelope(_ProductRouteEnvelope):
+class PostgresPreviewRefreshEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    refresh: VeriReelPreviewRefreshRequest
+    refresh: PostgresPreviewRefreshRequest
 
     @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelPreviewRefreshEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel preview refresh")
+    def _validate_alignment(self) -> "PostgresPreviewRefreshEnvelope":
+        _validate_driver_envelope_product(self.product, label="PostgreSQL preview refresh")
         return self
 
 
-class VeriReelPreviewDestroyEnvelope(_ProductRouteEnvelope):
+class PostgresPreviewDestroyEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    destroy: VeriReelPreviewDestroyRequest
+    destroy: PostgresPreviewDestroyRequest
 
     @model_validator(mode="after")
-    def _validate_alignment(self) -> "VeriReelPreviewDestroyEnvelope":
-        _validate_driver_envelope_product(self.product, label="VeriReel preview destroy")
+    def _validate_alignment(self) -> "PostgresPreviewDestroyEnvelope":
+        _validate_driver_envelope_product(self.product, label="PostgreSQL preview destroy")
         return self
 
 
-def resolve_verireel_driver_context(
-    *,
-    record_store: object,
-    product: str,
-    context: str = "",
-    instance: str = "",
-    require_profile: bool = False,
-    allow_declared_preview_transport: bool = False,
-) -> VeriReelResolvedDriverContext:
-    normalized_product = product.strip()
-    read_profile = getattr(record_store, "read_product_profile_record", None)
-    if not callable(read_profile):
-        raise VeriReelRouteDependencyError(
-            "Product driver validation requires product profile storage."
-        )
-    try:
-        profile = read_profile(normalized_product)
-    except FileNotFoundError as error:
-        raise VeriReelRouteDependencyError from error
-    if not isinstance(profile, LaunchplaneProductProfileRecord):
-        profile = LaunchplaneProductProfileRecord.model_validate(profile)
-    declared_transport = (
-        allow_declared_preview_transport
-        and profile.driver_id.strip() == "generic-web"
-        and profile.preview.transport_extension == "verireel-postgres"
-    )
-    if not profile.is_active or not declared_transport:
-        raise VeriReelProductMismatchError(
-            "Product profile does not declare the requested preview transport."
-        )
-    if context.strip() or instance.strip():
-        lane = _find_product_profile_lane(profile=profile, context=context, instance=instance)
-        if lane is None:
-            raise VeriReelProductMismatchError(
-                "Product profile does not own the requested driver lane."
-            )
-        return VeriReelResolvedDriverContext(profile=profile, lane=lane)
-    return VeriReelResolvedDriverContext(profile=profile)
-
-
-def apply_verireel_preview_refresh_result(
+def apply_postgres_preview_refresh_result(
     *,
     control_plane_root: Path,
     record_store: object,
-    request: VeriReelPreviewRefreshEnvelope,
-    execution_profile: LaunchplaneProductProfileRecord | None = None,
+    request: PostgresPreviewRefreshEnvelope,
+    execution_profile: LaunchplaneProductProfileRecord,
 ) -> tuple[dict[str, object], dict[str, object]]:
     preview_id = resolve_launchplane_preview_id(
         context=request.refresh.context,
@@ -170,18 +117,21 @@ def apply_verireel_preview_refresh_result(
                 request.refresh.image_reference,
             )
             try:
+                read_profile = getattr(record_store, "read_product_profile_record", None)
+                if not callable(read_profile):
+                    raise LaneMovementRefused("source_authority_unavailable")
                 try:
-                    resolved = resolve_verireel_driver_context(
-                        record_store=record_store,
-                        product=request.product,
-                        require_profile=True,
-                        allow_declared_preview_transport=True,
+                    profile = LaunchplaneProductProfileRecord.model_validate(
+                        cast(_ProductProfileStore, record_store).read_product_profile_record(
+                            request.product
+                        )
                     )
-                except (VeriReelRouteDependencyError, VeriReelProductMismatchError) as error:
+                except (FileNotFoundError, ValueError) as error:
                     raise LaneMovementRefused("source_authority_unavailable") from error
-                profile = resolved.profile
                 if (
-                    profile is None
+                    not profile.is_active
+                    or profile.driver_id != "generic-web"
+                    or profile.preview.transport_extension != "postgres"
                     or profile.preview.context != request.refresh.context
                     or profile.repository.partition("/")[2] != request.refresh.anchor_repo
                 ):
@@ -220,29 +170,29 @@ def apply_verireel_preview_refresh_result(
             anchor_pr_number=request.refresh.anchor_pr_number,
         )
         try:
-            driver_result = execute_verireel_preview_refresh(
+            driver_result = execute_postgres_preview_refresh(
                 record_store=record_store,
                 control_plane_root=control_plane_root,
                 request=request.refresh,
                 preview_id=generation_identity.preview_id,
                 preview_generation_id=generation_identity.generation_id,
-                **({"profile": execution_profile} if execution_profile is not None else {}),
+                profile=execution_profile,
             )
-        except VeriReelPreviewRefreshConfigError as error:
+        except PostgresPreviewRefreshConfigError as error:
             now = utc_now_timestamp()
             error_message = (
-                str(error).strip() or "VeriReel preview refresh configuration is incomplete."
+                str(error).strip() or "PostgreSQL preview refresh configuration is incomplete."
             )
-            driver_result = VeriReelPreviewRefreshResult(
+            driver_result = PostgresPreviewRefreshResult(
                 refresh_status="fail",
                 refresh_started_at=now,
                 refresh_finished_at=now,
                 application_name="",
                 application_id="",
-                preview_url=_verireel_preview_url_for_failed_records(request=request.refresh),
+                preview_url=_postgres_preview_url_for_failed_records(request=request.refresh),
                 error_message=error_message,
             )
-        records = apply_verireel_preview_refresh_records(
+        records = apply_postgres_preview_refresh_records(
             control_plane_root=control_plane_root,
             record_store=record_store,
             request=request.refresh,
@@ -252,20 +202,20 @@ def apply_verireel_preview_refresh_result(
     return records, driver_result.model_dump(mode="json")
 
 
-def apply_verireel_preview_destroy_result(
+def apply_postgres_preview_destroy_result(
     *,
     control_plane_root: Path,
     record_store: object,
-    request: VeriReelPreviewDestroyEnvelope,
-    execution_profile: LaunchplaneProductProfileRecord | None = None,
+    request: PostgresPreviewDestroyEnvelope,
+    execution_profile: LaunchplaneProductProfileRecord,
 ) -> tuple[dict[str, object], dict[str, object]]:
-    driver_result = execute_verireel_preview_destroy(
+    driver_result = execute_postgres_preview_destroy(
         record_store=record_store,
         control_plane_root=control_plane_root,
         request=request.destroy,
-        **({"profile": execution_profile} if execution_profile is not None else {}),
+        profile=execution_profile,
     )
-    records = apply_verireel_preview_destroy_records(
+    records = apply_postgres_preview_destroy_records(
         record_store=record_store,
         request=request.destroy,
         driver_result=driver_result,
@@ -273,12 +223,12 @@ def apply_verireel_preview_destroy_result(
     return records, driver_result.model_dump(mode="json")
 
 
-def apply_verireel_preview_refresh_records(
+def apply_postgres_preview_refresh_records(
     *,
     control_plane_root: Path,
     record_store: object,
-    request: VeriReelPreviewRefreshRequest,
-    driver_result: VeriReelPreviewRefreshResult,
+    request: PostgresPreviewRefreshRequest,
+    driver_result: PostgresPreviewRefreshResult,
     generation_identity: LaunchplanePreviewGenerationIdentity,
 ) -> dict[str, object]:
     requested_at = (
@@ -289,7 +239,7 @@ def apply_verireel_preview_refresh_records(
     failure_summary = driver_result.error_message.strip() or "Preview provisioning failed."
     preview_url = driver_result.preview_url.strip() or request.preview_url.strip()
     if not preview_url and not refresh_passed:
-        preview_url = _verireel_preview_url_for_failed_records(request=request)
+        preview_url = _postgres_preview_url_for_failed_records(request=request)
     preview_request = PreviewMutationRequest(
         context=request.context,
         anchor_repo=request.anchor_repo,
@@ -315,7 +265,7 @@ def apply_verireel_preview_refresh_records(
         started_at=requested_at,
         finished_at="" if refresh_passed else finished_at,
         failed_at="" if refresh_passed else finished_at,
-        resolved_manifest_fingerprint=_verireel_preview_manifest_fingerprint(request),
+        resolved_manifest_fingerprint=_postgres_preview_manifest_fingerprint(request),
         artifact_id=request.image_reference,
         deploy_status="pass" if refresh_passed else "fail",
         verify_status="pending" if refresh_passed else "skipped",
@@ -332,11 +282,11 @@ def apply_verireel_preview_refresh_records(
     )
 
 
-def apply_verireel_preview_destroy_records(
+def apply_postgres_preview_destroy_records(
     *,
     record_store: object,
-    request: VeriReelPreviewDestroyRequest,
-    driver_result: VeriReelPreviewDestroyResult,
+    request: PostgresPreviewDestroyRequest,
+    driver_result: PostgresPreviewDestroyResult,
 ) -> dict[str, object]:
     if driver_result.destroy_status != "pass":
         return {"transition": "destroy_failed"}
@@ -356,7 +306,7 @@ def apply_verireel_preview_destroy_records(
     )
 
 
-def _verireel_preview_manifest_fingerprint(request: VeriReelPreviewRefreshRequest) -> str:
+def _postgres_preview_manifest_fingerprint(request: PostgresPreviewRefreshRequest) -> str:
     normalized_sha = request.anchor_head_sha.strip().lower()
     short_sha = normalized_sha[:7]
     return (
@@ -365,20 +315,5 @@ def _verireel_preview_manifest_fingerprint(request: VeriReelPreviewRefreshReques
     )
 
 
-def _verireel_preview_url_for_failed_records(*, request: VeriReelPreviewRefreshRequest) -> str:
+def _postgres_preview_url_for_failed_records(*, request: PostgresPreviewRefreshRequest) -> str:
     return f"https://{request.preview_slug}.preview-config-missing.launchplane.invalid"
-
-
-def _find_product_profile_lane(
-    *, profile: LaunchplaneProductProfileRecord, context: str, instance: str
-) -> ProductLaneProfile | None:
-    normalized_context = context.strip()
-    normalized_instance = instance.strip()
-    for lane in profile.lanes:
-        lane_context = lane.context.strip()
-        lane_instance = lane.instance.strip()
-        if (not normalized_context or lane_context == normalized_context) and (
-            not normalized_instance or lane_instance == normalized_instance
-        ):
-            return lane
-    return None

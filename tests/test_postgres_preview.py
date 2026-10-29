@@ -10,44 +10,28 @@ import click
 from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 
 from control_plane import dokploy as control_plane_dokploy
-from control_plane.contracts.secret_record import SecretBinding
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import DokployTargetDefinition
-from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestroyRequest
-from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshRequest
-from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshConfigError
-from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshTransportError
-from control_plane.workflows.verireel_preview_driver import _preview_application_name
-from control_plane.workflows.verireel_preview_driver import _preview_database_identifiers
-from control_plane.workflows.verireel_preview_driver import _build_preview_runtime_identity
-from control_plane.workflows.verireel_preview_driver import _build_preview_database_command
-from control_plane.workflows.verireel_preview_driver import _build_admin_database_url
-from control_plane.workflows.verireel_preview_driver import _ensure_application
-from control_plane.workflows.verireel_preview_driver import _preview_database_admin_module_source
-from control_plane.workflows.verireel_preview_driver import _resolve_preview_secret
-from control_plane.workflows.verireel_preview_driver import _resolve_preview_url
-from control_plane.workflows.verireel_preview_driver import _run_application_command
-from control_plane.workflows.verireel_preview_driver import _run_application_command_with_retries
-from control_plane.workflows.verireel_preview_driver import _wait_for_preview_health
-from control_plane.workflows.verireel_preview_driver import _verireel_template_runtime_secret_keys
-from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_destroy
-from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_refresh
+from control_plane.workflows.postgres_preview import PostgresPreviewDestroyRequest
+from control_plane.workflows.postgres_preview import PostgresPreviewRefreshRequest
+from control_plane.workflows.postgres_preview import PostgresPreviewRefreshConfigError
+from control_plane.workflows.postgres_preview import PostgresPreviewRefreshTransportError
+from control_plane.workflows.postgres_preview import _preview_application_name
+from control_plane.workflows.postgres_preview import _preview_database_identifiers
+from control_plane.workflows.postgres_preview import _build_preview_runtime_identity
+from control_plane.workflows.postgres_preview import _build_preview_database_command
+from control_plane.workflows.postgres_preview import _build_admin_database_url
+from control_plane.workflows.postgres_preview import _ensure_application
+from control_plane.workflows.postgres_preview import _resolve_preview_secret
+from control_plane.workflows.postgres_preview import _resolve_preview_url
+from control_plane.workflows.postgres_preview import _run_application_command
+from control_plane.workflows.postgres_preview import _run_application_command_with_retries
+from control_plane.workflows.postgres_preview import _wait_for_preview_health
+from control_plane.workflows.postgres_preview import _template_runtime_secret_keys
+from control_plane.workflows.postgres_preview import execute_postgres_preview_destroy
+from control_plane.workflows.postgres_preview import execute_postgres_preview_refresh
 from control_plane.workflows.preview_resource_destroy import PreviewResourceDestroyResult
-
-
-def _runtime_binding(binding_key: str) -> SecretBinding:
-    normalized_key = binding_key.lower().replace("_", "-")
-    return SecretBinding(
-        binding_id=f"secret-{normalized_key}-binding-{normalized_key}",
-        secret_id=f"secret-{normalized_key}",
-        integration="runtime_environment",
-        binding_key=binding_key,
-        context="verireel",
-        instance="testing",
-        status="configured",
-        created_at="2026-05-05T22:15:00Z",
-        updated_at="2026-05-05T22:15:00Z",
-    )
+from tests.test_generic_web_preview_extensions import _driver_profile
 
 
 def _template_target() -> DokployTargetDefinition:
@@ -60,9 +44,11 @@ def _template_target() -> DokployTargetDefinition:
     )
 
 
-def _refresh_request() -> VeriReelPreviewRefreshRequest:
-    return VeriReelPreviewRefreshRequest.model_validate(
+def _refresh_request() -> PostgresPreviewRefreshRequest:
+    return PostgresPreviewRefreshRequest.model_validate(
         {
+            "context": "verireel-testing",
+            "anchor_repo": "verireel",
             "anchor_pr_number": 71,
             "anchor_pr_url": "https://github.com/every/verireel/pull/71",
             "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
@@ -73,7 +59,45 @@ def _refresh_request() -> VeriReelPreviewRefreshRequest:
     )
 
 
-class VeriReelPreviewDriverTests(unittest.TestCase):
+class PostgresPreviewDriverTests(unittest.TestCase):
+    def test_generated_secrets_cannot_replace_managed_preview_keys(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductPreviewProfile
+
+        payload = _driver_profile().preview.model_dump(mode="json")
+        for key in (
+            "DATABASE_URL",
+            "LAUNCHPLANE_PRODUCT",
+            "invalid key",
+            *payload["preview_url_env_keys"],
+        ):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                ProductPreviewProfile.model_validate(
+                    {**payload, "generated_secret_env": {key: "urlsafe"}}
+                )
+
+    def test_production_template_refuses_before_database_or_application_effects(self) -> None:
+        profile = _driver_profile()
+        profile = profile.model_copy(
+            update={
+                "preview": profile.preview.model_copy(update={"template_instance": "prod"}),
+                "lanes": (profile.lanes[0].model_copy(update={"instance": "prod"}),),
+            }
+        )
+        with (
+            patch(
+                "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
+                return_value=("provider", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.postgres_preview.dokploy_api.dokploy_request"
+            ) as provider,
+            self.assertRaises(PostgresPreviewRefreshConfigError),
+        ):
+            execute_postgres_preview_refresh(
+                control_plane_root=Path("."), request=_refresh_request(), profile=profile
+            )
+        provider.assert_not_called()
+
     def setUp(self) -> None:
         self.enterContext(
             patch("control_plane.dokploy.memory_capacity.require_preview_host_memory_capacity")
@@ -81,13 +105,13 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.lifecycle = MagicMock()
         self.lifecycle_factory = self.enterContext(
             patch(
-                "control_plane.workflows.verireel_preview_driver.preview_application_lifecycle",
+                "control_plane.workflows.postgres_preview.preview_application_lifecycle",
                 return_value=self.lifecycle,
             )
         )
 
     def test_shared_database_or_role_refuses_before_refresh_or_destroy(self) -> None:
-        database, role = _preview_database_identifiers("pr-71")
+        database, role = _preview_database_identifiers("pr-71", "verireel_preview_")
         template_url = "postgresql://admin:password@db:5432/testing"
         for database_url, template, app_present in (
             (f"postgresql://{role}:password@db:5432/production", template_url, True),
@@ -108,55 +132,60 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                     ),
                     TemporaryDirectory() as directory,
                     patch(
-                        "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                        "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                         return_value=("https://dokploy.example.invalid", "fixture-token"),
                     ),
                     patch(
-                        "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                        "control_plane.workflows.postgres_preview._template_application_payload",
                         return_value=(
                             _template_target(),
                             {"env": f"DATABASE_URL={template}"},
                         ),
                     ),
                     patch(
-                        "control_plane.workflows.verireel_preview_driver._resolve_preview_url_for_destroy",
+                        "control_plane.workflows.postgres_preview._resolve_preview_url_for_destroy",
                         return_value="https://preview.example.invalid",
                     ),
                     patch(
-                        "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                        "control_plane.workflows.postgres_preview._find_application_by_name",
                         return_value={"applicationId": "app-preview"} if app_present else None,
                     ),
                     patch(
-                        "control_plane.workflows.verireel_preview_driver._fetch_application",
+                        "control_plane.workflows.postgres_preview._fetch_application",
                         return_value={"env": f"DATABASE_URL={database_url}"},
                     ),
                     patch(
-                        "control_plane.workflows.verireel_preview_driver.destroy_dokploy_preview_resource"
+                        "control_plane.workflows.postgres_preview.destroy_dokploy_preview_resource"
                     ) as destroy,
                     patch(
-                        "control_plane.workflows.verireel_preview_driver._run_application_command"
+                        "control_plane.workflows.postgres_preview._run_application_command"
                     ) as bootstrap,
                     patch(
-                        "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
+                        "control_plane.workflows.postgres_preview._run_application_command_with_retries"
                     ) as drop,
                     patch(
-                        "control_plane.workflows.verireel_preview_driver.dokploy_api.dokploy_request",
+                        "control_plane.workflows.postgres_preview.dokploy_api.dokploy_request",
                         side_effect=AssertionError("Unsafe database reached provider effects"),
                     ),
                 ):
-                    with self.assertRaises(VeriReelPreviewRefreshConfigError):
+                    with self.assertRaises(PostgresPreviewRefreshConfigError):
                         if operation == "destroy":
-                            execute_verireel_preview_destroy(
+                            execute_postgres_preview_destroy(
+                                profile=_driver_profile(),
                                 control_plane_root=Path(directory),
-                                request=VeriReelPreviewDestroyRequest(
+                                request=PostgresPreviewDestroyRequest(
+                                    context="verireel-testing",
+                                    anchor_repo="verireel",
                                     anchor_pr_number=71,
                                     preview_slug="pr-71",
                                     destroy_reason="pull request closed",
                                 ),
                             )
                         else:
-                            execute_verireel_preview_refresh(
-                                control_plane_root=Path(directory), request=_refresh_request()
+                            execute_postgres_preview_refresh(
+                                profile=_driver_profile(),
+                                control_plane_root=Path(directory),
+                                request=_refresh_request(),
                             )
                     destroy.assert_not_called()
                     bootstrap.assert_not_called()
@@ -164,6 +193,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
 
     def test_preview_runtime_identity_uses_launchplane_preview_binding(self) -> None:
         identity = _build_preview_runtime_identity(
+            product="verireel",
             request=_refresh_request(),
             preview_id="preview-verireel-testing-verireel-pr-71",
             preview_generation_id=("preview-verireel-testing-verireel-pr-71-generation-0003"),
@@ -178,20 +208,18 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
     def test_destroy_removes_application_and_its_attached_schedules(
         self,
     ) -> None:
-        request = VeriReelPreviewDestroyRequest.model_validate(
+        request = PostgresPreviewDestroyRequest.model_validate(
             {
+                "context": "verireel-testing",
+                "anchor_repo": "verireel",
                 "anchor_pr_number": 71,
                 "destroy_reason": "pull request closed",
                 "preview_slug": "pr-71",
             }
         )
         cleanup_order: list[str] = []
-        database, role = _preview_database_identifiers(request.preview_slug)
+        database, role = _preview_database_identifiers(request.preview_slug, "verireel_preview_")
         template_database_url = "postgresql://admin:password@db:5432/verireel"
-
-        def _delete_recovery_schedule(**kwargs: object) -> None:
-            cleanup_order.append("schedule")
-            raise click.ClickException("schedule readback drifted")
 
         def _destroy_application(**kwargs: object) -> PreviewResourceDestroyResult:
             cleanup_order.append("application")
@@ -200,43 +228,44 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example.com", "token-123"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                "control_plane.workflows.postgres_preview._template_application_payload",
                 return_value=(
                     _template_target(),
                     {"env": f"DATABASE_URL={template_database_url}"},
                 ),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._resolve_preview_url_for_destroy",
+                "control_plane.workflows.postgres_preview._resolve_preview_url_for_destroy",
                 return_value="https://pr-71.ver-preview.shinycomputers.com",
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                "control_plane.workflows.postgres_preview._find_application_by_name",
                 return_value={"applicationId": "app-preview"},
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._fetch_application",
+                "control_plane.workflows.postgres_preview._fetch_application",
                 return_value={
                     "env": f"DATABASE_URL=postgresql://{role}:password@db:5432/{database}"
                 },
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.destroy_dokploy_preview_resource",
+                "control_plane.workflows.postgres_preview.destroy_dokploy_preview_resource",
                 side_effect=_destroy_application,
             ) as destroy_resource,
             patch(
-                "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
+                "control_plane.workflows.postgres_preview._run_application_command_with_retries"
             ) as drop,
             patch(
-                "control_plane.workflows.verireel_preview_driver._build_preview_database_command",
+                "control_plane.workflows.postgres_preview._build_preview_database_command",
                 wraps=_build_preview_database_command,
             ) as build_command,
         ):
-            result = execute_verireel_preview_destroy(
+            result = execute_postgres_preview_destroy(
+                profile=_driver_profile(),
                 control_plane_root=Path(temporary_directory_name),
                 request=request,
             )
@@ -246,15 +275,17 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             self.assertEqual(result.error_message, "")
 
             with patch(
-                "control_plane.workflows.verireel_preview_driver.destroy_dokploy_preview_resource",
+                "control_plane.workflows.postgres_preview.destroy_dokploy_preview_resource",
                 return_value=PreviewResourceDestroyResult(
                     status="fail",
                     cleanup_errors=(f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}: shared target",),
                 ),
             ):
                 drop.reset_mock()
-                refused = execute_verireel_preview_destroy(
-                    control_plane_root=Path(temporary_directory_name), request=request
+                refused = execute_postgres_preview_destroy(
+                    profile=_driver_profile(),
+                    control_plane_root=Path(temporary_directory_name),
+                    request=request,
                 )
                 self.assertEqual(refused.destroy_status, "fail")
                 drop.assert_not_called()
@@ -263,18 +294,20 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 with (
                     self.subTest(application=application),
                     patch(
-                        "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                        "control_plane.workflows.postgres_preview._find_application_by_name",
                         return_value=application,
                     ),
                     patch(
-                        "control_plane.workflows.verireel_preview_driver._fetch_application",
+                        "control_plane.workflows.postgres_preview._fetch_application",
                         return_value={"env": ""},
                     ),
                 ):
                     drop.reset_mock()
                     build_command.reset_mock()
-                    retried = execute_verireel_preview_destroy(
-                        control_plane_root=Path(temporary_directory_name), request=request
+                    retried = execute_postgres_preview_destroy(
+                        profile=_driver_profile(),
+                        control_plane_root=Path(temporary_directory_name),
+                        request=request,
                     )
                     self.assertEqual(retried.destroy_status, "pass")
                     drop.assert_called_once()
@@ -286,11 +319,25 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                     )
 
     def test_destroy_refuses_incomplete_inventory_before_any_cleanup(self) -> None:
-        request = VeriReelPreviewDestroyRequest(
-            anchor_pr_number=71, destroy_reason="pull request closed", preview_slug="pr-71"
+        request = PostgresPreviewDestroyRequest(
+            context="verireel-testing",
+            anchor_repo="verireel",
+            anchor_pr_number=71,
+            destroy_reason="pull request closed",
+            preview_slug="pr-71",
         )
         inventories: tuple[object, ...] = (
-            [{"environments": [{"applications": [{"name": _preview_application_name("pr-71")}]}]}],
+            [
+                {
+                    "environments": [
+                        {
+                            "applications": [
+                                {"name": _preview_application_name("pr-71", "ver-preview", "-app")}
+                            ]
+                        }
+                    ]
+                }
+            ],
             {},
             [{"environments": [{"applications": None}]}],
             [
@@ -299,7 +346,9 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                         {
                             "applications": [
                                 {
-                                    "name": _preview_application_name("pr-71"),
+                                    "name": _preview_application_name(
+                                        "pr-71", "ver-preview", "-app"
+                                    ),
                                     "applicationId": "preview",
                                 },
                                 None,
@@ -314,33 +363,33 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 self.subTest(inventory=inventory),
                 TemporaryDirectory() as directory,
                 patch(
-                    "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                    "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "fixture-token"),
                 ),
                 patch(
-                    "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                    "control_plane.workflows.postgres_preview._template_application_payload",
                     return_value=(
                         _template_target(),
                         {"env": "DATABASE_URL=postgresql://admin:password@db:5432/verireel"},
                     ),
                 ),
                 patch(
-                    "control_plane.workflows.verireel_preview_driver._resolve_preview_url_for_destroy",
+                    "control_plane.workflows.postgres_preview._resolve_preview_url_for_destroy",
                     return_value="https://preview.example.invalid",
                 ),
                 patch(
-                    "control_plane.workflows.verireel_preview_driver.dokploy_api.dokploy_request",
+                    "control_plane.workflows.postgres_preview.dokploy_api.dokploy_request",
                     return_value=inventory,
                 ),
                 patch(
-                    "control_plane.workflows.verireel_preview_driver.destroy_dokploy_preview_resource"
+                    "control_plane.workflows.postgres_preview.destroy_dokploy_preview_resource"
                 ) as destroy,
                 patch(
-                    "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
+                    "control_plane.workflows.postgres_preview._run_application_command_with_retries"
                 ) as database_cleanup,
             ):
-                result = execute_verireel_preview_destroy(
-                    control_plane_root=Path(directory), request=request
+                result = execute_postgres_preview_destroy(
+                    profile=_driver_profile(), control_plane_root=Path(directory), request=request
                 )
             self.assertEqual(result.destroy_status, "fail")
             self.assertEqual(result.application_id, "")
@@ -357,15 +406,15 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                "control_plane.workflows.postgres_preview._find_application_by_name",
                 return_value=None,
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_api.dokploy_request",
+                "control_plane.workflows.postgres_preview.dokploy_api.dokploy_request",
                 side_effect=_create_application,
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._fetch_application",
+                "control_plane.workflows.postgres_preview._fetch_application",
                 return_value={"applicationId": "app-preview"},
             ),
         ):
@@ -399,15 +448,15 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                "control_plane.workflows.postgres_preview._find_application_by_name",
                 return_value=None,
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_api.dokploy_request",
+                "control_plane.workflows.postgres_preview.dokploy_api.dokploy_request",
                 side_effect=_create_application,
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._fetch_application",
+                "control_plane.workflows.postgres_preview._fetch_application",
                 return_value={"applicationId": "app-preview"},
             ),
         ):
@@ -431,44 +480,58 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             },
         )
 
-    def test_build_preview_database_command_uses_bundled_temp_files(self) -> None:
-        command = _build_preview_database_command(
-            action="ensure",
-            admin_database_url="postgresql://user:pass@host:5432/postgres",
-            database_name="verireel_preview_pr_71",
-            role_name="verireel_preview_pr_71",
-            password="secret",
-        )
-
-        self.assertIn("PREVIEW_DB_ARGS_BASE64=", command)
-        self.assertIn("/tmp/.preview-db-admin-", command)
-        self.assertIn("/tmp/.preview-db-admin-runner-", command)
-        self.assertIn('node "$temp_runner" "$temp_script"', command)
-        self.assertIn('base64 -d > "$temp_script"', command)
-        self.assertIn('base64 -d > "$temp_runner"', command)
-        self.assertIn('rm -f "$temp_script" "$temp_runner" || true', command)
-
-        parse_result = subprocess.run(["sh", "-n", "-c", command], check=False)
-        self.assertEqual(parse_result.returncode, 0)
-
-    def test_preview_database_admin_module_source_is_valid_javascript(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            module_path = Path(temporary_directory_name) / "preview-db-admin.mjs"
-            module_path.write_text(_preview_database_admin_module_source(), encoding="utf-8")
-
-            parse_result = subprocess.run(["node", "--check", str(module_path)], check=False)
-
-        self.assertEqual(parse_result.returncode, 0)
-
-    def test_preview_database_admin_module_source_prefers_force_drop(self) -> None:
-        source = _preview_database_admin_module_source()
-
-        self.assertIn("WITH (FORCE)", source)
+    def test_database_commands_quote_identifiers_and_passwords(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "node_modules" / "pg"
+            package.mkdir(parents=True)
+            (root / "package.json").write_text("{}")
+            (package / "index.js").write_text(
+                "exports.Client = class { async connect() {} async end() {} "
+                "async query(sql, params = []) { console.log(JSON.stringify([sql, params])); "
+                "return { rowCount: 0 }; } };"
+            )
+            database, role, password = 'preview_"database', 'preview_"role', "pass'word"
+            for action in ("ensure", "drop"):
+                with self.subTest(action=action):
+                    command = _build_preview_database_command(
+                        action=action,
+                        admin_database_url="postgresql://fixture:fixture@db/postgres",
+                        database_name=database,
+                        role_name=role,
+                        password=password,
+                    )
+                    result = subprocess.run(
+                        ["sh", "-c", command], cwd=root, capture_output=True, text=True, check=True
+                    )
+                    queries = [json.loads(line) for line in result.stdout.splitlines()]
+                    database_identifier = '"' + database.replace('"', '""') + '"'
+                    role_identifier = '"' + role.replace('"', '""') + '"'
+                    statements = [query[0] for query in queries]
+                    if action == "ensure":
+                        self.assertIn(
+                            ["SELECT 1 FROM pg_roles WHERE rolname = $1", [role]], queries
+                        )
+                        self.assertIn(
+                            f"CREATE DATABASE {database_identifier} OWNER {role_identifier}",
+                            statements,
+                        )
+                        self.assertTrue(
+                            any("'pass''word'" in statement for statement in statements)
+                        )
+                    else:
+                        self.assertIn(
+                            f"DROP DATABASE IF EXISTS {database_identifier} WITH (FORCE)",
+                            statements,
+                        )
+                        self.assertIn(f"DROP ROLE IF EXISTS {role_identifier}", statements)
 
     def test_preview_refresh_request_requires_pr_scoped_preview_slug(self) -> None:
         with self.assertRaisesRegex(ValueError, "preview_slug to match anchor_pr_number"):
-            VeriReelPreviewRefreshRequest.model_validate(
+            PostgresPreviewRefreshRequest.model_validate(
                 {
+                    "context": "verireel-testing",
+                    "anchor_repo": "verireel",
                     "anchor_pr_number": 71,
                     "anchor_pr_url": "https://github.com/every/verireel/pull/71",
                     "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
@@ -479,8 +542,10 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             )
 
     def test_preview_refresh_can_derive_preview_url_from_runtime_records(self) -> None:
-        request = VeriReelPreviewRefreshRequest.model_validate(
+        request = PostgresPreviewRefreshRequest.model_validate(
             {
+                "context": "verireel-testing",
+                "anchor_repo": "verireel",
                 "anchor_pr_number": 71,
                 "anchor_pr_url": "https://github.com/every/verireel/pull/71",
                 "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
@@ -492,7 +557,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.control_plane_runtime_environments.resolve_runtime_context_values",
+                "control_plane.workflows.postgres_preview.control_plane_runtime_environments.resolve_runtime_context_values",
                 return_value={
                     "LAUNCHPLANE_PREVIEW_BASE_URL": "https://ver-preview.shinycomputers.com"
                 },
@@ -509,9 +574,9 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             context_name="verireel-testing",
         )
 
-    def test_verireel_template_runtime_secret_keys_skip_rewritten_database_url(self) -> None:
+    def test_template_runtime_secret_keys_skip_rewritten_database_url(self) -> None:
         self.assertEqual(
-            _verireel_template_runtime_secret_keys(
+            _template_runtime_secret_keys(
                 {
                     "DATABASE_URL": "postgresql://user:pass@db.example/verireel_testing",
                     "BETTER_AUTH_SECRET": "auth-secret",
@@ -519,14 +584,15 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                     "VERIREEL_CRON_SECRET": "cron-secret",
                     "VERIREEL_SMOKE_MAINTENANCE_SECRET": "smoke-secret",
                     "NEXT_PUBLIC_SITE_URL": "https://testing.example",
-                }
+                },
+                frozenset({"DATABASE_URL", *_driver_profile().preview.generated_secret_env}),
             ),
             (),
         )
 
     def test_template_credentials_are_found_by_name_or_embedded_password(self) -> None:
         self.assertEqual(
-            _verireel_template_runtime_secret_keys(
+            _template_runtime_secret_keys(
                 {
                     "POSTGRES_PASSWORD": "pg",
                     "PGPASSWORD": "pg",
@@ -563,11 +629,11 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
     def test_preview_refresh_refuses_template_platform_credential(self) -> None:
         with (
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                "control_plane.workflows.postgres_preview._template_application_payload",
                 return_value=(
                     _template_target(),
                     {
@@ -577,11 +643,12 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._run_application_command"
+                "control_plane.workflows.postgres_preview._run_application_command"
             ) as run_command,
         ):
-            with self.assertRaises(VeriReelPreviewRefreshConfigError) as refusal:
-                execute_verireel_preview_refresh(
+            with self.assertRaises(PostgresPreviewRefreshConfigError) as refusal:
+                execute_postgres_preview_refresh(
+                    profile=_driver_profile(),
                     control_plane_root=Path("."),
                     request=_refresh_request(),
                 )
@@ -595,18 +662,19 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 side_effect=click.ClickException(
                     "Could not load tracked Dokploy targets from Launchplane Postgres storage: connection failed"
                 ),
             ),
         ):
-            with self.assertRaises(VeriReelPreviewRefreshTransportError):
-                execute_verireel_preview_refresh(
+            with self.assertRaises(PostgresPreviewRefreshTransportError):
+                execute_postgres_preview_refresh(
+                    profile=_driver_profile(),
                     control_plane_root=Path(temporary_directory_name),
                     request=_refresh_request(),
                 )
@@ -615,11 +683,11 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=control_plane_dokploy.DokploySourceOfTruth(
                     schema_version=1,
                     targets=(
@@ -634,14 +702,15 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_api.fetch_dokploy_target_payload",
+                "control_plane.workflows.postgres_preview.dokploy_api.fetch_dokploy_target_payload",
                 side_effect=click.ClickException(
                     "Dokploy API GET /api/application.one request failed: timed out"
                 ),
             ),
         ):
-            with self.assertRaises(VeriReelPreviewRefreshTransportError):
-                execute_verireel_preview_refresh(
+            with self.assertRaises(PostgresPreviewRefreshTransportError):
+                execute_postgres_preview_refresh(
+                    profile=_driver_profile(),
                     control_plane_root=Path(temporary_directory_name),
                     request=_refresh_request(),
                 )
@@ -652,11 +721,11 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                "control_plane.workflows.postgres_preview._template_application_payload",
                 return_value=(
                     _template_target(),
                     {
@@ -666,21 +735,22 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                "control_plane.workflows.postgres_preview._find_application_by_name",
                 return_value={"applicationId": "app-preview"},
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._fetch_application",
+                "control_plane.workflows.postgres_preview._fetch_application",
                 side_effect=click.ClickException(
                     "Dokploy API GET /api/application.one request failed: timed out"
                 ),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._run_application_command"
+                "control_plane.workflows.postgres_preview._run_application_command"
             ) as run_command,
         ):
-            with self.assertRaises(VeriReelPreviewRefreshTransportError):
-                execute_verireel_preview_refresh(
+            with self.assertRaises(PostgresPreviewRefreshTransportError):
+                execute_postgres_preview_refresh(
+                    profile=_driver_profile(),
                     control_plane_root=Path(temporary_directory_name),
                     request=_refresh_request(),
                 )
@@ -691,34 +761,32 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as directory,
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "fixture-token"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                "control_plane.workflows.postgres_preview._template_application_payload",
                 return_value=(
                     _template_target(),
                     {"env": "DATABASE_URL=postgresql://admin:password@db:5432/verireel"},
                 ),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._resolve_preview_url",
+                "control_plane.workflows.postgres_preview._resolve_preview_url",
                 return_value="https://preview.example.invalid",
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_api.dokploy_request",
+                "control_plane.workflows.postgres_preview.dokploy_api.dokploy_request",
                 return_value=[{"environments": None}],
             ),
-            patch(
-                "control_plane.workflows.verireel_preview_driver._run_application_command"
-            ) as database,
-            patch(
-                "control_plane.workflows.verireel_preview_driver._ensure_application"
-            ) as application,
+            patch("control_plane.workflows.postgres_preview._run_application_command") as database,
+            patch("control_plane.workflows.postgres_preview._ensure_application") as application,
         ):
-            with self.assertRaises(VeriReelPreviewRefreshTransportError):
-                execute_verireel_preview_refresh(
-                    control_plane_root=Path(directory), request=_refresh_request()
+            with self.assertRaises(PostgresPreviewRefreshTransportError):
+                execute_postgres_preview_refresh(
+                    profile=_driver_profile(),
+                    control_plane_root=Path(directory),
+                    request=_refresh_request(),
                 )
         database.assert_not_called()
         application.assert_not_called()
@@ -732,12 +800,20 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         profile = profile.model_copy(
             update={
                 "product": "sample-product",
+                "runtime_port": 8080,
+                "health_path": "/ready",
                 "lanes": (profile.lanes[0].model_copy(update={"context": "sample-template"}),),
                 "preview": profile.preview.model_copy(
                     update={
                         "app_name_prefix": "sample-preview",
                         "app_name_suffix": "-app",
                         "transport_database_prefix": "sample_data_",
+                        "generated_secret_env": {
+                            "SESSION_SECRET": "urlsafe",
+                            "ENCRYPTION_KEY": "base64",
+                        },
+                        "preview_url_env_keys": ("PUBLIC_APP_URL",),
+                        "preview_domain_env_keys": ("PUBLIC_DOMAIN",),
                     }
                 ),
             }
@@ -753,21 +829,19 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                "control_plane.workflows.postgres_preview._template_application_payload",
                 return_value=(
                     _template_target(),
                     {
                         "applicationId": "app-template",
                         "env": (
                             "DATABASE_URL=postgresql://template:template-pass@db.example/verireel_testing\n"
-                            "BETTER_AUTH_SECRET=template-auth-secret\n"
-                            f"VERIREEL_SECRETS_MASTER_KEY={template_master_key}\n"
-                            "VERIREEL_CRON_SECRET=template-cron-secret\n"
-                            "VERIREEL_SMOKE_MAINTENANCE_SECRET=template-smoke-secret\n"
+                            "SESSION_SECRET=template-auth-secret\n"
+                            f"ENCRYPTION_KEY={template_master_key}\n"
                             "POSTGRES_PASSWORD=template-postgres-password\n"
                             "NEXT_PUBLIC_SUPPORT_EMAIL=support@example.com\n"
                         ),
@@ -775,57 +849,50 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 ),
             ) as template_lookup,
             patch(
-                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                "control_plane.workflows.postgres_preview._find_application_by_name",
                 return_value=None,
             ),
-            patch("control_plane.workflows.verireel_preview_driver._run_application_command"),
+            patch("control_plane.workflows.postgres_preview._run_application_command"),
             patch(
-                "control_plane.workflows.verireel_preview_driver._ensure_application",
+                "control_plane.workflows.postgres_preview._ensure_application",
                 return_value={"applicationId": "app-preview"},
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._configure_application",
+                "control_plane.workflows.postgres_preview._configure_application",
                 side_effect=capture_environment,
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._ensure_domain",
+                "control_plane.workflows.postgres_preview._ensure_domain",
                 return_value=("domain-preview", ()),
-            ),
+            ) as domain,
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_api.latest_deployment_for_target",
+                "control_plane.workflows.postgres_preview.dokploy_api.latest_deployment_for_target",
                 return_value=None,
             ),
-            patch("control_plane.workflows.verireel_preview_driver.dokploy_api.trigger_deployment"),
+            patch("control_plane.workflows.postgres_preview.dokploy_api.trigger_deployment"),
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_api.wait_for_target_deployment"
+                "control_plane.workflows.postgres_preview.dokploy_api.wait_for_target_deployment"
             ),
+            patch("control_plane.workflows.postgres_preview._run_application_command_with_retries"),
             patch(
-                "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
-            ),
-            patch(
-                "control_plane.workflows.verireel_preview_driver._wait_for_preview_health",
+                "control_plane.workflows.postgres_preview._wait_for_preview_health",
                 side_effect=lambda **kwargs: kwargs["expected_runtime_identity"],
-            ),
+            ) as health,
         ):
-            result = execute_verireel_preview_refresh(
+            result = execute_postgres_preview_refresh(
+                profile=profile,
                 control_plane_root=Path(temporary_directory_name),
                 request=_refresh_request(),
-                profile=profile,
             )
 
         self.assertEqual(result.refresh_status, "pass")
         self.assertEqual(result.application_id, "app-preview")
-        self.assertNotEqual(captured_env["BETTER_AUTH_SECRET"], "template-auth-secret")
-        self.assertNotEqual(captured_env["VERIREEL_CRON_SECRET"], "template-cron-secret")
+        self.assertNotEqual(captured_env["SESSION_SECRET"], "template-auth-secret")
         self.assertNotEqual(
-            captured_env["VERIREEL_SMOKE_MAINTENANCE_SECRET"],
-            "template-smoke-secret",
-        )
-        self.assertNotEqual(
-            captured_env["VERIREEL_SECRETS_MASTER_KEY"],
+            captured_env["ENCRYPTION_KEY"],
             template_master_key,
         )
-        self.assertEqual(len(base64.b64decode(captured_env["VERIREEL_SECRETS_MASTER_KEY"])), 32)
+        self.assertEqual(len(base64.b64decode(captured_env["ENCRYPTION_KEY"])), 32)
         self.assertIn(
             f"/{profile.preview.transport_database_prefix}pr_71?", captured_env["DATABASE_URL"]
         )
@@ -842,6 +909,10 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.assertNotIn("POSTGRES_PASSWORD", captured_env)
         self.assertNotIn("template-postgres-password", "\n".join(captured_env.values()))
         self.assertEqual(captured_env["NEXT_PUBLIC_SUPPORT_EMAIL"], "support@example.com")
+        self.assertEqual(domain.call_args.kwargs["runtime_port"], profile.runtime_port)
+        self.assertEqual(health.call_args.kwargs["health_path"], profile.health_path)
+        self.assertEqual(captured_env["PUBLIC_APP_URL"], _refresh_request().preview_url)
+        self.assertFalse(any(key.startswith("VERIREEL_") for key in captured_env))
         self.lifecycle.complete.assert_called_once()
         self.assertEqual(
             self.lifecycle_factory.call_args.kwargs["extensions"],
@@ -854,11 +925,11 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                "control_plane.workflows.postgres_preview._template_application_payload",
                 return_value=(
                     _template_target(),
                     {
@@ -868,15 +939,16 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                "control_plane.workflows.postgres_preview._find_application_by_name",
                 return_value=None,
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._run_application_command",
+                "control_plane.workflows.postgres_preview._run_application_command",
                 side_effect=[click.ClickException("bootstrap failed"), None],
             ) as run_command,
         ):
-            result = execute_verireel_preview_refresh(
+            result = execute_postgres_preview_refresh(
+                profile=_driver_profile(),
                 control_plane_root=Path(temporary_directory_name),
                 request=_refresh_request(),
             )
@@ -888,7 +960,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
     def test_preview_refresh_reuses_existing_preview_runtime_secrets(self) -> None:
         self.enterContext(
             patch(
-                "control_plane.workflows.verireel_preview_driver.generate_deployment_record_id",
+                "control_plane.workflows.postgres_preview.generate_deployment_record_id",
                 return_value="deployment-preview-secret-reuse",
             )
         )
@@ -899,7 +971,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 control_plane_dokploy.parse_dokploy_env_text(str(kwargs["env_text"]))
             )
 
-        database, role = _preview_database_identifiers("pr-71")
+        database, role = _preview_database_identifiers("pr-71", "verireel_preview_")
         existing_env = (
             f"DATABASE_URL=postgresql://{role}:existing-pass@db.example/{database}?schema=public\n"
             "BETTER_AUTH_SECRET=existing-auth-secret\n"
@@ -913,11 +985,11 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_source.read_dokploy_config",
+                "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                "control_plane.workflows.postgres_preview._template_application_payload",
                 return_value=(
                     _template_target(),
                     {
@@ -927,43 +999,42 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                "control_plane.workflows.postgres_preview._find_application_by_name",
                 return_value={"applicationId": "app-preview"},
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._fetch_application",
+                "control_plane.workflows.postgres_preview._fetch_application",
                 return_value={"applicationId": "app-preview", "env": existing_env},
             ),
-            patch("control_plane.workflows.verireel_preview_driver._run_application_command"),
+            patch("control_plane.workflows.postgres_preview._run_application_command"),
             patch(
-                "control_plane.workflows.verireel_preview_driver._ensure_application",
+                "control_plane.workflows.postgres_preview._ensure_application",
                 return_value={"applicationId": "app-preview"},
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._configure_application",
+                "control_plane.workflows.postgres_preview._configure_application",
                 side_effect=capture_environment,
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver._ensure_domain",
+                "control_plane.workflows.postgres_preview._ensure_domain",
                 return_value=("", ()),
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_api.latest_deployment_for_target",
+                "control_plane.workflows.postgres_preview.dokploy_api.latest_deployment_for_target",
                 return_value=None,
             ),
-            patch("control_plane.workflows.verireel_preview_driver.dokploy_api.trigger_deployment"),
+            patch("control_plane.workflows.postgres_preview.dokploy_api.trigger_deployment"),
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_api.wait_for_target_deployment"
+                "control_plane.workflows.postgres_preview.dokploy_api.wait_for_target_deployment"
             ),
+            patch("control_plane.workflows.postgres_preview._run_application_command_with_retries"),
             patch(
-                "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
-            ),
-            patch(
-                "control_plane.workflows.verireel_preview_driver._wait_for_preview_health",
+                "control_plane.workflows.postgres_preview._wait_for_preview_health",
                 side_effect=lambda **kwargs: kwargs["expected_runtime_identity"],
             ),
         ):
-            result = execute_verireel_preview_refresh(
+            result = execute_postgres_preview_refresh(
+                profile=_driver_profile(),
                 control_plane_root=Path(temporary_directory_name),
                 request=_refresh_request(),
             )
@@ -972,7 +1043,8 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.lifecycle.prepare.assert_called_once()
         self.lifecycle.complete.assert_called_once()
         self.assertEqual(
-            result.runtime_identity, _build_preview_runtime_identity(request=_refresh_request())
+            result.runtime_identity,
+            _build_preview_runtime_identity(product="verireel", request=_refresh_request()),
         )
         self.assertEqual(captured_env["BETTER_AUTH_SECRET"], "existing-auth-secret")
         self.assertEqual(captured_env["VERIREEL_CRON_SECRET"], "existing-cron-secret")
@@ -987,7 +1059,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.lifecycle.maintain.assert_called_once()
 
     def test_wait_for_preview_health_returns_matching_runtime_identity(self) -> None:
-        expected = _build_preview_runtime_identity(request=_refresh_request())
+        expected = _build_preview_runtime_identity(product="verireel", request=_refresh_request())
         response = MagicMock()
         response.read.return_value = json.dumps(
             {
@@ -996,9 +1068,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             }
         ).encode("utf-8")
         response.__enter__.return_value = response
-        with patch(
-            "control_plane.workflows.verireel_preview_driver.urlopen", return_value=response
-        ):
+        with patch("control_plane.workflows.postgres_preview.urlopen", return_value=response):
             observed = _wait_for_preview_health(
                 preview_url="https://pr-71.preview.example.test",
                 timeout_seconds=30,
@@ -1008,7 +1078,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.assertEqual(observed, expected)
 
     def test_wait_for_preview_health_rejects_runtime_identity_mismatch(self) -> None:
-        expected = _build_preview_runtime_identity(request=_refresh_request())
+        expected = _build_preview_runtime_identity(product="verireel", request=_refresh_request())
         mismatched = expected.model_copy(update={"source_git_ref": "a" * 40})
         response = MagicMock()
         response.read.return_value = json.dumps(
@@ -1019,12 +1089,12 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         ).encode("utf-8")
         response.__enter__.return_value = response
         with (
-            patch("control_plane.workflows.verireel_preview_driver.urlopen", return_value=response),
+            patch("control_plane.workflows.postgres_preview.urlopen", return_value=response),
             patch(
-                "control_plane.workflows.verireel_preview_driver.time.monotonic",
+                "control_plane.workflows.postgres_preview.time.monotonic",
                 side_effect=(0.0, 0.0, 0.0, 2.0),
             ),
-            patch("control_plane.workflows.verireel_preview_driver.time.sleep") as sleep,
+            patch("control_plane.workflows.postgres_preview.time.sleep") as sleep,
         ):
             with self.assertRaisesRegex(click.ClickException, "source_git_ref"):
                 _wait_for_preview_health(
@@ -1038,7 +1108,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
     def test_wait_for_preview_health_fails_immediately_on_hard_identity_mismatch(
         self,
     ) -> None:
-        expected = _build_preview_runtime_identity(request=_refresh_request())
+        expected = _build_preview_runtime_identity(product="verireel", request=_refresh_request())
         mismatched = expected.model_copy(update={"product": "different-product"})
         response = MagicMock()
         response.read.return_value = json.dumps(
@@ -1049,12 +1119,12 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         ).encode("utf-8")
         response.__enter__.return_value = response
         with (
-            patch("control_plane.workflows.verireel_preview_driver.urlopen", return_value=response),
+            patch("control_plane.workflows.postgres_preview.urlopen", return_value=response),
             patch(
-                "control_plane.workflows.verireel_preview_driver.time.monotonic",
+                "control_plane.workflows.postgres_preview.time.monotonic",
                 side_effect=(0.0, 0.0, 0.0),
             ),
-            patch("control_plane.workflows.verireel_preview_driver.time.sleep") as sleep,
+            patch("control_plane.workflows.postgres_preview.time.sleep") as sleep,
         ):
             with self.assertRaisesRegex(click.ClickException, "product"):
                 _wait_for_preview_health(
@@ -1067,8 +1137,10 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
 
     def test_preview_destroy_request_requires_pr_scoped_preview_slug(self) -> None:
         with self.assertRaisesRegex(ValueError, "preview_slug to match anchor_pr_number"):
-            VeriReelPreviewDestroyRequest.model_validate(
+            PostgresPreviewDestroyRequest.model_validate(
                 {
+                    "context": "verireel-testing",
+                    "anchor_repo": "verireel",
                     "anchor_pr_number": 71,
                     "preview_slug": "pr-72",
                     "destroy_reason": "external_preview_janitor_cleanup_completed",
@@ -1078,11 +1150,11 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
     def test_run_application_command_uses_shared_schedule_runner(self) -> None:
         with (
             patch(
-                "control_plane.workflows.verireel_preview_driver._upsert_application_schedule",
+                "control_plane.workflows.postgres_preview._upsert_application_schedule",
                 return_value="schedule-one",
             ),
             patch(
-                "control_plane.workflows.verireel_preview_driver.dokploy_api.run_dokploy_schedule"
+                "control_plane.workflows.postgres_preview.dokploy_api.run_dokploy_schedule"
             ) as run_schedule,
         ):
             _run_application_command(
@@ -1116,10 +1188,10 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         for error in (transient_error, caught.exception):
             with (
                 patch(
-                    "control_plane.workflows.verireel_preview_driver._run_application_command",
+                    "control_plane.workflows.postgres_preview._run_application_command",
                     side_effect=[error, None],
                 ) as run_command,
-                patch("control_plane.workflows.verireel_preview_driver.time.sleep") as sleep,
+                patch("control_plane.workflows.postgres_preview.time.sleep") as sleep,
             ):
                 _run_application_command_with_retries(
                     host="https://dokploy.example.com",
@@ -1140,10 +1212,10 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
     ) -> None:
         with (
             patch(
-                "control_plane.workflows.verireel_preview_driver._run_application_command",
+                "control_plane.workflows.postgres_preview._run_application_command",
                 side_effect=click.ClickException("still failing"),
             ) as run_command,
-            patch("control_plane.workflows.verireel_preview_driver.time.sleep") as sleep,
+            patch("control_plane.workflows.postgres_preview.time.sleep") as sleep,
         ):
             with self.assertRaises(click.ClickException):
                 _run_application_command_with_retries(
