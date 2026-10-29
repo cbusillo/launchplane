@@ -10,6 +10,31 @@ from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
 
 
 class MergeTrainControllerFeedbackTests(TestCase):
+    def test_unverified_base_retest_removal_does_not_claim_verified_recovery(self) -> None:
+        for observation in ("absent_after_uncertain_attempt", "removed_by_foreign_actor"):
+            with self.subTest(observation=observation):
+                message = feedback._feedback_message(
+                    controller_action="recover_candidate_block",
+                    event="waiting",
+                    result={
+                        "reason_code": "candidate_block_new_base_retest",
+                        "details": {"removal_observation": observation},
+                    },
+                    controller_record_id="failed-candidate",
+                    phase="controller",
+                )
+
+                self.assertEqual(
+                    message,
+                    feedback._feedback_message(
+                        controller_action="recover_candidate_block",
+                        event="waiting",
+                        result={"details": {"removal_observation": observation}},
+                        controller_record_id="failed-candidate",
+                        phase="controller",
+                    ),
+                )
+
     def test_build_feedback_payloads_emits_building_candidate_entries(self) -> None:
         response: dict[str, Any] = {
             "result": {
