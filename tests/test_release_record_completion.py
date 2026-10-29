@@ -11,6 +11,7 @@ from control_plane.client_release import (
     ClientReleaseFailureView,
     ClientReleaseRunView,
     ClientReleaseStepView,
+    ClientReleaseStepStatus,
 )
 from control_plane.release_invitation import advance_release_invitations, ReleaseInvitationBackoff
 from control_plane.release_review_record import release_decision_marker
@@ -478,6 +479,94 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.store.create_release_review_decision_record_if_absent(newer)
         self.advance()
         self.assertEqual(self.issue["state"], "closed")
+        self.assertEqual(len(self.comments), 1)
+
+    def test_superseded_unstarted_intent_does_not_hold_a_completed_candidate_open(self) -> None:
+        newer = self.decision.model_copy(
+            update={"record_id": "completed-retry", "decided_at": "2026-09-24T01:00:00Z"}
+        )
+        self.store.create_release_review_decision_record_if_absent(newer)
+        self.issue["body"] += "\n" + release_decision_marker(newer.record_id)
+        assert self.release_run is not None
+        completed = self.release_run.model_copy(update={"decision_record_id": newer.record_id})
+        statuses: tuple[ClientReleaseStepStatus, ...] = (
+            "not_started",
+            "pending",
+            "running",
+            "reconciliation_required",
+        )
+        for status in statuses:
+            with self.subTest(status=status):
+                self.issue["state"] = "open"
+                earlier = ClientReleaseRunView(
+                    decision_record_id=self.decision.record_id,
+                    rollback_drill=False,
+                    state="waiting",
+                    steps=(
+                        ClientReleaseStepView(
+                            step="backup-1",
+                            kind="backup",
+                            status=status,
+                            operation_id="" if status == "not_started" else "backup",
+                        ),
+                    ),
+                )
+                with patch(
+                    "control_plane.client_release.read_client_release_run",
+                    side_effect=lambda **kwargs: (
+                        completed if kwargs["decision"].record_id == newer.record_id else earlier
+                    ),
+                ):
+                    self.advance()
+                self.assertEqual(
+                    self.issue["state"], "closed" if status == "not_started" else "open"
+                )
+
+    def test_superseded_unpublished_retry_does_not_keep_polling_a_closed_issue(self) -> None:
+        pending = self.decision.model_copy(
+            update={
+                "record_id": "superseded-unpublished",
+                "decided_at": "2026-09-24T01:00:00Z",
+                "release_issue_url": "",
+            }
+        )
+        rejected = pending.model_copy(
+            update={
+                "record_id": "latest-rejection",
+                "decided_at": "2026-09-25T01:00:00Z",
+                "decision": "changes_requested",
+                "reason": "Revise it",
+                "release_start": "",
+                "release_issue_url": self.decision.release_issue_url,
+            }
+        )
+        for item in (pending, rejected):
+            self.store.create_release_review_decision_record_if_absent(item)
+        self.issue["state"] = "closed"
+        backoff = ReleaseInvitationBackoff()
+        assert self.release_run is not None
+        original = self.release_run
+        unstarted = ClientReleaseRunView(
+            decision_record_id=pending.record_id,
+            rollback_drill=False,
+            state="waiting",
+            steps=(
+                ClientReleaseStepView(
+                    step="backup-1", kind="backup", status="not_started", operation_id=""
+                ),
+            ),
+        )
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: (
+                unstarted if kwargs["decision"].record_id == pending.record_id else original
+            ),
+        ):
+            self.advance(backoff)
+            calls = self.calls.copy()
+            with patch("control_plane.release_invitation.monotonic", return_value=1e20):
+                self.advance(backoff)
+        self.assertEqual(self.calls, calls)
         self.assertEqual(len(self.comments), 1)
 
     def test_finished_earlier_attempt_keeps_the_same_candidates_hotfix_review_open(self) -> None:

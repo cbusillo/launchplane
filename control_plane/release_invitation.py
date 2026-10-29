@@ -650,14 +650,13 @@ def _settle_release_record(
                         or (
                             not other.release_issue_url
                             and other.checklist_digest == decision.checklist_digest
-                            and (_timestamp(other.decided_at), other.record_id)
-                            > (_timestamp(decision.decided_at), decision.record_id)
                         )
                     )
                 ):
                     continue
                 if other.decision == "temporary_hotfix" and not any(
                     item.decision in {"accepted", "changes_requested"}
+                    and item.release_issue_url
                     and item.checklist_digest == other.checklist_digest
                     and (_timestamp(item.decided_at), item.record_id)
                     > (_timestamp(other.decided_at), other.record_id)
@@ -669,7 +668,14 @@ def _settle_release_record(
                 if (
                     other_run is None
                     or other_run.decision_record_id != other.record_id
-                    or not _finished(other_run)
+                    or any(
+                        step.status in {"pending", "running", "reconciliation_required"}
+                        for step in other_run.steps
+                    )
+                    or (
+                        other == saved_decisions[0]
+                        and (not other.release_issue_url or not _finished(other_run))
+                    )
                 ):
                     active = True
                     break
@@ -835,6 +841,11 @@ def publish_release_invitation(
                     )
                 ):
                     return False
+                if any(
+                    item.checklist_digest == review.checklist_digest
+                    for item in store.list_release_review_decision_records(product=profile.product)
+                ):
+                    return False
                 issue = candidates[0] if candidates else None
                 body = _release_invitation_body(
                     store=store,
@@ -870,65 +881,67 @@ def publish_release_invitation(
                     if not isinstance(created, dict) or not isinstance(created.get("number"), int):
                         raise ValueError("Release candidate issue creation was not confirmed.")
                     issue = created
-            number = _release_issue_number(issue)
-            if (
-                issue.get("state") == "open"
-                and issue.get("body") != body
-                and not any(
-                    line.startswith(
-                        (
-                            "<!-- launchplane:release-reminder-due:",
-                            "<!-- launchplane:release-decision:",
+                number = _release_issue_number(issue)
+                if (
+                    issue.get("state") == "open"
+                    and issue.get("body") != body
+                    and not any(
+                        line.startswith(
+                            (
+                                "<!-- launchplane:release-reminder-due:",
+                                "<!-- launchplane:release-decision:",
+                            )
                         )
+                        for line in _receipt_lines(issue)
                     )
-                    for line in _receipt_lines(issue)
-                )
-            ):
-                result = github_api_request(
-                    path=f"{path}/{number}", token=token, method="PATCH", body={"body": body}
-                )
-                if not isinstance(result, dict) or result.get("number") != number:
-                    raise ValueError("Release invitation update was not confirmed.")
-                issue = result
-            url = f"https://github.com/{profile.repository}/issues/{number}"
-            if issue.get("state") == "closed":
-                return True
-            due_line = next(
-                (
-                    line
-                    for line in _receipt_lines(issue)
-                    if line.startswith("<!-- launchplane:release-reminder-due:")
-                ),
-                "",
-            )
-            due = (
-                _timestamp(
-                    due_line.removeprefix("<!-- launchplane:release-reminder-due:").removesuffix(
-                        " -->"
+                ):
+                    result = github_api_request(
+                        path=f"{path}/{number}", token=token, method="PATCH", body={"body": body}
                     )
+                    if not isinstance(result, dict) or result.get("number") != number:
+                        raise ValueError("Release invitation update was not confirmed.")
+                    issue = result
+                url = f"https://github.com/{profile.repository}/issues/{number}"
+                if issue.get("state") == "closed":
+                    return True
+                due_line = next(
+                    (
+                        line
+                        for line in _receipt_lines(issue)
+                        if line.startswith("<!-- launchplane:release-reminder-due:")
+                    ),
+                    "",
                 )
-                if due_line
-                else _timestamp(issue.get("created_at")) + timedelta(days=3)
-            )
-            reminder_marker = marker.replace("release-candidate:", "release-reminder:")
-            comments = (
-                _pages(f"{path}/{number}/comments", token, app_id=app_id, marker=reminder_marker)
-                if _now() >= due and send_reminder
-                else []
-            )
-            reminded = reminder_marker in _receipt_lines(issue) or bool(comments)
-            if _now() >= due and send_reminder and not reminded:
-                result = github_api_request(
-                    path=f"{path}/{number}/comments",
-                    token=token,
-                    method="POST",
-                    body={
-                        "body": f"{reminder_marker}\nA reminder: hi @{profile.owner.github_login}, [open the release page]({origin}/ui/owner-review?product={quote(profile.product, safe='')}) to Accept or Request changes on this release."
-                    },
+                due = (
+                    _timestamp(
+                        due_line.removeprefix(
+                            "<!-- launchplane:release-reminder-due:"
+                        ).removesuffix(" -->")
+                    )
+                    if due_line
+                    else _timestamp(issue.get("created_at")) + timedelta(days=3)
                 )
-                if not isinstance(result, dict) or not isinstance(result.get("id"), int):
-                    raise ValueError("Release invitation reminder was not confirmed.")
-                reminded = True
+                reminder_marker = marker.replace("release-candidate:", "release-reminder:")
+                comments = (
+                    _pages(
+                        f"{path}/{number}/comments", token, app_id=app_id, marker=reminder_marker
+                    )
+                    if _now() >= due and send_reminder
+                    else []
+                )
+                reminded = reminder_marker in _receipt_lines(issue) or bool(comments)
+                if _now() >= due and send_reminder and not reminded:
+                    result = github_api_request(
+                        path=f"{path}/{number}/comments",
+                        token=token,
+                        method="POST",
+                        body={
+                            "body": f"{reminder_marker}\nA reminder: hi @{profile.owner.github_login}, [open the release page]({origin}/ui/owner-review?product={quote(profile.product, safe='')}) to Accept or Request changes on this release."
+                        },
+                    )
+                    if not isinstance(result, dict) or not isinstance(result.get("id"), int):
+                        raise ValueError("Release invitation reminder was not confirmed.")
+                    reminded = True
             if not receipt_due:
                 open_issues = _pages(f"{path}?state=open&sort=created&direction=desc", token)
                 decided_urls = {
@@ -936,17 +949,20 @@ def publish_release_invitation(
                     for item in store.list_release_review_decision_records(product=profile.product)
                     if item.release_issue_url
                 }
-                _retire_older_release_issues(
-                    issues=open_issues,
-                    decided_urls=decided_urls,
-                    current=issue,
-                    product_marker=product_marker,
-                    legacy=legacy,
-                    url=url,
-                    path=path,
-                    token=token,
-                    app_id=app_id,
-                )
+                with store.release_review_publication_lock(
+                    record_id=f"legacy-retirement:{profile.product}"
+                ):
+                    _retire_older_release_issues(
+                        issues=open_issues,
+                        decided_urls=decided_urls,
+                        current=issue,
+                        product_marker=product_marker,
+                        legacy=legacy,
+                        url=url,
+                        path=path,
+                        token=token,
+                        app_id=app_id,
+                    )
             _remember_delivery(backoff, receipt, due, reminded)
     return True
 
@@ -1123,6 +1139,16 @@ def _retire_release_issue(
     *, issue: dict[str, object], url: str, path: str, token: str, legacy: bool
 ) -> None:
     number = _release_issue_number(issue)
+    current = github_api_request(path=f"{path}/{number}", token=token)
+    if (
+        not isinstance(current, dict)
+        or current.get("number") != number
+        or not isinstance(current.get("body"), str)
+    ):
+        raise ValueError("Replaced release issue identity was not confirmed.")
+    if legacy and "<!-- launchplane:release-requests-retired -->" in _receipt_lines(current):
+        return
+    issue = current
     updated_body = (
         "\n".join(_comment_lines(issue))
         + ("\n<!-- launchplane:release-requests-retired -->" if legacy else "")
@@ -1160,28 +1186,30 @@ def _retire_decided_legacy_requests(
         if previous == fingerprint and monotonic() < next_read:
             return
         backoff.legacy_retirements[profile.product] = (fingerprint, monotonic() + 300)
-    with store.release_review_publication_lock(record_id=f"legacy-retirement:{profile.product}"):
-        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
-        with launchplane_github_token(
-            token_resolver=resolve_launchplane_github_token,
-            api_request=github_api_request,
-            control_plane_root=control_plane_root,
-            context_name=lane.context,
-            repository=profile.repository,
-            purpose="release_record",
-        ) as token:
-            if not token:
-                raise ValueError("Release record source-control access is unavailable.")
-            path = f"/repos/{quote(profile.repository)}/issues"
-            issues = _pages(
-                f"{path}?state=all&sort=updated&direction=desc",
-                token,
-                marker=release_request_issue_marker(profile.product),
-                issues_only=True,
-            )
-            legacy = _legacy_release_requests(
-                issues=issues, profile=profile, path=path, token=token, last_decision=decision
-            )
+    lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+    with launchplane_github_token(
+        token_resolver=resolve_launchplane_github_token,
+        api_request=github_api_request,
+        control_plane_root=control_plane_root,
+        context_name=lane.context,
+        repository=profile.repository,
+        purpose="release_record",
+    ) as token:
+        if not token:
+            raise ValueError("Release record source-control access is unavailable.")
+        path = f"/repos/{quote(profile.repository)}/issues"
+        issues = _pages(
+            f"{path}?state=all&sort=updated&direction=desc",
+            token,
+            marker=release_request_issue_marker(profile.product),
+            issues_only=True,
+        )
+        legacy = _legacy_release_requests(
+            issues=issues, profile=profile, path=path, token=token, last_decision=decision
+        )
+        with store.release_review_publication_lock(
+            record_id=f"legacy-retirement:{profile.product}"
+        ):
             if (
                 store.read_product_profile_record(profile.product) != profile
                 or _last_client_decision(store, profile) != decision
@@ -1196,13 +1224,11 @@ def _retire_decided_legacy_requests(
                         token=token,
                         legacy=True,
                     )
-        if backoff is not None:
-            backoff.legacy_retirements[profile.product] = (
-                fingerprint,
-                monotonic() + 300
-                if any(item.request is not None for item in legacy)
-                else float("inf"),
-            )
+    if backoff is not None:
+        backoff.legacy_retirements[profile.product] = (
+            fingerprint,
+            monotonic() + 300 if any(item.request is not None for item in legacy) else float("inf"),
+        )
 
 
 def adopt_release_invitation(

@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stdout
+from collections.abc import Iterator
+from contextlib import contextmanager, redirect_stdout
 from datetime import UTC, datetime, timedelta
 import io
 import json
@@ -2032,6 +2033,59 @@ class ReleaseInvitationTests(unittest.TestCase):
             for future in futures:
                 future.result()
         self.assertEqual(len(self.issues), 1)
+
+    def test_due_reminder_cannot_follow_the_decision_that_closes_its_issue(self) -> None:
+        from control_plane.release_review_record import release_decision_marker
+
+        self.publish()
+        self.now += timedelta(days=3)
+        original_lock = self.store.release_review_publication_lock
+        decided = False
+        decisions: list[ReleaseReviewDecisionRecord] = []
+
+        @contextmanager
+        def decide_when_candidate_publication_finishes(*, record_id: str) -> Iterator[None]:
+            nonlocal decided
+            with original_lock(record_id=record_id):
+                yield
+            if record_id.startswith("candidate:") and not decided:
+                decided = True
+                decisions.append(self.save_decision("changes_requested", ""))
+
+        with patch.object(
+            self.store,
+            "release_review_publication_lock",
+            decide_when_candidate_publication_finishes,
+        ):
+            self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertIn(release_decision_marker(decisions[0].record_id), self.comments[-1]["body"])
+
+    def test_stale_legacy_retirement_cannot_replace_the_confirmed_pointer(self) -> None:
+        from control_plane.release_invitation import _retire_release_issue
+
+        shared = {
+            "number": 91,
+            "state": "open",
+            "body": release_request_issue_marker(self.profile.product),
+        }
+        self.issues.append(shared)
+        stale = shared.copy()
+        destinations = (
+            "https://github.com/example/site/issues/92",
+            "https://github.com/example/site/issues/93",
+        )
+        for url in destinations:
+            _retire_release_issue(
+                issue=stale,
+                url=url,
+                path="/repos/example/site/issues",
+                token="delivery-token",
+                legacy=True,
+            )
+        self.assertIn(destinations[0], str(shared["body"]))
+        self.assertNotIn(destinations[1], str(shared["body"]))
+        self.assertEqual(len(self.edits), 1)
 
     def test_changed_review_during_lookup_does_not_message(self) -> None:
         ready = self.review

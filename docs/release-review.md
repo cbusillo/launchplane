@@ -91,8 +91,11 @@ successful promotion is never used to infer what production runs now.
 Temporary-hotfix review requests remain open for the Client to decide. A closed
 issue still receives a missing outcome. The saved decision and original request
 remain in the same issue; the decision and outcome are comments on it. Retries
-reuse the outcome receipt and confirm closure only after other release actions
-on that candidate have finished, including a saved retry awaiting publication.
+reuse the outcome receipt. Outstanding recorded operations, unknown run evidence,
+an unpublished or unfinished current release intent, and pending hotfix review
+keep the issue open. Superseded plans that never started do not hold it open or
+receive an invented failure outcome. Current intent follows the newest saved
+product decision, as it does in the release worker.
 
 ## Odoo business hours
 
@@ -335,8 +338,9 @@ notice, and its Client decision uses that issue too. These issues project saved
 Launchplane records. Editing an issue never accepts a release or changes a
 promotion gate.
 
-A candidate publication lock serializes its issue creation and decision comments
-across replicas. Checklist compilation and legacy carryover reads do not hold this
+A candidate publication lock serializes issue creation, request-body refresh,
+reminder publication, decisions and outcomes across replicas. Invitation mutations
+recheck saved candidate decisions under that lock. Checklist compilation and legacy carryover reads do not hold this
 lock. The saved decision is acknowledged afterward under its own publication lock;
 those transactions never nest on the acceptance path. A lost issue-create,
 decision-comment or storage acknowledgement is recovered from the existing issue rather than creating another. New candidate
@@ -447,8 +451,9 @@ New candidate issue markers bind the checklist and product. Existing issue bodie
 can refresh test-note annotations for that same checklist; their request time
 and reminder deadline stay fixed. Decision markers identify each saved action in the candidate issue's comments
 or a standalone decision's original body. Legacy request and adoption markers are compatibility evidence for the carryover
-path, never acceptance authority. Historical retirement has its own lock and
-cannot hold up request creation. Complete absent or retired legacy sets are cached
+path, never acceptance authority. Both retirement paths use the same separate
+lock for mutations, refresh the target body and preserve a confirmed legacy
+pointer. Historical discovery does not hold that lock or the candidate lock. Complete absent or retired legacy sets are cached
 for that product, repository and Client identity for the worker's lifetime;
 pending or incomplete reads remain retryable. Reminders follow durable receipts
 before broad supersession cleanup, so a cleanup failure never duplicates a sent reminder.
