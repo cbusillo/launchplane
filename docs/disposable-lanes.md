@@ -8,6 +8,68 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Recorded Odoo preview qualification
+
+The observations route's existing reviewed `collect` mode accepts an owned
+Odoo `preview_id` and its preview slug. It resolves the active serving
+generation, verifies its runtime identity against the immutable issued plan,
+and reads the completed deployment's concrete Compose ID. A current profile
+prefix or a different generation cannot select the recipient.
+
+Collection reuses the testing usage reader for recent successful sign-ins and
+authenticated session files, and the shared copy-runtime probe for actual
+mounts, backing storage, network membership and ports. It checks the running
+web and runner identities, compares all container environments and configuration
+parameter values against current managed and provider production credentials,
+and runs the existing maintenance integration readback with no preview
+integration allowances.
+The host returns per-read salted digests of preview credential candidates to
+the service. Production values and digests stay inside the service. The same
+candidate reader handles URLs, JSON and encoded payloads on both sides. The
+comparison includes all configured production-context integrations, provider
+credentials, including literal and secret-backed configuration parameters.
+Production candidates retain whole managed secrets and every fragment of managed
+or credential-shaped provider values. Other provider values contribute only
+credential-named fragments. Nested names retain their credential context, and
+scalar values include their text representations. Within managed values and
+credential-named provider fragments, short, numeric or boolean-looking values
+and bearer URLs stay protected. A collision
+refuses with the production binding or environment key whose credential separation
+is unproven; keys inside credential payloads remain private. An
+untyped public endpoint, port or flag inside a protected value also refuses when
+it matches the preview, including public fields of two structured secrets.
+That leaves credential separation unproven until its purpose is established;
+URL or scalar shape alone cannot supply that fact.
+Database parameters are read in a read-only transaction through the pinned
+database image; the production database is not inventoried. Preview parameters
+are compared only against known managed and provider production values. This
+does not establish that `database.secret`, VAPID keys or other database-only
+production secrets have been rotated; sanitation proof
+belongs to the sanitized-copy work. Other tables, such as user API keys, are
+outside this inventory. The isolation evidence explicitly names this managed
+and provider comparison scope. Credential digests,
+user identities, session identifiers and provider details never reach the
+API response. Authenticated sessions and recent sign-ins are independent
+boolean facts; this read creates no login or Odoo session. Under Director decision
+Q1053, session and integration observations use the PR image's Python at the
+same trust as today's preview-deploy gate. These are not independent of the PR
+image. Host resource, environment, database-parameter and runtime-identity checks
+remain independent; no second executor is added.
+
+The reader rechecks provider, runtime, completed-operation and production
+authority before publication. Missing or changing facts refuse with a specific
+`preview_qualification_missing` reason or prerequisite code and publish no
+positive qualification. Provider authorization refusals remain denials.
+Successful collection can report `unused` or `in_use` and isolated production
+resources. Data custody and reproducibility remain UNKNOWN unless independently
+established; this read neither clones nor sanitizes data, and cannot qualify
+its historical origin. A production alias found in the preview slug's stored
+target ID is recorded protectively before collection refuses. Aliases found
+only through the completed deployment, or discovered after that pre-check,
+refuse without positive qualification. Existing protected-use, needed-copy and
+shared-resource records retain their protections. No lane, resource or
+credential is changed.
+
 ## Native generic-web testing deployment
 
 The existing `POST /v1/drivers/generic-web/deploy` accepts the authenticated
