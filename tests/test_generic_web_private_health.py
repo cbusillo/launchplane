@@ -1,20 +1,28 @@
 from itertools import count
+from pathlib import Path
 from typing import Any
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import click
 
-from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.private_health_endpoint_record import (
+    PrivateHealthEndpointRecord,
+    private_health_endpoint_record_sha256,
+)
 from control_plane.contracts.product_profile_record import (
     ProductLaneHealthCheck,
     ProductLaneHealthMonitoringPolicy,
 )
 from control_plane.workflows import public_ingress_monitor as monitor
 from control_plane.workflows.runtime_identity_health import (
+    HealthcheckPass,
     wait_for_runtime_identity_healthcheck_with_retry,
 )
 from tests import test_generic_web_promotion as fixture
+from tests.test_private_testing_trust import certificate_fixture
+from control_plane.outbound_http import PublicHttpDestinationError, PublicHttpResponse
+from control_plane.storage.postgres import PostgresRecordStore
 
 
 class GenericWebPrivateHealthTests(unittest.TestCase):
@@ -55,6 +63,7 @@ class GenericWebPrivateHealthTests(unittest.TestCase):
         self.provider = fixture._ProductionProvider()
         self.requested: list[str] = []
         self.failure = ""
+        self.public_failure = True
 
     def observe(self, url: str, _timeout: int, **_kwargs: Any) -> monitor.HttpObservation:
         self.requested.append(url)
@@ -90,7 +99,12 @@ class GenericWebPrivateHealthTests(unittest.TestCase):
     def promote(self) -> Any:
         def bounded_identity_check(**kwargs: Any) -> Any:
             if "wait_once" not in kwargs:
-                raise click.ClickException("Inert public health failure")
+                if self.public_failure:
+                    raise click.ClickException("Inert public health failure")
+                assert self.provider.running is not None
+                return HealthcheckPass(
+                    payload={"runtime_identity": self.provider.running.model_dump(mode="json")}
+                )
             clock = count()
             return wait_for_runtime_identity_healthcheck_with_retry(
                 **{**kwargs, "sleep": lambda _seconds: None, "monotonic": lambda: next(clock)}
@@ -188,7 +202,7 @@ class GenericWebPrivateHealthTests(unittest.TestCase):
         self.assertEqual(result.promotion_status, "fail")
         self.assertEqual(result.rollback_status, "pass")
 
-    def test_private_checks_keep_existing_public_health_verification(self) -> None:
+    def enable_public_checks(self) -> None:
         original = fixture._profile()
         self.store.profile = self.store.profile.model_copy(
             update={
@@ -198,31 +212,80 @@ class GenericWebPrivateHealthTests(unittest.TestCase):
                 )
             }
         )
+
+    def test_private_checks_keep_existing_public_health_verification(self) -> None:
+        self.enable_public_checks()
         result = self.promote()
         self.assertEqual(result.promotion_status, "fail")
 
-    def test_private_intent_with_no_enabled_check_refuses_before_deploy(self) -> None:
-        lane = self.store.profile.lanes[1]
-        checks = tuple(
-            check.model_copy(update={"enabled": False}) for check in lane.health_monitoring.checks
+    def test_mixed_lane_passes_when_both_public_and_private_checks_pass(self) -> None:
+        self.enable_public_checks()
+        self.public_failure = False
+        result = self.promote()
+        self.assertEqual(result.promotion_status, "pass")
+        promotion = self.store.promotions[result.promotion_record_id]
+        self.assertIn(self.store.profile.lanes[1].health_url, promotion.destination_health.urls)
+        self.assertIn(self.endpoints["private-prod"].url, promotion.destination_health.urls)
+
+    def test_testing_ca_reaches_the_shared_private_transport(self) -> None:
+        endpoint = self.endpoints["private-testing"]
+        ca, _, _ = certificate_fixture()
+        self.endpoints[endpoint.endpoint_key] = PrivateHealthEndpointRecord.model_validate(
+            {**endpoint.model_dump(), "tls_ca_pem": ca}
         )
-        self.store.profile = self.store.profile.model_copy(
-            update={
-                "lanes": (
-                    self.store.profile.lanes[0],
-                    lane.model_copy(
-                        update={
-                            "health_monitoring": lane.health_monitoring.model_copy(
-                                update={"checks": checks}
-                            )
-                        }
-                    ),
+        observe = self.observe
+
+        def trusted(url: str, timeout: int, **kwargs: Any) -> monitor.HttpObservation:
+            if url == endpoint.url:
+                self.assertEqual(
+                    kwargs.get("tls_ca_pem"), self.endpoints[endpoint.endpoint_key].tls_ca_pem
                 )
-            }
+            return observe(url, timeout, **kwargs)
+
+        with patch.object(self, "observe", side_effect=trusted):
+            self.assertEqual(self.promote().promotion_status, "pass")
+
+    def test_testing_edge_uses_verified_route_only_after_private_address_refusal(self) -> None:
+        endpoint = self.endpoints["private-testing"].model_copy(
+            update={"url": "https://testing.example.com/health"}
         )
-        with self.assertRaises(click.ClickException):
-            self.promote()
-        self.assertEqual(self.provider.deployed_artifacts, [])
+        root = Path("/inert/control-plane")
+        response = PublicHttpResponse(
+            status_code=200,
+            final_url=endpoint.url,
+            redirect_count=0,
+            headers=(("content-type", "application/json"),),
+            body=b'{"status":"ok"}',
+        )
+        store = Mock(spec=PostgresRecordStore)
+        authority = private_health_endpoint_record_sha256(endpoint)
+        with (
+            patch.object(
+                monitor,
+                "fetch_private_health_url",
+                side_effect=PublicHttpDestinationError("private_url", "inert"),
+            ),
+            patch(
+                "control_plane.testing_private_health.fetch_testing_private_health",
+                return_value=response,
+            ) as edge,
+        ):
+            observed = monitor.fetch_scoped_private_health(
+                record_store=store,
+                product=endpoint.product,
+                context=endpoint.context,
+                instance=endpoint.instance,
+                endpoint_key=endpoint.endpoint_key,
+                endpoint_sha256=authority,
+                url=endpoint.url,
+                timeout_seconds=3,
+                require_runtime_identity=True,
+                root=root,
+            )
+        self.assertEqual(observed.status_code, response.status_code)
+        self.assertEqual(edge.call_args.kwargs["root"], root)
+        self.assertEqual(edge.call_args.kwargs["endpoint_key"], endpoint.endpoint_key)
+        self.assertEqual(edge.call_args.kwargs["endpoint_sha256"], authority)
 
     def test_missing_disabled_or_foreign_private_authority_never_deploys(self) -> None:
         original = self.endpoints["private-prod"]

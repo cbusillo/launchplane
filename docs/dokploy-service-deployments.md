@@ -624,7 +624,8 @@ Stable lanes can verify health through:
   owned by that exact product, context and instance
 
 Promotion verifies every enabled private check through the existing private
-transport, including its scoped testing CA when configured. Source health must
+transport, including its scoped testing CA or verified testing-edge route when
+configured. Interrupted-release recovery uses that same verifier. Source health must
 match the qualified testing identity. Destination health must match the newly
 deployed identity; failure follows the existing automatic rollback, whose health
 must match the restored identity. Existing public and split-ingress health checks
@@ -632,7 +633,9 @@ still run when a lane also has private checks. Missing, disabled or foreign
 endpoint authority refuses before deployment; private monitoring intent without
 an enabled private check also refuses. A private check is never silently skipped
 because the lane has no public URL. Legacy lanes with no health configuration
-retain their existing skipped result. These checks add no deployment, credential
+retain their existing skipped result. A private check cannot qualify an older
+rollback record without a recorded runtime identity; recovery remains held until
+the intended runtime can be verified. These checks add no deployment, credential
 or release authority.
 
 The preferred Discord Blue target is its private health endpoint on port `8787`.

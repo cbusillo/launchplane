@@ -55,7 +55,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
     _result_from_record,
-    _verify_health_evidence_with_identity,
+    _verify_lane_health_evidence,
     _health_evidence_for_lane,
     _build_promotion_record,
     _mark_health_failed,
@@ -375,7 +375,7 @@ def inspect_promotion(
             expected_deployment_record_id=effective.record_id,
             expected_provider_reference=effective_target.ship_request.deploy_reference,
         )
-        checked = _verify_health_evidence_with_identity(
+        checked = _verify_lane_health_evidence(
             _health_evidence_for_lane(
                 record_store=store,
                 profile=profile,
@@ -384,6 +384,10 @@ def inspect_promotion(
                 health_path=profile.health_path,
                 status="pending",
             ),
+            record_store=store,
+            profile=profile,
+            lane=lane,
+            control_plane_root=root,
             expected_runtime_identity=effective.runtime_identity,
         )
         if checked.status != "pass" or checked.runtime_identity_status != "match":
@@ -669,7 +673,7 @@ def inspect_rollback_drill(
             expected_deployment_record_id=deployed.record_id,
             expected_provider_reference=target.ship_request.deploy_reference,
         )
-        checked = _verify_health_evidence_with_identity(
+        checked = _verify_lane_health_evidence(
             _health_evidence_for_lane(
                 record_store=store,
                 profile=profile,
@@ -682,6 +686,10 @@ def inspect_rollback_drill(
                 health_path=profile.health_path,
                 status="pending",
             ),
+            record_store=store,
+            profile=profile,
+            lane=lane,
+            control_plane_root=root,
             expected_runtime_identity=identity,
         )
         if checked.status != "pass" or checked.runtime_identity_status != "match":

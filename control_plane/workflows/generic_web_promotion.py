@@ -394,14 +394,26 @@ def _execute_generic_web_prod_promotion_unserialized(
         )
 
     try:
+        source_identity = record_store.read_environment_inventory(
+            context_name=source_lane.context, instance_name=source_lane.instance
+        ).runtime_identity
+        if (
+            any(
+                check.kind == "private_http" and check.enabled
+                for check in source_lane.health_monitoring.checks
+            )
+            and source_identity is not None
+            and (source_identity.artifact_id, source_identity.source_git_ref)
+            != (request.artifact_id, request.source_git_ref)
+        ):
+            raise click.ClickException("Private source health differs from the accepted candidate.")
         source_health = _verify_lane_health_evidence(
             source_health,
             record_store=record_store,
             profile=profile,
             lane=source_lane,
-            expected_runtime_identity=record_store.read_environment_inventory(
-                context_name=source_lane.context, instance_name=source_lane.instance
-            ).runtime_identity,
+            control_plane_root=control_plane_root,
+            expected_runtime_identity=source_identity,
             source=True,
         )
         if source_health.status == "fail":
@@ -595,6 +607,7 @@ def _execute_generic_web_prod_promotion_unserialized(
                 record_store=record_store,
                 profile=profile,
                 lane=destination_lane,
+                control_plane_root=control_plane_root,
                 expected_runtime_identity=deployment_record.runtime_identity,
             )
         except click.ClickException as error:
@@ -917,6 +930,7 @@ def _roll_back_production(
             record_store=record_store,
             profile=profile,
             lane=lane,
+            control_plane_root=control_plane_root,
             expected_runtime_identity=rollback_record.runtime_identity,
         )
     except click.ClickException as error:
@@ -1190,14 +1204,8 @@ def _private_lane_health_endpoints(
         for check in lane.health_monitoring.checks
         if check.kind == "private_http" and check.enabled
     )
-    if not checks and lane.health_monitoring.monitoring_intent == "private":
-        raise click.ClickException("Private release health requires an enabled private check.")
     endpoints = []
     for check in checks:
-        if not check.private_endpoint_key:
-            raise click.ClickException(
-                "Private release health requires lane-owned endpoint authority."
-            )
         try:
             endpoint = _resolved_private_health_url(
                 record_store=record_store,
@@ -1222,6 +1230,7 @@ def _verify_lane_health_evidence(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     expected_runtime_identity: RuntimeIdentity | None,
+    control_plane_root: Path | None = None,
     source: bool = False,
 ) -> HealthcheckEvidence:
     if evidence.status == "skipped":
@@ -1251,11 +1260,24 @@ def _verify_lane_health_evidence(
         )
         if verified.status != "pass":
             return verified.model_copy(update={"urls": evidence.urls})
-    for endpoint in endpoints:
+    checks = tuple(
+        check
+        for check in lane.health_monitoring.checks
+        if check.kind == "private_http" and check.enabled
+    )
+    for check, endpoint in zip(checks, endpoints, strict=True):
         verified = _verify_health_evidence_with_identity(
             evidence.model_copy(update={"urls": (endpoint.url,)}),
             expected_runtime_identity=expected_runtime_identity,
-            wait_once=partial(_wait_for_private_healthcheck, tls_ca_pem=endpoint.tls_ca_pem),
+            wait_once=partial(
+                _wait_for_private_healthcheck,
+                record_store=record_store,
+                profile=profile,
+                lane=lane,
+                endpoint_key=check.private_endpoint_key,
+                endpoint=endpoint,
+                control_plane_root=control_plane_root,
+            ),
         )
         if verified.status != "pass":
             break
@@ -1263,12 +1285,32 @@ def _verify_lane_health_evidence(
 
 
 def _wait_for_private_healthcheck(
-    *, url: str, timeout_seconds: int, tls_ca_pem: str
+    *,
+    record_store: GenericWebPromotionStore,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    endpoint_key: str,
+    endpoint: PrivateHealthEndpointResolution,
+    control_plane_root: Path | None,
+    url: str,
+    timeout_seconds: int,
 ) -> HealthcheckPass:
-    from control_plane.workflows.public_ingress_monitor import fetch_private_health_url
+    from control_plane.workflows.public_ingress_monitor import fetch_scoped_private_health
 
     try:
-        observed = fetch_private_health_url(url, min(5, timeout_seconds), tls_ca_pem=tls_ca_pem)
+        observed = fetch_scoped_private_health(
+            record_store=record_store,
+            product=profile.product,
+            context=lane.context,
+            instance=lane.instance,
+            endpoint_key=endpoint_key,
+            endpoint_sha256=endpoint.authority_sha256,
+            url=url,
+            timeout_seconds=min(5, timeout_seconds),
+            tls_ca_pem=endpoint.tls_ca_pem,
+            require_runtime_identity=True,
+            root=control_plane_root,
+        )
     except (OSError, ValueError, RuntimeError) as error:
         raise click.ClickException("Private release health could not be read.") from error
     if not 200 <= observed.status_code < 300:
