@@ -104,7 +104,7 @@ snapshot receipt proves migration or preparation completion. No unknown fact
 is inferred from a target image or a successful archive decode.
 
 The existing client selects this mode with an original reservation instead of
-a table. The operation owner supplies the exact private bindings:
+a table. The operation lead supplies the exact private bindings:
 
 ```bash
 uv run python scripts/read-copy-aggregates.py \
