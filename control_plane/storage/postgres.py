@@ -67,7 +67,7 @@ from control_plane.storage.delivery_evidence import (
 
 from uuid import uuid4
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -30058,6 +30058,42 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             )
             session.commit()
+
+    def retained_volume_recovery_payloads(self) -> Generator[PayloadDict, None, None]:
+        from control_plane.application_state_volume import state_volume_allocation_names
+
+        with self._session_factory() as session:
+            for row_type in (
+                LaunchplaneDisposableReplacementPreparationRow,
+                LaunchplaneDisposableTestingResourceAllocationRow,
+                LaunchplaneFreshOdooTestingGenerationRow,
+                LaunchplaneRetainedTestingGenerationRow,
+                LaunchplaneNativeTestingCopyCaptureRow,
+                LaunchplaneOdooUpgradeRehearsalRow,
+                LaunchplanePreviewGenerationRow,
+                LaunchplaneOdooStableTargetReplacementOperationRow,
+                LaunchplaneTestingCandidateRow,
+            ):
+                yield from session.scalars(
+                    select(row_type.payload).execution_options(yield_per=1000)
+                )
+            allocations = session.scalars(
+                select(LaunchplaneIdempotencyRow.payload)
+                .where(LaunchplaneIdempotencyRow.route_path.startswith("/v1/dokploy-targets/setup"))
+                .execution_options(yield_per=1000)
+            )
+            for allocation in allocations:
+                response = allocation.get("response_payload", {})
+                if not isinstance(response, dict):
+                    raise ValueError("Allocation custody payload is unavailable.")
+                result = response.get("result", response)
+                if not isinstance(result, dict):
+                    raise ValueError("Allocation custody result is unavailable.")
+                if result.get("allocation_state") == "retained_uncertain":
+                    plan_id = result.get("plan_id")
+                    if not isinstance(plan_id, str):
+                        raise ValueError("Retained allocation identity is unavailable.")
+                    yield state_volume_allocation_names(plan_id)
 
     def write_product_retirement_record(self, record: ProductRetirementRecord) -> None:
         with self._session_factory() as session:

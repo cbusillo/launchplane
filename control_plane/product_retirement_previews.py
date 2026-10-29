@@ -292,6 +292,7 @@ def retire_product_previews(adapter: object, lease: object, operation_key: str) 
                 control_plane_root=runner._control_plane_root,
                 target_id=ids[0],
                 observed_at=runner._requested_at,
+                capture_volume_custody=False,
             )
             if (
                 planned is None
@@ -331,6 +332,7 @@ def retire_product_previews(adapter: object, lease: object, operation_key: str) 
                     control_plane_root=runner._control_plane_root,
                     target_id=planned.target_id,
                     observed_at=runner._requested_at,
+                    capture_volume_custody=False,
                 )
                 if fresh.state != "absent" and not _observation_allows_reconciliation(
                     planned=planned, current=fresh
