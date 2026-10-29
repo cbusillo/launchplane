@@ -88,10 +88,15 @@ redacted failure reason. They separately report the version currently recorded
 in production, identifying the reviewed, previous or another version by commit.
 Unavailable reasons or production evidence are stated explicitly; a past
 successful promotion is never used to infer what production runs now.
-Temporary-hotfix review requests remain open for the Client to decide. Already
-closed records are left alone. The saved decision and original issue body remain
-unchanged. Retries reuse the
-outcome receipt and the invitation's confirmed issue-closure path.
+Temporary-hotfix review requests remain open for the Client to decide. A closed
+candidate issue still receives a missing outcome; already-closed legacy
+per-decision issues keep their historical behavior and receive no backfill notice. The saved decision and original request
+remain in the same issue; the decision and outcome are comments on it. Retries
+reuse the outcome receipt. Outstanding recorded operations, unknown run evidence,
+an unpublished or unfinished current release intent, and pending hotfix review
+keep the issue open. Superseded plans that never started do not hold it open or
+receive an invented failure outcome. Current intent follows the newest saved
+product decision, as it does in the release worker.
 
 ## Odoo business hours
 
@@ -315,71 +320,62 @@ rollback drill and re-promotion. Publication rechecks the run after looking up
 its destination. Once the run finishes, the worker reconciles invitations for
 that released version without asking the Client again.
 
-The product repository keeps one issue for these requests. Launchplane finds it
-by a standalone `release_request_issue_marker(product)` line in the issue body;
-without one, it creates a "Release review requests" issue. To use an existing
-go-live or release issue, append that marker to its body before deploying this
-publisher. Lookup stops at the first page containing a marked issue, newest
-updated first; keep one marked issue per product. Multiple matches on that page
-or incomplete reads refuse publication. Discovery is bounded to 1,000 entries
-(including PRs); for a larger repository, mark its destination before enabling
-the publisher so it appears at the front of the updated-issue list. A closed
-marked issue is intentionally reused and reopened when a genuine new review
-is ready; its mentions still notify the Client.
-Comment lookup is also bounded to 1,000 entries; keep the requests issue unlocked
-and preserve its receipts. The Client must already be able to read the product
-repository for the mention to notify them; missing access is a reported prerequisite,
-not a reason to grant access automatically.
-The marker functions live in `control_plane/release_invitation.py`; there is no
-checked-in destination catalog.
+Each reviewed candidate has one issue in the product repository. Its body opens
+with the Client's mention, what to test, the reason for the request and the
+release-page link. Its identity is the complete checklist digest, including both lane versions,
+source changes and reviewed settings. A later checklist gets a new issue. Re-accepting a stopped release reopens the
+same candidate issue and adds its new decision as a comment. A saved decision
+prevents another request for the unchanged checklist. The publisher closes an undecided predecessor with a link to the
+replacement; it never reopens a shared requests thread or rewrites old invitation
+comments. A decided release keeps its own issue until its run finishes.
 
-The publisher reconciles an invitation only if the current Client's saved
-acceptance names the exact candidate now in production and its saved release
-run has finished: it passed, or it stopped on a failed or cancelled step with
-nothing still running or awaiting reconciliation. A stopped run settles with a
-line saying whether its promotion went live and which step did not complete, and
-that nothing is needed from the Client. It claims only what the run recorded, not
-what production serves now; the release record reports that. A stopped release that never reached
-production keeps its request open, since the Client can Accept again. Equal
-versions alone, held approval, a running release, and missing evidence cannot
-complete an invitation. The existing invitation is marked settled without another mention,
-with the saved acceptance linked and the original text and delivery receipts
-retained in a collapsed history section. Historical mentions are neutralized.
-Completed or replaced comments and their preserved receipts are excluded from
-later open request and replacement scans, including renewed requests bound to
-the same saved decision.
-The latest open request also settles when the Client accepted a newer testing
-version in that same review and that accepted version reached production.
-The saved acceptance, rather than the original request marker, identifies what
-released. Earlier rejected requests remain history.
-The marked issue closes only when testing matches production and there is no
-other outstanding invitation. Older decided invitations remain history;
-newer requests remain pending until the Client decides. A newer testing
-candidate keeps its own request open while the completed invitation settles.
-Renewed requests for the exact version that subsequently released also settle;
-earlier rejected requests keep their history rather than being marked released.
-When the Client changes their decision or retries a release on the same checklist
-without a renewed invitation, its newest open invitation settles from the final
-acceptance and passed run. Older decided invitations remain history.
-Completion receipts make
-retries and replica restarts idempotent, and the product publication lock and
-fresh decision/run/lane checks protect concurrent workers. Workers throttle
-incomplete completion lookups to five minutes and stop looking up confirmed or
-absent historical invitations until the profile or lane versions change, even
-while a newer review waits; a restart recovers
-the durable completion receipts. They do not compile a new checklist for a
-release already completed. No acceptance or release record is
-changed by invitation reconciliation.
-Each request includes `release_invitation_marker(product, candidate)`, derived
-from the candidate's artifact, commit and shared-input identity. The publisher serializes deliberate requests across replicas using the existing
-release-publication lock and checks for that receipt before posting. A retry after a lost response
-adopts the existing comment; edits to checklist notes do not notify again.
-Receipt-only adoption is the migration prerequisite for the receipt-trust
-hardening tracked in #3085. The ordinary publisher still accepts its existing
-legacy markers; enforcing App-only discovery before adopting already-sent
-manual or former-App requests could create another invitation. Deploy this
-preparation first, inventory/adopt the existing requests, then deliver the
-separate trust-enforcement source. Marker text alone is not an acceptance.
+The signed-in Client's decision is posted as a comment on that same issue,
+together with the complete saved checklist and release action. This keeps the
+request and discussion comments intact and avoids repeatedly growing the issue body. Request changes closes the issue
+immediately unless it starts a temporary-hotfix rollback. Accepted releases close
+with their persisted outcome; missing, pending or reconciliation-required work
+keeps them open. A temporary hotfix starts its own issue with the existing review
+notice, and its Client decision uses that issue too. These issues project saved
+Launchplane records. Editing an issue never accepts a release or changes a
+promotion gate.
+
+A candidate publication lock serializes issue creation, request-body updates,
+reminders, decisions and outcomes across replicas. Invitation mutations
+recheck saved candidate decisions under that lock. Checklist compilation and legacy carryover reads do not hold this
+lock. The saved decision is acknowledged afterward under its own publication lock;
+those transactions never nest on the acceptance path. A lost issue-create,
+decision-comment or storage acknowledgement is recovered from the existing issue rather than creating another. New candidate
+issues must be authored by the configured Delivery App. Candidate lookup stops at
+the page containing its marker or an issue older than
+the saved request, using creation order. A later decision can reuse the preceding
+published decision's exact issue URL. Closed repository history alone cannot block
+publication. Pending-candidate supersession and legacy request discovery scan the
+open issue inventory, bounded to 1,000 issues and PRs; each comment lookup is also
+bounded to 1,000 entries. Incomplete
+reads, ambiguous candidate identities or missing source-control access refuse
+publication; they do not authorize a release, change access or create credentials.
+The Client must already be able to read the product repository for the mention
+to notify them.
+
+Legacy shared threads are read only for carryover. A pending request for the exact
+candidate moves into its candidate issue with the original request and a link
+back. An adopted receipt resolves back to that original comment and its creation time;
+the receipt itself is never substituted for the request. The original comment
+remains unchanged. Carryover includes the supported release-page link, adds no
+second Client mention or acceptance requirement, and preserves the original reminder deadline
+and an already-sent reminder. Only after the candidate issue exists does the
+shared thread close with a pointer. A legacy request that has a published decision
+can instead point to its existing decision issue. Closed historical threads
+are preserved with their existing decision links. Pending requests remain open until carried over or decided.
+No real product or destination is configured in source.
+
+The manual receipt-adoption route remains for legacy manual or former-App requests.
+It does not serve new candidate issues. The shared-thread replacement and
+announcement-history machinery from the original receipt-hardening scope in
+[#3085](https://github.com/cbusillo/launchplane/issues/3085) is no longer used by
+new requests. Existing receipt-adoption and historical decision recovery still
+need their own trust qualification; this change does not globally activate that
+retained work.
 
 For an already-sent manual request or a request from a former App, a signed-in
 admin uses `POST /v1/release-review/requests` with the current
@@ -390,11 +386,10 @@ The original comment must belong to that open issue and contain the current exac
 candidate marker, with no replacement/completion or intervening Client decision.
 The existing admin permission and browser CSRF checks apply. No Client decision,
 mention, original edit or new invitation is created. Retries discover the same
-adoption marker; the ordinary publisher can then update its own receipt silently.
+adoption marker; the ordinary publisher can then carry the request into its candidate issue silently.
 An App attestation on a manual destination supplies trust without trusting its
 human author or borrowing another App's credential. Adoption refuses when another
-App-attested destination already exists. The original
-manual comment is retained unchanged, including after release completion.
+App-attested destination already exists. The original manual comment is retained unchanged, including after release completion.
 The invitation greets the Client, shows the Client test notes for changes they
 reviewed or were asked to review on preview, and asks them to open the release
 page, check the testing site, and press Accept or Request changes. It explains
@@ -405,17 +400,17 @@ working with these changes so they can go live. This is the site's release
 decision, separate from the one-change preview decision described in
 [Client review](owner-acceptance.md).
 
-On a deliberate publication before the Client decides, a candidate containing
-new Client-facing changes posts one new invitation mentioning the Client and naming only the additions. A batch
-of changes gets one invitation. Client-facing evidence is an existing product
+On a deliberate publication before the Client decides, each new candidate opens
+one issue mentioning the Client and listing its test notes. A batch of changes
+gets one candidate issue. Client-facing evidence is an existing product
 preview decision or a bound per-PR review request in Launchplane's persisted
 preview feedback; titles, labels and the existence of a preview are not classifiers.
 Valid engineering release-test notes under the
 [shared notes contract](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#ready-handoffs)
 also appear in an existing mixed request or a decided release request.
 The Client sees the real test steps and the source change, without the engineering
-directive. Those steps alone never open an automatic request or send a new ping;
-preview-review evidence classifies additions within a deliberate publication.
+directive. Those steps alone never open an automatic request; publication still needs its
+saved release request.
 Neither kind of change starts publication from the worker.
 For a batch landing, the stored landing plan binds the batch PR and merge commit
 to its constituent PRs; each constituent uses its own review evidence and its
@@ -453,25 +448,22 @@ lookup blocked while the next release pass runs within the configured worker
 cadence. Shutdown joins both threads; this is scheduling isolation, not a
 provider latency guarantee. All existing checklist, candidate and release gates
 still apply.
-The `release-request` marker binds an open review to its product, repository,
-Client identity and latest Client decision. Durable `release-client-change`
-receipts retain which PRs were announced in that review. Legacy PR links,
-including batch links bound to their constituents, seed announcement history on
-a deliberate publication. An adopted receipt for the exact current candidate
-covers its included changes even without individual PR links. Repository names
-compare without case sensitivity, as GitHub does.
-The publisher updates the wording and marks older invitations in the same open
-review replaced once, collapsing the earlier wording and neutralizing its
-mentions while retaining delivery receipts and historical text. Release decision
-records remain the authority for accepted releases. Invitations from already
-decided reviews stay unchanged. After every publication, exactly one invitation
-in the open review is current. Lost post or replacement responses are recovered from those receipts;
-cleanup is completed before delivery is cached. Missing timestamps or identities
-refuse publication. No manual live-thread cleanup is needed.
+New candidate issue markers bind the checklist and product. Launchplane owns
+the generated request body and refreshes test-note annotations for that same
+checklist. Human discussion belongs in comments, which the publishers preserve.
+The request time and reminder deadline stay fixed. Decision markers identify each saved action in the candidate issue's comments
+or a standalone decision's original body. Legacy request and adoption markers are compatibility evidence for the carryover
+path, never acceptance authority. Both retirement paths use the same separate
+lock for mutations, refresh the target body and preserve a confirmed legacy
+pointer. Historical discovery reads only open threads and does not hold that lock or the
+candidate lock. Closed history cannot keep retirement scanning forever. Complete absent or retired legacy sets are cached
+for that product, repository and Client identity for the worker's lifetime;
+pending or incomplete reads remain retryable. Reminders follow durable receipts
+before broad supersession cleanup, so a cleanup failure never duplicates a sent reminder.
 
 A saved, still-current release request gets at most one reminder per open review
-after three days. Its durable receipt prevents duplicate reminders after restarts or lost
-responses. A direct request retry confirms the existing invitation without
+after three days, as a comment on its candidate issue. Its durable receipt prevents
+duplicate reminders after restarts or lost responses. A direct request retry confirms the existing invitation without
 sending a due reminder. This maintains the decided request; it never starts a
 new release request because time passed.
 
@@ -581,8 +573,9 @@ release evidence requires a new decision. Decisions do not expire merely because
 time passes. A later request for changes replaces acceptance of the same
 checklist. Backup and deployment evidence remain independently required.
 
-Recording a decision also creates a release issue in the product repository,
-containing that complete checklist, the actor, decision, and reason. The Client
+Recording a decision posts that complete checklist, actor, decision and reason
+as a comment on the candidate's existing release issue in the product repository. A standalone
+decision, such as a temporary hotfix, creates its candidate issue if none exists. The Client
 does not need to open GitHub. The existing managed source-control credential
 must be able to read and create issues in that repository; this feature creates
 no credentials or grants. Launchplane saves the decision before publishing its
@@ -599,19 +592,15 @@ no saved start records approval only; requests for changes withdraw approval,
 and admin overrides do not start a release. These statements describe the
 recorded action, not proof that its operations completed. Publication retries
 preserve existing historical issue bodies, including older wording.
-Publishers of the same saved decision serialize lookup, issue creation and the
-stored URL acknowledgement with a per-decision storage lock. After waiting, a
-publisher reads the saved decision again and reuses its authoritative URL. The
-PostgreSQL holder reads and acknowledges that exact decision using its lock
-transaction's connection, so waiting publishers cannot exhaust the pool it
-needs to finish. The URL commits with that transaction before publication
-returns. Lock waits are bounded to five seconds (or an earlier configured
-statement timeout); storage failures leave the saved decision pending for retry.
+The saved URL commits with its acknowledgement transaction before publication
+returns. Lock waits are bounded to five seconds (or an earlier configured statement
+timeout); storage failures leave the saved decision pending for retry.
 The PostgreSQL transaction lock and local file lock release when their worker exits;
 an interrupted acknowledgement recovers the existing issue by its marker before
 any new creation. Local SQLite publication requires a file-backed database so
 separate processes share the file lock.
-The complete record uses one issue body. If GitHub rejects publication, the
+Each saved checklist is published once, in the issue body for a standalone decision
+or in its decision comment on an existing candidate issue. If GitHub rejects publication, the
 decision remains saved and promotion stays blocked; records are not split into
 comments. Retry recovery finds the earlier issue by the marker on its first
 line, `<!-- launchplane:release-decision:<record id> -->`, so a record written
