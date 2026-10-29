@@ -2898,6 +2898,32 @@ Director agent can use this bounded path without a workflow caller grant.
 It allocates an empty testing application in a new project and environment;
 it does not apply product profiles, runtime settings, policy or deployments.
 
+Before constructing the intent, read the target repository with the catalog's
+configured automation identity, which must already have read access:
+
+```bash
+set -euo pipefail
+mkdir -p state/onboarding
+<catalog>/skills/github/scripts/gh-with-env-token api "repos/$PRODUCT_REPOSITORY" > state/onboarding/repository.json
+jq -e '
+  (.id | type == "number" and . > 0) and
+  (.owner.id | type == "number" and . > 0) and
+  (.default_branch | type == "string" and length > 0)
+' state/onboarding/repository.json
+jq '{repository: .full_name, repository_id: (.id | tostring),
+     repository_owner_id: (.owner.id | tostring), default_branch}' \
+  state/onboarding/repository.json > state/onboarding/repository-identity.json
+```
+
+Here `<catalog>` is the installed codex-skills checkout. Bind the returned
+`repository`, `repository_id`, `repository_owner_id` and `default_branch` into
+the intent used by both operations. Keep the saved response with the reviewed
+request. Missing or inaccessible metadata stays UNKNOWN; do not guess IDs,
+substitute credentials or request a caller grant. Missing read access follows
+the existing access stop boundary.
+The preview base URL must be a root URL whose wildcard DNS and ingress already
+route to the selected server; onboarding does not provision public ingress.
+
 Supply the typed `GenericWebOnboardingIntent` and the corresponding ordinary
 target request with `operation: create-application`, `target_type: application`,
 `instance: testing`, `environment_name: testing` and an explicit `server_id`.
@@ -2946,37 +2972,41 @@ deployment records or other targets in either context are refused.
 Unchanged original-key replay returns the committed receipt. Advanced manifests
 retain their existing service authorization; this path grants no broader action.
 
-Source support is not deployed qualification. Confirm the deployed schema,
-then prove plan/create/readback/original-key recovery/retention on isolated
-targets before removing the compatibility wrapper and its planner. Keep
-existing workflow allocations on their original actor/key recovery path.
+The deployed target and record path was qualified in
+[#5263](https://github.com/cbusillo/launchplane/issues/5263#issuecomment-6490944855):
+original-actor/key readback, record identity/replay and lost-client-response
+recovery passed without policy changes. Partial server-checkpoint continuation
+remains rehearsal proof. This qualifies empty target and record onboarding;
+it does not establish working previews or real-repository artifact provenance.
+Verify those independently through [event-driven delivery](event-driven-deploys.md).
 
-#### Compatibility workflow
+#### Compatibility workflow recovery
 
-Use the manual `Product Onboarding` workflow for a new generic-web product.
-Start with `mode=dry_run` when admin review of the exact plan is useful, or
-use `mode=apply` for one dispatch that pauses at the protected
-`launchplane-authz-admin` environment before any writes. Provide product,
-repository, image repository, runtime port, health path, preview base URL, and a
-reason/issue reference; optional names derive from the product key. The preview
-base URL must be a root URL. Its wildcard DNS and ingress namespace must already
-route to the selected Dokploy server because onboarding owns Launchplane and
-Dokploy records, not public ingress provisioning.
+`Product Onboarding` refuses new-product dry runs and applies before any API
+request. New products use the native operations above. Its remaining dispatch
+surface renders only the original target request and calls the unchanged
+immutable recovery worker. No repository token, product-record plan, caller-grant
+plan or authz reconciliation is requested.
 
-The workflow resolves immutable GitHub identity, plans one non-production
-Dokploy application, plans Launchplane records including the context-scoped
-`LAUNCHPLANE_PREVIEW_BASE_URL`, and plans the complete
-`operator.generic-web-preview` managed authz set. The apply job reuses the
-reviewed plan artifact and digests. Do not copy target ids, manifests, authz
-JSON, or database credentials into the conventional workflow.
-
-Planning authority is read-only and distinct: the plan job uses
-`dokploy_target.plan`, `generic_web_onboarding.plan`, and
-`generic_web_preview_authz.plan`. Only the protected apply worker receives
-`dokploy_target.setup`, `product_onboarding.apply`, and
-`authz_policy_grant.write`. Both protected workers are called by immutable
-full-SHA reusable-workflow refs so policy-admin grants never depend on a mutable
-branch identity.
+Keep the original target-affecting dispatch inputs, reason and any explicit
+allocation key. Former product metadata inputs remain accepted for compatibility
+but are optional and unused during recovery. For readback, set outer `mode=dry_run` and
+`allocation_control={"mode":"readback"}`. For continuation, use outer
+`mode=apply`, exact confirmation `APPLY GENERIC WEB ONBOARDING`, and
+`allocation_control={"mode":"apply"}`. Include the original `idempotency_key`
+when one was supplied; otherwise the original derived key is preserved.
+Retention additionally requires `retain_allocation: true` and the reviewed
+`expected_allocation_custody_sha256` from readback. Keep the original actor and
+request; never replace the old byte-artifact digest with a native canonical
+one. Recovery skips product and authorization record apply. Do not repin or
+retire the old worker until every old workflow allocation is accounted for;
+completed workflow history alone does not establish that custody is clear.
+If readback finds an old target whose product records were never applied,
+settle its custody through reviewed retention, then start native onboarding
+with fresh testing and preview contexts. Keep the retained resources; do not
+pass the old workflow allocation to native record apply, which requires its
+own same-actor native plan.
+The current-source worker is separate from this immutable recovery revision.
 
 Use `Generic Web Preview Authorization` for reviewed `onboard`, `expand`,
 `contract`, and `retire` operations. `onboard` bootstraps the managed preview
@@ -2992,15 +3022,12 @@ run `contract` at that same SHA. This reviewed overlap removes legacy managed
 rule identities without an authorization gap. Use `retire` when offboarding the
 product entirely.
 
-If provider creation succeeds and a later step fails, rerun the exact same
-workflow inputs, including the reason. Stable idempotency keys replay the provider result and prevent duplicate
-creation. If records succeed but authz fails, leave the records in place and
-rerun; the product remains unauthorized until the existing managed authz
-reconcile succeeds. Use `Product Onboarding Manifest (Advanced)` only when the
-typed generic-web contract does not fit, and use `Dokploy Target Setup` for
-adoption, production, compose, or repair operations.
-
-Conventional onboarding creates new products only.
+Use `Product Onboarding Manifest (Advanced)` only when the typed generic-web
+contract does not fit, and `Dokploy Target Setup` for adoption, production,
+compose or repair operations. Keep the existing generic-web caller-rule
+planner and retirement/readback routes for old products. Its App client ID and
+private-key inputs are shared with `Generic Web Preview Authorization`; this
+onboarding removal does not retire credentials, grants or policy records.
 
 - Promotions and deploys reference explicit artifact identifiers.
 - Missing control-plane config is a hard error, not a silent fallback.
