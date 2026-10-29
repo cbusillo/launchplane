@@ -19,6 +19,8 @@ from control_plane.contracts.preview_execution import (
     odoo_preview_target_key,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
     OdooPreviewApplyEnvelope,
@@ -42,7 +44,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
     OdooPreviewApplyInputsResult,
 )
-from control_plane.workflows.launchplane import find_preview_record
+from control_plane.workflows.launchplane import find_preview_record, generate_preview_id
 
 
 @dataclass(frozen=True)
@@ -298,7 +300,7 @@ def require_interrupted_preview_disposal(
     number: int,
     original_reservation_id: str,
 ) -> None:
-    from control_plane.disposable_lanes import require_disposable_lane
+    from control_plane.disposable_lanes import require_disposable_lane, require_unprotected_preview
 
     if store.read_product_profile_record(profile.product) != profile:
         raise ValueError("The preview profile changed before disposal.")
@@ -340,15 +342,7 @@ def require_interrupted_preview_disposal(
         )
     except FileNotFoundError:
         target = None
-    if (target is not None and target.policies.staff_testing_hold is not None) or (
-        report is not None
-        and (
-            report.usage == "in_use"
-            or report.data == "only_copy"
-            or report.production_resources in {"shared", "separation_ready"}
-        )
-    ):
-        raise ValueError("Interrupted preview disposal is held by use, data or shared resources.")
+    require_unprotected_preview(target, report)
 
 
 def require_current_preview_original_target(
@@ -425,6 +419,135 @@ def require_unrecorded_preview_original(
         target_id="" if target_id.startswith("${created.") else target_id,
     )
     return reservation
+
+
+def require_unrecorded_preview_refresh(
+    store: PostgresRecordStore,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: OdooPreviewApplyInputsResult,
+    original_reservation_id: str,
+    operation_record_id: str,
+) -> str:
+    from control_plane.disposable_lanes import (
+        disposable_lane_binding_sha256,
+        disposable_lane_configuration,
+        require_lane_target_ownership,
+        require_unprotected_preview,
+    )
+
+    if (
+        store.read_product_profile_record(profile.product) != profile
+        or profile.preview.clean_testing_snapshot
+        or profile.preview.data_transport_mode != "none"
+        or issued_plan.dry_run_plan.clean_snapshot is not None
+        or issued_plan.plan_request.fishbowl_source is not None
+    ):
+        raise ValueError("Unrecorded preview recovery requires current source-free authority.")
+    original = require_unrecorded_preview_original(
+        store,
+        profile=profile,
+        number=issued_plan.plan_request.pr_number,
+        reservation_id=original_reservation_id,
+    )
+    retained = original_preview_intent(original, profile=profile, store=store)
+    if (
+        retained.issued_plan.plan_request.fishbowl_source is not None
+        or retained.issued_plan.dry_run_plan.clean_snapshot is not None
+    ):
+        raise ValueError("Unrecorded preview recovery requires a source-free original.")
+    result = original.response_payload.get("result")
+    if (
+        original.state != "completed"
+        or not isinstance(result, dict)
+        or result.get("status") != "fail"
+    ):
+        raise ValueError("Unrecorded preview recovery requires a completed failed original.")
+    previous_target = retained.issued_plan.dry_run_plan.compose_ref
+    receipt_target = str(result.get("compose_id") or "")
+    if previous_target.startswith("${created."):
+        previous_target = receipt_target
+    plan = issued_plan.dry_run_plan
+    if (
+        issued_plan.operation != "refresh"
+        or issued_plan.context != retained.issued_plan.context
+        or issued_plan.preview_slug != retained.issued_plan.preview_slug
+        or not previous_target
+        or previous_target.startswith("${created.")
+        or plan.compose_ref != previous_target
+        or receipt_target
+        and receipt_target != previous_target
+        or plan.environment_id != retained.issued_plan.dry_run_plan.environment_id
+        or plan.compose_name != retained.issued_plan.dry_run_plan.compose_name
+        or any(
+            profile.preview.slug_template.format(number=item.anchor_pr_number)
+            == issued_plan.preview_slug
+            for item in store.list_preview_records(context_name=issued_plan.context)
+        )
+        or store.list_preview_generation_records(
+            preview_id=generate_preview_id(
+                context_name=issued_plan.context,
+                anchor_repo=profile.repository.partition("/")[2],
+                anchor_pr_number=issued_plan.plan_request.pr_number,
+            )
+        )
+        or any(
+            held.record_id != operation_record_id
+            for held in store.list_held_provider_target_reservations(
+                provider_target_key=original.provider_target_key
+            )
+        )
+    ):
+        raise ValueError("Unrecorded preview target or original authority changed.")
+    targets: tuple[DokployTargetIdRecord | ProviderTargetRecord, ...] = (
+        *store.list_dokploy_target_id_records(),
+        *store.list_physical_provider_target_records(),
+    )
+    require_lane_target_ownership(
+        targets,
+        context=issued_plan.context,
+        instance=issued_plan.preview_slug,
+        target_id=plan.compose_ref,
+    )
+    if any(
+        (item.context, item.instance) == (issued_plan.context, issued_plan.preview_slug)
+        and item.target_id != plan.compose_ref
+        for item in targets
+    ):
+        raise ValueError("The recorded preview target differs from the original.")
+    try:
+        target = store.read_dokploy_target_record(
+            context_name=issued_plan.context, instance_name=issued_plan.preview_slug
+        )
+    except FileNotFoundError:
+        target = None
+    try:
+        target_id = store.read_dokploy_target_id_record(
+            context_name=issued_plan.context, instance_name=issued_plan.preview_slug
+        )
+    except FileNotFoundError:
+        target_id = None
+    require_unprotected_preview(
+        target,
+        store.read_disposable_lane_safety(
+            profile.product, issued_plan.context, issued_plan.preview_slug
+        ),
+    )
+    return nonvalidating_compact_sorted_json_sha256(
+        {
+            "original": preview_reservation_reference(
+                original, store.read_original_mutation_intent(original)
+            ),
+            "lane": disposable_lane_binding_sha256(
+                profile,
+                target,
+                target_id,
+                configuration=disposable_lane_configuration(
+                    store, issued_plan.context, issued_plan.preview_slug
+                ),
+            ),
+        }
+    )
 
 
 def recover_held_preview(

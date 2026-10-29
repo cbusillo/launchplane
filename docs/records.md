@@ -1034,7 +1034,12 @@ profiles; migration `a4c8e0f2b6d3` copied every one into
 then removed it. Repository inventory records were left in place.
 
 Repository mappings omit active repositories that two products share, naming
-them in `ambiguous_repositories`; other entries stay available.
+them in `ambiguous_repositories`; other entries stay available. Optional
+ambiguity references expose only product ids allowed by the caller's existing
+per-product profile-read scope. Their coverage distinguishes complete source
+collection reads, authorization-scoped results, limited sources, and unknown
+legacy evidence. Missing coverage capability remains unknown, and an empty
+reference list does not establish completeness.
 
 Full-profile writes cannot transfer standing acceptance to another repository
 or copied repository identity. Hold acceptance through the existing reviewed
@@ -1166,6 +1171,8 @@ The service exposes product profile records through `GET /v1/product-profiles`,
 `GET /v1/product-profiles/{product}`, and `POST /v1/product-profiles`. Writes
 require the `product_profile.write` action for the target product in the
 Launchplane service context; reads use `product_profile.read`.
+Stored profiles with retired preview settings remain readable in the catalog
+and declaration client; new writes still require the reviewed transition.
 An existing full-profile write preserves classification provenance when an
 older payload omits it, and refuses explicit classification or provenance
 changes. Use the reviewed production-use endpoint for those changes.
@@ -1324,6 +1331,13 @@ lane intent, and server-owned profile audit fields. Whole-profile service writes
 cannot change existing health-monitoring authority, and onboarding updates
 preserve it; admins use this bounded apply path instead. Concurrent profile
 edits fail stale instead of being overwritten.
+
+Preview TLS, prelaunch rebuild policy and repository identity planners validate
+each changed complete candidate with the same profile builder and write contract
+used by apply. Both modes return a redacted `invalid_product_profile` refusal
+before offering an invalid changed plan or writing it. Stored historical profiles
+remain readable, and unchanged requests do not rewrite or revalidate unrelated
+legacy fields.
 
 Odoo prelaunch rebuild policy changes use
 `POST /v1/product-profiles/prelaunch-rebuild/apply`. The request identifies one
@@ -3263,6 +3277,18 @@ branch matching stay compatible.
   `register` from `retire` through the typed operation field. Records preserve
   dry-run or apply evidence without storing GitHub runner registration tokens or
   other credentials.
+- Native runner relabel policy revisions and immutable review/planned/terminal
+  custody use dedicated `runner-relabel-policy` and `runner-relabel-custody`
+  namespaces in the existing idempotency table. Frozen contracts in
+  `control_plane.contracts.runner_relabel` bind the original immutable actor,
+  exact repository/runner identity, reviewed host/root and protected routing,
+  before/desired labels and policy/review digests. Insert-only custody never
+  reads legacy audit upserts as authority. Numeric revisions and policy CAS
+  serialize under the same transaction lock used for checked dispatch; explicit
+  same-transaction lease validation fences planned/terminal evidence. Existing
+  durable provider reservations fence the repository numeric ID/runner ID across
+  actors and keys. Unknown outcomes retain that fence. Records have no automatic
+  expiry or purge; source adds no table or held-schema activation.
 - Scoped agent write-intent evaluation is exposed at
   `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
   intent to an exact existing policy action, evaluates authorization, and returns

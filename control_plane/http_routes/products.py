@@ -1020,6 +1020,12 @@ def register_agent_context_read_routes(
             generated_at=utc_now_timestamp(),
             product_store=mapping_store,
             work_request_store=mapping_store,
+            product_reference_allowed=lambda product: common.authorization_allows(
+                identity=identity,
+                action="product_profile.read",
+                product=product,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            ),
         )
         return RepoProductMappingResponse(
             trace_id=trace_id,
@@ -1089,6 +1095,12 @@ def register_agent_context_read_routes(
             work_request_store=context_store,
             preview_readiness_store=context_store,
             tenant_admission_section=tenant_admission_section,
+            product_reference_allowed=lambda referenced_product: common.authorization_allows(
+                identity=identity,
+                action="product_profile.read",
+                product=referenced_product,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            ),
         )
         return AgentContextResponse(trace_id=trace_id, context=context_payload)
 
@@ -1599,11 +1611,12 @@ def register_product_environment_read_routes(
         normalized_driver_id = driver_id.strip()
         try:
             profile_store = require_product_profile_list_store(record_store)
-            product_profile_payload = (
-                control_plane_product_read_service.build_product_profile_list_service_payload(
-                    record_store=profile_store,
-                    driver_id=normalized_driver_id,
+            profiles = tuple(
+                profile
+                for profile in profile_store.list_product_profile_records(
+                    driver_id=normalized_driver_id
                 )
+                if profile.is_active
             )
         except TypeError as error:
             raise common.http_error(
@@ -1612,10 +1625,6 @@ def register_product_environment_read_routes(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        payload_profiles = cast(list[object], product_profile_payload["profiles"])
-        profiles = tuple(
-            LaunchplaneProductProfileRecord.model_validate(profile) for profile in payload_profiles
-        )
         if not service_reader and identity is not None:
             profiles = tuple(
                 profile
@@ -1629,7 +1638,7 @@ def register_product_environment_read_routes(
             )
         return ProductProfileListResponse(
             trace_id=trace_id,
-            driver_id=str(product_profile_payload["driver_id"]),
+            driver_id=normalized_driver_id,
             profiles=profiles,
             coverage=read_coverage(
                 profile_store,

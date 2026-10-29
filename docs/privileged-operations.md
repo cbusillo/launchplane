@@ -40,12 +40,8 @@ policy mutation. Remaining deletion is tracked by
 
 ## Agent Policy Proposals
 
-The configured `local_operator` identity may submit prepared access-policy and merge-train
-policy requests to `POST /v1/agent/privileged-operations/plans`. This requires
-exactly one explicit managed proposal rule in both runtime policy and a fresh
-active policy record. The two existing descriptors are
-`managed-authz-policy-set` and `managed-merge-train-policy-import`; secret
-rotation and retired delivery descriptors are not accepted by this surface.
+Agent proposal admission and supported descriptors are defined by the
+[privileged-operation API contract](service-boundary.md#privileged-operation-api).
 
 The request carries the descriptor, request, reason, related issue, and a stable
 `source_event_id`. Reuse that source event when a response is interrupted:
@@ -60,16 +56,13 @@ the proposal and returns the review link without approving or applying it.
 Creation persists a `planned` record and its event only. It installs no rule,
 changes no merge policy, and schedules no execution. The signed-in Director
 reviews the proposer, redacted change evidence and counts, then approves or
-rejects through the existing browser lifecycle. Callers with a `local_operator` identity cannot approve,
+rejects through the existing browser lifecycle. Agent requesters cannot approve,
 cancel, revoke, or execute a plan, even if a policy mistakenly lists those
-actions. The independent `local_operator` requester stores only a domain-separated
-principal fingerprint, so its history and replay do not depend on terminal-agent
-credentials or ordinary-agent enrollment, sessions or leases.
+actions. The requester stores only a domain-separated principal fingerprint; historical
+records do not depend on ordinary-agent enrollment, sessions or leases.
 
-Before first use, the Director prepares **agent proposal access** in the Access
-policy tab and approves that separate managed authorization plan. See
-[the proposer grant](authorization-authority.md#preparing-agent-proposal-access).
-Code landing does not install it. Removing proposer access does not cancel
+Proposal admission follows the [API contract](service-boundary.md#privileged-operation-api).
+Removing proposer access does not cancel
 already pending plans; those still need separate Director approval or cancellation.
 After the first `local_operator` requester record is persisted, rollback must
 retain a reader that supports that requester type. Older records remain readable.

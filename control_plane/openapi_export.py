@@ -214,6 +214,7 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/dry-run": "dry_run_promotion_recovery",
     "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/apply": "apply_promotion_recovery",
     "/v1/admin/runtime-settings/removal": "runtime_setting_removal",
+    "/v1/previews/lifecycle-sweep": "apply_preview_lifecycle_sweep",
     "/v1/product-config/testing-hold/apply": "apply_testing_hold",
     "/v1/dokploy-targets/setup": "setup_dokploy_target",
     "/v1/route-bindings/reconcile": "reconcile_route_binding",

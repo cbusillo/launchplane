@@ -23,6 +23,8 @@ from control_plane.dokploy.compose import (
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 from control_plane.copy_readback_diagnostics import (
     COPY_FAILURE_EXIT_MARKER,
+    COPY_FAILURE_EVIDENCE_MARKER,
+    COPY_FAILURE_STATE_DIRECTORY,
     COPY_FAILURE_STAGE_MARKER,
     CopyFailureStage,
     ReadbackPredicate,
@@ -353,6 +355,16 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             f"{COPY_FAILURE_STAGE_MARKER}={CopyFailureStage.ATTACHMENTS}", output.splitlines()
         )
         self.assertIn(f"{COPY_FAILURE_EXIT_MARKER}=1", output.splitlines())
+        from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+
+        markers = extract_odoo_post_deploy_readback_markers({"logs": output})
+        path = (
+            self.root
+            / COPY_FAILURE_STATE_DIRECTORY
+            / (markers[COPY_FAILURE_EVIDENCE_MARKER] + ".json")
+        )
+        evidence = json.loads(path.read_text())
+        self.assertEqual(base64.b64decode(evidence["stderr"]), b"private traceback")
         self.assertNotIn("private", output)
         self.assertNotIn(["docker", "start", "web"], self.calls)
 

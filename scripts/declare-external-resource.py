@@ -80,7 +80,9 @@ def main() -> int:
                 query={},
                 timeout=120,
             )
-            record = ProductProfileResponse.model_validate(result, extra="ignore").profile
+            record = ProductProfileResponse.model_validate(
+                result, extra="ignore", context={"stored_product_profile": True}
+            ).profile
             if record.product != args.product or not any(
                 (lane.context, lane.instance) == (args.context, args.instance)
                 for lane in record.lanes

@@ -113,7 +113,7 @@ and credentials stay behind the service boundary.
 
 For guidance on adding a new driver type or product-specific driver, see
 [driver-development.md](driver-development.md). For the expected shape of a
-product repo that calls a driver, see
+product repo that publishes artifacts for a driver, see
 [product-repo-contract.md](product-repo-contract.md).
 
 ## Read Endpoints

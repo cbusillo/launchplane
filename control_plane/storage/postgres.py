@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from control_plane.generic_web_onboarding import GenericWebOnboardingIntent
+from control_plane.preview_namespaces import (
+    require_postgres_preview_cleanup,
+    preview_resource_declaration_changed,
+    preview_product_operation_key,
+    validate_preview_profile_writes,
+)
 from control_plane.timestamps import utc_now_timestamp as _utc_now_timestamp
 
 from control_plane.contracts.public_hosts import retained_hostname_identity
@@ -66,7 +73,7 @@ from control_plane.storage.delivery_evidence import (
 
 from uuid import uuid4
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -522,6 +529,7 @@ from control_plane.runtime_setting_removal import (
     RuntimeSettingRemovalRequest,
     RuntimeSettingRemovalPlan,
 )
+from control_plane.runtime_setting_inventory import SettingConsumerInventory
 from control_plane.service_auth import LaunchplaneIdentity
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
@@ -633,6 +641,7 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
     authz_policy_allows_immutable_github_id_administration,
     effective_administrator_quorum,
     strict_immutable_github_human_administrator_ids,
@@ -656,6 +665,7 @@ from control_plane.storage.product_authority_bundle import (
     require_absent_products,
     require_runtime_key_safety_policies,
     ProductAuthorityBundle,
+    ServiceIdentityAuthorityError,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
     OdooInstanceOverrideConflictError,
@@ -5474,6 +5484,199 @@ register_source_events(Base)
 
 
 class PostgresRecordStore(HumanSessionStore):
+    @staticmethod
+    def _runner_relabel_document_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from control_plane.contracts.runner_relabel import (
+            RunnerRelabelOperationClaim,
+            RunnerRelabelPolicyPlan,
+            RunnerRelabelReview,
+            RunnerRelabelTerminal,
+        )
+
+        models: dict[str, type[BaseModel]] = {
+            "review": RunnerRelabelReview,
+            "policy-review": RunnerRelabelPolicyPlan,
+            "review-operation": RunnerRelabelOperationClaim,
+            "terminal": RunnerRelabelTerminal,
+            "planned": RunnerLaneRegistrationAuditRecord,
+            "terminal-audit": RunnerLaneRegistrationAuditRecord,
+        }
+        model = models.get(kind)
+        if model is None:
+            raise ValueError("Unknown native runner custody kind.")
+        return model.model_validate(payload).model_dump(mode="json")
+
+    def read_runner_relabel_document(self, kind: str, key: str) -> dict[str, Any] | None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        row = self.read_idempotency_record(
+            scope="runner-relabel-custody", route_path=kind, idempotency_key=key
+        )
+        if row is None:
+            return None
+        if (
+            row.state != "completed"
+            or row.scope != "runner-relabel-custody"
+            or row.route_path != kind
+            or row.idempotency_key != key
+            or row.record_id != canonical_json_sha256(["runner-relabel-custody", kind, key])
+            or row.request_fingerprint != canonical_json_sha256(row.response_payload)
+        ):
+            raise ValueError("Native runner custody envelope is invalid.")
+        return self._runner_relabel_document_payload(kind, dict(row.response_payload))
+
+    def write_runner_relabel_document(
+        self,
+        kind: str,
+        key: str,
+        payload: dict[str, Any],
+        *,
+        reservation: LaunchplaneIdempotencyRecord | None = None,
+    ) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        payload = self._runner_relabel_document_payload(kind, payload)
+        fingerprint = canonical_json_sha256(payload)
+        try:
+            with self._session_factory() as session:
+                self._begin_serialized_write(session)
+                if reservation is not None:
+                    self.require_current_provider_execution(session, reservation)
+                existing = session.scalar(
+                    self._idempotency_statement(
+                        scope="runner-relabel-custody",
+                        route_path=kind,
+                        idempotency_key=key,
+                        for_update=True,
+                    )
+                )
+                if existing is not None:
+                    record = LaunchplaneIdempotencyRecord.model_validate(existing.payload)
+                    if (
+                        record.request_fingerprint != fingerprint
+                        or record.response_payload != payload
+                        or record.state != "completed"
+                        or record.scope != "runner-relabel-custody"
+                        or record.route_path != kind
+                        or record.idempotency_key != key
+                        or record.record_id
+                        != canonical_json_sha256(["runner-relabel-custody", kind, key])
+                    ):
+                        raise ValueError("Native runner evidence is immutable.")
+                    return
+                now = self._database_mutation_timestamp(session)
+                record = LaunchplaneIdempotencyRecord(
+                    record_id=canonical_json_sha256(["runner-relabel-custody", kind, key]),
+                    scope="runner-relabel-custody",
+                    route_path=kind,
+                    idempotency_key=key,
+                    request_fingerprint=fingerprint,
+                    response_status_code=202,
+                    response_trace_id="runner-relabel-custody",
+                    recorded_at=now,
+                    response_payload=payload,
+                )
+                session.add(self._idempotency_row(record))
+                session.commit()
+        except IntegrityError:
+            winner = self.read_runner_relabel_document(kind, key)
+            if winner is None:
+                raise
+            if winner != payload:
+                raise ValueError("Native runner evidence is immutable.") from None
+
+    @contextmanager
+    def runner_relabel_policy_guard(self, policy_id: str) -> Iterator[Session]:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            if self.database_dialect_name == "postgresql":
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"runner-relabel-policy:{policy_id}"},
+                )
+            yield session
+            session.commit()
+
+    def read_runner_relabel_policy(
+        self, policy_id: str, *, session: Session | None = None
+    ) -> dict[str, Any] | None:
+        def read(active_session: Session) -> dict[str, Any] | None:
+            from control_plane.contracts.canonical_json import canonical_json_sha256
+
+            statement = (
+                select(LaunchplaneIdempotencyRow)
+                .where(
+                    LaunchplaneIdempotencyRow.scope == "runner-relabel-policy",
+                    LaunchplaneIdempotencyRow.route_path == policy_id,
+                )
+                .order_by(LaunchplaneIdempotencyRow.attempt.desc())
+                .limit(1)
+            )
+            row: LaunchplaneIdempotencyRow | None = active_session.scalar(statement)
+            if row is None:
+                return None
+            record = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            payload = record.response_payload
+            revision = payload.get("revision")
+            digest = canonical_json_sha256(
+                {key: value for key, value in payload.items() if key != "policy_sha256"}
+            )
+            if (
+                type(revision) is not int
+                or revision < 1
+                or record.attempt != revision
+                or row.attempt != revision
+                or record.state != "completed"
+                or record.scope != "runner-relabel-policy"
+                or record.route_path != policy_id
+                or record.idempotency_key != str(revision)
+                or record.record_id
+                != canonical_json_sha256(["runner-relabel-policy", policy_id, revision])
+                or record.request_fingerprint != digest
+                or payload.get("policy_sha256") != digest
+                or payload.get("previous_sha256") != payload.get("expected_policy_sha256")
+            ):
+                raise ValueError("Runner policy custody envelope is invalid.")
+            from control_plane.contracts.runner_relabel import RunnerRelabelPolicyRecord
+
+            return RunnerRelabelPolicyRecord.model_validate(payload).model_dump(mode="json")
+
+        if session is not None:
+            return read(session)
+        with self._session_factory() as active:
+            return read(active)
+
+    def compare_and_write_runner_relabel_policy(
+        self, policy_id: str, payload: dict[str, Any], *, expected_sha256: str
+    ) -> dict[str, Any]:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        with self.runner_relabel_policy_guard(policy_id) as session:
+            current = self.read_runner_relabel_policy(policy_id, session=session)
+            if (current["policy_sha256"] if current else "") != expected_sha256:
+                raise ValueError("Runner policy changed since review.")
+            revision = int(current["revision"]) + 1 if current else 1
+            saved = {**payload, "revision": revision, "previous_sha256": expected_sha256}
+            saved["policy_sha256"] = canonical_json_sha256(saved)
+            from control_plane.contracts.runner_relabel import RunnerRelabelPolicyRecord
+
+            saved = RunnerRelabelPolicyRecord.model_validate(saved).model_dump(mode="json")
+            now = self._database_mutation_timestamp(session)
+            record = LaunchplaneIdempotencyRecord(
+                record_id=canonical_json_sha256(["runner-relabel-policy", policy_id, revision]),
+                scope="runner-relabel-policy",
+                route_path=policy_id,
+                idempotency_key=str(revision),
+                attempt=revision,
+                request_fingerprint=saved["policy_sha256"],
+                response_status_code=202,
+                response_trace_id="runner-relabel-policy",
+                recorded_at=now,
+                response_payload=saved,
+            )
+            session.add(self._idempotency_row(record))
+            return saved
+
     @contextmanager
     def delivery_evidence_index(self) -> Iterator[DeliveryEvidenceIndex]:
         yield DeliveryEvidenceIndex(self._engine)
@@ -5829,7 +6032,12 @@ class PostgresRecordStore(HumanSessionStore):
     def _read_payload(*, model_type: type[RecordModel], payload: PayloadDict) -> RecordModel:
         if model_type is LaunchplaneProductProfileRecord:
             return cast(RecordModel, PostgresRecordStore._read_product_profile_payload(payload))
-        return model_type.model_validate(payload)
+        return model_type.model_validate(
+            payload,
+            context={"stored_product_profile": True}
+            if model_type is ProductRetirementRecord
+            else None,
+        )
 
     def _write_row(self, row: Base) -> None:
         with self._session_factory() as session:
@@ -6327,6 +6535,44 @@ class PostgresRecordStore(HumanSessionStore):
             session.merge(row)
         self._after_product_authority_bundle_step(step_name)
 
+    def _validate_preview_profile_writes_in_session(
+        self, session: Any, replacements: tuple[LaunchplaneProductProfileRecord, ...]
+    ) -> None:
+        if not replacements:
+            return
+        profiles = tuple(
+            self._read_product_profile_payload(row.payload)
+            for row in session.scalars(select(LaunchplaneProductProfileRow))
+        )
+        validate_preview_profile_writes(
+            profiles=profiles,
+            replacements=replacements,
+            previews=(
+                PreviewRecord.model_validate(row.payload)
+                for row in session.scalars(
+                    select(LaunchplanePreviewRow).where(LaunchplanePreviewRow.state != "destroyed")
+                )
+            ),
+        )
+        if self._engine.dialect.name == "postgresql":
+            current = {profile.product: profile for profile in profiles}
+            for replacement in sorted(replacements, key=lambda item: item.product):
+                if not preview_resource_declaration_changed(
+                    current.get(replacement.product), replacement
+                ):
+                    continue
+                key = preview_product_operation_key(replacement.product)
+                if self._preview_refresh_is_held(key, exclusive=True):
+                    continue
+                excluded = session.scalar(
+                    text("SELECT pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                    {"lock_name": self._preview_refresh_lock_name(key)},
+                )
+                if excluded is not True:
+                    raise ValueError(
+                        "A product operation is still running; finish it before changing preview resource declarations."
+                    )
+
     def _product_profile_row(
         self, record: LaunchplaneProductProfileRecord
     ) -> LaunchplaneProductProfileRow:
@@ -6478,11 +6724,29 @@ class PostgresRecordStore(HumanSessionStore):
             payload=self._payload_dict(record),
         )
 
-    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
-        self._write_product_authority_bundle(bundle)
+    def write_product_authority_bundle(
+        self, bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity | None = None
+    ) -> None:
+        self._write_product_authority_bundle(bundle, caller_identity=identity)
+
+    def write_new_product_onboarding_bundle(
+        self, bundle: ProductAuthorityBundle, *, intent: GenericWebOnboardingIntent
+    ) -> None:
+        from control_plane.onboarding_target import require_unallocated_onboarding_contexts
+
+        def guard(_session: Any) -> None:
+            try:
+                require_unallocated_onboarding_contexts(self, intent, allocated_testing=True)
+            except ValueError as error:
+                raise ProductProfileConflictError(str(error)) from error
+
+        self._write_product_authority_bundle(bundle, guard_provider=guard)
 
     def compare_and_write_product_authority_bundle(
-        self, bundle: ProductAuthorityBundle, *, mutation: DbOnlyMutationRequest
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        mutation: DbOnlyMutationRequest,
     ) -> tuple[str, LaunchplaneIdempotencyRecord]:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -6493,7 +6757,10 @@ class PostgresRecordStore(HumanSessionStore):
                 return status, reservation
             assert reservation_row is not None
             self._write_product_authority_bundle(
-                bundle, write_session=session, write_transaction_started=True, commit=False
+                bundle,
+                write_session=session,
+                write_transaction_started=True,
+                commit=False,
             )
             completion = complete_launchplane_mutation_reservation(
                 reservation,
@@ -6507,17 +6774,159 @@ class PostgresRecordStore(HumanSessionStore):
             return "written", completion
 
     def write_director_secret_bundle(
-        self, bundle: ProductAuthorityBundle, *, identity: GitHubHumanIdentity
+        self, bundle: ProductAuthorityBundle, *, identity: LaunchplaneIdentity
     ) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_active_authz_policy(session)
             active = self._locked_active_authz_policy_record(session)
-            if not active.policy.names_administrator(identity):
-                raise PermissionError("Only the Director can store service credentials.")
+            self._require_service_identity_administrator(active.policy, identity)
             self._write_product_authority_bundle(
-                bundle, write_session=session, write_transaction_started=True
+                bundle,
+                write_session=session,
+                write_transaction_started=True,
+                caller_identity=identity,
             )
+
+    @staticmethod
+    def _require_service_identity_administrator(
+        policy: LaunchplaneAuthzPolicy, identity: LaunchplaneIdentity | None
+    ) -> None:
+        from control_plane.service_auth import AuthorizationTarget, LocalAdminIdentity
+
+        administrator = (
+            isinstance(identity, GitHubHumanIdentity) and policy.names_administrator(identity)
+        ) or isinstance(identity, LocalAdminIdentity)
+        if (
+            not administrator
+            or identity is None
+            or not policy.allows(
+                identity=identity,
+                action="authz_policy_grant.write",
+                product="launchplane",
+                context="launchplane",
+                target=AuthorizationTarget(scope="context"),
+            )
+        ):
+            raise ServiceIdentityAuthorityError(
+                "Service identity changes require an admin with policy-write authority."
+            )
+
+    @staticmethod
+    def _bundle_changes_service_identity(session: Session, bundle: ProductAuthorityBundle) -> bool:
+        from control_plane.service_agent_identities import (
+            AGENT_BEARER_ENVIRONMENT_KEYS,
+            AGENT_BEARER_SOURCE_KEY,
+            AGENT_SELECTOR_KEYS,
+        )
+        from control_plane.secrets import LAUNCHPLANE_SERVICE_SECRET_INTEGRATION
+
+        selector_keys = AGENT_SELECTOR_KEYS | {AGENT_BEARER_SOURCE_KEY}
+        runtime_records = (
+            *bundle.runtime_environments,
+            *(write.record for write in bundle.runtime_environment_writes),
+        )
+        runtime_changes = [(record, record.env) for record in runtime_records]
+        runtime_changes.extend(
+            (deletion.expected_record, {}) for deletion in bundle.delete_runtime_environments
+        )
+        for record, values in runtime_changes:
+            if (record.scope, record.context, record.instance) != ("context", "launchplane", ""):
+                continue
+            current = session.get(
+                LaunchplaneRuntimeEnvironmentRow, (record.scope, record.context, record.instance)
+            )
+            previous_values = (
+                RuntimeEnvironmentRecord.model_validate(current.payload).env if current else {}
+            )
+            previous = {
+                key: previous_values[key] for key in selector_keys if key in previous_values
+            }
+            proposed = {key: values[key] for key in selector_keys if key in values}
+            if json.dumps(previous, sort_keys=True) != json.dumps(proposed, sort_keys=True):
+                return True
+
+        if not (bundle.secret_bindings or bundle.secret_records or bundle.secret_versions):
+            return False
+        token_keys = frozenset(
+            key for field, key in AGENT_BEARER_ENVIRONMENT_KEYS.items() if field.endswith("_token")
+        )
+        bindings = {
+            row.binding_id: SecretBinding.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneSecretBindingRow).where(
+                    LaunchplaneSecretBindingRow.integration
+                    == LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+                    LaunchplaneSecretBindingRow.context == "launchplane",
+                    LaunchplaneSecretBindingRow.instance == "",
+                    LaunchplaneSecretBindingRow.binding_key.in_(token_keys),
+                )
+            ).all()
+        }
+        binding_fields = {
+            "binding_id",
+            "integration",
+            "binding_key",
+            "context",
+            "instance",
+            "secret_id",
+            "status",
+        }
+        for binding in bundle.secret_bindings:
+            previous_binding = bindings.get(binding.binding_id)
+            selected = (
+                binding.integration == LAUNCHPLANE_SERVICE_SECRET_INTEGRATION
+                and binding.context == "launchplane"
+                and not binding.instance
+                and binding.binding_key in token_keys
+            )
+            if not selected and previous_binding is None:
+                continue
+            if previous_binding is None or previous_binding.model_dump(
+                include=binding_fields
+            ) != binding.model_dump(include=binding_fields):
+                return True
+
+        if not (bundle.secret_records or bundle.secret_versions):
+            return False
+        secret_ids = {binding.secret_id for binding in bindings.values()}
+        if not secret_ids:
+            return False
+        records = {
+            row.secret_id: SecretRecord.model_validate(row.payload)
+            for row in session.scalars(
+                select(LaunchplaneSecretRow).where(LaunchplaneSecretRow.secret_id.in_(secret_ids))
+            ).all()
+        }
+        record_fields = {
+            "secret_id",
+            "scope",
+            "integration",
+            "context",
+            "instance",
+            "current_version_id",
+            "policy",
+            "status",
+        }
+        for secret_record in bundle.secret_records:
+            if secret_record.secret_id not in secret_ids:
+                continue
+            previous_record = records.get(secret_record.secret_id)
+            if previous_record is None or previous_record.model_dump(
+                include=record_fields
+            ) != secret_record.model_dump(include=record_fields):
+                return True
+        version_ids = {record.current_version_id for record in records.values()}
+        version_fields = {"version_id", "secret_id", "ciphertext", "key_id"}
+        for version in bundle.secret_versions:
+            if version.version_id not in version_ids:
+                continue
+            previous_version = session.get(LaunchplaneSecretVersionRow, version.version_id)
+            if previous_version is None or SecretVersion.model_validate(
+                previous_version.payload
+            ).model_dump(include=version_fields) != version.model_dump(include=version_fields):
+                return True
+        return False
 
     def write_product_public_hosts_bundle(
         self,
@@ -6713,6 +7122,7 @@ class PostgresRecordStore(HumanSessionStore):
         commit: bool = True,
         validate_only: bool = False,
         write_transaction_started: bool = False,
+        caller_identity: LaunchplaneIdentity | None = None,
     ) -> None:
         if not bundle.requires_write():
             return
@@ -6723,7 +7133,22 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             if not write_transaction_started:
                 self._begin_serialized_write(session)
+            if caller_identity is not None:
+                self._lock_active_authz_policy(session)
             self._lock_product_authority_bundle_write(session)
+            self._validate_preview_profile_writes_in_session(session, bundle.product_profiles)
+            if self._bundle_changes_service_identity(session, bundle):
+                if caller_identity is None:
+                    raise ServiceIdentityAuthorityError(
+                        "Service identity changes require a separate apply by an authorized administrator."
+                    )
+                try:
+                    active_policy = self._locked_active_authz_policy_record(session).policy
+                except OwnerControlShadowVerifierConflictError as error:
+                    raise ServiceIdentityAuthorityError(
+                        "Current administrator authority is unavailable."
+                    ) from error
+                self._require_service_identity_administrator(active_policy, caller_identity)
             reservation_reader = getattr(
                 self._provider_evidence_context, "reservation_reader", None
             )
@@ -19935,6 +20360,10 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.commit()
 
+    @staticmethod
+    def _preview_refresh_lock_name(preview_id: str) -> str:
+        return f"launchplane-preview-refresh:{preview_id}"
+
     @contextmanager
     def serialize_preview_refresh(
         self, *, preview_id: str, dedicated: bool = False, shared: bool = False
@@ -19958,7 +20387,7 @@ class PostgresRecordStore(HumanSessionStore):
             lock_function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
             session.execute(
                 text(f"select {lock_function}(hashtextextended(:lock_name, 0))"),
-                {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
+                {"lock_name": self._preview_refresh_lock_name(normalized_preview_id)},
             )
             held = getattr(self._preview_execution_context, "held", ())
             self._preview_execution_context.held = (
@@ -28971,6 +29400,7 @@ class PostgresRecordStore(HumanSessionStore):
             # Same order as bundle writes, which may check context ownership.
             self._lock_product_authority_bundle_write(session)
             self._lock_landing_authority(session, landing_authority.product_profile(record.product))
+            self._validate_preview_profile_writes_in_session(session, (record,))
             session.merge(self._product_profile_row(record))
             session.commit()
 
@@ -29301,6 +29731,7 @@ class PostgresRecordStore(HumanSessionStore):
                     session.delete(reservation_row)
                     session.commit()
                 return ProductProfileCompareWriteResult(status="history_conflict")
+        self._validate_preview_profile_writes_in_session(session, (replacement_record,))
         row.display_name = replacement_record.display_name
         row.repository = replacement_record.repository
         row.driver_id = replacement_record.driver_id
@@ -29738,6 +30169,10 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.product_retirement import ProductRetirementBlockedError
 
         profile = bound.profile
+        try:
+            require_postgres_preview_cleanup(profile, bound.previews)
+        except ValueError as error:
+            raise ProductRetirementBlockedError(str(error)) from error
         contexts = (
             {lane.context for lane in profile.lanes}
             | {
@@ -29859,6 +30294,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "source": "service:product-retirement",
                 }
             )
+            self._validate_preview_profile_writes_in_session(session, (retired,))
             session.merge(self._product_profile_row(retired))
             session.add(
                 LaunchplaneProductRetirementRow(
@@ -29876,6 +30312,42 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             )
             session.commit()
+
+    def retained_volume_recovery_payloads(self) -> Generator[PayloadDict, None, None]:
+        from control_plane.application_state_volume import state_volume_allocation_names
+
+        with self._session_factory() as session:
+            for row_type in (
+                LaunchplaneDisposableReplacementPreparationRow,
+                LaunchplaneDisposableTestingResourceAllocationRow,
+                LaunchplaneFreshOdooTestingGenerationRow,
+                LaunchplaneRetainedTestingGenerationRow,
+                LaunchplaneNativeTestingCopyCaptureRow,
+                LaunchplaneOdooUpgradeRehearsalRow,
+                LaunchplanePreviewGenerationRow,
+                LaunchplaneOdooStableTargetReplacementOperationRow,
+                LaunchplaneTestingCandidateRow,
+            ):
+                yield from session.scalars(
+                    select(row_type.payload).execution_options(yield_per=1000)
+                )
+            allocations = session.scalars(
+                select(LaunchplaneIdempotencyRow.payload)
+                .where(LaunchplaneIdempotencyRow.route_path.startswith("/v1/dokploy-targets/setup"))
+                .execution_options(yield_per=1000)
+            )
+            for allocation in allocations:
+                response = allocation.get("response_payload", {})
+                if not isinstance(response, dict):
+                    raise ValueError("Allocation custody payload is unavailable.")
+                result = response.get("result", response)
+                if not isinstance(result, dict):
+                    raise ValueError("Allocation custody result is unavailable.")
+                if result.get("allocation_state") == "retained_uncertain":
+                    plan_id = result.get("plan_id")
+                    if not isinstance(plan_id, str):
+                        raise ValueError("Retained allocation identity is unavailable.")
+                    yield state_volume_allocation_names(plan_id)
 
     def write_product_retirement_record(self, record: ProductRetirementRecord) -> None:
         with self._session_factory() as session:
@@ -32298,6 +32770,55 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return "deleted"
 
+    def global_setting_consumer_inventory(
+        self, *, keys: tuple[str, ...]
+    ) -> SettingConsumerInventory:
+        from control_plane.runtime_setting_inventory import (
+            SettingAuthorityConsumer,
+            setting_consumer_inventory,
+        )
+
+        with self._session_factory() as session:
+            authorities = [
+                SettingAuthorityConsumer(
+                    kind="reconcile_request",
+                    product=row.product,
+                    instance=row.target_kind,
+                    state=row.state,
+                )
+                for row in session.scalars(select(LaunchplaneProductReconcileRequestRow)).all()
+            ]
+            authorities.extend(
+                SettingAuthorityConsumer(
+                    kind="production_recipient",
+                    product=row.product,
+                    context=row.context,
+                    instance="prod",
+                    state=str(row.payload.get("phase", "")),
+                )
+                for row in session.scalars(select(LaunchplaneProductionRecipientRow)).all()
+            )
+            return setting_consumer_inventory(
+                keys=keys,
+                records=(
+                    RuntimeEnvironmentRecord.model_validate(row.payload)
+                    for row in session.scalars(select(LaunchplaneRuntimeEnvironmentRow)).all()
+                ),
+                profiles=(
+                    self._read_product_profile_payload(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                ),
+                targets=(
+                    DokployTargetRecord.model_validate(row.payload)
+                    for row in session.scalars(select(LaunchplaneDokployTargetRow)).all()
+                ),
+                bindings=(
+                    SecretBinding.model_validate(row.payload)
+                    for row in session.scalars(select(LaunchplaneSecretBindingRow)).all()
+                ),
+                authority_records=authorities,
+            )
+
     def runtime_setting_removal(
         self,
         *,
@@ -32344,6 +32865,16 @@ class PostgresRecordStore(HumanSessionStore):
                     profiles,
                 )
             return profile
+
+        def context_for_request(session: Any) -> RuntimeEnvironmentRecord | None:
+            if request.scope != "instance" or request.instance == "preview":
+                return None
+            row = session.scalar(
+                self._runtime_environment_statement(
+                    scope="context", context=request.context, instance="", for_update=True
+                )
+            )
+            return RuntimeEnvironmentRecord.model_validate(row.payload) if row else None
 
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -32432,7 +32963,11 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ValueError("The selected runtime record is absent.")
                 private_nonce = secrets.token_hex(32)
                 plan = removal_plan(
-                    current, request, authority_sha256=authority_sha256, private_nonce=private_nonce
+                    current,
+                    request,
+                    authority_sha256=authority_sha256,
+                    private_nonce=private_nonce,
+                    context_record=context_for_request(session),
                 )
                 review_id = plan.review_id
                 existing = session.scalar(
@@ -32562,6 +33097,7 @@ class PostgresRecordStore(HumanSessionStore):
                     request,
                     authority_sha256=authority_sha256,
                     private_nonce=str(review.response_payload["private_nonce"]),
+                    context_record=context_for_request(session),
                 )
             except ValueError as error:
                 raise RuntimeSettingRemovalStale(str(error)) from None
@@ -32610,7 +33146,11 @@ class PostgresRecordStore(HumanSessionStore):
                 else (),
             )
             self._write_product_authority_bundle(
-                bundle, write_session=session, commit=False, write_transaction_started=True
+                bundle,
+                write_session=session,
+                commit=False,
+                write_transaction_started=True,
+                caller_identity=identity,
             )
             session.flush()
             written_row = session.scalar(

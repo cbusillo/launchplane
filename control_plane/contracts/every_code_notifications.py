@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
+from control_plane.contracts.text_fields import require_text as _required_text
 
 
 EveryCodeNotificationDestinationKind = Literal["discord"]
@@ -154,10 +155,3 @@ def _record_token(value: str) -> str:
     return "".join(
         character if character.isalnum() else "-" for character in value.strip().lower()
     ).strip("-")
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

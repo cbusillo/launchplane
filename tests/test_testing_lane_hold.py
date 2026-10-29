@@ -701,7 +701,14 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
                         profile.model_copy(update={"lanes": profile.lanes if retains_lane else ()})
                     )
                     store.write_product_profile_record(
-                        profile.model_copy(update={"product": "other-product"})
+                        profile.model_copy(
+                            update={
+                                "product": "other-product",
+                                "preview": profile.preview.model_copy(
+                                    update={"app_name_prefix": "other-product-preview"}
+                                ),
+                            }
+                        )
                     )
                     read = await self._get(app)
                     plan = await self._post(app, _payload())

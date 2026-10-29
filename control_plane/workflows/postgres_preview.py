@@ -4,75 +4,68 @@ from typing import cast
 
 import base64
 import json
+import hashlib
 import secrets
 import shlex
 import time
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, unquote, urlparse
-from urllib.request import Request, urlopen
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane.runtime_platform_credentials import looks_like_credential
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
-    health_payload_runtime_identity_status,
-    runtime_identity_env,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.preview_namespaces import POSTGRES_PREVIEW_TRANSPORTS
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.workflows.preview_resource_destroy import (
     PREVIEW_CLEANUP_SAFETY_UNKNOWN,
     destroy_dokploy_preview_resource,
 )
-from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.workflows.generic_web_application_lifecycle import (
     DokployApplicationLifecycle,
     preview_application_lifecycle,
     recover_preview_application_lifecycle,
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
+from control_plane.workflows.generic_web_preview import (
+    _wait_for_preview_health as _wait_for_preview_health,
+    _render_preview_env_text,
+    _enforce_preview_copied_runtime_key_safety,
+    GenericWebPreviewProfileStore,
+    _configure_application,
+    _ensure_domain,
+    _delete_application,
+    _delete_domain,
+)
+from control_plane.preview_namespaces import require_unique_preview_namespaces
+from control_plane.contracts.snapshot_protocol import snapshot_protocol_default
 from control_plane import runtime_platform_credentials
 from control_plane.dokploy import memory_capacity
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 
 from control_plane.dokploy import api as dokploy_api
-from control_plane.dokploy.application_endpoint import application_endpoint_spec
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.dokploy.api import JsonObject
 
 
 DEFAULT_PREVIEW_TIMEOUT_SECONDS = 300
-PREVIEW_APP_PREFIX = "ver-preview"
-PREVIEW_DATABASE_PREFIX = "verireel_preview_"
 PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
-_HARD_RUNTIME_IDENTITY_FIELDS = frozenset({"product", "context", "instance", "environment_kind"})
-_PREVIEW_REFRESH_GENERATED_ENV_KEYS = frozenset(
-    {
-        "BETTER_AUTH_SECRET",
-        "DATABASE_URL",
-        "VERIREEL_CRON_SECRET",
-        "VERIREEL_SECRETS_MASTER_KEY",
-        "VERIREEL_SMOKE_MAINTENANCE_SECRET",
-    }
-)
-
-
-def _expected_preview_slug(anchor_pr_number: int) -> str:
-    return f"pr-{anchor_pr_number}"
 
 
 def _build_preview_runtime_identity(
     *,
-    request: "VeriReelPreviewRefreshRequest",
+    request: "PostgresPreviewRefreshRequest",
     preview_id: str = "",
     preview_generation_id: str = "",
     deployed_at: str = "",
-    product: str = "verireel",
+    product: str,
 ) -> RuntimeIdentity:
     return RuntimeIdentity(
         product=product,
@@ -92,72 +85,78 @@ def _build_preview_runtime_identity(
     )
 
 
-class VeriReelPreviewRefreshRequest(BaseModel):
+class PostgresPreviewRefreshRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    context: str = "verireel-testing"
-    anchor_repo: str = "verireel"
+    context: str
+    anchor_repo: str
     anchor_pr_number: int = Field(ge=1)
     anchor_pr_url: str
     anchor_head_sha: str
     preview_slug: str
+    slug_template: str = snapshot_protocol_default("pr-{number}")
     preview_url: str = ""
     image_reference: str
     timeout_seconds: int = Field(default=DEFAULT_PREVIEW_TIMEOUT_SECONDS, ge=1)
 
     @model_validator(mode="after")
-    def _validate_request(self) -> "VeriReelPreviewRefreshRequest":
+    def _validate_request(self) -> "PostgresPreviewRefreshRequest":
         if not self.context.strip():
-            raise ValueError("VeriReel preview refresh requires context.")
+            raise ValueError("PostgreSQL preview refresh requires context.")
         if not self.anchor_repo.strip():
-            raise ValueError("VeriReel preview refresh requires anchor_repo.")
+            raise ValueError("PostgreSQL preview refresh requires anchor_repo.")
         if not self.anchor_pr_url.strip():
-            raise ValueError("VeriReel preview refresh requires anchor_pr_url.")
+            raise ValueError("PostgreSQL preview refresh requires anchor_pr_url.")
         if not self.anchor_head_sha.strip():
-            raise ValueError("VeriReel preview refresh requires anchor_head_sha.")
+            raise ValueError("PostgreSQL preview refresh requires anchor_head_sha.")
         if not self.preview_slug.strip():
-            raise ValueError("VeriReel preview refresh requires preview_slug.")
-        if self.preview_slug.strip() != _expected_preview_slug(self.anchor_pr_number):
+            raise ValueError("PostgreSQL preview refresh requires preview_slug.")
+        if self.preview_slug.strip() != self.slug_template.strip().replace(
+            "{number}", str(self.anchor_pr_number)
+        ):
             raise ValueError(
-                "VeriReel preview refresh requires preview_slug to match anchor_pr_number."
+                "PostgreSQL preview refresh requires preview_slug to match anchor_pr_number."
             )
         if not self.image_reference.strip():
-            raise ValueError("VeriReel preview refresh requires image_reference.")
+            raise ValueError("PostgreSQL preview refresh requires image_reference.")
         if self.preview_url.strip():
             _preview_url_host(self.preview_url)
         return self
 
 
-class VeriReelPreviewDestroyRequest(BaseModel):
+class PostgresPreviewDestroyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    context: str = "verireel-testing"
-    anchor_repo: str = "verireel"
+    context: str
+    anchor_repo: str
     anchor_pr_number: int = Field(ge=1)
     preview_slug: str
+    slug_template: str = snapshot_protocol_default("pr-{number}")
     destroy_reason: str
     timeout_seconds: int = Field(default=DEFAULT_PREVIEW_TIMEOUT_SECONDS, ge=1)
 
     @model_validator(mode="after")
-    def _validate_request(self) -> "VeriReelPreviewDestroyRequest":
+    def _validate_request(self) -> "PostgresPreviewDestroyRequest":
         if not self.context.strip():
-            raise ValueError("VeriReel preview destroy requires context.")
+            raise ValueError("PostgreSQL preview destroy requires context.")
         if not self.anchor_repo.strip():
-            raise ValueError("VeriReel preview destroy requires anchor_repo.")
+            raise ValueError("PostgreSQL preview destroy requires anchor_repo.")
         if not self.preview_slug.strip():
-            raise ValueError("VeriReel preview destroy requires preview_slug.")
-        if self.preview_slug.strip() != _expected_preview_slug(self.anchor_pr_number):
+            raise ValueError("PostgreSQL preview destroy requires preview_slug.")
+        if self.preview_slug.strip() != self.slug_template.strip().replace(
+            "{number}", str(self.anchor_pr_number)
+        ):
             raise ValueError(
-                "VeriReel preview destroy requires preview_slug to match anchor_pr_number."
+                "PostgreSQL preview destroy requires preview_slug to match anchor_pr_number."
             )
         if not self.destroy_reason.strip():
-            raise ValueError("VeriReel preview destroy requires destroy_reason.")
+            raise ValueError("PostgreSQL preview destroy requires destroy_reason.")
         return self
 
 
-class VeriReelPreviewRefreshResult(BaseModel):
+class PostgresPreviewRefreshResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     refresh_status: Literal["pass", "fail"]
@@ -170,15 +169,15 @@ class VeriReelPreviewRefreshResult(BaseModel):
     error_message: str = ""
 
 
-class VeriReelPreviewRefreshConfigError(click.ClickException):
-    """Public-safe preflight/configuration failure for preview refresh."""
+class PostgresPreviewRefreshConfigError(click.ClickException):
+    pass
 
 
-class VeriReelPreviewRefreshTransportError(click.ClickException):
-    """Public-safe backend/provider failure for preview refresh."""
+class PostgresPreviewRefreshTransportError(click.ClickException):
+    pass
 
 
-class VeriReelPreviewDestroyResult(BaseModel):
+class PostgresPreviewDestroyResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     destroy_status: Literal["pass", "fail"]
@@ -188,19 +187,6 @@ class VeriReelPreviewDestroyResult(BaseModel):
     application_id: str
     preview_url: str
     error_message: str = ""
-
-
-class VeriReelPreviewInventoryRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    context: str = "verireel-testing"
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "VeriReelPreviewInventoryRequest":
-        if not self.context.strip():
-            raise ValueError("VeriReel preview inventory requires context.")
-        return self
 
 
 class _DatabaseParts(BaseModel):
@@ -213,21 +199,56 @@ class _DatabaseParts(BaseModel):
     password: str
 
 
-def _preview_app_name(preview_slug: str, prefix: str = PREVIEW_APP_PREFIX) -> str:
+class _PreviewNamespaceStore(Protocol):
+    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+    def list_preview_records(self) -> tuple[PreviewRecord, ...]: ...
+
+
+def _require_unique_preview_namespaces(
+    record_store: object | None, profile: LaunchplaneProductProfileRecord
+) -> None:
+    if not callable(getattr(record_store, "list_product_profile_records", None)):
+        raise PostgresPreviewRefreshConfigError(
+            "Preview namespace ownership requires product profile inventory."
+        )
+    if not callable(getattr(record_store, "list_preview_records", None)):
+        raise PostgresPreviewRefreshConfigError(
+            "Preview namespace ownership requires preview inventory."
+        )
+    store = cast(_PreviewNamespaceStore, record_store)
+    profiles = store.list_product_profile_records()
+    if not any(other.product == profile.product for other in profiles):
+        raise PostgresPreviewRefreshConfigError(
+            "Preview namespace ownership requires the stored product profile."
+        )
+    try:
+        require_unique_preview_namespaces(
+            profile,
+            profiles,
+            retained_contexts={
+                record.context
+                for record in store.list_preview_records()
+                if record.state != "destroyed"
+            },
+        )
+    except ValueError as error:
+        raise PostgresPreviewRefreshConfigError(str(error)) from error
+
+
+def _preview_app_name(preview_slug: str, prefix: str) -> str:
     return f"{prefix}-{preview_slug}"
 
 
-def _preview_application_name(
-    preview_slug: str, prefix: str = PREVIEW_APP_PREFIX, suffix: str = "-app"
-) -> str:
+def _preview_application_name(preview_slug: str, prefix: str, suffix: str = "") -> str:
     return f"{_preview_app_name(preview_slug, prefix)}{suffix}"
 
 
-def _preview_database_identifiers(
-    preview_slug: str, prefix: str = PREVIEW_DATABASE_PREFIX
-) -> tuple[str, str]:
+def _preview_database_identifiers(preview_slug: str, prefix: str) -> tuple[str, str]:
     normalized_slug = preview_slug.strip().lower().replace("-", "_")
-    identifier = f"{prefix}{normalized_slug}"[:63]
+    identifier = f"{prefix}{normalized_slug}"
+    if len(identifier.encode()) > 63:
+        suffix = hashlib.sha256(identifier.encode()).hexdigest()[:12]
+        identifier = f"{identifier.encode()[:50].decode(errors='ignore')}_{suffix}"
     return identifier, identifier
 
 
@@ -243,13 +264,13 @@ def _preview_url_host(preview_url: str) -> str:
 def _preview_url_from_base_url(*, preview_slug: str, preview_base_url: str) -> str:
     parsed = urlparse(str(preview_base_url).strip())
     if parsed.scheme not in {"http", "https"}:
-        raise VeriReelPreviewRefreshConfigError(
+        raise PostgresPreviewRefreshConfigError(
             f"{PREVIEW_BASE_URL_ENV_KEY} must use http or https."
         )
     if not parsed.hostname:
-        raise VeriReelPreviewRefreshConfigError(f"{PREVIEW_BASE_URL_ENV_KEY} requires a hostname.")
+        raise PostgresPreviewRefreshConfigError(f"{PREVIEW_BASE_URL_ENV_KEY} requires a hostname.")
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-        raise VeriReelPreviewRefreshConfigError(
+        raise PostgresPreviewRefreshConfigError(
             f"{PREVIEW_BASE_URL_ENV_KEY} must be a root URL without path, query, or fragment."
         )
     return parsed._replace(
@@ -268,14 +289,14 @@ def _resolve_preview_base_url(*, control_plane_root: Path, context_name: str) ->
     )
     preview_base_url = str(resolved_values.get(PREVIEW_BASE_URL_ENV_KEY) or "").strip()
     if not preview_base_url:
-        raise VeriReelPreviewRefreshConfigError(
+        raise PostgresPreviewRefreshConfigError(
             f"Missing {PREVIEW_BASE_URL_ENV_KEY} in Launchplane runtime-environment records for {context_name}."
         )
     return preview_base_url
 
 
 def _resolve_preview_url(
-    *, control_plane_root: Path, request: VeriReelPreviewRefreshRequest
+    *, control_plane_root: Path, request: PostgresPreviewRefreshRequest
 ) -> str:
     if request.preview_url.strip():
         return request.preview_url.strip()
@@ -289,7 +310,7 @@ def _resolve_preview_url(
 
 
 def _resolve_preview_url_for_destroy(
-    *, control_plane_root: Path, request: VeriReelPreviewDestroyRequest
+    *, control_plane_root: Path, request: PostgresPreviewDestroyRequest
 ) -> str:
     return _preview_url_from_base_url(
         preview_slug=request.preview_slug.strip(),
@@ -300,32 +321,26 @@ def _resolve_preview_url_for_destroy(
     )
 
 
-def _preview_domain_from_url(preview_url: str) -> str:
-    host = _preview_url_host(preview_url)
-    if "." not in host:
-        raise ValueError("Preview URL hostname must include a preview domain suffix.")
-    return host.split(".", 1)[1]
-
-
 def _parse_database_url(database_url: str) -> _DatabaseParts:
+    _validate_database_url_query(database_url)
     parsed = urlparse(database_url.strip())
-    if not parsed.scheme:
-        raise VeriReelPreviewRefreshConfigError(
-            "Preview template DATABASE_URL must include a scheme."
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        raise PostgresPreviewRefreshConfigError(
+            "Preview template DATABASE_URL must use PostgreSQL."
         )
     if not parsed.hostname:
-        raise VeriReelPreviewRefreshConfigError(
+        raise PostgresPreviewRefreshConfigError(
             "Preview template DATABASE_URL must include a hostname."
         )
     database_name = parsed.path.lstrip("/").strip()
     if not database_name:
-        raise VeriReelPreviewRefreshConfigError(
+        raise PostgresPreviewRefreshConfigError(
             "Preview template DATABASE_URL must include a database name."
         )
     username = unquote(parsed.username or "").strip()
     password = unquote(parsed.password or "")
     if not username:
-        raise VeriReelPreviewRefreshConfigError(
+        raise PostgresPreviewRefreshConfigError(
             "Preview template DATABASE_URL must include a username."
         )
     return _DatabaseParts(
@@ -337,21 +352,25 @@ def _parse_database_url(database_url: str) -> _DatabaseParts:
     )
 
 
-def _verireel_template_runtime_secret_keys(
-    template_env_map: dict[str, str],
-) -> tuple[str, ...]:
-    # Template secrets the preview does not generate for itself. Previews run unmerged
-    # code, so these are dropped rather than copied from the testing lane.
-    required_keys: list[str] = []
-    for key, value in template_env_map.items():
-        normalized_key = key.strip()
-        if not normalized_key or not str(value).strip():
-            continue
-        if normalized_key in _PREVIEW_REFRESH_GENERATED_ENV_KEYS:
-            continue
-        if looks_like_credential(normalized_key, str(value)):
-            required_keys.append(normalized_key)
-    return tuple(dict.fromkeys(required_keys))
+def _validate_database_url_query(database_url: str) -> None:
+    identity_keys = {
+        "user",
+        "password",
+        "dbname",
+        "host",
+        "hostaddr",
+        "port",
+        "passfile",
+        "service",
+    }
+    for key, value in parse_qsl(urlparse(database_url).query, keep_blank_values=True):
+        if (
+            key.lower() in identity_keys
+            or runtime_platform_credentials.plain_setting_looks_like_credential(key, value)
+        ):
+            raise PostgresPreviewRefreshConfigError(
+                "PostgreSQL URL query cannot override connection identity or carry credentials; use the URI authority/path and managed template credentials."
+            )
 
 
 def _build_admin_database_url(database_url: str) -> str:
@@ -368,12 +387,15 @@ def _build_admin_database_url(database_url: str) -> str:
 
 
 def _build_preview_database_url(
-    *, host: str, port: int, database_name: str, role_name: str, password: str
+    *, template_database_url: str, database_name: str, role_name: str, password: str
 ) -> str:
-    encoded_role = quote(role_name, safe="")
-    encoded_password = quote(password, safe="")
-    encoded_database = quote(database_name, safe="")
-    return f"postgresql://{encoded_role}:{encoded_password}@{host}:{port}/{encoded_database}?schema=public"
+    _validate_database_url_query(template_database_url)
+    parsed = urlparse(template_database_url)
+    authority = parsed.netloc.rpartition("@")[2]
+    userinfo = f"{quote(role_name, safe='')}:{quote(password, safe='')}"
+    return parsed._replace(
+        netloc=f"{userinfo}@{authority}", path=f"/{quote(database_name, safe='')}"
+    ).geturl()
 
 
 def _random_password(length: int = 32) -> str:
@@ -402,13 +424,52 @@ def _resolve_preview_secret(
     return generate()
 
 
+def _render_postgres_preview_env(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    template_env_map: dict[str, str],
+    existing_env_map: dict[str, str],
+    database_parts: _DatabaseParts,
+    preview_url: str,
+    runtime_identity: RuntimeIdentity,
+    preview_environment: control_plane_runtime_environments.SiteRuntimeEnvironment,
+) -> str:
+    env_text = _render_preview_env_text(
+        profile=profile,
+        template_application={
+            "env": dokploy_api.render_dokploy_env_text_with_overrides("", updates=template_env_map)
+        },
+        preview_url=preview_url,
+        runtime_identity=runtime_identity,
+        preview_environment=preview_environment,
+    )
+    updates = dokploy_api.parse_dokploy_env_text(env_text)
+    for key, encoding in profile.preview.generated_secret_env.items():
+        updates[key] = _resolve_preview_secret(
+            existing_env_map=existing_env_map,
+            template_env_map=template_env_map,
+            key=key,
+            generate=_random_base64_secret if encoding == "base64" else _random_urlsafe_secret,
+        )
+    updates["DATABASE_URL"] = _build_preview_database_url(
+        template_database_url=template_env_map["DATABASE_URL"],
+        database_name=database_parts.database,
+        role_name=database_parts.username,
+        password=database_parts.password,
+    )
+    runtime_platform_credentials.refuse_platform_credentials(
+        updates, target=f"{profile.product} preview", source="preview environment settings"
+    )
+    return dokploy_api.render_dokploy_env_text_with_overrides("", updates=updates)
+
+
 def _template_application_payload(
     *,
     control_plane_root: Path,
     host: str,
     token: str,
-    template_context: str = "verireel",
-    template_instance: str = "testing",
+    template_context: str,
+    template_instance: str,
 ) -> tuple[dokploy_source.DokployTargetDefinition, JsonObject]:
     try:
         source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
@@ -416,24 +477,24 @@ def _template_application_payload(
         )
     except click.ClickException as exc:
         if _is_source_of_truth_backend_failure(exc):
-            raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
-        raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
+            raise PostgresPreviewRefreshTransportError(str(exc)) from exc
+        raise PostgresPreviewRefreshConfigError(str(exc)) from exc
     target_definition = dokploy_source.find_dokploy_target_definition(
         source_of_truth,
         context_name=template_context,
         instance_name=template_instance,
     )
     if target_definition is None:
-        raise VeriReelPreviewRefreshConfigError(
+        raise PostgresPreviewRefreshConfigError(
             f"No Dokploy target definition found for {template_context}/{template_instance}."
         )
     if target_definition.target_type != "application":
-        raise VeriReelPreviewRefreshConfigError(
-            "VeriReel preview driver requires the testing target to be a Dokploy application."
+        raise PostgresPreviewRefreshConfigError(
+            "PostgreSQL preview driver requires the testing target to be a Dokploy application."
         )
     if not target_definition.target_id.strip():
-        raise VeriReelPreviewRefreshConfigError(
-            "VeriReel testing target requires a Dokploy target_id before preview execution."
+        raise PostgresPreviewRefreshConfigError(
+            "PostgreSQL testing target requires a Dokploy target_id before preview execution."
         )
     try:
         payload = dokploy_api.fetch_dokploy_target_payload(
@@ -444,23 +505,22 @@ def _template_application_payload(
         )
     except click.ClickException as exc:
         if _is_dokploy_provider_failure(exc):
-            raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
-        raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
+            raise PostgresPreviewRefreshTransportError(str(exc)) from exc
+        raise PostgresPreviewRefreshConfigError(str(exc)) from exc
     return target_definition, payload
 
 
 def _declared_template_options(
-    profile: LaunchplaneProductProfileRecord | None,
+    profile: LaunchplaneProductProfileRecord, *, for_destroy: bool = False
 ) -> dict[str, str]:
-    if profile is None:
-        return {}
     if (
         profile.driver_id != "generic-web"
-        or profile.preview.transport_extension != "verireel-postgres"
+        or profile.preview.transport_extension
+        not in (POSTGRES_PREVIEW_TRANSPORTS if for_destroy else {"postgres"})
         or not profile.preview.transport_database_prefix
         or not profile.preview.app_name_prefix
     ):
-        raise VeriReelPreviewRefreshConfigError(
+        raise PostgresPreviewRefreshConfigError(
             "Declared preview transport configuration is incomplete."
         )
     template = next(
@@ -468,7 +528,11 @@ def _declared_template_options(
         None,
     )
     if template is None:
-        raise VeriReelPreviewRefreshConfigError("Declared preview transport has no template lane.")
+        raise PostgresPreviewRefreshConfigError("Declared preview transport has no template lane.")
+    if template.instance != "testing":
+        raise PostgresPreviewRefreshConfigError(
+            "PostgreSQL previews require a testing template lane."
+        )
     return {"template_context": template.context, "template_instance": template.instance}
 
 
@@ -495,7 +559,6 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
         token=token,
         path="/api/project.all",
     )
-    # A match or absence is authoritative only after the full inventory validates.
     for application in tuple(dokploy_api.iter_dokploy_applications(raw_projects)):
         if str(application.get("name") or "").strip() == application_name:
             application_id = str(
@@ -546,7 +609,7 @@ def _ensure_application(
     server_id = str(template_application.get("serverId") or "").strip()
     if not environment_id:
         raise click.ClickException(
-            "VeriReel preview driver could not resolve the Dokploy testing environmentId."
+            "PostgreSQL preview driver could not resolve the Dokploy testing environmentId."
         )
     application_payload: JsonObject = {
         "name": application_name,
@@ -570,85 +633,6 @@ def _ensure_application(
             f"Dokploy did not return an applicationId for preview app {application_name!r}."
         )
     return _fetch_application(host=host, token=token, application_id=created_application_id)
-
-
-def _configure_application(
-    *,
-    host: str,
-    token: str,
-    application: JsonObject,
-    template_application: JsonObject,
-    image_reference: str,
-    env_text: str,
-) -> None:
-    application_id = str(application.get("applicationId") or "").strip()
-    if not application_id:
-        raise click.ClickException("Preview application payload is missing applicationId.")
-    dokploy_api.refuse_app_runtime_env_write(
-        env_text=env_text,
-        current_env_text=str(application.get("env") or ""),
-        target=f"preview application {application_id}",
-    )
-    dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/application.update",
-        method="POST",
-        payload={
-            "applicationId": application_id,
-            "description": str(application.get("description") or "").strip(),
-            "sourceType": "docker",
-            "autoDeploy": True,
-            "replicas": template_application.get("replicas"),
-            "endpointSpecSwarm": application_endpoint_spec(template_application),
-            "createEnvFile": template_application.get("createEnvFile"),
-            "triggerType": template_application.get("triggerType"),
-            "enabled": template_application.get("enabled"),
-        },
-    )
-    dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/application.saveBuildType",
-        method="POST",
-        payload={
-            "applicationId": application_id,
-            "buildType": template_application.get("buildType"),
-            "dockerfile": template_application.get("dockerfile"),
-            "dockerContextPath": template_application.get("dockerContextPath"),
-            "dockerBuildStage": template_application.get("dockerBuildStage"),
-            "herokuVersion": template_application.get("herokuVersion"),
-            "railpackVersion": template_application.get("railpackVersion"),
-            "publishDirectory": template_application.get("publishDirectory"),
-            "isStaticSpa": template_application.get("isStaticSpa"),
-        },
-    )
-    dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/application.saveDockerProvider",
-        method="POST",
-        payload={
-            "applicationId": application_id,
-            "dockerImage": image_reference,
-            "username": template_application.get("username"),
-            "password": template_application.get("password"),
-            "registryUrl": template_application.get("registryUrl"),
-        },
-    )
-    dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/application.saveEnvironment",
-        method="POST",
-        payload={
-            "applicationId": application_id,
-            "env": env_text,
-            "buildArgs": template_application.get("buildArgs"),
-            "buildSecrets": template_application.get("buildSecrets"),
-            "createEnvFile": template_application.get("createEnvFile"),
-        },
-    )
 
 
 def _restore_existing_application(
@@ -687,85 +671,6 @@ def _restore_existing_application(
         target_id=application_id,
         before_key=dokploy_api.deployment_key(latest_before),
         timeout_seconds=timeout_seconds,
-    )
-
-
-def _ensure_domain(
-    *, host: str, token: str, application_id: str, preview_host: str
-) -> tuple[str, tuple[str, ...]]:
-    raw_domains = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/domain.byApplicationId",
-        query={"applicationId": application_id},
-    )
-    domains = raw_domains if isinstance(raw_domains, list) else []
-    existing: JsonObject | None = None
-    stale_domain_ids: list[str] = []
-    for raw_domain in domains:
-        domain = dokploy_api.as_json_object(raw_domain)
-        if domain is None:
-            continue
-        domain_host = str(domain.get("host") or "").strip()
-        domain_id = str(domain.get("domainId") or "").strip()
-        if domain_host == preview_host and domain_id:
-            existing = domain
-            continue
-        if domain_id:
-            stale_domain_ids.append(domain_id)
-    payload: JsonObject = {
-        "host": preview_host,
-        "path": "/",
-        "internalPath": "/",
-        "port": 3000,
-        "https": True,
-        "applicationId": application_id,
-        "certificateType": "none",
-        "customCertResolver": None,
-        "composeId": None,
-        "serviceName": None,
-        "domainType": "application",
-        "previewDeploymentId": None,
-        "stripPath": False,
-    }
-    if existing is not None:
-        existing_domain_id = str(existing.get("domainId") or "").strip()
-        dokploy_api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/domain.update",
-            method="POST",
-            payload={"domainId": existing_domain_id, **payload},
-        )
-        return "", tuple(stale_domain_ids)
-    created = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/domain.create",
-        method="POST",
-        payload=payload,
-    )
-    created_domain = dokploy_api.as_json_object(created)
-    return str((created_domain or {}).get("domainId") or "").strip(), tuple(stale_domain_ids)
-
-
-def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
-    dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/domain.delete",
-        method="POST",
-        payload={"domainId": domain_id},
-    )
-
-
-def _delete_application(*, host: str, token: str, application_id: str) -> None:
-    dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/application.delete",
-        method="POST",
-        payload={"applicationId": application_id},
     )
 
 
@@ -994,65 +899,6 @@ def _build_preview_database_command(
     )
 
 
-def _wait_for_preview_health(
-    *,
-    preview_url: str,
-    timeout_seconds: int,
-    expected_runtime_identity: RuntimeIdentity,
-) -> RuntimeIdentity:
-    health_url = f"{preview_url.rstrip('/')}/api/health"
-    started_at = time.monotonic()
-    request = Request(
-        health_url,
-        headers={
-            "Accept": "application/json",
-            "Cache-Control": "no-store",
-        },
-    )
-    last_detail = "health endpoint did not return matching runtime identity"
-    while time.monotonic() - started_at <= timeout_seconds:
-        remaining_seconds = max(1, timeout_seconds - int(time.monotonic() - started_at))
-        try:
-            with urlopen(request, timeout=min(15, remaining_seconds)) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            if not isinstance(payload, dict):
-                last_detail = "health endpoint returned non-object JSON"
-            elif payload.get("ok") is not True:
-                last_detail = "health endpoint did not report ok=true"
-            else:
-                status, detail, observed = health_payload_runtime_identity_status(
-                    expected=expected_runtime_identity,
-                    payload=payload,
-                    json_parse_failed=False,
-                )
-                if status == "match" and observed is not None:
-                    return observed
-                if status == "mismatch" and _runtime_identity_mismatch_is_hard(detail):
-                    raise click.ClickException(
-                        "Preview runtime identity did not match the expected deployment identity: "
-                        f"{detail}."
-                    )
-                last_detail = detail
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError):
-            last_detail = "health endpoint request failed or returned invalid JSON"
-        elapsed_seconds = time.monotonic() - started_at
-        if elapsed_seconds >= timeout_seconds:
-            break
-        sleep_seconds = min(5, timeout_seconds - elapsed_seconds)
-        time.sleep(sleep_seconds)
-    raise click.ClickException(
-        f"Timed out waiting for {health_url} to report the expected runtime identity: {last_detail}."
-    )
-
-
-def _runtime_identity_mismatch_is_hard(detail: str) -> bool:
-    prefix = "Runtime identity mismatched fields: "
-    if not detail.startswith(prefix):
-        return False
-    fields = {field.strip() for field in detail.removeprefix(prefix).split(",") if field.strip()}
-    return bool(fields & _HARD_RUNTIME_IDENTITY_FIELDS)
-
-
 def _resolve_existing_preview_database(
     existing_application: JsonObject | None,
     *,
@@ -1061,7 +907,7 @@ def _resolve_existing_preview_database(
     template_database: _DatabaseParts,
 ) -> _DatabaseParts | None:
     if database_name == template_database.database or role_name == template_database.username:
-        raise VeriReelPreviewRefreshConfigError(
+        raise PostgresPreviewRefreshConfigError(
             "Preview database ownership is unverified; no database or application changes allowed."
         )
     if existing_application is None:
@@ -1080,25 +926,26 @@ def _resolve_existing_preview_database(
         or database.username != role_name
         or (database.host, database.port) != (template_database.host, template_database.port)
     ):
-        raise VeriReelPreviewRefreshConfigError(
+        raise PostgresPreviewRefreshConfigError(
             "Preview database ownership is unverified; no database or application changes allowed."
         )
     return database
 
 
-def execute_verireel_preview_refresh(
+def execute_postgres_preview_refresh(
     *,
     control_plane_root: Path,
-    request: VeriReelPreviewRefreshRequest,
+    request: PostgresPreviewRefreshRequest,
     preview_id: str = "",
     preview_generation_id: str = "",
     record_store: object | None = None,
-    profile: LaunchplaneProductProfileRecord | None = None,
-) -> VeriReelPreviewRefreshResult:
+    profile: LaunchplaneProductProfileRecord,
+) -> PostgresPreviewRefreshResult:
+    _require_unique_preview_namespaces(record_store, profile)
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     except click.ClickException as exc:
-        raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
+        raise PostgresPreviewRefreshConfigError(str(exc)) from exc
     template_options = _declared_template_options(profile)
     template_target, template_application = _template_application_payload(
         control_plane_root=control_plane_root,
@@ -1111,43 +958,36 @@ def execute_verireel_preview_refresh(
     )
     template_database_url = str(template_env_map.get("DATABASE_URL") or "").strip()
     if not template_database_url:
-        raise VeriReelPreviewRefreshConfigError(
-            "VeriReel testing template application is missing DATABASE_URL."
+        raise PostgresPreviewRefreshConfigError(
+            "PostgreSQL testing template application is missing DATABASE_URL."
         )
     try:
-        # The preview copies the whole template env, so a platform credential
-        # there would reach unmerged pull-request code.
         runtime_platform_credentials.refuse_platform_credentials(
             template_env_map,
-            target=f"VeriReel preview {request.preview_slug}",
+            target=f"PostgreSQL preview {request.preview_slug}",
             source=f"the {template_target.context}/{template_target.instance} template application env",
         )
     except runtime_platform_credentials.PlatformCredentialRefusedError as exc:
-        raise VeriReelPreviewRefreshConfigError(str(exc.message)) from exc
+        raise PostgresPreviewRefreshConfigError(str(exc.message)) from exc
     template_database = _parse_database_url(template_database_url)
 
     started_at = utc_now_timestamp()
     preview_url = _resolve_preview_url(control_plane_root=control_plane_root, request=request)
-    app_prefix = profile.preview.app_name_prefix if profile is not None else PREVIEW_APP_PREFIX
-    database_prefix = (
-        profile.preview.transport_database_prefix
-        if profile is not None
-        else PREVIEW_DATABASE_PREFIX
-    )
+    app_prefix = profile.preview.app_name_prefix
+    database_prefix = profile.preview.transport_database_prefix
     application_name = _preview_application_name(
         request.preview_slug,
         app_prefix,
-        profile.preview.app_name_suffix if profile is not None else "-app",
+        profile.preview.app_name_suffix,
     )
     app_name = _preview_app_name(request.preview_slug, app_prefix)
     preview_host = _preview_url_host(preview_url)
-    preview_domain = _preview_domain_from_url(preview_url)
     try:
         existing_application = _find_application_by_name(
             host=host, token=token, application_name=application_name
         )
     except click.ClickException as exc:
-        raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
+        raise PostgresPreviewRefreshTransportError(str(exc)) from exc
     existing_snapshot = None
     if existing_application is not None:
         application_id = str(existing_application.get("applicationId") or "").strip()
@@ -1157,8 +997,8 @@ def execute_verireel_preview_refresh(
             )
         except click.ClickException as exc:
             if _is_dokploy_provider_failure(exc):
-                raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
-            raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
+                raise PostgresPreviewRefreshTransportError(str(exc)) from exc
+            raise PostgresPreviewRefreshConfigError(str(exc)) from exc
     if existing_snapshot is None:
         memory_capacity.require_preview_host_memory_capacity(
             host=host,
@@ -1184,14 +1024,60 @@ def execute_verireel_preview_refresh(
         password=_random_password(),
     )
     created_preview_database = existing_database is None
-    application_id = ""
     created_application_id = ""
     created_domain_id = ""
-    stale_domain_ids: tuple[str, ...] = ()
     migration_started = False
     lifecycle: DokployApplicationLifecycle | None = None
     image_effect_attempted = False
     previous_application_restored = False
+
+    expected_runtime_identity = _build_preview_runtime_identity(
+        request=request,
+        preview_id=preview_id,
+        preview_generation_id=preview_generation_id,
+        product=profile.product,
+    )
+    required_keys = (*profile.preview.required_template_env_keys, *profile.preview.copied_env_keys)
+    if any(not template_env_map.get(key, "").strip() for key in required_keys):
+        raise PostgresPreviewRefreshConfigError(
+            "PostgreSQL testing template is missing declared required/copied environment keys."
+        )
+    try:
+        preview_environment = (
+            control_plane_runtime_environments.resolve_preview_runtime_environment_from_store(
+                record_store=cast(
+                    control_plane_runtime_environments.SiteRuntimeEnvironmentStore, record_store
+                ),
+                context_name=profile.preview.context,
+                template_values={},
+            )
+        )
+        template_lane = next(
+            lane for lane in profile.lanes if lane.instance == profile.preview.template_instance
+        )
+        _enforce_preview_copied_runtime_key_safety(
+            record_store=cast(GenericWebPreviewProfileStore, record_store),
+            profile=profile,
+            template_lane=template_lane,
+            template_application=template_application,
+            preview_slug=request.preview_slug,
+            preview_environment=preview_environment,
+            check_credential_values=True,
+        )
+    except click.ClickException as error:
+        raise PostgresPreviewRefreshConfigError(str(error)) from error
+    try:
+        env_text = _render_postgres_preview_env(
+            profile=profile,
+            template_env_map=template_env_map,
+            existing_env_map=existing_env_map,
+            database_parts=database_parts,
+            preview_url=preview_url,
+            runtime_identity=expected_runtime_identity,
+            preview_environment=preview_environment,
+        )
+    except runtime_platform_credentials.PlatformCredentialRefusedError as error:
+        raise PostgresPreviewRefreshConfigError(error.message) from error
 
     try:
         admin_database_url = _build_admin_database_url(template_database_url)
@@ -1209,54 +1095,6 @@ def execute_verireel_preview_refresh(
             ),
             timeout_seconds=request.timeout_seconds,
         )
-        expected_runtime_identity = _build_preview_runtime_identity(
-            request=request,
-            preview_id=preview_id,
-            preview_generation_id=preview_generation_id,
-            product=profile.product if profile is not None else "verireel",
-        )
-        env_text = dokploy_api.render_dokploy_env_text_with_overrides(
-            str(template_application.get("env") or ""),
-            removals=_verireel_template_runtime_secret_keys(template_env_map),
-            updates={
-                "VERIREEL_APP_URL": preview_url,
-                "BETTER_AUTH_URL": preview_url,
-                "DOKPLOY_PREVIEW_DOMAIN": preview_domain,
-                "NEXT_PUBLIC_DOKPLOY_PREVIEW_DOMAIN": preview_domain,
-                "DATABASE_URL": _build_preview_database_url(
-                    host=database_parts.host,
-                    port=database_parts.port,
-                    database_name=database_parts.database,
-                    role_name=database_parts.username,
-                    password=database_parts.password,
-                ),
-                "BETTER_AUTH_SECRET": _resolve_preview_secret(
-                    existing_env_map=existing_env_map,
-                    key="BETTER_AUTH_SECRET",
-                    generate=_random_urlsafe_secret,
-                    template_env_map=template_env_map,
-                ),
-                "VERIREEL_SECRETS_MASTER_KEY": _resolve_preview_secret(
-                    existing_env_map=existing_env_map,
-                    key="VERIREEL_SECRETS_MASTER_KEY",
-                    generate=_random_base64_secret,
-                    template_env_map=template_env_map,
-                ),
-                "VERIREEL_CRON_SECRET": _resolve_preview_secret(
-                    existing_env_map=existing_env_map,
-                    key="VERIREEL_CRON_SECRET",
-                    generate=_random_urlsafe_secret,
-                    template_env_map=template_env_map,
-                ),
-                "VERIREEL_SMOKE_MAINTENANCE_SECRET": _resolve_preview_secret(
-                    existing_env_map=existing_env_map,
-                    key="VERIREEL_SMOKE_MAINTENANCE_SECRET",
-                    generate=_random_urlsafe_secret,
-                    template_env_map=template_env_map,
-                ),
-                **runtime_identity_env(expected_runtime_identity),
-            },
-        )
         application = _ensure_application(
             host=host,
             token=token,
@@ -1273,14 +1111,12 @@ def execute_verireel_preview_refresh(
             host=host,
             token=token,
             application_id=application_id,
-            product=profile.product if profile is not None else "",
+            product=profile.product,
             context=request.context,
             instance=request.preview_slug,
             artifact_id=request.image_reference,
             source_git_ref=request.anchor_head_sha,
-            extensions=profile.preview.generic_web_extensions
-            if profile is not None
-            else GenericWebLaneExtensions(),
+            extensions=profile.preview.generic_web_extensions,
         )
         lifecycle.capture()
         lifecycle.prepare()
@@ -1297,6 +1133,9 @@ def execute_verireel_preview_refresh(
             token=token,
             application_id=application_id,
             preview_host=preview_host,
+            runtime_port=profile.runtime_port,
+            certificate_type=profile.preview.domain_certificate_type,
+            https=urlparse(preview_url).scheme == "https",
         )
         latest_before = dokploy_api.latest_deployment_for_target(
             host=host,
@@ -1326,7 +1165,12 @@ def execute_verireel_preview_refresh(
             preview_url=preview_url,
             timeout_seconds=request.timeout_seconds,
             expected_runtime_identity=expected_runtime_identity,
+            health_path=profile.health_path,
         )
+        if observed_runtime_identity is None:
+            raise click.ClickException(
+                "Preview health did not return its observed runtime identity."
+            )
         lifecycle.complete()
         for stale_domain_id in stale_domain_ids:
             _delete_domain(host=host, token=token, domain_id=stale_domain_id)
@@ -1383,7 +1227,7 @@ def execute_verireel_preview_refresh(
         message = str(exc)
         if rollback_errors:
             message = f"{message}\n" + "\n".join(rollback_errors)
-        return VeriReelPreviewRefreshResult(
+        return PostgresPreviewRefreshResult(
             refresh_status="fail",
             refresh_started_at=started_at,
             refresh_finished_at=finished_at,
@@ -1395,9 +1239,7 @@ def execute_verireel_preview_refresh(
         )
 
     finished_at = utc_now_timestamp()
-    # The successful create/reuse and health probe already identify this application.
-    # A second inventory read cannot strengthen that proof and can lose the receipt.
-    return VeriReelPreviewRefreshResult(
+    return PostgresPreviewRefreshResult(
         refresh_status="pass",
         refresh_started_at=started_at,
         refresh_finished_at=finished_at,
@@ -1408,48 +1250,47 @@ def execute_verireel_preview_refresh(
     )
 
 
-def execute_verireel_preview_destroy(
+def execute_postgres_preview_destroy(
     *,
     control_plane_root: Path,
-    request: VeriReelPreviewDestroyRequest,
+    request: PostgresPreviewDestroyRequest,
     record_store: object | None = None,
-    profile: LaunchplaneProductProfileRecord | None = None,
-) -> VeriReelPreviewDestroyResult:
+    profile: LaunchplaneProductProfileRecord,
+) -> PostgresPreviewDestroyResult:
+    _require_unique_preview_namespaces(record_store, profile)
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     template_target, template_application = _template_application_payload(
         control_plane_root=control_plane_root,
         host=host,
         token=token,
-        **_declared_template_options(profile),
+        **_declared_template_options(profile, for_destroy=True),
     )
     template_env_map = dokploy_api.parse_dokploy_env_text(
         str(template_application.get("env") or "")
     )
     template_database_url = str(template_env_map.get("DATABASE_URL") or "").strip()
     if not template_database_url:
-        raise click.ClickException("VeriReel testing template application is missing DATABASE_URL.")
+        raise click.ClickException(
+            "PostgreSQL testing template application is missing DATABASE_URL."
+        )
 
     started_at = utc_now_timestamp()
     preview_url = _resolve_preview_url_for_destroy(
         control_plane_root=control_plane_root, request=request
     )
-    app_prefix = profile.preview.app_name_prefix if profile is not None else PREVIEW_APP_PREFIX
-    database_prefix = (
-        profile.preview.transport_database_prefix
-        if profile is not None
-        else PREVIEW_DATABASE_PREFIX
-    )
+    app_prefix = profile.preview.app_name_prefix
+    database_prefix = profile.preview.transport_database_prefix
     application_name = _preview_application_name(
         request.preview_slug,
         app_prefix,
-        profile.preview.app_name_suffix if profile is not None else "-app",
+        profile.preview.app_name_suffix,
     )
     try:
         application = _find_application_by_name(
             host=host, token=token, application_name=application_name
         )
     except click.ClickException as exc:
-        return VeriReelPreviewDestroyResult(
+        return PostgresPreviewDestroyResult(
             destroy_status="fail",
             destroy_started_at=started_at,
             destroy_finished_at=utc_now_timestamp(),
@@ -1484,7 +1325,7 @@ def execute_verireel_preview_destroy(
     if application_id:
         destroy_result = destroy_dokploy_preview_resource(
             record_store=record_store,
-            context=profile.preview.context if profile is not None else request.context,
+            context=profile.preview.context,
             instance=request.preview_slug,
             host=host,
             token=token,
@@ -1493,7 +1334,7 @@ def execute_verireel_preview_destroy(
         )
         cleanup_errors.extend(destroy_result.cleanup_errors)
         if cleanup_errors and cleanup_errors[0].startswith(f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"):
-            return VeriReelPreviewDestroyResult(
+            return PostgresPreviewDestroyResult(
                 destroy_status="fail",
                 destroy_started_at=started_at,
                 destroy_finished_at=utc_now_timestamp(),
@@ -1521,7 +1362,7 @@ def execute_verireel_preview_destroy(
 
     finished_at = utc_now_timestamp()
     if cleanup_errors:
-        return VeriReelPreviewDestroyResult(
+        return PostgresPreviewDestroyResult(
             destroy_status="fail",
             destroy_started_at=started_at,
             destroy_finished_at=finished_at,
@@ -1530,7 +1371,7 @@ def execute_verireel_preview_destroy(
             preview_url=preview_url,
             error_message="; ".join(cleanup_errors),
         )
-    return VeriReelPreviewDestroyResult(
+    return PostgresPreviewDestroyResult(
         destroy_status="pass",
         destroy_started_at=started_at,
         destroy_finished_at=finished_at,

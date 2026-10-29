@@ -239,6 +239,9 @@ def inspect_copy_runtime(spec, *, expected_instance):
         for mount in container.get('Mounts', []):
             if mount.get('Source'):
                 source_path = Path(mount['Source']).resolve(strict=False)
+                failure_state = Path.home().resolve(strict=True) / COPY_FAILURE_STATE_DIRECTORY
+                if failure_state.is_relative_to(source_path) or source_path.is_relative_to(failure_state):
+                    raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_STATE)
                 snapshot_state = Path.home().resolve(strict=True) / CLEAN_SNAPSHOT_STATE_DIRECTORY
                 if ((expected_instance == 'preview' or gen.get('clean_snapshot_enabled') or snapshot_state.exists())
                     and (snapshot_state.is_relative_to(source_path) or source_path.is_relative_to(snapshot_state))

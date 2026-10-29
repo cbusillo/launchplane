@@ -342,9 +342,6 @@ authentication before creating a separate private token file.
   runtime worker commands, host/user metadata, and non-secret operation settings
   from DB-backed runtime-environment records. Private keys, tokens, and
   known-host material must come from managed secret bindings.
-- GitHub workflows should not carry provider credentials such as `DOKPLOY_HOST`,
-  `DOKPLOY_TOKEN`, or project names; they should call Launchplane with OIDC and
-  operation intent.
 - Runner-host hygiene cross-repository evidence uses a dedicated GitHub App.
   Store its non-secret client ID in the documented repository variable and its
   private key in `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY`.
@@ -354,8 +351,11 @@ authentication before creating a separate private token file.
   only in the executor step. The token is revoked at job completion and is not
   persisted in artifacts, audit records, logs, or Launchplane managed secrets.
   Do not retain a PAT fallback.
-- Conventional product onboarding uses a dedicated read-only GitHub App to
-  resolve immutable repository and repository-owner ids before protected review. Store its
+- Existing caller-rule maintenance in `Generic Web Preview Authorization` uses
+  a dedicated read-only GitHub App to resolve immutable repository and
+  repository-owner ids before protected review. New-product native onboarding
+  uses the configured source-host helper described in
+  [operations](operations.md#native-target-allocation). Store its
   client id in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID` and its private key
   in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_PRIVATE_KEY`. Install it only on product
   repositories that admins may onboard and grant only repository Contents
@@ -857,8 +857,9 @@ decryption key state denies the reveal or resolution.
   do not need a runtime key-safety target.
 - Trusted local agents that need to call the deployed service instead of a
   browser session should source `~/.config/launchplane/local-operator.env` and
-  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine Director-agent writes. Exact
-  authority is DB-backed by `local_operators` authz policy rules. Rare privileged
+  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine Director-agent writes under
+  the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission)
+  and endpoint admission. Rare privileged
   Director-agent writes can use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` only when matching
   `local_admins` authz policy rules grant the action. Write requests sent with
   either token must include a reason. Product-config apply also requires a

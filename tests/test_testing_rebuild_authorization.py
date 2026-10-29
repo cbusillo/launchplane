@@ -14,6 +14,9 @@ from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationGuard,
 )
 from control_plane import service_bootstrap
+from control_plane import secrets
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.service_agent_identities import AGENT_BEARER_SOURCE_KEY
 from control_plane.service_auth import (
     BearerIdentityConfig,
     configured_local_operator_identity,
@@ -122,7 +125,28 @@ class DirectorTestingRebuildAuthorizationTests(unittest.TestCase):
             guard.recheck_provider_effect("next-effect")
         self.assertEqual(self.fixture.effects, [])
 
-    def test_real_worker_completes_native_lifecycle_under_standing_authority(self) -> None:
+    def test_real_worker_completes_with_record_identity_and_no_bootstrap_agent(self) -> None:
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="context",
+                context="launchplane",
+                env={
+                    AGENT_BEARER_SOURCE_KEY: "records",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": self.config.local_operator_subject,
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": self.config.local_operator_token_label,
+                },
+                updated_at=self.operation.updated_at,
+            )
+        )
+        secrets.write_secret_value(
+            record_store=self.store,
+            scope="context",
+            integration=secrets.LAUNCHPLANE_SERVICE_SECRET_INTEGRATION,
+            name="operator-fixture",
+            binding_key="LAUNCHPLANE_LOCAL_OPERATOR_TOKEN",
+            plaintext_value=self.config.local_operator_token,
+            context_name="launchplane",
+        )
         now = datetime.now(UTC)
         operation = self.operation.model_copy(
             update={
@@ -135,7 +159,9 @@ class DirectorTestingRebuildAuthorizationTests(unittest.TestCase):
         )
         self.store.write_odoo_stable_target_replacement_operation_record(operation)
         with patch.object(
-            service_bootstrap, "_bearer_identity_config_from_env", return_value=self.config
+            service_bootstrap,
+            "_bearer_identity_config_from_env",
+            return_value=BearerIdentityConfig(),
         ):
             self.assertTrue(
                 worker._execute_target_replacement_operation(

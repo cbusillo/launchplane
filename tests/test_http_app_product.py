@@ -1342,6 +1342,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             )
 
             response = await _get_agent_context(app, repository="every/example-site")
+            mapping_response = await _get_repo_product_mapping(app)
             app_store.close()
 
         self.assertEqual(response.status_code, 200)
@@ -1350,10 +1351,60 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["repository"], "every/example-site")
         sections = context["sections"]
         self.assertEqual(sections["repo_product_mapping"]["status"], "available")
+        context_mapping = sections["repo_product_mapping"]["payload"]["mapping"]
+        direct_mapping = mapping_response.json()["mapping"]
+        context_mapping.pop("generated_at")
+        direct_mapping.pop("generated_at")
+        self.assertEqual(
+            context_mapping,
+            direct_mapping,
+        )
         self.assertEqual(sections["preview_readiness"]["status"], "available")
         readiness = sections["preview_readiness"]["payload"]["readiness"]
         self.assertEqual(readiness["repository"], "every/example-site")
         self.assertEqual(readiness["items"][0]["readiness_status"], "ready")
+
+    async def test_ambiguous_product_references_preserve_scoped_profile_reads(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_url = _sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            _seed_agent_context_read_records(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            self.addCleanup(store.close)
+            profile = store.read_product_profile_record("example-site")
+            store.write_product_profile_record(
+                profile.model_copy(update={"product": "hidden-site"})
+            )
+            policy = _product_environment_read_policy(products=("launchplane",))
+            profile_policy = _product_profile_read_policy(product=profile.product)
+            policy = policy.model_copy(
+                update={"github_actions": policy.github_actions + profile_policy.github_actions}
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+            )
+
+            direct = await _get_repo_product_mapping(app)
+            context = await _get_agent_context(app, repository=profile.repository)
+            visible = await _get_product_profile(app, profile.product)
+            hidden = await _get_product_profile(app, "hidden-site")
+
+        self.assertEqual(direct.status_code, 200)
+        self.assertEqual(context.status_code, 200)
+        for mapping in (
+            direct.json()["mapping"],
+            context.json()["context"]["sections"]["repo_product_mapping"]["payload"]["mapping"],
+        ):
+            self.assertIn(profile.repository, mapping["ambiguous_repositories"])
+            self.assertEqual(
+                mapping["ambiguous_repository_product_references"],
+                [{"repository": profile.repository, "products": [profile.product]}],
+            )
+            self.assertEqual(mapping["product_reference_coverage"]["authorization"], "scoped")
+            self.assertNotIn("hidden-site", json.dumps(mapping))
+        self.assertEqual(visible.status_code, 200)
+        self.assertEqual(hidden.status_code, 403)
 
     async def test_agent_context_reads_require_identity(self) -> None:
         app = create_launchplane_fastapi_app(
@@ -2209,6 +2260,35 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             [profile["product"] for profile in payload["profiles"]],
             ["sellyouroutboard"],
         )
+
+    async def test_list_product_profiles_preserves_read_only_stored_transport(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            profile_payload = _product_profile_payload()
+            preview = cast(dict[str, object], profile_payload["preview"])
+            preview.update(
+                transport_extension="verireel-postgres",
+                data_transport_mode="driver",
+                app_name_prefix="preview-app",
+                transport_database_prefix="preview_db",
+            )
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                profile_payload, context={"stored_product_profile": True}
+            )
+            with self.assertRaises(ValueError):
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            store.write_product_profile_record(profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_read_policy(product="launchplane"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_product_profiles(app, driver_id=profile.driver_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["profiles"], [profile.model_dump(mode="json")])
+        self.assertEqual(response.json()["coverage"]["status"], "complete")
 
     async def test_show_product_profile_returns_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -3685,6 +3765,77 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_required")
 
+    async def test_settings_modes_reject_invalid_complete_candidates_without_writes(self) -> None:
+        for profile_factory, verifier_identity, policy, post, request_payload in (
+            (
+                _product_preview_tls_profile,
+                _product_preview_tls_identity,
+                _product_preview_tls_policy,
+                _post_product_preview_tls,
+                _product_preview_tls_payload,
+            ),
+            (
+                _product_prelaunch_rebuild_policy_profile,
+                _product_prelaunch_rebuild_policy_identity,
+                _product_prelaunch_rebuild_policy_policy,
+                _post_product_prelaunch_rebuild_policy,
+                _product_prelaunch_rebuild_policy_payload,
+            ),
+        ):
+            for conflict in ("missing_health_url", "preview_override"):
+                with self.subTest(route=post.__name__, conflict=conflict):
+                    payload = profile_factory().model_dump(mode="json")
+                    if conflict == "preview_override":
+                        payload["preview"]["override_env"] = {"LEGACY_SETTING": "private-value"}
+                    else:
+                        payload["lanes"][0].update(
+                            base_url="",
+                            health_url="",
+                            health_monitoring={
+                                "monitoring_intent": "prelaunch",
+                                "checks": [{"name": "public", "kind": "public_http"}],
+                            },
+                        )
+                    original = LaunchplaneProductProfileRecord.model_validate(
+                        payload, context={"stored_product_profile": True}
+                    )
+                    with TemporaryDirectory() as temporary_directory_name:
+                        store = PostgresRecordStore(
+                            database_url=_sqlite_database_url(
+                                Path(temporary_directory_name) / "launchplane.sqlite3"
+                            )
+                        )
+                        self.addCleanup(store.close)
+                        store.ensure_schema()
+                        store.write_product_profile_record(original)
+                        app = create_launchplane_fastapi_app(
+                            verifier=_StubVerifier(verifier_identity()),
+                            authz_policy=policy(),
+                            record_store_factory=lambda: store,
+                        )
+                        with patch.object(
+                            store, "compare_and_write_product_profile_record"
+                        ) as write:
+                            for mode in ("dry-run", "apply"):
+                                response = await post(
+                                    app,
+                                    {
+                                        **request_payload(),
+                                        "mode": mode,
+                                        "reviewed_plan_sha256": "a" * 64 if mode == "apply" else "",
+                                    },
+                                    idempotency_key="invalid-candidate" if mode == "apply" else "",
+                                )
+                                self.assertEqual(response.status_code, 400, response.json())
+                                self.assertEqual(
+                                    response.json()["error"]["code"], "invalid_product_profile"
+                                )
+                                self.assertNotIn("private-value", response.text)
+                            write.assert_not_called()
+                        self.assertEqual(
+                            store.read_product_profile_record(original.product), original
+                        )
+
     async def test_apply_product_prelaunch_rebuild_policy_dry_run_preserves_profile(
         self,
     ) -> None:
@@ -4034,7 +4185,10 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             original_profile = original_profile.model_copy(
                 update={
                     "preview": original_profile.preview.model_copy(
-                        update={"domain_certificate_type": "letsencrypt"}
+                        update={
+                            "domain_certificate_type": "letsencrypt",
+                            "override_env": {"LEGACY_SETTING": "private-value"},
+                        }
                     )
                 }
             )
@@ -4865,6 +5019,7 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
             )
 
             response = await _get_protected_artifacts(app, product="verireel")
+            manifest = record_store.read_artifact_manifest("artifact-verireel-prod")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -4874,6 +5029,15 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("artifact-verireel-prod", protected_artifacts["artifact_ids"])
         self.assertIn("artifact-preview-verireel-pr-196", protected_artifacts["artifact_ids"])
         self.assertNotIn("artifact-preview-verireel-pr-195", protected_artifacts["artifact_ids"])
+        retained = next(
+            entry
+            for entry in protected_artifacts["entries"]
+            if entry["artifact_id"] == manifest.artifact_id
+        )
+        self.assertEqual(retained["manifest_provenance"]["source_commit"], manifest.source_commit)
+        self.assertEqual(
+            retained["manifest_provenance"]["image"], manifest.image.model_dump(mode="json")
+        )
 
     @scoped_agent_test
     async def test_protected_artifacts_requires_wildcard_context_for_whole_product(

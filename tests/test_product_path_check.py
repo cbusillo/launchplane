@@ -1,6 +1,7 @@
 from tests.support.auth import scoped_agent_test
 import unittest
 from collections.abc import Mapping
+from itertools import product
 from typing import cast
 
 from fastapi import FastAPI
@@ -34,6 +35,8 @@ from control_plane.contracts.artifact_identity import (
     ArtifactImageReference,
 )
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.operation_status_read import safe_operation_error_code
+from control_plane.product_reconcile import ProductReconcileError, run_product_reconcile_once
 from control_plane.product_path_check import (
     PathCheckInputs,
     ProductPathCheck,
@@ -235,20 +238,25 @@ class ProductPathCheckTests(unittest.TestCase):
             last_plan=_completed_noop_plan(),
         )
         store = Mock()
-        for state, expected in (
-            ("done", "clear"),
-            ("pending", "unknown"),
-            ("running", "unknown"),
-            ("failed", "unknown"),
+        for state, (outcome, done_state, failed_state) in product(
+            ("done", "pending", "running", "failed"),
+            (
+                ({}, "clear", "blocked"),
+                ({"deployed_operation_id": "operation-previous"}, "clear", None),
+                ({"queued_operation_id": "operation-previous"}, "blocked", None),
+                ({"last_failed_operation_id": "operation-previous"}, "blocked", "blocked"),
+            ),
         ):
+            if state == "failed" and failed_state is None:
+                continue
             with (
-                self.subTest(state=state),
+                self.subTest(state=state, outcome=outcome),
                 patch(
                     "control_plane.product_path_check.read_staff_testing_hold", return_value=None
                 ),
             ):
                 store.read_product_reconcile_request.return_value = record.model_copy(
-                    update={"state": state}
+                    update={"state": state, "last_plan": {**_completed_noop_plan(), **outcome}}
                 )
                 inputs = read_path_check_inputs(
                     path="testing",
@@ -262,7 +270,10 @@ class ProductPathCheckTests(unittest.TestCase):
                 check = build_product_path_check(
                     product="example-site", path="testing", inputs=inputs
                 )
+                expected = {"done": done_state, "failed": failed_state}.get(state, "unknown")
                 self.assertEqual(_steps(check)["testing_deploy"][0], expected)
+                if state in {"pending", "running"}:
+                    self.assertEqual(check.steps[-1].record_ids, ())
 
     def test_promote_reports_every_blocker_at_once(self) -> None:
         # 2026-09-27: no usable grant (occurrence 3) and no backup policy
@@ -360,6 +371,7 @@ class ProductPathCheckTests(unittest.TestCase):
                         profile=_profile(),
                         testing_hold_active=False,
                         testing_reconcile_plan={
+                            "reconcile_state": "failed",
                             "last_failed_operation_id": "operation-1",
                             "last_failed_error_code": code,
                             "last_failed_error_summary": "Fixed summary.",
@@ -378,7 +390,10 @@ class ProductPathCheckTests(unittest.TestCase):
             inputs=PathCheckInputs(
                 profile=_profile(),
                 testing_hold_active=True,
-                testing_reconcile_plan={"deployed_operation_id": "operation-2"},
+                testing_reconcile_plan={
+                    "reconcile_state": "done",
+                    "deployed_operation_id": "operation-2",
+                },
             ),
         )
 
@@ -953,6 +968,70 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 store.list_product_reconcile_requests(product="example-site"), (completed,)
+            )
+            for error, expected_code in (
+                (RuntimeError("private upstream exception"), "testing_reconcile_failed"),
+                (
+                    ProductReconcileError("private upstream exception", code="ancestor_build"),
+                    "ancestor_build",
+                ),
+                (
+                    ProductReconcileError("private upstream exception", code="unsafe error text"),
+                    safe_operation_error_code("unsafe error text"),
+                ),
+            ):
+                with self.subTest(error=error):
+                    store.request_product_reconcile(
+                        ProductReconcileTarget(product="example-site", target_kind="testing"),
+                        completed.updated_at,
+                    )
+                    with patch(
+                        "control_plane.product_reconcile.reconcile_product_request",
+                        side_effect=error,
+                    ):
+                        failed = run_product_reconcile_once(
+                            record_store=store, lease_owner="test-worker"
+                        )
+                    assert failed is not None
+                    self.assertEqual(failed.state, "failed")
+                    self.assertNotIn("last_failed_operation_id", failed.last_plan)
+                    response = await _asgi_request(
+                        app_with(("product_environment.read",)), "GET", route, headers=headers
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    step = response.json()["check"]["steps"][-1]
+                    self.assertEqual((step["state"], step["code"]), ("blocked", expected_code))
+                    self.assertEqual(step["fix"], "code")
+                    self.assertEqual(step["record_ids"], [])
+                    self.assertNotIn("private upstream exception", response.text)
+                    self.assertNotIn("unsafe error text", response.text)
+                    self.assertEqual(
+                        store.read_product_reconcile_request(failed.target_key), failed
+                    )
+            deployed = store.request_product_reconcile(
+                ProductReconcileTarget(product="example-site", target_kind="testing"),
+                completed.updated_at,
+            )
+            store.claim_next_product_reconcile_request("test-worker", 60)
+            store.complete_product_reconcile_request(
+                deployed.target_key,
+                "test-worker",
+                "done",
+                {"deployed_operation_id": "operation-previous"},
+            )
+            pending = store.request_product_reconcile(
+                ProductReconcileTarget(product="example-site", target_kind="testing"),
+                completed.updated_at,
+            )
+            pending_response = await _asgi_request(
+                app_with(("product_environment.read",)), "GET", route, headers=headers
+            )
+            self.assertEqual(pending_response.status_code, 200, pending_response.text)
+            pending_step = pending_response.json()["check"]["steps"][-1]
+            self.assertEqual(pending_step["state"], "unknown")
+            self.assertEqual(pending_step["record_ids"], [])
+            self.assertEqual(
+                store.list_product_reconcile_requests(product="example-site"), (pending,)
             )
             store.close()
 

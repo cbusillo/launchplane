@@ -1079,7 +1079,7 @@ function NoProducts({ onRetry }: { onRetry: () => void }) {
         No products are owned by Launchplane yet
       </h1>
       <p>
-        Use Product Onboarding to record the product, its lanes and runtime targets.
+        Record the product, its lanes and runtime targets in Launchplane.
       </p>
       <ol className="onboarding-checklist">
         <li>Record the product profile and display name.</li>
@@ -1250,7 +1250,7 @@ function nextSafeInspection(
     return {
       title: "Complete stable lane evidence",
       detail:
-        "The product profile exists without stable environment summaries. Use Product Onboarding to record lane authority.",
+        "The product profile exists without stable environment summaries. Record its lanes and runtime targets in Launchplane.",
       targetId: "product-diagnostics",
     };
   }

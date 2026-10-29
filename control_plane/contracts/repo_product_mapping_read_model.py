@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -9,6 +10,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     product_profiles_share_repository,
 )
+from control_plane.contracts.read_coverage import ReadCoverage, read_coverage
 
 RepoProductClassification = Literal[
     "managed_runtime", "active_awareness", "support_dependency", "out_of_scope"
@@ -74,6 +76,18 @@ class RepoProductMapping(BaseModel):
         exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+    ambiguous_repository_product_references: tuple[AmbiguousRepositoryProductReference, ...] = (
+        Field(
+            default=(),
+            exclude_if=lambda value: not value,
+            json_schema_extra={"x-launchplane-optional-response": True},
+        )
+    )
+    product_reference_coverage: ReadCoverage | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_mapping(self) -> "RepoProductMapping":
@@ -85,19 +99,39 @@ class RepoProductMapping(BaseModel):
         return self
 
 
+class AmbiguousRepositoryProductReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
+    products: tuple[str, ...]
+
+
 def build_repo_product_mapping_from_records(
     *,
     generated_at: str,
     product_profiles: tuple[LaunchplaneProductProfileRecord, ...],
     work_requests: tuple[EveryCodeWorkRequestRecord, ...] = (),
+    product_reference_allowed: Callable[[str], bool] | None = None,
+    product_reference_coverage: ReadCoverage | None = None,
 ) -> RepoProductMapping:
     entries: dict[str, RepoProductMappingEntry] = {}
-    ambiguous = {
-        profile.repository.strip().lower()
+    ambiguous, reference_products = _ambiguous_repository_groups(product_profiles)
+    readable_products = {
+        profile.product
         for profile in product_profiles
-        for other in product_profiles
-        if profile.product != other.product and product_profiles_share_repository(profile, other)
+        if product_reference_allowed is None or product_reference_allowed(profile.product)
     }
+    if product_reference_coverage is not None and any(
+        profile.product not in readable_products for profile in product_profiles
+    ):
+        product_reference_coverage = product_reference_coverage.model_copy(
+            update={
+                "authorization": "scoped",
+                "status": "scoped"
+                if product_reference_coverage.source == "complete"
+                else product_reference_coverage.source,
+            }
+        )
     for profile in product_profiles:
         repository = profile.repository.strip()
         if not repository or "/" not in repository:
@@ -127,7 +161,53 @@ def build_repo_product_mapping_from_records(
         generated_at=generated_at,
         repositories=tuple(sorted(entries.values(), key=lambda entry: entry.repository.lower())),
         ambiguous_repositories=tuple(sorted(ambiguous)),
+        ambiguous_repository_product_references=tuple(
+            AmbiguousRepositoryProductReference(
+                repository=repository,
+                products=tuple(product for product in products if product in readable_products),
+            )
+            for repository, products in sorted(reference_products.items())
+        ),
+        product_reference_coverage=product_reference_coverage,
     )
+
+
+def _ambiguous_repository_groups(
+    product_profiles: tuple[LaunchplaneProductProfileRecord, ...],
+) -> tuple[set[str], dict[str, tuple[str, ...]]]:
+    remaining = set(range(len(product_profiles)))
+    groups: list[set[int]] = []
+    while remaining:
+        group = {remaining.pop()}
+        changed = True
+        while changed:
+            changed = False
+            for index in tuple(remaining):
+                if any(
+                    product_profiles_share_repository(
+                        product_profiles[index], product_profiles[member]
+                    )
+                    for member in group
+                ):
+                    remaining.remove(index)
+                    group.add(index)
+                    changed = True
+        groups.append(group)
+    ambiguous: set[str] = set()
+    references: dict[str, tuple[str, ...]] = {}
+    for group in groups:
+        products = tuple(sorted({product_profiles[index].product for index in group}))
+        if len(products) < 2:
+            continue
+        repositories = {
+            product_profiles[index].repository.strip().lower()
+            for index in group
+            if product_profiles[index].repository.strip()
+        }
+        ambiguous.update(repositories)
+        for repository in repositories:
+            references[repository] = products
+    return ambiguous, references
 
 
 def _product_profile_entry(profile: LaunchplaneProductProfileRecord) -> RepoProductMappingEntry:
@@ -161,6 +241,7 @@ def build_repo_product_mapping_service_payload(
     generated_at: str,
     product_store: RepoProductMappingProductStore,
     work_request_store: RepoProductMappingWorkRequestStore,
+    product_reference_allowed: Callable[[str], bool] | None = None,
 ) -> dict[str, object]:
     product_profiles = tuple(
         profile for profile in product_store.list_product_profile_records() if profile.is_active
@@ -170,6 +251,14 @@ def build_repo_product_mapping_service_payload(
         generated_at=generated_at,
         product_profiles=product_profiles,
         work_requests=work_requests,
+        product_reference_allowed=product_reference_allowed,
+        product_reference_coverage=read_coverage(
+            product_store,
+            collections=("product_profiles",),
+            population="active_product_profiles",
+            authorization_complete=True,
+            exclusions=("inactive_products",),
+        ),
     )
     return {
         "mapping": mapping.model_dump(mode="json"),

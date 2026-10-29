@@ -623,7 +623,9 @@ mutation_in_progress`; a completed effect replays; a different request
 
 For a held event-driven testing deploy, a scoped admin can first call
 `GET /v1/admin/generic-web/deploy-recovery/{product}/testing` under the existing
-`product_environment.read` authority. This database-only read returns one opaque
+`product_environment.read` authority. An authenticated Director agent's existing
+service marker also admits only this GET without a product grant; ordinary terminal
+agents and all terminal-agent recovery POSTs remain refused. This database-only read returns one opaque
 `recovery_reference`, lane and reservation state/attempt. It requires one exact
 held reservation in the event reconciler's scope and an original deploy request
 whose retained request or saved reconcile inputs match the reservation fingerprint.
@@ -1056,27 +1058,6 @@ provider payload data.
 > described in this doc remain only until their deletion (#2606, #2740); do not
 > extend them or onboard a product onto them.
 
-The original communication model was:
-
-- Launchplane runs as a long-running service behind an admin-owned stable
-  host.
-- Product workflows communicate with Launchplane over authenticated HTTP.
-- GitHub Actions OIDC is the default machine-to-machine trust boundary.
-- Launchplane authorizes requests from GitHub-issued identity claims such as repo,
-  workflow, ref, environment, and event context.
-- Typed evidence payloads are the stable contract; CLI commands are service
-  clients, DB-backed admin tools, or explicit local-only rehearsal and
-  inspection helpers.
-
-Launchplane should eventually expose API ingress for at least:
-
-- deployment evidence
-- promotion evidence
-- inventory refresh triggers or derived writes
-- preview generation evidence
-- preview destroyed evidence
-- driver-triggered runtime actions where Launchplane owns execution
-
 The first explicit version of that boundary, including the OIDC claim mapping
 and endpoint list, lives in [`service-boundary.md`](service-boundary.md).
 Agent-facing read context and scoped write-intent consumption rules live in
@@ -1092,8 +1073,7 @@ uv run launchplane service serve \
 ```
 
 The service needs an explicit minimal bootstrap policy input, but the repo no
-longer tracks the live policy. Product and workflow grants should be represented
-as DB-backed authz policy records. Omitting `LAUNCHPLANE_DATABASE_URL` always fails closed,
+longer tracks the live policy. Omitting `LAUNCHPLANE_DATABASE_URL` always fails closed,
 including loopback local development, rather than using file-backed JSON state
 as authority. The GitHub OIDC audience is explicit admin/process wiring;
 production code must not default it to a live domain.
@@ -1144,9 +1124,6 @@ runtime memos belong in product repos; this repo keeps only the shared driver
 and record contracts.
 
 The service uses GitHub OIDC bearer tokens and DB-backed authz policy records.
-Additional evidence routes should land against the same authn/authz boundary
-rather than creating separate ad hoc ingress patterns.
-
 Managed authz policy reconciliation is a native FastAPI service route. It
 requires DB-backed policy storage, enforces `authz_policy_grant.write`,
 preserves signed-in GitHub human-session callers, and keeps dry-runs stateless.
@@ -2913,30 +2890,123 @@ handoff; a record-backed report does not establish current provider health.
 
 ### Conventional generic-web onboarding
 
-Use the manual `Product Onboarding` workflow for a new generic-web product.
-Start with `mode=dry_run` when admin review of the exact plan is useful, or
-use `mode=apply` for one dispatch that pauses at the protected
-`launchplane-authz-admin` environment before any writes. Provide product,
-repository, image repository, runtime port, health path, preview base URL, and a
-reason/issue reference; optional names derive from the product key. The preview
-base URL must be a root URL. Its wildcard DNS and ingress namespace must already
-route to the selected Dokploy server because onboarding owns Launchplane and
-Dokploy records, not public ingress provisioning.
+#### Native target allocation
 
-The workflow resolves immutable GitHub identity, plans one non-production
-Dokploy application, plans Launchplane records including the context-scoped
-`LAUNCHPLANE_PREVIEW_BASE_URL`, and plans the complete
-`operator.generic-web-preview` managed authz set. The apply job reuses the
-reviewed plan artifact and digests. Do not copy target ids, manifests, authz
-JSON, or database credentials into the conventional workflow.
+`POST /v1/dokploy-targets/setup` accepts an `onboarding` intent for a new
+generic-web product. A CSRF-checked signed-in administrator or authenticated
+Director agent can use this bounded path without a workflow caller grant.
+It allocates an empty testing application in a new project and environment;
+it does not apply product profiles, runtime settings, policy or deployments.
 
-Planning authority is read-only and distinct: the plan job uses
-`dokploy_target.plan`, `generic_web_onboarding.plan`, and
-`generic_web_preview_authz.plan`. Only the protected apply worker receives
-`dokploy_target.setup`, `product_onboarding.apply`, and
-`authz_policy_grant.write`. Both protected workers are called by immutable
-full-SHA reusable-workflow refs so policy-admin grants never depend on a mutable
-branch identity.
+Before constructing the intent, read the target repository with the catalog's
+configured automation identity, which must already have read access:
+
+```bash
+set -euo pipefail
+mkdir -p state/onboarding
+<catalog>/skills/github/scripts/gh-with-env-token api "repos/$PRODUCT_REPOSITORY" > state/onboarding/repository.json
+jq -e '
+  (.id | type == "number" and . > 0) and
+  (.owner.id | type == "number" and . > 0) and
+  (.default_branch | type == "string" and length > 0)
+' state/onboarding/repository.json
+jq '{repository: .full_name, repository_id: (.id | tostring),
+     repository_owner_id: (.owner.id | tostring), default_branch}' \
+  state/onboarding/repository.json > state/onboarding/repository-identity.json
+```
+
+Here `<catalog>` is the installed codex-skills checkout. Bind the returned
+`repository`, `repository_id`, `repository_owner_id` and `default_branch` into
+the intent used by both operations. Keep the saved response with the reviewed
+request. Missing or inaccessible metadata stays UNKNOWN; do not guess IDs,
+substitute credentials or request a caller grant. Missing read access follows
+the existing access stop boundary.
+The preview base URL must be a root URL whose wildcard DNS and ingress already
+route to the selected server; onboarding does not provision public ingress.
+
+Supply the typed `GenericWebOnboardingIntent` and the corresponding ordinary
+target request with `operation: create-application`, `target_type: application`,
+`instance: testing`, `environment_name: testing` and an explicit `server_id`.
+Context, target, project, server, health path and source ref must match the
+intent. Existing placement ids, domains, repository source setup, replacement
+targets and state volumes are refused. Both testing and preview contexts must
+be unowned and free of target/deployment records, including previous product use.
+Those facts are checked before each provider write and under the authority
+guard before adoption.
+Provider names are service allocation markers; product-record apply preserves
+the adopted names.
+
+Start with `mode: dry-run` and a chosen `Idempotency-Key`. Save the exact
+request, key and response privately. The response supplies
+`target_request_sha256` and `onboarding_plan_sha256`. The target digest uses
+canonical JSON of the validated target request, excluding mode, reason,
+confirmation, retention controls, onboarding intent and the two review digests.
+The record-plan digest uses the existing onboarding intent contract. Send both
+back as `reviewed_target_request_sha256` and
+`reviewed_onboarding_plan_sha256` for apply or readback. Apply also requires
+the existing exact confirmation and a reason, and the saved plan under the
+same actor and key. These are native service digests, not the compatibility
+workflow's byte digest of its JSON artifact.
+A changed dry-run requires a fresh key; an existing key preserves its original
+plan even before allocation begins.
+
+On an uncertain outcome, preserve the original request, actor and key. Use
+`mode: readback` to inspect durable progress and `custody_sha256`, then resume
+with unchanged `mode: apply`, or retain with `retain_allocation: true` and
+`expected_allocation_custody_sha256` from that reviewed readback. Recovery uses
+the existing allocation machinery; it never repeats a positively recovered
+create, deletes resources or applies onboarding/policy records. Retained
+allocations keep their original custody and cannot resume creating resources.
+Apply the separately reviewed product-record plan only after allocation succeeds.
+
+The authenticated Director agent can use `POST /v1/product-onboarding/apply`
+with `generic_web` and `mode: dry_run` to review the record plan, then apply it
+with `reviewed_plan_sha256`, the recorded application's `resolved_target_id`
+and the target plan's `allocation_id`. Native apply requires an `Idempotency-Key`.
+The saved allocation belongs to the same actor and must contain the unchanged
+onboarding intent and verified application identity. This also applies to native
+browser apply. A changed intent needs its own reviewed allocation. Apply preserves
+the allocated application identity and generated project/target names. Product
+and context ownership are checked under the atomic record-write lock. Known
+deployment records or other targets in either context are refused.
+Unchanged original-key replay returns the committed receipt. Advanced manifests
+retain their existing service authorization; this path grants no broader action.
+
+The deployed target and record path was qualified in
+[#5263](https://github.com/cbusillo/launchplane/issues/5263#issuecomment-6490944855):
+original-actor/key readback, record identity/replay and lost-client-response
+recovery passed without policy changes. Partial server-checkpoint continuation
+remains rehearsal proof. This qualifies empty target and record onboarding;
+it does not establish working previews or real-repository artifact provenance.
+Verify those independently through [event-driven delivery](event-driven-deploys.md).
+
+#### Compatibility workflow recovery
+
+`Product Onboarding` refuses new-product dry runs and applies before any API
+request. New products use the native operations above. Its remaining dispatch
+surface renders only the original target request and calls the unchanged
+immutable recovery worker. No repository token, product-record plan, caller-grant
+plan or authz reconciliation is requested.
+
+Keep the original target-affecting dispatch inputs, reason and any explicit
+allocation key. Former product metadata inputs remain accepted for compatibility
+but are optional and unused during recovery. For readback, set outer `mode=dry_run` and
+`allocation_control={"mode":"readback"}`. For continuation, use outer
+`mode=apply`, exact confirmation `APPLY GENERIC WEB ONBOARDING`, and
+`allocation_control={"mode":"apply"}`. Include the original `idempotency_key`
+when one was supplied; otherwise the original derived key is preserved.
+Retention additionally requires `retain_allocation: true` and the reviewed
+`expected_allocation_custody_sha256` from readback. Keep the original actor and
+request; never replace the old byte-artifact digest with a native canonical
+one. Recovery skips product and authorization record apply. Do not repin or
+retire the old worker until every old workflow allocation is accounted for;
+completed workflow history alone does not establish that custody is clear.
+If readback finds an old target whose product records were never applied,
+settle its custody through reviewed retention, then start native onboarding
+with fresh testing and preview contexts. Keep the retained resources; do not
+pass the old workflow allocation to native record apply, which requires its
+own same-actor native plan.
+The current-source worker is separate from this immutable recovery revision.
 
 Use `Generic Web Preview Authorization` for reviewed `onboard`, `expand`,
 `contract`, and `retire` operations. `onboard` bootstraps the managed preview
@@ -2952,15 +3022,12 @@ run `contract` at that same SHA. This reviewed overlap removes legacy managed
 rule identities without an authorization gap. Use `retire` when offboarding the
 product entirely.
 
-If provider creation succeeds and a later step fails, rerun the exact same
-workflow inputs, including the reason. Stable idempotency keys replay the provider result and prevent duplicate
-creation. If records succeed but authz fails, leave the records in place and
-rerun; the product remains unauthorized until the existing managed authz
-reconcile succeeds. Use `Product Onboarding Manifest (Advanced)` only when the
-typed generic-web contract does not fit, and use `Dokploy Target Setup` for
-adoption, production, compose, or repair operations.
-
-Conventional onboarding creates new products only.
+Use `Product Onboarding Manifest (Advanced)` only when the typed generic-web
+contract does not fit, and `Dokploy Target Setup` for adoption, production,
+compose or repair operations. Keep the existing generic-web caller-rule
+planner and retirement/readback routes for old products. Its App client ID and
+private-key inputs are shared with `Generic Web Preview Authorization`; this
+onboarding removal does not retire credentials, grants or policy records.
 
 - Promotions and deploys reference explicit artifact identifiers.
 - Missing control-plane config is a hard error, not a silent fallback.
@@ -4732,7 +4799,24 @@ anchors from open GitHub pull requests, including drafts, writes lifecycle plans
 results, which Product Ops shows per product. Destructive provider cleanup
 still requires an explicit `apply=true` request to
 `POST /v1/previews/lifecycle-sweep` from a separately authorized caller; the
-manual `Preview Lifecycle` workflow dispatch remains that route.
+native **Engineering Ops → Preview cleanup** page offers **Report** and
+**Apply cleanup** for all preview-enabled products. Cleanup requires the explicit
+delete confirmation; it discovers current desired state again, rather than
+applying a previously displayed report. The page shows per-product failures,
+held reservations and record/trace evidence even when the HTTP request completes.
+A dropped response locks both modes in this browser tab until the original
+request is retried with its retained operation key, including after a reload.
+The page reconstructs the original report or cleanup request by matching that key's
+retained fingerprint; it does not depend on a separately saved form draft.
+Each new cleanup attempt consumes its delete confirmation, including a refused
+attempt. Retrying an uncertain cleanup preserves the originally confirmed
+request and key.
+
+The manual `Preview Lifecycle` workflow and its URL/audience/source settings stay
+supported during #3514's migration. Do not remove them until deployed native
+report/apply behavior, current binding/default and rollback evidence qualify the
+replacement and Chris's fresh settings-deletion table. Source tests alone do
+not establish that deployed proof.
 An authenticated Director agent may run the report-only sweep without cleanup
 mutation authority. Apply requests keep their existing authorization checks.
 Preview-disabled products are excluded from the sweep. PR feedback goes through

@@ -21,7 +21,9 @@ from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LI
 from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
 from control_plane.copy_readback_diagnostics import (
     COPY_FAILURE_EXIT_MARKER,
+    COPY_FAILURE_EVIDENCE_MARKER,
     COPY_FAILURE_STAGE_MARKER,
+    COPY_FAILURE_STATE_DIRECTORY,
     CopyFailureStage,
     ReadbackPredicate,
 )
@@ -1223,6 +1225,51 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertEqual(evidence[COPY_FAILURE_STAGE_MARKER], stage)
         self.assertEqual(evidence[COPY_FAILURE_EXIT_MARKER], str(exit_status))
         self.assertNotIn("private-fixture-detail", str(evidence))
+
+    def test_foreign_readonly_mount_cannot_reach_private_copy_failure_evidence(self) -> None:
+        self.containers["foreign"] = {
+            "Id": "foreign",
+            "Config": {"Labels": {"com.docker.compose.project": "another-project"}},
+            "Mounts": [{"Source": str(self.root / COPY_FAILURE_STATE_DIRECTORY), "RW": False}],
+        }
+        with self.assertRaises(RuntimeError) as raised:
+            self.run_script()
+        self.assertEqual(
+            getattr(raised.exception, "predicate", None), ReadbackPredicate.PRIVATE_STATE
+        )
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+
+    def test_failed_runner_retains_private_traceback_without_publishing_it(self) -> None:
+        original = self.command
+        child_stdout = b"copy_failure_stage=module_update\nprivate fixture output\n"
+        child_stderr = b"Traceback (most recent call last):\nValueError: private fixture cause\n"
+
+        def refuse(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if arguments[-1:] == ["clean-snapshot"]:
+                return subprocess.CompletedProcess(
+                    arguments, 1, stdout=child_stdout, stderr=child_stderr
+                )
+            return original(arguments, **kwargs)
+
+        with (
+            patch.object(self, "command", side_effect=refuse),
+            self.assertRaises(RuntimeError),
+        ):
+            self.run_script()
+        markers = post_deploy.extract_odoo_post_deploy_readback_markers(
+            {"logs": self.script_output.getvalue()}
+        )
+        evidence_id = markers[COPY_FAILURE_EVIDENCE_MARKER]
+        path = self.root / COPY_FAILURE_STATE_DIRECTORY / (evidence_id + ".json")
+        evidence = json.loads(path.read_text())
+        self.assertEqual(base64.b64decode(evidence["stdout"]), child_stdout)
+        self.assertEqual(base64.b64decode(evidence["stderr"]), child_stderr)
+        self.assertEqual(evidence["exit_status"], 1)
+        self.assertEqual(evidence["stage"], CopyFailureStage.MODULE_UPDATE)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertNotIn("private fixture", self.script_output.getvalue())
+        self.assertNotIn(["docker", "start", "web"], self.calls)
 
     def test_every_command_inherits_target_lock_and_child_blocks_retry_after_failure(self) -> None:
         command = self.command

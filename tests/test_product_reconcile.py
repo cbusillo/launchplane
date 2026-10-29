@@ -2275,6 +2275,30 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.request()
             repeated = self.run_once()
         self.assertEqual(first.last_plan["deploy_status"], "fail")
+        from control_plane.product_path_check import (
+            PathCheckInputs,
+            _testing_reconcile_plan,
+            build_product_path_check,
+        )
+
+        check = build_product_path_check(
+            product="site",
+            path="testing",
+            inputs=PathCheckInputs(
+                profile=_generic_web_profile(),
+                testing_reconcile_plan=_testing_reconcile_plan(self.store, _generic_web_profile()),
+            ),
+        )
+        self.assertEqual(check.steps[-1].state, "blocked")
+        self.assertEqual(check.steps[-1].code, "deploy_failed")
+        self.assertTrue(
+            any(
+                check.steps[-1].code in incident.summary
+                for incident in self.store.list_public_ingress_incident_records(
+                    product="site", instance_name="testing", status="open"
+                )
+            )
+        )
         self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
         self.assertEqual(len(triggered), 1)
         records = self.store.list_deployment_records(context_name="cm", instance_name="testing")

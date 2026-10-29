@@ -11,6 +11,7 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import ArtifactIdentityReference
 from control_plane.contracts.protected_artifacts import build_protected_artifact_set
 from control_plane.storage.filesystem import FilesystemRecordStore
+from tests.support.artifact_manifests import artifact_manifest_v2
 from tests.support.protected_artifacts import (
     _active_preview,
     _deploy,
@@ -37,6 +38,42 @@ def _prod_deployment(
 
 
 class ProtectedArtifactTests(TestCase):
+    def test_retained_manifest_provenance_excludes_arbitrary_build_values(self) -> None:
+        manifest = artifact_manifest_v2()
+        manifest.build_flags.values["PRIVATE_SETTING"] = "private-build-value"
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            store.write_product_profile_record(_profile())
+            store.write_artifact_manifest(manifest)
+            store.write_deployment_record(
+                _prod_deployment(
+                    artifact_id=manifest.artifact_id,
+                    source_git_ref=manifest.source_commit,
+                    finished_at="2026-06-02T20:01:00Z",
+                )
+            )
+            store.write_deployment_record(
+                _prod_deployment(
+                    artifact_id="newer-artifact",
+                    source_git_ref="1" * 40,
+                    finished_at="2026-06-03T20:01:00Z",
+                )
+            )
+
+            protected = build_protected_artifact_set(store, product="verireel")
+
+        entry = next(
+            entry for entry in protected.entries if entry.artifact_id == manifest.artifact_id
+        )
+        provenance = entry.manifest_provenance
+        self.assertIsNotNone(provenance)
+        assert provenance is not None
+        self.assertEqual(provenance.source_commit, manifest.source_commit)
+        self.assertEqual(provenance.build_provenance, manifest.build_provenance)
+        self.assertEqual(provenance.addon_sources, manifest.addon_sources)
+        self.assertEqual(provenance.image, manifest.image)
+        self.assertNotIn("private-build-value", protected.model_dump_json())
+
     def test_build_protected_artifact_set_includes_stable_and_active_preview_refs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
@@ -75,6 +112,9 @@ class ProtectedArtifactTests(TestCase):
         self.assertTrue(
             any("artifact-preview-verireel-pr-196" in warning for warning in protected.warnings)
         )
+        for entry in protected.entries:
+            if entry.artifact_id == "artifact-preview-verireel-pr-196":
+                self.assertIsNone(entry.manifest_provenance)
 
     def test_build_protected_artifact_set_protects_previous_good_rollback_target(self) -> None:
         previous_source_git_ref = "0123456789abcdef0123456789abcdef01234567"

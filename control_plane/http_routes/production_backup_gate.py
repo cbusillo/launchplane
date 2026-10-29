@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 import click
 from control_plane.action_effects import BACKUP_CONTINUATION_ACTION
 from fastapi import Depends, Header, Path, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, BeforeValidator, ConfigDict
 
 from control_plane.contracts.production_backup_failures import (
     BACKUP_FAILED_CODE,
@@ -21,6 +21,7 @@ from control_plane.contracts.durable_operation_authorization import (
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
+    VeriReelProdBackupGateOperationStatus,
 )
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationCaptureError,
@@ -55,6 +56,8 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 PRODUCTION_BACKUP_GATE_ROUTE = "/v1/production-backup-gates"
 PRODUCTION_BACKUP_GATE_OPERATION_ROUTE = "/v1/production-backup-gates/operations/{operation_id}"
+PRODUCTION_BACKUP_GATE_OPERATIONS_ROUTE = "/v1/production-backup-gates/operations"
+BackupScopeQuery = Annotated[str, Query(min_length=1), BeforeValidator(str.strip)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,11 +69,9 @@ class ProductionBackupGateRouteDependencies:
     control_plane_root: FilePath
 
 
-class ProductionBackupGateResponse(BaseModel):
+class ProductionBackupGateOperationEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["accepted"] = "accepted"
-    trace_id: str
     operation_id: str
     operation_status: str
     backup_record_id: str
@@ -78,6 +79,30 @@ class ProductionBackupGateResponse(BaseModel):
     error_code: str
     # Launchplane's fixed description of error_code; never provider text.
     error_description: str = ""
+
+
+class ProductionBackupGateResponse(ProductionBackupGateOperationEvidence):
+    status: Literal["accepted"] = "accepted"
+    trace_id: str
+
+
+class ProductionBackupGateOperationSummary(ProductionBackupGateOperationEvidence):
+    typed_binding: bool
+    created_at: str
+    updated_at: str
+    finished_at: str
+
+
+class ProductionBackupGateOperationListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    product: str
+    context: str
+    instance: str
+    operations: tuple[ProductionBackupGateOperationSummary, ...]
+    truncated: bool
 
 
 # Structured evidence the backup provider writes: record ids, digests, stage,
@@ -112,21 +137,28 @@ _BACKUP_EVIDENCE_KEYS = frozenset(
 )
 
 
-def _response(
-    operation: VeriReelProdBackupGateOperationRecord, trace_id: str
-) -> ProductionBackupGateResponse:
+def _operation_evidence(
+    operation: VeriReelProdBackupGateOperationRecord,
+) -> ProductionBackupGateOperationEvidence:
     evidence = operation.result.evidence if operation.result else operation.progress_evidence
     error_code = safe_operation_error_code(operation.error_code) or (
         BACKUP_FAILED_CODE if operation.status == "fail" else ""
     )
-    return ProductionBackupGateResponse(
-        trace_id=trace_id,
+    return ProductionBackupGateOperationEvidence(
         operation_id=operation.operation_id,
         operation_status=operation.status,
         backup_record_id=operation.backup_record_id,
         evidence={key: value for key, value in evidence.items() if key in _BACKUP_EVIDENCE_KEYS},
         error_code=error_code,
         error_description=backup_failure_description(error_code),
+    )
+
+
+def _response(
+    operation: VeriReelProdBackupGateOperationRecord, trace_id: str
+) -> ProductionBackupGateResponse:
+    return ProductionBackupGateResponse(
+        trace_id=trace_id, **_operation_evidence(operation).model_dump()
     )
 
 
@@ -312,24 +344,13 @@ def register_production_backup_gate_routes(
             ) from error
         return _response(operation, trace_id)
 
-    def scoped_operation(
-        operation_id: str,
-        product: str,
-        context: str,
-        instance: str,
+    def scoped_store(
+        scope: tuple[str, str, str],
         identity: LaunchplaneIdentity,
         record_store: object,
         trace_id: str,
         action: str,
-        allow_unbound: bool = False,
-    ) -> VeriReelProdBackupGateOperationRecord:
-        """The operation in the requested scope.
-
-        Only a read accepts ``allow_unbound``: an operation an older VeriReel
-        driver path queued has no shared-gate binding, but the read still shows
-        its structured status.
-        """
-        scope = (product.strip().lower(), context.strip().lower(), instance.strip().lower())
+    ) -> PostgresRecordStore:
         if not common.authorization_allows(
             identity=identity,
             action=action,
@@ -350,8 +371,23 @@ def register_production_backup_gate_routes(
                 code="database_storage_required",
                 message="Production backup operations require database storage.",
             )
+        return record_store
+
+    def scoped_operation(
+        operation_id: str,
+        product: str,
+        context: str,
+        instance: str,
+        identity: LaunchplaneIdentity,
+        record_store: object,
+        trace_id: str,
+        action: str,
+        allow_unbound: bool = False,
+    ) -> VeriReelProdBackupGateOperationRecord:
+        scope = (product.lower(), context.lower(), instance.lower())
+        store = scoped_store(scope, identity, record_store, trace_id, action)
         try:
-            operation = record_store.read_verireel_prod_backup_gate_operation_record(operation_id)
+            operation = store.read_verireel_prod_backup_gate_operation_record(operation_id)
             if (operation.binding is None and not allow_unbound) or (
                 operation.product,
                 operation.context,
@@ -369,9 +405,9 @@ def register_production_backup_gate_routes(
 
     def read_backup_operation(
         operation_id: Annotated[str, Path(min_length=1, max_length=256)],
-        product: Annotated[str, Query(min_length=1)],
-        context: Annotated[str, Query(min_length=1)],
-        instance: Annotated[str, Query(min_length=1)],
+        product: BackupScopeQuery,
+        context: BackupScopeQuery,
+        instance: BackupScopeQuery,
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> ProductionBackupGateResponse:
@@ -389,12 +425,51 @@ def register_production_backup_gate_routes(
         )
         return _response(operation, trace_id)
 
+    def list_backup_operations(
+        product: BackupScopeQuery,
+        context: BackupScopeQuery,
+        instance: BackupScopeQuery,
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        status: Annotated[VeriReelProdBackupGateOperationStatus | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    ) -> ProductionBackupGateOperationListResponse:
+        trace_id = common.next_trace_id()
+        scope = (product.lower(), context.lower(), instance.lower())
+        store = scoped_store(
+            scope, identity, record_store, trace_id, "production_backup_authority.read"
+        )
+        operations = store.list_verireel_prod_backup_gate_operation_records(
+            product=scope[0],
+            context_name=scope[1],
+            instance_name=scope[2],
+            statuses=(status,) if status else (),
+            limit=limit + 1,
+        )
+        return ProductionBackupGateOperationListResponse(
+            trace_id=trace_id,
+            product=scope[0],
+            context=scope[1],
+            instance=scope[2],
+            operations=tuple(
+                ProductionBackupGateOperationSummary(
+                    **_operation_evidence(operation).model_dump(),
+                    typed_binding=operation.binding is not None,
+                    created_at=operation.created_at,
+                    updated_at=operation.updated_at,
+                    finished_at=operation.finished_at,
+                )
+                for operation in operations[:limit]
+            ),
+            truncated=len(operations) > limit,
+        )
+
     def cancel_backup_operation(
         operation_id: Annotated[str, Path(min_length=1, max_length=256)],
         cancellation_request: DurableOperationCancellationRequest,
-        product: Annotated[str, Query(min_length=1)],
-        context: Annotated[str, Query(min_length=1)],
-        instance: Annotated[str, Query(min_length=1)],
+        product: BackupScopeQuery,
+        context: BackupScopeQuery,
+        instance: BackupScopeQuery,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_mutation_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> ProductionBackupGateResponse:
@@ -424,6 +499,12 @@ def register_production_backup_gate_routes(
     for path, handler, method, route_operation_id in (
         (PRODUCTION_BACKUP_GATE_ROUTE, enqueue_backup, "POST", "enqueue_production_backup_gate"),
         (
+            PRODUCTION_BACKUP_GATE_OPERATIONS_ROUTE,
+            list_backup_operations,
+            "GET",
+            "list_production_backup_gate_operations",
+        ),
+        (
             PRODUCTION_BACKUP_GATE_OPERATION_ROUTE,
             read_backup_operation,
             "GET",
@@ -440,7 +521,11 @@ def register_production_backup_gate_routes(
             path,
             handler,
             methods=[method],
-            response_model=ProductionBackupGateResponse,
+            response_model=(
+                ProductionBackupGateOperationListResponse
+                if handler is list_backup_operations
+                else ProductionBackupGateResponse
+            ),
             operation_id=route_operation_id,
             responses={
                 status: {"model": common.error_response_model}

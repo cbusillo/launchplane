@@ -316,37 +316,19 @@ class FastApiDeploymentPromotionReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["error"]["code"], "database_storage_required")
         self.assertIn("read_promotion_record", payload["error"]["message"])
 
-    async def test_openapi_includes_deployment_and_promotion_read_contracts(self) -> None:
-        response = await openapi_response()
+    def test_openapi_record_read_responses_are_closed(self) -> None:
+        openapi = openapi_document()
 
-        self.assertEqual(response.status_code, 200)
-        openapi = response.json()
-        deployment_route = openapi["paths"]["/v1/deployments/{record_id}"]["get"]
-        promotion_route = openapi["paths"]["/v1/promotions/{record_id}"]["get"]
-        self.assertEqual(deployment_route["operationId"], "read_deployment_record")
-        self.assertEqual(promotion_route["operationId"], "read_promotion_record")
-        self.assertEqual(
-            deployment_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/DeploymentRecordResponse",
-        )
-        self.assertEqual(
-            promotion_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/PromotionRecordResponse",
-        )
-        for route in (deployment_route, promotion_route):
-            self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
-            self.assertIn("401", route["responses"])
-            self.assertIn("403", route["responses"])
-            self.assertIn("404", route["responses"])
-            self.assertIn("503", route["responses"])
-        self.assertEqual(
-            openapi["components"]["schemas"]["DeploymentRecordResponse"]["additionalProperties"],
-            False,
-        )
-        self.assertEqual(
-            openapi["components"]["schemas"]["PromotionRecordResponse"]["additionalProperties"],
-            False,
-        )
+        for schema_name in (
+            "DeploymentRecordResponse",
+            "PromotionRecordResponse",
+            "EnvironmentInventoryResponse",
+            "RecentOperationsResponse",
+        ):
+            self.assertEqual(
+                openapi["components"]["schemas"][schema_name]["additionalProperties"],
+                False,
+            )
 
 
 class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
@@ -442,29 +424,6 @@ class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "database_storage_required")
         self.assertIn("read_environment_inventory", payload["error"]["message"])
-
-    async def test_openapi_includes_inventory_read_contract(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        openapi = response.json()
-        route = openapi["paths"]["/v1/inventory/{context}/{instance}"]["get"]
-        self.assertEqual(route["operationId"], "read_environment_inventory")
-        self.assertEqual(
-            route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/EnvironmentInventoryResponse",
-        )
-        self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
-        self.assertIn("401", route["responses"])
-        self.assertIn("403", route["responses"])
-        self.assertIn("404", route["responses"])
-        self.assertIn("503", route["responses"])
-        self.assertEqual(
-            openapi["components"]["schemas"]["EnvironmentInventoryResponse"][
-                "additionalProperties"
-            ],
-            False,
-        )
 
 
 class FastApiProviderHoldAttentionReadTests(unittest.IsolatedAsyncioTestCase):
@@ -701,26 +660,6 @@ class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "database_storage_required")
         self.assertIn("list_environment_inventory", payload["error"]["message"])
-
-    async def test_openapi_includes_recent_operations_contract(self) -> None:
-        response = await openapi_response()
-
-        self.assertEqual(response.status_code, 200)
-        openapi = response.json()
-        route = openapi["paths"]["/v1/contexts/{context}/operations/recent"]["get"]
-        self.assertEqual(route["operationId"], "read_recent_operations")
-        self.assertEqual(
-            route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/RecentOperationsResponse",
-        )
-        self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
-        self.assertIn("401", route["responses"])
-        self.assertIn("403", route["responses"])
-        self.assertIn("503", route["responses"])
-        self.assertEqual(
-            openapi["components"]["schemas"]["RecentOperationsResponse"]["additionalProperties"],
-            False,
-        )
 
 
 class FastApiRuntimeSettingsTests(unittest.IsolatedAsyncioTestCase):

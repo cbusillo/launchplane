@@ -12,6 +12,10 @@ from pydantic import ValidationError
 
 from control_plane import secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.merge_train_stall import (
+    STALL_WORKFLOW_REF_KEY,
+    STALL_WORKFLOW_REPOSITORY_KEY,
+)
 from control_plane.dokploy.memory_capacity import (
     PREVIEW_MEMORY_FLOORS_SETTING,
     PreviewMemoryCapacityRefused,
@@ -137,6 +141,27 @@ class ServiceRuntimeSettingTests(unittest.TestCase):
             self.call(self.apply_request(preview["plan_digest"]))
         self.assertEqual(_service_env(self.store), EXISTING_ENV)
 
+    def test_reviewed_apply_accepts_both_stall_sender_routing_settings(self) -> None:
+        expected = {
+            STALL_WORKFLOW_REPOSITORY_KEY: "example/launchplane",
+            STALL_WORKFLOW_REF_KEY: "main",
+        }
+        for index, (key, value) in enumerate(expected.items()):
+            request = ServiceRuntimeSettingRequest(
+                key=key, value=value, reason="Activate the existing stall sender route."
+            )
+            preview = self.call(request)
+            self.assertEqual(
+                _service_env(self.store), {**EXISTING_ENV, **dict(list(expected.items())[:index])}
+            )
+            self.call(
+                request.model_copy(
+                    update={"mode": "apply", "expected_plan_digest": preview["plan_digest"]}
+                ),
+                f"stall-route-{index}",
+            )
+        self.assertEqual(_service_env(self.store), {**EXISTING_ENV, **expected})
+
     def test_undeclared_secret_shaped_or_invalid_settings_are_refused(self) -> None:
         for key, value in (
             ("LAUNCHPLANE_UNDECLARED_SETTING", "1"),
@@ -144,6 +169,8 @@ class ServiceRuntimeSettingTests(unittest.TestCase):
             (PREVIEW_MEMORY_FLOORS_SETTING, json.dumps({"synthetic-execution-host": 0})),
             (PREVIEW_MEMORY_FLOORS_SETTING, "not json"),
             ("LAUNCHPLANE_DISCUSSION_REMINDERS", json.dumps({"schedules": []})),
+            (STALL_WORKFLOW_REPOSITORY_KEY, "not-a-repository"),
+            (STALL_WORKFLOW_REF_KEY, "   "),
         ):
             with self.subTest(key=key, value=value), self.assertRaises(ValidationError):
                 ServiceRuntimeSettingRequest(key=key, value=value, reason="Try it.")

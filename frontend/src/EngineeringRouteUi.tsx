@@ -23,6 +23,7 @@ const ENGINEERING_VIEWS: Exclude<EngineeringView, "hub">[] = [
   "tenant-admission",
   "governance-projection",
   "github-delivery",
+  "preview-lifecycle",
   "privileged-operations",
   "runtime-setting-removal",
 ];

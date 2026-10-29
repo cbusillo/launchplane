@@ -1,141 +1,63 @@
 ---
-title: Reusable Preview Workflow Contract
+title: Preview Workflow Compatibility Contract
 ---
 
-Status: transitional. This page describes the old call-in path, in which a
-product repository's workflows call Launchplane through pinned reusable
-workflows and workflow-identity grants. [DIRECTION.md](../DIRECTION.md) retires
-that: a product repository never calls Launchplane. Previews now come from
-[event-driven deploys](event-driven-deploys.md), and the reconciler writes the PR
-comment and the `launchplane/owner-review` check itself. Products still on the
-call-in path keep it until they move (#2740) and #2606 deletes it; do not add a
-new caller. [Client Review Request](#client-review-request) and
-[Manager Preview Approval](#manager-preview-approval) apply to both paths.
+Status: transitional compatibility only. [DIRECTION.md](../DIRECTION.md) retires
+product repositories calling Launchplane, pinned reusable Launchplane workflows,
+workflow-identity grants, and caller-grant rules. New products use
+[event-driven deploys](event-driven-deploys.md) and the build handoff in
+[artifact provenance](artifact-provenance.md).
 
-## Purpose
+## Existing Compatibility Boundary
 
-Product preview workflows should be thin event adapters. Product repos build and
-publish the product artifact; Launchplane owns preview event semantics,
-idempotency, provider mutation, durable records, unsupported notices, feedback
-comments, inventory, and cleanup.
+Launchplane still contains old reusable preview workflows and caller-policy
+readers. Their presence supports products not yet migrated; it is not an
+onboarding recipe or permission to add, widen, or refresh a caller grant. Keep
+existing callers unchanged until event-driven reconciliation is activated and
+verified for that product, then retire the caller through the supported cleanup
+and readback path. Do not delete a compatibility workflow merely because this
+document no longer teaches product repositories to call it. Active backup,
+promotion, rollback, runtime-health and cleanup gates remain until Launchplane
+owns equivalent behavior and tests. The [onboarding cleanup runbook](operations.md#conventional-generic-web-onboarding)
+owns the retained caller-rule retirement path.
 
-## Ownership Boundary
+The service remains responsible for preview records, provider mutations, runtime
+settings and secrets, cleanup, feedback, and reconciliation. Product repositories
+build immutable artifacts only. The canonical event and provenance documents own
+the new-product contract rather than duplicating it here.
 
-Product repos own:
+## Retained Preview Safety
 
-- GitHub event wiring for `pull_request`, `pull_request_target`, and manual
-  `workflow_dispatch` entrypoints.
-- Product build, test, package, and immutable artifact publishing.
-- Product-specific smoke facts that Launchplane cannot derive from a product
-  profile.
-- The minimal Launchplane request payload containing product key, PR number,
-  source SHA, immutable artifact reference, run URL, and primitive smoke result.
+Generic-web lifecycle cleanup uses the repository-name anchor from the product
+profile for stored-preview lookup and terminal evidence; the product key need
+not equal the repository name. Historical callers without a profile retain
+their product-shaped anchor, with no fallback to unrelated records.
+Provider application lookup validates the complete project/environment/application
+inventory before proving absence or reusing a match. Missing or malformed nested
+relations fail cleanup without deleting provider state or marking a preview
+destroyed; a fully enumerated empty inventory remains valid absence.
 
-Launchplane owns:
+After native generic-web provider teardown succeeds, the destroy route records
+the matching preview as `destroyed` and clears its active and serving generation
+links before returning success. A destroy for a preview that was never recorded
+is a successful no-op with `destroy_outcome=no_preview_recorded` when no provider
+resource evidence exists. Reusable feedback maps that outcome to `cleared`.
+Provider teardown failure leaves durable preview state unchanged, and managed
+failure comments claim that a preview may remain only when the feedback request
+contains preview URL or image evidence or Launchplane finds an active preview
+record with a canonical URL; otherwise the failure wording remains neutral about
+resource existence. Driver-transport extensions retain ownership of their own
+destroy transition. Because provider and record mutations cannot share a
+transaction, retrying destroy after a record-write failure is the supported
+convergence path; an already-absent provider application is treated as a
+successful teardown so that retry can repair the record.
 
-- Preview-request interpretation and idempotency conventions.
-- Preview refresh, destroy, inventory, readiness, and lifecycle cleanup routes.
-- Scheduled lifecycle sweeps for every product profile where
-  `preview.enabled=true`.
-- Preview records, generation records, desired-state records, cleanup records,
-  and PR feedback records.
-- Unsupported notices for fork and Dependabot preview requests.
-- PR comment rendering, delivery, replacement, and cleanup.
-- Provider credentials, runtime settings, managed secrets, preview URL policy,
-  and preview slug policy.
-
-Product workflows must not render Launchplane preview comments directly or keep
-their own durable lifecycle truth once a matching Launchplane route exists.
-
-## Event Contract
-
-Use `PreviewWorkflowEvent` and `decide_preview_workflow_operation` from
-`control_plane.contracts.preview_workflow_contract` as the shared event contract.
-The decision is deliberately small:
-
-- `refresh`: build and publish the product artifact, then call the product
-  driver's preview-refresh route.
-- `destroy`: call the product driver's preview-destroy route.
-- `unsupported_notice`: call `POST /v1/previews/pr-feedback` with
-  `status="unsupported"` from a trusted base-branch workflow.
-- `ignore`: make no Launchplane mutation.
-
-Product repo adapters can ask Launchplane to render that decision from a GitHub
-event payload before doing product-owned work:
-
-```shell
-uv run launchplane preview-workflow-decision \
-  --event-file "$GITHUB_EVENT_PATH" \
-  --event-name "$GITHUB_EVENT_NAME" \
-  --product sell-your-outboard \
-  --context sellyouroutboard-testing \
-  --run-id "$GITHUB_RUN_ID" \
-  --run-attempt "$GITHUB_RUN_ATTEMPT"
-```
-
-The command is read-only. It does not contact GitHub, call Launchplane service
-routes, check out pull-request code, or mutate a provider. It emits the normalized
-event, decision, route path, feedback status, and run-scoped idempotency key as
-JSON so product workflows can branch on the shared contract instead of
-duplicating event semantics.
-
-Preview operations for one pull request are serialized rather than cancelable.
-A close followed immediately by reopen may complete destroy before the
-subsequent refresh; the final event converges the preview to the current
-requested state without canceling cleanup in progress.
-
-Same-repository preview build jobs that need an importable helper for the
-GitHub event decision and image tags should use
-`cbusillo/launchplane/.github/actions/setup-preview-prepare-client@<launchplane-sha>`.
-The
-generated client is read-only and product-agnostic: callers pass the current
-repository, head repository, PR author, PR number, source SHA, image name, and
-run URL; the client returns refresh/unsupported/noop mode, same-repo
-support flags, `pr-<number>` image tags, and full image references. It does not
-call Launchplane, choose provider targets, render comments, derive preview URLs,
-or store lifecycle truth.
-
-Once the product workflow has decided to refresh, destroy, or send an
-unsupported notice, it should hand off to Launchplane's reusable workflow instead
-of constructing route payloads locally:
-
-```yaml
-jobs:
-  launchplane-preview:
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-lifecycle.yml@<launchplane-sha>
-    with:
-      operation: refresh
-      anchor_pr_number: ${{ github.event.pull_request.number }}
-      anchor_pr_url: ${{ github.event.pull_request.html_url }}
-      anchor_head_sha: ${{ github.event.pull_request.head.sha }}
-      image_reference: ${{ needs.build.outputs.image_digest }}
-```
-
-The reusable workflow derives the product key from the caller repository by
-default, derives a run-scoped idempotency key, calls the correct Launchplane
-route, and exposes the returned preview slug, preview URL, refresh status,
-destroy status, or feedback status as job outputs. Callers should omit preview
-context so Launchplane can derive it from the product profile before
-authorization and recording. The lifecycle boundary normalizes an omitted or
-empty driver timeout to 300 seconds before constructing refresh or destroy
-requests. It does not accept `preview_slug`, `preview_url`, provider target ids,
-feedback markdown, or idempotency keys as caller inputs.
-For generic-web application previews, `preview.domain_certificate_type="none"`
-means TLS terminates at the edge ingress: Launchplane creates the Dokploy domain
-on HTTP only, while the public preview URL remains HTTPS. `"letsencrypt"`
-instead makes Dokploy terminate TLS for that domain. This keeps one party
-that manages TLS per preview route and avoids publishing an inner TLS route when
-Dokploy has no certificate to serve.
-
-The generic-web preview-refresh route may return `200` or `202` for a successful
-provider mutation. The reusable lifecycle worker accepts both responses and
-still validates the returned refresh and readiness statuses. When a generic-web
-refresh receives `403`, the lifecycle worker makes one
-same-identity call to the redacted GitHub Actions authz diagnostic route before
-failing the original refresh. That diagnostic still requires a separate,
-narrow `authz_diagnostic.evaluate` grant; without it, the workflow retains the
-ordinary generic denial. Its response contains only selector categories and
-opaque fingerprints, never policy selectors or other principal rules.
+Preview refresh readiness should allow the serving runtime identity to converge
+after a provider deploy trigger. A health response that still reports the prior
+deployment/artifact/source identity for the same product, context, preview slug,
+and environment kind remains a polling signal until the route timeout; a
+different product, context, preview slug, or environment kind remains a hard
+mismatch.
 
 New preview settings accept only `data_transport_mode="none"` (ordinary preview
 provisioning with the declared environment copying) or `"driver"` (executed
@@ -156,9 +78,11 @@ API clients alongside the service when deploying this contract change.
 
 When the stored product profile declares `preview.data_transport_mode="driver"`,
 the generic-web lifecycle route delegates refresh and destroy execution to the
-registered product-driver extension. This keeps product-specific database,
-secret, migration, seed, and cleanup behavior inside Launchplane while the
-product workflow remains a thin reusable-workflow caller. Missing driver
+registered shared capability. The `postgres` capability provides an isolated
+database and role, profile-declared generated secrets and application lifecycle
+commands for any generic-web product with a PostgreSQL testing template. Its
+configuration and the supported legacy transition are described in
+[driver development](driver-development.md). Missing driver
 extensions fail closed instead of falling back to generic environment copying.
 Driver-owned application commands must invoke executables already present in the
 immutable image instead of relying on package-runner download or discovery
@@ -179,208 +103,42 @@ to echo them, and persists that observed identity on the same explicit generatio
 Product-local preview slugs are not substitutes for Launchplane's canonical
 preview and generation identities.
 
-Preview comment updates that are not part of the lifecycle workflow use
-`cbusillo/launchplane/.github/workflows/reusable-preview-pr-feedback.yml@<launchplane-sha>`.
-Callers provide only primitive display facts such as PR number, status, preview
-URL, image references, revision, run URL, and failure summary. The reusable
-feedback workflow owns the `/v1/previews/pr-feedback` route, marker, payload
-shape, delivery behavior, and run-scoped idempotency key. Callers may omit
-preview context; Launchplane derives it from the product profile before
-authorization and recording.
+PostgreSQL refresh and destroy use the same product-operation serialization as
+plain previews, rechecking the profile after acquiring it. A profile write cannot
+change resource declarations during a product operation; retained previews keep
+those declarations fixed between operations. This also applies to plain previews:
+clean them up before changing resource names, source or template. Inert refresh
+configuration failures preserve serving evidence. Destroy never creates a record
+for an unrecorded preview; an already destroyed record is an idempotent success.
+PostgreSQL destroy also accepts complete historical declarations for active or
+retiring products, including disabled previews, while refresh still requires an
+active canonical profile. Cleanup preserves the stored profile and retirement
+hash fence; retired products cannot execute cleanup.
+PostgreSQL environments use the same explicit template copy list, managed preview
+configuration and credential-safety checks as plain previews, with additional
+copied query-value checks limited to PostgreSQL. Generated database/application
+declarations take precedence over managed values and retired entries; removing a
+generator declaration is the supported way to change that ownership. Template connection identity and
+credential query overrides fail before provider effects.
 
-Product workflows that still need to translate local job results into a preview
-feedback `status` and `failure_summary` should call
-`cbusillo/launchplane/.github/workflows/reusable-preview-feedback-status.yml@<launchplane-sha>`.
-The reusable workflow maps refresh publish, provision, and product verification
-results to `ready` or `failed`, and maps cleanup results to `destroyed` or
-`cleanup_failed`, before delegating to the reusable preview feedback workflow.
-A successful destroy that finds neither a provider resource nor a Launchplane
-preview record returns the typed `no_preview_recorded` outcome and maps to
-`cleared`, removing any stale managed comment instead of claiming cleanup
-failed. Skipped cleanup jobs and unknown typed outcomes remain fail-closed. The
-reusable workflow does not accept route paths, payloads, markers, idempotency
-keys, feedback markdown, provider targets, or runtime facts from callers.
 Because product callers pin reusable workflows while the service deploys
-independently, add any future destroy outcome to the reusable workflow allowlist
+independently, add any future destroy outcome to the `reusable-preview-feedback-status.yml` allowlist
 and roll caller pins forward before the deployed service starts emitting it.
-
-## Required Workflow Shape
-
-Same-repository PR refresh uses `pull_request` because the workflow may check
-out and build the PR head. The product-repo caller must invoke the reusable
-generic-web preview workflow only when all of these conditions hold:
-
-- The PR head repository equals `github.repository`.
-- The PR author is not `dependabot[bot]`.
-
-A preview stays up until its pull request closes or merges: `opened`,
-`reopened`, and `synchronize` refresh it for trusted same-repository PRs, drafts
-included. Labels and draft state play no part (#2735). Any PR not meeting every condition must
-skip the reusable refresh workflow.
-
-Same-repository preview cleanup uses `pull_request_target`: closing the PR runs
-`destroy` from the base-branch workflow. This
-gives destructive cleanup an exact GitHub OIDC `workflow_ref`; it does not
-check out or execute pull-request code. Fork and Dependabot PRs use the same
-trusted workflow only for unsupported or cleared notices. The job must call
-`cbusillo/launchplane/.github/workflows/reusable-preview-request-notice.yml@<launchplane-sha>`.
-The reusable workflow owns the trusted event decision, cleanup lifecycle and
-feedback handoff, unsupported/cleared status selection, and failure summary.
-Product repos must not check out code, choose a checkout ref, render feedback
-markdown, build request payloads, or call `POST /v1/previews/pr-feedback`
-directly from their own trusted notice workflows. The notice, lifecycle, PR
-feedback, and feedback-status reusable workflows accept an optional `runs_on`
-input: a JSON-encoded runner selector that defaults to `"ubuntu-latest"`. The
-notice forwards it to the cleanup and feedback workflows it calls, so one caller
-input chooses the runner for every job in the notice run.
-
-After native generic-web provider teardown succeeds, the destroy route records
-the matching preview as `destroyed` and clears its active and serving generation
-links before returning success. A destroy for a preview that was never recorded
-is a successful no-op with `destroy_outcome=no_preview_recorded` when no provider
-resource evidence exists. Reusable feedback maps that outcome to `cleared`.
-Provider teardown failure leaves durable preview state unchanged, and managed
-failure comments claim that a preview may remain only when the feedback request
-contains preview URL or image evidence or Launchplane finds an active preview
-record with a canonical URL; otherwise the failure wording remains neutral about
-resource existence. Driver-transport extensions retain ownership of their own
-destroy transition. Because provider and record mutations cannot share a
-transaction, retrying destroy after a record-write failure is the supported
-convergence path; an already-absent provider application is treated as a
-successful teardown so that retry can repair the record.
-
-This typed cleanup outcome currently belongs to the generic-web lifecycle
-workflow. Odoo preview cleanup retains its existing result mapping until its
-driver route exposes an equivalent typed no-preview outcome.
-
-Manual `workflow_dispatch` may request `refresh` or `destroy` when a product repo
-needs an admin retry path. Manual refresh still follows the same build,
-publish, and Launchplane-refresh handoff as a PR refresh.
-
-## Client Review Handoff
-
-When a ready preview belongs to a repository with an authoritative Client
-requirement, the Launchplane-owned PR feedback comment is the canonical handoff.
-It includes the public preview URL, immutable image and current revision, the
-exact Launchplane Client-workbench deep link, the PR changes link, a concise test
-plan, Accept and Request changes instructions, a staleness warning, and the next
-Launchplane step. GitHub reviews and comments do not record Client acceptance.
-
-If Client authority cannot be resolved or the workbench route is unavailable,
-the comment fails closed: it tells reviewers not to merge and exposes no Client
-action instructions. Repositories classified as not requiring Client acceptance
-receive the ordinary ready-preview comment without an interactive Client handoff.
-
-The reconciled pilot keeps the decision itself on a trusted Launchplane Client
-surface, visually separate from untrusted preview content. Client acceptance is
-bound to the complete accepted delivery evidence and is consumed by a separately
-authorized Launchplane delivery job; it never authorizes merge, deploy, source,
-configuration, secrets, or access administration. Changed or incomplete binding
-evidence requires fresh review.
-
-## Client Review Request
-
-[Client review](owner-acceptance.md#current-client-review) owns review intent
-from test notes, label overrides, engineering-only checks, invitations and
-decision delivery. Its [carry rules](owner-acceptance.md#carried-acceptance) own
-acceptance across unchanged-feature base updates.
-
-Feedback comments use a repository-scoped Launchplane Delivery App token;
-the [Client-review check](advisory-governance-checks.md#client-review-check)
-uses the separate Advisory Checks App. Check delivery is best-effort and never
-loses a saved decision or fails preview feedback. A later preview reconcile or
-decision retries publication.
-
-## Manager Preview Approval
-
-Launchplane no longer posts the `manager-preview-approval` status or its managed
-`/preview` command comment on pull requests. Preview refresh, verification,
-destroy, Odoo preview apply, authorization-policy changes, and the signed GitHub
-webhook leave the pull request alone; Client review is shown by
-`launchplane/owner-review` (see Client Review Request). When Launchplane next
-writes a ready preview comment, a leftover `manager-preview-approval` status on
-the current head is closed once as `success` with
-`Retired. Owner review is recorded in Launchplane.`, and a leftover
-`launchplane/owner-acceptance` check run created by Launchplane's advisory app
-is updated once to `neutral` with the title "Retired". Neither signal is created where it does not already exist.
-
-Manager preview approval is retired. Its evaluator, webhook commands, reconcile
-route, and store methods are deleted; existing manager events stay in the
-database unread. Current approval uses product review and the release checklist.
-
-The `tenant-admission` status is a separate Launchplane projection of the current
-repository classification and candidate identity. It no longer evaluates manager,
-waiver, or maintenance admission records. The controller separately requires
-current technical checks before merging. Preview refresh, verification, destroy,
-and cleanup do not wait for this status, and projection delivery failure never
-rolls back a completed lifecycle mutation.
-
-Generic-web routes write lifecycle records as part of refresh, destroy, and
-verification. Odoo preview apply finalizes the serving preview and generation
-evidence after the provider result is `pass` but before the durable provider
-reservation releases its target fence. The completed provider response stores
-those lifecycle record identities, so exact replay never synthesizes new
-evidence under changed profile authority. The service uses the issued plan as the stable generation
-identity and returns a non-passing conflict when a delayed refresh or destroy no
-longer owns the preview.
-
-## Idempotency
-
-Every Launchplane mutation from a product preview workflow needs a stable
-idempotency key. Use `preview_workflow_idempotency_key` or the same shape:
-
-```text
-preview-workflow:<product>:<context>:<operation>:pr-<number>:<run-id>:<run-attempt>
-```
-
-Run-scoped keys make repeated HTTP attempts safe while preserving a distinct
-record for a later retry or GitHub rerun. Ignored decisions do not have
-idempotency keys. Launchplane-owned reusable workflows may use an equivalent
-route-specific key when the service derives context from product records.
-
-Preview refresh readiness should allow the serving runtime identity to converge
-after a provider deploy trigger. A health response that still reports the prior
-deployment/artifact/source identity for the same product, context, preview slug,
-and environment kind remains a polling signal until the route timeout; a
-different product, context, preview slug, or environment kind remains a hard
-mismatch.
 
 ## Route Handoff
 
-Preview refresh routes receive only product-local facts:
-
-- product key, and context only for compatibility routes that still require it
-- PR number and source SHA
-- immutable image or artifact reference
-- run URL
-- primitive smoke/readiness facts when the check is product-specific
-
-Generic-web preview refresh callers should pass `anchor_pr_number` and omit
-context, `preview_slug`, and `preview_url`. Launchplane derives the context from
-the product profile, derives the slug from the product profile slug policy,
-derives the live URL from the preview context's runtime environment records, and
-rejects a supplied slug when it conflicts with the derived value. `context`,
-`preview_slug`, and `preview_url` remain compatibility fields for older
-adapters, not product-repo authority.
-
-Generic-web lifecycle cleanup uses the repository-name anchor from that same
-profile for stored-preview lookup and terminal evidence; the product key need
-not equal the repository name. Historical callers without a profile retain
-their product-shaped anchor, with no fallback to unrelated records.
-Provider application lookup validates the complete project/environment/application
-inventory before proving absence or reusing a match. Missing or malformed nested
-relations fail cleanup without deleting provider state or marking a preview
-destroyed; a fully enumerated empty inventory remains valid absence.
+This section preserves the Odoo preview data-source and recovery operations
+contract that existing service code and operational documents still use. It does
+not define a product-repository caller or grant.
 
 Odoo preview builds and lifecycle reconciliation follow
 [event-driven deploys](event-driven-deploys.md). The product publishes an
 immutable artifact and Launchplane verifies its source-control provenance.
 Launchplane's reconciler plans and applies previews without a product workflow
-calling the service. The generic-web feedback wrappers below remain for
+calling the service. Existing generic-web feedback wrappers remain for
 products that have not completed their staged migration.
 
-Launchplane owns isolated Odoo preview planning and smoke checks. The event
-reconciler supplies the verified manifest and PR facts, obtains a ready plan,
+Launchplane owns isolated Odoo preview planning and smoke checks. The event reconciler supplies the verified manifest and PR facts, obtains a ready plan,
 and applies it inside the service. Runtime bindings, provider targets and
 per-preview data names come from Launchplane records. Existing preview discovery
 must prove the target and hostname before cleanup. The reconciler publishes
@@ -391,7 +149,7 @@ identity, and verified runtime identity. The
 service requires an exact lowercase 40-character source commit and lowercase
 64-character `sha256` image digest, injects its runtime identity into the preview
 environment, and requires `/launchplane/health` to echo the matching identity;
-callers cannot disable that verification on a refresh request.
+event reconciliation cannot disable that verification.
 Refresh explicitly sets `PLATFORM_INSTANCE=preview` in the runtime environment,
 overriding any inherited instance name on both new and existing previews. The
 devkit treats this as a public, non-production runtime: startup password and
@@ -413,7 +171,7 @@ attached by the control plane, independently of addon output. Unknown history on
 refuses a reset. Retained-copy refreshes inspect current storage and never
 bootstrap a missing database. No new database marker is needed.
 
-The restore requires complete upstream settings, a non-root reader and an explicit
+The restore requires complete upstream settings, a non-root reader, and an explicit
 dedicated SSH directory. Its source mount is root-only and read-only. The workflow
 checks actual runner/web bind mounts before staging an identity: the runner must
 have only the canonical source from Launchplane's resolved settings bound read-only at `/root/.ssh`, and web has no
@@ -550,46 +308,70 @@ profile's naming policy. The latter stops fresh planning for that target when
 the original intent is unavailable; unrelated previews remain independent. It
 does not recover the original action or plan, permit provider observation, or
 settle the reservation. Original availability flags remain false.
-If a later browser or product-specific smoke workflow needs to publish common
-preview evidence, it should call
-`cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@<launchplane-sha>`
-with the PR number, `verification_status`, `verified_at`, optional checked URLs
-plus timeout, and optional failure summary. The reusable workflow owns the
-`POST /v1/drivers/generic-web/preview-verification` payload, route handoff, and
-run-scoped idempotency key. Launchplane resolves the preview context and
-generic-web base-driver compatibility from the product profile, updates the
-latest preview generation, and returns a typed `generic_web_preview_verification`
-result while preserving durable status/failure evidence in the same preview
-records used by refresh. Odoo preview verification uses this generic-web route;
-the former Odoo-shaped preview verification alias is retired.
 
-Preview destroy routes receive the PR number, source/run metadata, and an
-explicit destroy reason such as `pull_request_closed` or
-`manual_destroy_requested`. Generic-web preview destroy follows the same
-context and slug policy as refresh: callers should pass PR identity, and
-Launchplane derives the preview context and preview slug from the product
-profile before provider deletion.
+## Client Review Handoff
 
-Preview feedback routes receive the status and primitive display facts.
-Launchplane derives the marker, rendered markdown, delivery behavior, and record
-id. If the feedback comment cannot be delivered, Launchplane records the skipped
-or failed feedback result and, when a preview PR feedback notification policy is
-configured, emits admin notification attempts from the control plane. Product
-workflows should not render fallback PR comments themselves; missing runtime
-GitHub credentials and GitHub API failures are Launchplane-owned admin
-signals.
+When a ready preview belongs to a repository with an authoritative Client
+requirement, the Launchplane-owned PR feedback comment is the canonical handoff.
+It includes the public preview URL, immutable image and current revision, the
+exact Launchplane Client-workbench deep link, the PR changes link, a concise test
+plan, Accept and Request changes instructions, a staleness warning, and the next
+Launchplane step. GitHub reviews and comments do not record Client acceptance.
 
-Historical runs keep the caller identity from the workflow revision they ran.
-Launchplane intentionally continues to deny retired or renamed caller refs;
-admins must not widen managed authorization to make an obsolete run replay.
-When a stale Launchplane-owned feedback comment remains, use the audited
-admin remediation route to dry-run and reconcile that exact PR instead.
+If Client authority cannot be resolved or the workbench route is unavailable,
+the comment fails closed: it tells reviewers not to merge and exposes no Client
+action instructions. Repositories classified as not requiring Client acceptance
+receive the ordinary ready-preview comment without an interactive Client handoff.
 
-Product repos should call the reusable preview feedback workflow instead of
-assembling `/v1/previews/pr-feedback` payloads, markers, or idempotency keys in
-repo-local scripts.
+The reconciled pilot keeps the decision itself on a trusted Launchplane Client
+surface, visually separate from untrusted preview content. Client acceptance is
+bound to the complete accepted delivery evidence and is consumed by a separately
+authorized Launchplane delivery job; it never authorizes merge, deploy, source,
+configuration, secrets, or access administration. Changed or incomplete binding
+evidence requires fresh review.
 
-Use
-`cbusillo/launchplane/.github/actions/launchplane-request@<launchplane-sha>`
-for the OIDC transport only when a Launchplane-owned reusable workflow does not
-exist yet. Pin the full reviewed Launchplane commit SHA.
+## Client Review Request
+
+[Client review](owner-acceptance.md#current-client-review) owns review intent
+from test notes, label overrides, engineering-only checks, invitations and
+decision delivery. Its [carry rules](owner-acceptance.md#carried-acceptance) own
+acceptance across unchanged-feature base updates.
+
+Feedback comments use a repository-scoped Launchplane Delivery App token;
+the [Client-review check](advisory-governance-checks.md#client-review-check)
+uses the separate Advisory Checks App. Check delivery is best-effort and never
+loses a saved decision or fails preview feedback. A later preview reconcile or
+decision retries publication.
+
+## Manager Preview Approval
+
+Launchplane no longer posts the `manager-preview-approval` status or its managed
+`/preview` command comment on pull requests. Preview refresh, verification,
+destroy, Odoo preview apply, authorization-policy changes, and the signed GitHub
+webhook leave the pull request alone; Client review is shown by
+`launchplane/owner-review` (see Client Review Request). When Launchplane next
+writes a ready preview comment, a leftover `manager-preview-approval` status on
+the current head is closed once as `success` with
+`Retired. Owner review is recorded in Launchplane.`, and a leftover
+`launchplane/owner-acceptance` check run created by Launchplane's advisory app
+is updated once to `neutral` with the title "Retired". Neither signal is created where it does not already exist.
+
+Manager preview approval is retired. Its evaluator, webhook commands, reconcile
+route, and store methods are deleted; existing manager events stay in the
+database unread. Current approval uses product review and the release checklist.
+
+The `tenant-admission` status is a separate Launchplane projection of the current
+repository classification and candidate identity. It no longer evaluates manager,
+waiver, or maintenance admission records. The controller separately requires
+current technical checks before merging. Preview refresh, verification, destroy,
+and cleanup do not wait for this status, and projection delivery failure never
+rolls back a completed lifecycle mutation.
+
+Generic-web routes write lifecycle records as part of refresh, destroy, and
+verification. Odoo preview apply finalizes the serving preview and generation
+evidence after the provider result is `pass` but before the durable provider
+reservation releases its target fence. The completed provider response stores
+those lifecycle record identities, so exact replay never synthesizes new
+evidence under changed profile authority. The service uses the issued plan as the stable generation
+identity and returns a non-passing conflict when a delayed refresh or destroy no
+longer owns the preview.

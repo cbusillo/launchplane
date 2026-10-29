@@ -2099,6 +2099,81 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_postgres_preview_transport_holds_product_lease_through_provider_execution(
+        self,
+    ) -> None:
+        from control_plane.drivers.postgres_preview_transport import (
+            PostgresPreviewDestroyEnvelope,
+            apply_postgres_preview_destroy_result,
+        )
+        from control_plane.workflows.postgres_preview import (
+            PostgresPreviewDestroyRequest,
+            PostgresPreviewDestroyResult,
+        )
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        with _store_for_fresh_head_database() as store:
+            profile = _driver_profile()
+            store.write_product_profile_record(profile)
+            renamed = profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"app_name_suffix": "-new"})}
+            )
+
+            def execute(**_: object) -> PostgresPreviewDestroyResult:
+                with self.assertRaises(ValueError):
+                    store.write_product_profile_record(renamed)
+                return PostgresPreviewDestroyResult(
+                    destroy_status="pass",
+                    destroy_started_at="2026-10-29T00:00:00Z",
+                    destroy_finished_at="2026-10-29T00:00:00Z",
+                    application_name="",
+                    application_id="",
+                    preview_url="",
+                )
+
+            with patch(
+                "control_plane.drivers.postgres_preview_transport.execute_postgres_preview_destroy",
+                side_effect=execute,
+            ):
+                apply_postgres_preview_destroy_result(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    execution_profile=profile,
+                    request=PostgresPreviewDestroyEnvelope(
+                        product=profile.product,
+                        destroy=PostgresPreviewDestroyRequest(
+                            context=profile.preview.context,
+                            anchor_repo=profile.repository.partition("/")[2],
+                            anchor_pr_number=1,
+                            preview_slug="pr-1",
+                            destroy_reason="closed",
+                        ),
+                    ),
+                )
+            store.write_product_profile_record(renamed)
+            self.assertEqual(store.read_product_profile_record(profile.product), renamed)
+
+    def test_preview_operation_excludes_resource_renaming_until_it_finishes(self) -> None:
+        from control_plane.preview_namespaces import preview_product_operation_key
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        with _store_for_fresh_head_database() as store:
+            profile = _driver_profile()
+            store.write_product_profile_record(profile)
+            renamed = profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"app_name_suffix": "-new"})}
+            )
+            with store.serialize_preview_refresh(
+                preview_id=preview_product_operation_key(profile.product),
+                dedicated=True,
+                shared=True,
+            ):
+                with self.assertRaises(ValueError):
+                    store.write_product_profile_record(renamed)
+                self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            store.write_product_profile_record(renamed)
+            self.assertEqual(store.read_product_profile_record(profile.product), renamed)
+
     def test_schema_column_catalog_reads_do_not_grow_per_required_table(self) -> None:
         from control_plane.storage.postgres import Base
 

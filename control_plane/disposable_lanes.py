@@ -343,15 +343,7 @@ def require_disposable_lane(
             and preview.state not in {"active", "destroyed"}
         ):
             raise DisposableLaneSafetyUnknown("The preview lifecycle does not admit a refresh.")
-        if evidence is not None and (
-            usage.protected
-            or evidence.data == "only_copy"
-            or evidence.production_resources in {"shared", "separation_ready"}
-        ):
-            # Expiry or config drift cannot silently erase a protective report.
-            raise DisposableLaneSafetyUnknown(
-                "The preview has a recorded protected use or resource."
-            )
+        require_unprotected_preview(target, evidence)
         binding = disposable_lane_binding_sha256(
             profile,
             target,
@@ -425,6 +417,20 @@ def require_disposable_lane(
             "The lane is in use, holds needed data, shares production resources, or safety is unknown."
         )
     return evidence.binding_sha256
+
+
+def require_unprotected_preview(
+    target: DokployTargetRecord | None, evidence: DisposableLaneSafety | None
+) -> None:
+    if (target is not None and target.policies.staff_testing_hold is not None) or (
+        evidence is not None
+        and (
+            evidence.usage == "in_use"
+            or evidence.data == "only_copy"
+            or evidence.production_resources in {"shared", "separation_ready"}
+        )
+    ):
+        raise DisposableLaneSafetyUnknown("The preview has a recorded protected use or resource.")
 
 
 def resolve_disposable_preview(
