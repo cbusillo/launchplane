@@ -309,6 +309,8 @@ try:
         expected=spec.get('container_ids')
         if spec.get('allow_unavailable') is not True or not isinstance(expected,list) or not expected or not all(isinstance(value,str) and value for value in expected):
             raise ValueError('Container removal requires admitted unavailable testing custody')
+        if spec.get('retiring') is True:
+            own=own.intersection(set(expected))
         states={item['State']['Status'] for item in containers if item['Id'] in own}
         if not own.issubset(set(expected)) or states.intersection({'running','restarting','paused'}):
             result={'type':'complete','availability':'changed'}
@@ -324,7 +326,7 @@ try:
             for identifier in sorted(own):
                 docker('rm',identifier)
             containers=inventory()
-            if any((item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==spec['project'] for item in containers):
+            if any(item['Id'] in own for item in containers):
                 raise ValueError('Old testing containers remain')
             result={'type':'complete','availability':'absent'}
         else:

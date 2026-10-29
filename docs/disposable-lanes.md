@@ -292,7 +292,11 @@ from current stopped/absent state. Incidental Docker lifecycle timestamps do not
 invalidate an unchanged stopped copy. Pre-start container removal accepts only admitted IDs in complete current
 inventory and refuses running or replacement members. Post-verification removal
 captures the freshly qualified stopped IDs and storage in its durable effect;
-replay uses that same custody. Both use Docker removal without force or volume
+replay settles that same custody before qualifying a later batch. A positively
+observed restart or re-enabled automatic deployment after a completed effect
+starts a successor linked to that completed receipt. An unsettled effect always
+retains its original key; rollback reads the latest effect rather than an older
+exclusion. Both removal stages use Docker removal without force or volume
 deletion. Interrupted removal finishes only its stopped or dead leftovers;
 absent members need no repeated removal. Preparation resumes with the observed absent original,
 while preserving the original ingress preimage and metadata for health rollback.

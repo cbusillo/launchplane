@@ -514,3 +514,19 @@ class RetainedTestingCopyTests(unittest.TestCase):
                 self.assertEqual(frame["type"], "failed")
                 self.assertFalse(any(command[1] == "rm" for command in commands))
                 self.containers = original
+
+    def test_retirement_settles_missing_original_ids_without_removing_replacements(self) -> None:
+        expected = [item["Id"] for item in self.containers]
+        for item in self.containers:
+            item["Id"] = "replacement-" + item["Id"]
+        for mode in ("remove", "removal-readback"):
+            frame, commands = self.run_host(
+                mode=mode,
+                extra={
+                    "allow_unavailable": True,
+                    "retiring": True,
+                    "container_ids": expected,
+                },
+            )
+            self.assertEqual(frame["availability"], "absent")
+            self.assertFalse(any(command[1] == "rm" for command in commands))

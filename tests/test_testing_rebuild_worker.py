@@ -313,6 +313,13 @@ class NativeTestingWorkerTests(unittest.TestCase):
         return {}
 
     def physical(self, **kwargs: Any) -> dict[str, Any]:
+        if kwargs["payload"]["mode"] in {"remove", "removal-readback"} and kwargs["payload"].get(
+            "retiring"
+        ):
+            if not set(kwargs["payload"]["container_ids"]).intersection(
+                self.retained.get("container_ids", [])
+            ):
+                return {"type": "complete", "availability": "absent"}
         if kwargs["payload"]["mode"] == "remove":
             self.assertTrue(self.retained["stopped"])
             if self.intent.retained.get("stopped") is True and not kwargs["payload"].get(
@@ -616,14 +623,14 @@ class NativeTestingWorkerTests(unittest.TestCase):
 
     def test_new_staff_hold_blocks_container_removal_before_dispatch(self) -> None:
         self.admit_unavailable("stopped")
-        effect = service.NativeTestingRebuildExecution.run_effect
+        physical = self.physical
 
-        def held(executor: Any, phase: str, *args: Any, **kwargs: Any) -> Any:
-            if phase == "remove-old-containers":
+        def held(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["payload"]["mode"] == "removal-readback":
                 self.apply_staff_hold(True, "Fixture holds the old testing data")
-            return effect(executor, phase, *args, **kwargs)
+            return physical(**kwargs)
 
-        with patch.object(service.NativeTestingRebuildExecution, "run_effect", new=held):
+        with patch.object(service, "retained_copy_operation", side_effect=held):
             with self.assertRaises(service.NativeTestingRebuildPending):
                 self.execute()
         self.assertFalse(hasattr(self, "removed_container_ids"))
@@ -844,16 +851,106 @@ class NativeTestingWorkerTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 self.execute()
             self.assertEqual(self.execute().deploy_status, "pass")
-        receipt = self.store.read_idempotency_record(
-            scope=REBUILD_SCOPE,
-            route_path=REBUILD_ROUTE + ":effect",
-            idempotency_key=self.operation.operation_id + ":remove-retired-containers",
-        )
-        assert receipt is not None
-        self.assertEqual(receipt.state, "completed")
-        custody = self.store.read_original_mutation_intent(receipt)["removal_custody"]
-        self.assertEqual(custody["container_ids"], self.intent.retained["container_ids"])
+        self.assertEqual(self.removed_container_ids, self.intent.retained["container_ids"])
+        self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def check_later_retirement_process(self, *, partial: bool) -> None:
+        self.admit_unavailable("stopped", partial=partial)
+        remove = service.NativeTestingRebuildExecution.remove_old_containers
+
+        def held(executor: Any, *, retired: bool = False) -> None:
+            if retired:
+                raise NativeSourceUnavailable("Fixture pauses after the stop completed")
+            remove(executor)
+
+        with patch.object(service.NativeTestingRebuildExecution, "remove_old_containers", new=held):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.retained.update(
+            self.intent.retained,
+            stopped=False,
+            web_stopped=False,
+            availability="available",
+            container_ids=["later-web", "later-database"],
+        )
+        self.old_provider["autoDeploy"] = True
+
+        def provider(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/compose.update":
+                self.assertIs(kwargs["payload"]["autoDeploy"], False)
+                self.old_provider["autoDeploy"] = False
+                return dict(self.old_provider)
+            return self.provider_request(**kwargs)
+
+        with patch.object(api, "dokploy_request", side_effect=provider):
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects.count("stop-old"), 2 if partial else 1)
+        self.assertNotIn("switch-old", self.effects)
+        self.assertEqual(self.removed_container_ids, ["later-web", "later-database"])
+        self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+
+    def test_process_after_completed_stop_follows_fresh_retirement(self) -> None:
+        self.check_later_retirement_process(partial=True)
+
+    def test_process_after_completed_stop_exclusion_follows_fresh_retirement(self) -> None:
+        self.check_later_retirement_process(partial=False)
+
+    def test_already_stopped_retirement_resumes_its_interrupted_removal(self) -> None:
+        self.admit_unavailable("stopped")
+        publish = service.NativeTestingRebuildExecution.publish
+        physical = self.physical
+        removes: list[list[str]] = []
+
+        def later_stopped(executor: Any, plan: Any, desired: Any, **kwargs: Any) -> None:
+            publish(executor, plan, desired, **kwargs)
+            if desired == plan.new:
+                self.retained.update(
+                    self.intent.retained, container_ids=["later-web", "later-database"]
+                )
+
+        def lost(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["payload"]["mode"] == "remove" and kwargs["payload"].get("retiring"):
+                removes.append(kwargs["payload"]["container_ids"])
+                if len(removes) == 1:
+                    raise TimeoutError("Fixture interrupts removal before the containers disappear")
+            return physical(**kwargs)
+
+        with (
+            patch.object(service.NativeTestingRebuildExecution, "publish", new=later_stopped),
+            patch.object(service, "retained_copy_operation", side_effect=lost),
+        ):
+            with self.assertRaises(TimeoutError):
+                self.execute()
+            self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(removes, [["later-web", "later-database"]] * 2)
+        self.assertEqual(self.retained["availability"], "absent")
+        self.assertEqual(self.effects, ["switch-new"])
+
+    def test_replaced_containers_settle_original_removal_before_new_cleanup(self) -> None:
+        self.admit_unavailable("stopped", partial=True)
+        physical = self.physical
+
+        def lost(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["payload"]["mode"] == "remove":
+                raise TimeoutError("Fixture interrupts the first removal")
+            return physical(**kwargs)
+
+        with patch.object(service, "retained_copy_operation", side_effect=lost):
+            with self.assertRaises(TimeoutError):
+                self.execute()
+        self.retained.update(
+            self.intent.retained,
+            stopped=False,
+            web_stopped=False,
+            availability="available",
+            container_ids=["later-web", "later-database"],
+        )
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.removed_container_ids, ["later-web", "later-database"])
+        self.assertEqual(self.effects, ["switch-new", "stop-old", "stop-old"])
 
     def test_partial_unavailable_retirement_replays_a_lost_stop_reply(self) -> None:
         self.admit_unavailable("stopped", partial=True)
@@ -1502,19 +1599,26 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(readback.predecessor_state, "present")
         self.assertNotIn("public_health", readback.model_dump())
 
-    def test_finished_unavailable_retirement_replays_without_requalifying_old_work(self) -> None:
+    def test_restarted_retirement_waits_for_current_old_work_without_reversing(self) -> None:
         self.admit_unavailable("stopped")
         self.hold_after_unavailable_retirement()
         self.retained.update(
-            availability="available", stopped=False, web_stopped=False, inventory_sha256="e" * 64
+            self.intent.retained,
+            availability="available",
+            stopped=False,
+            web_stopped=False,
+            inventory_sha256="e" * 64,
         )
         self.deployment_history.return_value = [
             {"deploymentId": "fixture-later-old-job", "status": "running"}
         ]
         with patch.object(post_deploy, "compose_data_workflow_is_quiescent", return_value=False):
-            result = self.execute()
-        self.assertEqual(result.deploy_status, "pass", result.error_code)
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
         self.assertEqual(self.effects, ["switch-new"])
+        self.deployment_history.return_value = []
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
 
     def test_finished_unavailable_retirement_cannot_hide_failed_candidate_health(self) -> None:

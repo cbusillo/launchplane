@@ -1617,12 +1617,13 @@ class NativeTestingRebuildExecution:
         if retired and self.intent.retained.get("container_ids") is None:
             return
         phase = "remove-retired-containers" if retired else "remove-old-containers"
+        phase, prior = self.latest_retirement_effect(phase)
+        if retired and self.removal_finished(phase):
+            if not self.retiring_copy().get("container_ids"):
+                return
+            phase = "remove-retired-containers:after:" + prior.record_id
+            prior = None
         if not self.removal_finished(phase):
-            prior = self.store.read_idempotency_record(
-                scope=REBUILD_SCOPE,
-                route_path=REBUILD_ROUTE + ":effect",
-                idempotency_key=self.operation.operation_id + ":" + phase,
-            )
             custody = (
                 self.store.read_original_mutation_intent(prior)["removal_custody"]
                 if retired and prior is not None
@@ -1677,6 +1678,10 @@ class NativeTestingRebuildExecution:
                 lambda dispatch: dispatch(remove),
                 recovery=True,
                 removal_custody=custody if retired else None,
+            )
+        if retired and self.retiring_copy().get("container_ids"):
+            raise NativeTestingRebuildPending(
+                "The retiring target has another qualified container batch."
             )
         self.transport.payload["unavailable_predecessor"] = {
             "project": self.intent.project,
@@ -2010,19 +2015,17 @@ class NativeTestingRebuildExecution:
             self.restore_old_auto_deploy(plan)
 
     def restore_old_auto_deploy(self, plan: TestingRebuildPlan) -> None:
-        original_disable = self.store.read_idempotency_record(
-            scope=REBUILD_SCOPE,
-            route_path=REBUILD_ROUTE + ":effect",
-            idempotency_key=self.operation.operation_id + ":disable-old-auto-deploy",
+        original_disable_phase, original_disable = self.latest_retirement_effect(
+            "disable-old-auto-deploy"
         )
         if original_disable is None:
             return
         if (
             original_disable.provider_target_key
-            != self.adapter.target_key() + ":disable-old-auto-deploy"
+            != self.adapter.target_key() + ":" + original_disable_phase
             or original_disable.request_fingerprint
             != canonical_json_sha256(
-                {"intent": self.intent.digest, "phase": "disable-old-auto-deploy"}
+                {"intent": self.intent.digest, "phase": original_disable_phase}
             )
         ):
             raise ValueError("The original automatic-deploy effect has different custody.")
@@ -2063,12 +2066,27 @@ class NativeTestingRebuildExecution:
             recovery=True,
         )
 
-    def retire_old(self, plan: TestingRebuildPlan) -> None:
-        if isinstance(plan.old, UnavailableTestingPredecessor):
-            if self.unavailable_retirement_finished(plan):
-                self.remove_old_containers()
-                return
+    def latest_retirement_effect(self, phase: str) -> tuple[str, Any]:
+        current = phase
+        while True:
+            receipt = self.store.read_idempotency_record(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE + ":effect",
+                idempotency_key=self.operation.operation_id + ":" + current,
+            )
+            if receipt is None or receipt.state != "completed":
+                return current, receipt
+            successor = phase + ":after:" + receipt.record_id
+            following = self.store.read_idempotency_record(
+                scope=REBUILD_SCOPE,
+                route_path=REBUILD_ROUTE + ":effect",
+                idempotency_key=self.operation.operation_id + ":" + successor,
+            )
+            if following is None:
+                return current, receipt
+            current = successor
 
+    def retire_old(self, plan: TestingRebuildPlan) -> None:
         def disable_auto_deploy(dispatch: Callable[[Callable[[], None]], None]) -> None:
             def send() -> None:
                 api.dokploy_request(
@@ -2081,18 +2099,38 @@ class NativeTestingRebuildExecution:
 
             dispatch(send)
 
+        disable_phase, disable = self.latest_retirement_effect("disable-old-auto-deploy")
+        if (
+            disable is not None
+            and disable.state == "completed"
+            and disable.response_payload.get("not_dispatched") is not True
+            and self.old_provider().get("autoDeploy") is not False
+        ):
+            disable_phase = "disable-old-auto-deploy:after:" + disable.record_id
         self.run_effect(
-            "disable-old-auto-deploy",
+            disable_phase,
             lambda: self.old_provider().get("autoDeploy") is False,
             disable_auto_deploy,
             recovery=True,
         )
-
-        retirement = self.store.read_idempotency_record(
-            scope=REBUILD_SCOPE,
-            route_path=REBUILD_ROUTE + ":effect",
-            idempotency_key=self.operation.operation_id + ":retire-old",
+        stop_phase, retirement = self.latest_retirement_effect("retire-old")
+        stopped = bool(self.retiring_copy()["stopped"])
+        completed_exclusion = (
+            retirement is not None
+            and retirement.state == "completed"
+            and retirement.response_payload.get("cause") == "predecessor_already_unavailable"
         )
+        if (
+            retirement is not None
+            and retirement.state == "completed"
+            and not stopped
+            and (
+                retirement.response_payload.get("not_dispatched") is not True or completed_exclusion
+            )
+        ):
+            stop_phase = "retire-old:after:" + retirement.record_id
+            retirement = None
+            completed_exclusion = False
         if (
             isinstance(plan.old, UnavailableTestingPredecessor)
             and (
@@ -2100,35 +2138,33 @@ class NativeTestingRebuildExecution:
                 or retirement.state != "completed"
                 and not retirement.provider_effect_started_at
             )
-            and self.retiring_copy()["stopped"]
+            and stopped
         ):
             self.run_effect(
-                "retire-old",
+                stop_phase,
                 lambda: False,
                 lambda dispatch: None,
                 exclude_undispatched=True,
                 recovery=True,
                 exclude_cause="predecessor_already_unavailable",
             )
-            self.remove_old_containers(retired=True)
-            return
+        elif not completed_exclusion:
 
-        def stop_compose() -> None:
-            api.dokploy_request(
-                host=self.host,
-                token=self.token,
-                path="/api/compose.stop",
-                method="POST",
-                payload={"composeId": self.intent.old.target_id},
+            def stop_compose() -> None:
+                api.dokploy_request(
+                    host=self.host,
+                    token=self.token,
+                    path="/api/compose.stop",
+                    method="POST",
+                    payload={"composeId": self.intent.old.target_id},
+                )
+
+            self.run_effect(
+                stop_phase,
+                lambda: bool(self.retiring_copy()["stopped"]),
+                lambda dispatch: dispatch(stop_compose),
+                recovery=True,
             )
-
-        self.run_effect(
-            "retire-old",
-            lambda: bool(self.retiring_copy()["stopped"]),
-            lambda dispatch: dispatch(stop_compose),
-            recovery=True,
-        )
-
         if isinstance(plan.old, UnavailableTestingPredecessor):
             self.remove_old_containers(retired=True)
 
@@ -2141,50 +2177,10 @@ class NativeTestingRebuildExecution:
             payload={**self.retained_payload("read"), "retiring": True},
         )
 
-    def unavailable_retirement_finished(self, plan: TestingRebuildPlan) -> bool:
-        if not isinstance(plan.old, UnavailableTestingPredecessor):
-            return False
-        stop = self.store.read_idempotency_record(
-            scope=REBUILD_SCOPE,
-            route_path=REBUILD_ROUTE + ":effect",
-            idempotency_key=self.operation.operation_id + ":retire-old",
-        )
-        if (
-            stop is None
-            or stop.state != "completed"
-            or stop.response_payload.get("cause") != "predecessor_already_unavailable"
-        ):
-            return False
-        if not isinstance(
-            self.retirement_exclusion(plan, after_health_failure=True), TestingStopExclusionReadback
-        ):
-            raise NativeTestingRebuildPending("The completed retirement exclusion is unverified.")
-        disable = self.store.read_idempotency_record(
-            scope=REBUILD_SCOPE,
-            route_path=REBUILD_ROUTE + ":effect",
-            idempotency_key=self.operation.operation_id + ":disable-old-auto-deploy",
-        )
-        if (
-            disable is None
-            or disable.state != "completed"
-            or disable.response_payload.get("not_dispatched") is True
-            or disable.provider_target_key != self.adapter.target_key() + ":disable-old-auto-deploy"
-            or disable.request_fingerprint
-            != canonical_json_sha256(
-                {"intent": self.intent.digest, "phase": "disable-old-auto-deploy"}
-            )
-        ):
-            raise NativeTestingRebuildPending("The completed retirement lost its disable custody.")
-        return True
-
     def retirement_exclusion(
         self, plan: TestingRebuildPlan, *, after_health_failure: bool = False
     ) -> TestingRetirementRecovery | None:
-        stop = self.store.read_idempotency_record(
-            scope=REBUILD_SCOPE,
-            route_path=REBUILD_ROUTE + ":effect",
-            idempotency_key=self.operation.operation_id + ":retire-old",
-        )
+        stop_phase, stop = self.latest_retirement_effect("retire-old")
         if (
             stop is None
             or stop.state != "completed"
@@ -2193,9 +2189,9 @@ class NativeTestingRebuildExecution:
             return None
         if (
             stop.provider_effect_started_at
-            or stop.provider_target_key != self.adapter.target_key() + ":retire-old"
+            or stop.provider_target_key != self.adapter.target_key() + ":" + stop_phase
             or stop.request_fingerprint
-            != canonical_json_sha256({"intent": self.intent.digest, "phase": "retire-old"})
+            != canonical_json_sha256({"intent": self.intent.digest, "phase": stop_phase})
         ):
             raise ValueError("The original stop exclusion has different physical custody.")
         if isinstance(plan.old, UnavailableTestingPredecessor):
@@ -2238,16 +2234,12 @@ class NativeTestingRebuildExecution:
         # Exclude all outstanding retirement writes before releasing the lane's
         # original fence. Unknown dispatched effects are observed, never retried.
         for phase in ("disable-old-auto-deploy", "retire-old"):
-            prior = self.store.read_idempotency_record(
-                scope=REBUILD_SCOPE,
-                route_path=REBUILD_ROUTE + ":effect",
-                idempotency_key=self.operation.operation_id + ":" + phase,
-            )
+            current_phase, prior = self.latest_retirement_effect(phase)
             if prior is not None and prior.provider_effect_started_at:
                 if phase == "retire-old":
                     return None
                 self.run_effect(
-                    phase,
+                    current_phase,
                     lambda: self.old_provider().get("autoDeploy") is False,
                     lambda dispatch: None,
                     reconcile_only=True,
@@ -2255,7 +2247,7 @@ class NativeTestingRebuildExecution:
                 )
             elif prior is None or prior.state != "completed":
                 self.run_effect(
-                    phase,
+                    current_phase,
                     lambda: False,
                     lambda dispatch: None,
                     exclude_undispatched=True,
@@ -2280,6 +2272,7 @@ class NativeTestingRebuildExecution:
         removal_custody: dict[str, Any] | None = None,
     ) -> DurableProviderOperationResult:
         parent = self
+        action = phase.split(":after:", 1)[0]
         forward_route = phase == "route:" + self.plan.new.copy_id
         inverse_route = phase == "route:" + self.plan.old.copy_id
         if abort_forward and (not forward_route or not recovery):
@@ -2334,7 +2327,7 @@ class NativeTestingRebuildExecution:
                     return ProviderObservation("unknown")
                 if present():
                     return ProviderObservation("present", 200)
-                if phase in {"remove-old-containers", "remove-retired-containers"}:
+                if action in {"remove-old-containers", "remove-retired-containers"}:
                     return ProviderObservation("absent", retry_safe=True)
                 return ProviderObservation("unknown" if provider_effect_phase else "absent")
 
@@ -2367,7 +2360,7 @@ class NativeTestingRebuildExecution:
                     return ProviderMutationOutcome(200, provider_effect_performed=False)
 
                 def dispatch(send: Callable[[], None]) -> None:
-                    if phase in {"disable-old-auto-deploy", "retire-old"}:
+                    if action in {"disable-old-auto-deploy", "retire-old"}:
                         target = parent.store.read_dokploy_target_record(
                             context_name=parent.operation.context,
                             instance_name="testing",
@@ -2380,7 +2373,7 @@ class NativeTestingRebuildExecution:
                     lease.assert_current()
                     retiring_unavailable = isinstance(
                         parent.intent.old, UnavailableTestingPredecessor
-                    ) and phase in {
+                    ) and action in {
                         "disable-old-auto-deploy",
                         "retire-old",
                         "remove-retired-containers",
@@ -2388,7 +2381,7 @@ class NativeTestingRebuildExecution:
                     if retiring_unavailable:
                         parent.require_old_quiescent()
                         parent.retiring_copy()
-                    if retiring_unavailable or phase == "remove-old-containers":
+                    if retiring_unavailable or action == "remove-old-containers":
                         check_testing_rebuild_protection(
                             parent.root, parent.store, parent.operation, parent.intent
                         )
