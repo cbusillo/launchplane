@@ -1020,6 +1020,13 @@ def register_agent_context_read_routes(
             generated_at=utc_now_timestamp(),
             product_store=mapping_store,
             work_request_store=mapping_store,
+            product_reference_allowed=lambda product: common.authorization_allows(
+                identity=identity,
+                action="product_profile.read",
+                product=product,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            ),
+            authorization_complete=director_agent_identity(identity),
         )
         return RepoProductMappingResponse(
             trace_id=trace_id,
@@ -1089,6 +1096,13 @@ def register_agent_context_read_routes(
             work_request_store=context_store,
             preview_readiness_store=context_store,
             tenant_admission_section=tenant_admission_section,
+            product_reference_allowed=lambda referenced_product: common.authorization_allows(
+                identity=identity,
+                action="product_profile.read",
+                product=referenced_product,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            ),
+            product_reference_authorization_complete=director_agent_identity(identity),
         )
         return AgentContextResponse(trace_id=trace_id, context=context_payload)
 

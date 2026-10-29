@@ -43,6 +43,19 @@ class _EmptyProductStore:
         return tuple(record for record in self.records if record.driver_id == driver_id)
 
 
+class _CoveredProductStore(_EmptyProductStore):
+    def __init__(
+        self,
+        records: tuple[LaunchplaneProductProfileRecord, ...],
+        coverage: str,
+    ) -> None:
+        super().__init__(records)
+        self.coverage = coverage
+
+    def collection_read_coverage(self, collection: str) -> str:
+        return self.coverage if collection == "product_profiles" else "unsupported"
+
+
 class _WorkRequestStore:
     def __init__(self, records: tuple[EveryCodeWorkRequestRecord, ...]) -> None:
         self.records = records
@@ -70,6 +83,35 @@ class _WorkRequestStore:
 
 
 class RepoProductMappingServiceTests(unittest.TestCase):
+    def _profile(
+        self,
+        *,
+        product: str,
+        repository: str,
+        repository_id: str = "",
+        driver_id: str = "odoo",
+        director_standing: bool = False,
+    ) -> LaunchplaneProductProfileRecord:
+        return LaunchplaneProductProfileRecord.model_validate(
+            {
+                "schema_version": 1,
+                "product": product,
+                "display_name": product.replace("-", " ").title(),
+                "repository": repository,
+                "repository_id": repository_id,
+                "repository_owner_id": "7007" if repository_id else "",
+                "driver_id": driver_id,
+                "owner": {"github_login": product, "github_id": "42"},
+                "release_on_acceptance": "director_standing" if director_standing else "held",
+                "image": {"repository": f"ghcr.io/synthetic/{product}"},
+                "runtime_port": 8069,
+                "health_path": "/web/health",
+                "lanes": ({"instance": "testing", "context": product},),
+                "updated_at": "2026-10-29T12:00:00Z",
+                "source": "test",
+            }
+        )
+
     def test_repo_product_mapping_payload_classifies_products_and_awareness_repos(self) -> None:
         payload = build_repo_product_mapping_service_payload(
             generated_at="2026-05-08T18:05:00Z",
@@ -163,6 +205,111 @@ class RepoProductMappingServiceTests(unittest.TestCase):
             "cbusillo/tool-104",
             {str(repository["repository"]) for repository in repositories},
         )
+
+    def test_ambiguous_aliases_reference_every_product_in_shared_group(self) -> None:
+        profiles = (
+            self._profile(
+                product="synthetic-client-one",
+                repository="synthetic/client-one",
+                repository_id="420042",
+            ),
+            self._profile(
+                product="synthetic-client-two",
+                repository="synthetic/client-two-renamed",
+                repository_id="420042",
+            ),
+        )
+
+        payload = build_repo_product_mapping_service_payload(
+            generated_at="2026-10-29T12:00:00Z",
+            product_store=_CoveredProductStore(profiles, "complete"),
+            work_request_store=_WorkRequestStore(()),
+        )
+
+        mapping = cast(dict[str, object], payload["mapping"])
+        self.assertEqual(
+            mapping["ambiguous_repositories"],
+            ["synthetic/client-one", "synthetic/client-two-renamed"],
+        )
+        references = cast(
+            list[dict[str, object]], mapping["ambiguous_repository_product_references"]
+        )
+        self.assertEqual(
+            {str(reference["repository"]): reference["products"] for reference in references},
+            {
+                "synthetic/client-one": ["synthetic-client-one", "synthetic-client-two"],
+                "synthetic/client-two-renamed": [
+                    "synthetic-client-one",
+                    "synthetic-client-two",
+                ],
+            },
+        )
+        self.assertEqual(
+            cast(dict[str, object], mapping["product_reference_coverage"])["status"],
+            "complete",
+        )
+
+    def test_ambiguous_references_filter_products_without_changing_ambiguity(self) -> None:
+        profiles = (
+            self._profile(product="visible-client", repository="synthetic/shared"),
+            self._profile(product="hidden-client", repository="synthetic/shared"),
+            self._profile(
+                product="visible-director",
+                repository="synthetic/shared",
+                driver_id="generic-web",
+                director_standing=True,
+            ),
+        )
+
+        payload = build_repo_product_mapping_service_payload(
+            generated_at="2026-10-29T12:00:00Z",
+            product_store=_CoveredProductStore(profiles, "complete"),
+            work_request_store=_WorkRequestStore(()),
+            product_reference_allowed=lambda product: product != "hidden-client",
+            authorization_complete=False,
+        )
+
+        mapping = cast(dict[str, object], payload["mapping"])
+        self.assertEqual(mapping["ambiguous_repositories"], ["synthetic/shared"])
+        references = cast(
+            list[dict[str, object]], mapping["ambiguous_repository_product_references"]
+        )
+        self.assertEqual(
+            references,
+            [
+                {
+                    "repository": "synthetic/shared",
+                    "products": ["visible-client", "visible-director"],
+                }
+            ],
+        )
+        coverage = cast(dict[str, object], mapping["product_reference_coverage"])
+        self.assertEqual(coverage["source"], "complete")
+        self.assertEqual(coverage["authorization"], "scoped")
+        self.assertEqual(coverage["status"], "scoped")
+
+    def test_reference_coverage_is_unknown_for_legacy_store_even_without_references(self) -> None:
+        payload = build_repo_product_mapping_service_payload(
+            generated_at="2026-10-29T12:00:00Z",
+            product_store=_EmptyProductStore(),
+            work_request_store=_WorkRequestStore(()),
+        )
+
+        mapping = cast(dict[str, object], payload["mapping"])
+        self.assertNotIn("ambiguous_repository_product_references", mapping)
+        coverage = cast(dict[str, object], mapping["product_reference_coverage"])
+        self.assertEqual(coverage["status"], "unknown")
+        self.assertEqual(coverage["source"], "unknown")
+
+        limited_payload = build_repo_product_mapping_service_payload(
+            generated_at="2026-10-29T12:00:00Z",
+            product_store=_CoveredProductStore((), "limited"),
+            work_request_store=_WorkRequestStore(()),
+        )
+        limited_mapping = cast(dict[str, object], limited_payload["mapping"])
+        limited_coverage = cast(dict[str, object], limited_mapping["product_reference_coverage"])
+        self.assertEqual(limited_coverage["status"], "limited")
+        self.assertEqual(limited_coverage["source"], "limited")
 
 
 if __name__ == "__main__":
