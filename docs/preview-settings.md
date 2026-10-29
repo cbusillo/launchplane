@@ -26,7 +26,9 @@ It removes the values from the profile. Conflicting managed values, retired keys
 or ambiguous product ownership abort the transaction, preserving both sources for
 review. Product-profile writes reject nonempty `preview.override_env`; use the
 managed product-config path for all subsequent changes. Historical profile
-snapshots remain readable. The old one-key profile editor is retired.
+snapshots remain readable. The product catalog returns stored profiles directly,
+so retained read-only preview transport settings do not trigger new-write
+validation during inventory. The old one-key profile editor is retired.
 
 For a plain setting, save a private product-config payload outside the checkout:
 

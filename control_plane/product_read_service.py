@@ -10,7 +10,6 @@ from control_plane import product_config_service as control_plane_product_config
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
     ProductEnvironmentReadModelStore,
-    ProductReadModelStore,
     ProductSiteOverview,
     build_product_activity_read_model,
     build_product_environment_config_status,
@@ -68,20 +67,6 @@ def require_product_environment_read_model_store(
             f"missing store method(s): {missing}."
         )
     return cast(ProductEnvironmentReadModelStore, record_store)
-
-
-def build_product_profile_list_service_payload(
-    *, record_store: ProductReadModelStore, driver_id: str
-) -> dict[str, object]:
-    profiles = tuple(
-        profile
-        for profile in record_store.list_product_profile_records(driver_id=driver_id)
-        if profile.is_active
-    )
-    return {
-        "driver_id": driver_id,
-        "profiles": [profile.model_dump(mode="json") for profile in profiles],
-    }
 
 
 def build_product_environment_read_service_result(
