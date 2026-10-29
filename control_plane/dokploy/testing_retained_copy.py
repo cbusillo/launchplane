@@ -324,8 +324,6 @@ try:
             result={'type':'complete','availability':'stopped' if own else 'absent'}
     else:
         result=qualify_retained_copy(containers,spec)
-        if spec.get('allow_unavailable') is True:
-            result['container_ids']=sorted(own)
         if result.get('availability')!='absent':
             backings=inspect_volume_backings(result['volumes'],containers,own)
             result['physical_binding']=hashlib.sha256(json.dumps({'logical':result['resource_binding'],'backings':backings},sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -338,6 +336,8 @@ try:
                 result['observation_sha256']=hashlib.sha256(json.dumps({'project':spec['project'],'context':spec['context'],'custody':result},sort_keys=True,separators=(',',':')).encode()).hexdigest()
             if spec.get('unavailable_sha256') and result.get('observation_sha256')!=spec['unavailable_sha256']:
                 raise ValueError('The unavailable predecessor changed')
+        if spec.get('allow_unavailable') is True:
+            result['container_ids']=sorted(own)
         if spec['mode']=='readiness':
             if result['web_stopped']:
                 raise CopyReadbackRefused(ReadbackPredicate.RUNTIME)

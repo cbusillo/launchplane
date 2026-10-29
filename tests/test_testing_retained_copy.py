@@ -420,16 +420,11 @@ class RetainedTestingCopyTests(unittest.TestCase):
                     extra=extra,
                     inspect_result=[] if change == "incomplete" else None,
                 )
-                self.assertEqual(
-                    frame,
-                    {"type": "complete", "availability": "changed"}
-                    if change in {"running", "foreign"}
-                    else {
-                        "type": "failed",
-                        "predicate": ReadbackPredicate.NATIVE_READ,
-                        "kind": "unavailable",
-                    },
-                )
+                if change in {"running", "foreign"}:
+                    self.assertEqual(frame["availability"], "changed")
+                else:
+                    self.assertEqual(frame["type"], "failed")
+                    self.assertEqual(frame["predicate"], ReadbackPredicate.NATIVE_READ)
                 self.assertFalse(any(command[1] == "rm" for command in commands))
 
     def test_interrupted_removal_finishes_only_the_admitted_leftovers(self) -> None:

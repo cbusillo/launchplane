@@ -890,6 +890,8 @@ class NativeTestingWorkerTests(unittest.TestCase):
             with self.assertRaises(service.NativeTestingRebuildPending):
                 self.execute()
         self.assertEqual(self.effects, ["switch-new"])
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
     def test_original_may_stop_between_route_and_custody_reads(self) -> None:
         self.admit_unhealthy_running()
@@ -1125,6 +1127,48 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(result.deploy_status, "pass", result.error_code)
         self.assertEqual(self.effects, ["switch-new"])
         self.assertEqual(self.current().target_id.target_id, self.fixture.candidate.compose_id)
+
+    def test_legacy_intent_recovers_container_ids_only_from_matching_admission(self) -> None:
+        self.admit_unavailable("stopped")
+        identifiers = self.intent.retained["container_ids"]
+        self.intent = self.intent.model_copy(
+            update={
+                "retained": {
+                    key: value
+                    for key, value in self.intent.retained.items()
+                    if key != "container_ids"
+                }
+            }
+        )
+        self.capture.return_value = self.intent
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(self.removed_container_ids, identifiers)
+        self.assertEqual(self.effects, ["switch-new"])
+
+    def test_recorded_admission_rollback_finishes_without_making_a_new_decision(self) -> None:
+        self.admit_unavailable("absent")
+        with patch.object(
+            service.NativeTestingRebuildExecution,
+            "retire_old",
+            side_effect=NativeSourceUnavailable("Fixture pauses after publication"),
+        ):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        checkpoint = self.checkpoint()
+        recorded = TestingRebuildRecord.model_validate(
+            {
+                **checkpoint.model_dump(),
+                "error": "testing_rebuild_admission_changed",
+                "admission_refusal": "Recorded predecessor change before upgrade",
+            }
+        )
+        RecordTestingRebuildStore(self.store).save(recorded)
+        result = self.execute()
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(self.checkpoint().step, "failed")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertEqual(self.execute(), result)
 
     def test_absent_predecessor_rebuild_preserves_unknown_old_storage_custody(self) -> None:
         self.admit_unavailable("absent")

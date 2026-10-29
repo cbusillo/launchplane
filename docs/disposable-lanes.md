@@ -309,6 +309,9 @@ or its original absence and reverses metadata this attempt adopted. Foreign file
 bytes, changed physical custody and metadata CAS conflicts remain fenced.
 An admission-change result retains its actual reason and never invents a health
 failure. Old volumes remain under their existing retirement and only-copy rules.
+Already recorded admission rollbacks keep their original-key completion path;
+new old-side changes cannot start one. Older intents without a container-ID list
+recover it only from a current observation matching their admitted custody hash.
 
 `testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
 payloads, scoped by product, context and operation key. The envelope is completed
