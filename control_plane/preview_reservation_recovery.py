@@ -451,6 +451,9 @@ def require_unrecorded_preview_refresh(
         reservation_id=original_reservation_id,
     )
     retained = original_preview_intent(original, profile=profile, store=store)
+    from control_plane.preview_source import require_source_free_preview_original
+
+    require_source_free_preview_original(original, store.read_original_mutation_intent(original))
     if (
         retained.issued_plan.plan_request.fishbowl_source is not None
         or retained.issued_plan.dry_run_plan.clean_snapshot is not None

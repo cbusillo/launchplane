@@ -16665,7 +16665,7 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
         await self.closed_preview(completed_at=(now - timedelta(seconds=3)).isoformat())
         self.reads.clear()
         fake = FakePreviewProvider()
-        operation = self.prepared_operation(fake, "actual-custom-executor", now)
+        operation = self.prepared_operation(fake, "actual-custom-executor", now, creating=True)
         entered = threading.Event()
         release = threading.Event()
         execute = fake.execute_apply

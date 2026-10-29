@@ -1084,6 +1084,10 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                     request.apply.dry_run_plan.operation = "refresh"
                 key = f"retry-{phase}-{preserving}"
                 request.apply.dry_run_plan.compose_name += "-" + key.lower()
+                if request.apply.dry_run_plan.operation == "refresh":
+                    request.apply.dry_run_plan.compose_ref = (
+                        "${created.composeId:" + request.apply.dry_run_plan.compose_name + "}"
+                    )
                 guard = Mock()
 
                 def interrupted(**kwargs: Any) -> dict[str, object]:

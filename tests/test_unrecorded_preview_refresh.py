@@ -43,8 +43,9 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         created: bool = True,
         original_source: ProductSecretCopyFrom | None = None,
         original_snapshot: CleanTestingSnapshot | None = None,
+        capture_source_decision: bool = True,
     ) -> None:
-        self.fixture = DirectorBoundedWritesFixture(self)
+        self.fixture = DirectorBoundedWritesFixture(self, record_source_history=False)
         self.store = self.fixture.store
         self.profile = self.fixture.profile
         with self.store._session_factory() as session:
@@ -71,6 +72,8 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
             request_fingerprint="original-request",
             trace_id="original-preview",
         )
+        if capture_source_decision and self.profile.preview.data_transport_mode == "none":
+            operation.adapter.capture_source_decision()
         original = self.store.reserve_mutation(
             scope=operation.reservation_scope,
             route_path=ODOO_PREVIEW_APPLY_ROUTE,
@@ -144,6 +147,14 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         def execute(**kwargs: Any) -> dict[str, object]:
             self.assertTrue(kwargs["qualify_existing_preview"])
             self.assertEqual(self.store.list_preview_records(), ())
+            reservation = self.store.read_idempotency_record_by_id(kwargs["deployment_record_id"])
+            self.assertIsNotNone(reservation)
+            assert reservation is not None
+            decision = kwargs["expected_source_decision"]
+            self.assertEqual(
+                self.store.read_original_mutation_intent(reservation)["effective_source"],
+                decision.model_dump(mode="json"),
+            )
             kwargs["provider_effect_checkpoint"]("fixture-qualified-effect")
             return self.passing_result()
 
@@ -176,6 +187,99 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         apply.assert_not_called()
         self.assert_original_preserved()
 
+    async def test_current_none_mode_cannot_erase_unknown_or_restored_original_history(
+        self,
+    ) -> None:
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        def driver_profile() -> dict[str, Any]:
+            payload = _odoo_preview_profile_payload()
+            preview = payload["preview"]
+            assert isinstance(preview, dict)
+            preview["data_transport_mode"] = "driver"
+            return payload
+
+        for recorded in (False, True):
+            for history in (
+                None,
+                {"upstream_restore_requested": "false"},
+                {"upstream_restore_requested": "true", "odoo_restore_completed": "true"},
+                {"upstream_restore_requested": "false", "odoo_restore_completed": "false"},
+            ):
+                with self.subTest(recorded=recorded, history=history):
+                    with patch(
+                        "tests.test_director_bounded_writes._odoo_preview_profile_payload",
+                        side_effect=driver_profile,
+                    ):
+                        self.prepare_fixture(created=False)
+                    self.profile = self.profile.model_copy(
+                        update={
+                            "preview": self.profile.preview.model_copy(
+                                update={"data_transport_mode": "none"}
+                            )
+                        }
+                    )
+                    self.fixture.profile = self.profile
+                    self.store.write_product_profile_record(self.profile)
+                    self.fixture.issue_preview()
+                    result: dict[str, object] = {
+                        "status": "pass" if recorded else "fail",
+                        "compose_id": self.target_id,
+                    }
+                    if history is not None:
+                        result["module_install_update_evidence"] = history
+                    self.replace_original(response_payload={"result": result})
+                    if recorded:
+                        self.store.write_preview_record(self.fixture.preview)
+                        self.fixture.payload.pop("unrecorded_original_reservation_id")
+                    with patch(
+                        "control_plane.http_app.execute_odoo_preview_apply_result"
+                    ) as execute:
+                        response = await self.fixture.preview_apply()
+                    self.assertEqual(response.status_code, 409, response.text)
+                    execute.assert_not_called()
+                    self.assert_original_preserved()
+
+    def test_independent_recipient_ignores_only_proven_unallocated_or_disjoint_originals(
+        self,
+    ) -> None:
+        from control_plane.preview_source import require_source_free_preview_history
+
+        self.prepare_fixture(capture_source_decision=False)
+        self.fixture.record_source_history()
+
+        def require_history() -> None:
+            require_source_free_preview_history(
+                self.store,
+                profile=self.profile,
+                issued_plan=_issued_plan(self.request),
+                operation_record_id="new-operation",
+            )
+
+        with self.assertRaises(ValueError):
+            require_history()
+        self.replace_original(
+            response_payload={"result": {"status": "blocked", "provider_effect_attempted": False}}
+        )
+        require_history()
+        self.assert_original_preserved()
+        assert self.original is not None
+        self.replace_original(
+            provider_effect_started_at=self.original.created_at,
+            provider_effect_phase="compose_create",
+        )
+        with self.assertRaises(ValueError):
+            require_history()
+        self.replace_original(provider_effect_started_at="", provider_effect_phase="")
+        self.replace_original(response_payload={"result": {"status": "fail"}})
+        with self.assertRaises(ValueError):
+            require_history()
+        self.replace_original(
+            response_payload={"result": {"status": "fail", "compose_id": "disjoint-recipient"}}
+        )
+        require_history()
+        self.assert_original_preserved()
+
     async def test_existing_target_failed_original_qualifies_without_lifecycle(self) -> None:
         self.prepare_fixture(created=False)
         with patch(
@@ -192,6 +296,13 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         def execute(**kwargs: Any) -> dict[str, object]:
+            reservation = self.store.read_idempotency_record_by_id(kwargs["deployment_record_id"])
+            assert reservation is not None
+            self.source_intent = self.store.read_original_mutation_intent(reservation)
+            self.assertEqual(
+                self.source_intent["effective_source"],
+                kwargs["expected_source_decision"].model_dump(mode="json"),
+            )
             kwargs["provider_effect_checkpoint"]("fixture-uncertain-effect")
             return {"status": "fail", "provider_effect_attempted": True}
 
@@ -216,6 +327,12 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
                 repeated = await self.fixture.preview_apply()
                 self.assertEqual(repeated.status_code, 502, repeated.text)
                 self.assertEqual(observe.call_count, 3)
+            operation_id = apply.call_args.kwargs["deployment_record_id"]
+            reservation = self.store.read_idempotency_record_by_id(operation_id)
+            assert reservation is not None
+            self.assertEqual(
+                self.store.read_original_mutation_intent(reservation), self.source_intent
+            )
             apply.assert_called_once()
         self.assertEqual(self.store.list_preview_records(), ())
         self.assertEqual(self.store.list_preview_generation_records(), ())

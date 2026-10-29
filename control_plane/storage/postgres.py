@@ -10005,6 +10005,13 @@ class PostgresRecordStore(HumanSessionStore):
             product=product, number=number, include_failed=True
         )
 
+    def list_odoo_preview_originals(
+        self, *, product: str, number: int
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        return self._list_odoo_preview_reservations(
+            product=product, number=number, include_completed=True
+        )
+
     def _list_odoo_preview_reservations(
         self,
         *,
@@ -10012,6 +10019,7 @@ class PostgresRecordStore(HumanSessionStore):
         limit: int | None = None,
         number: int | None = None,
         include_failed: bool = False,
+        include_completed: bool = False,
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
         from control_plane.product_reconcile import reconcile_reservation_scope
@@ -10067,7 +10075,7 @@ class PostgresRecordStore(HumanSessionStore):
             orm_model=LaunchplaneIdempotencyRow,
             filters=(
                 LaunchplaneIdempotencyRow.route_path == ODOO_PREVIEW_APPLY_ROUTE,
-                states,
+                True if include_completed else states,
                 product_scope,
             ),
             order_by=(LaunchplaneIdempotencyRow.record_id,),
