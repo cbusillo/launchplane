@@ -55,6 +55,7 @@ from control_plane.lane_movement import LANE_MOVEMENT_REFUSALS
 from control_plane.product_reconcile_read import (
     ProductReconcileRequestReader,
     product_reconcile_request_view,
+    testing_reconcile_failure_code,
 )
 from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
@@ -250,12 +251,12 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             _testing_failure_fix(code),
             (failed,),
         )
-    if plan.get("reconcile_state") == "failed" and plan.get("last_failed_error_code"):
-        code = safe_operation_error_code(str(plan.get("last_failed_error_code") or ""))
+    if plan.get("reconcile_state") == "failed":
+        code = safe_operation_error_code(testing_reconcile_failure_code(plan))
         return _step(
             step_id,
             "blocked",
-            code or "testing_reconcile_failed",
+            code,
             "The last testing reconciliation failed.",
             _testing_failure_fix(code),
         )

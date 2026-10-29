@@ -12,6 +12,7 @@ validated key names, and a plan blocker can name dozens of keys.
 """
 
 import re
+from collections.abc import Mapping
 from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, JsonValue
@@ -45,6 +46,21 @@ class ProductReconcileRequestReader(Protocol):
     def list_product_reconcile_requests(
         self, *, product: str, limit: int | None
     ) -> tuple[ProductReconcileRequestRecord, ...]: ...
+
+
+def testing_reconcile_failure_code(plan: Mapping[str, object]) -> str:
+    code = plan.get("last_failed_error_code")
+    if isinstance(code, str) and code:
+        return code
+    return (
+        "post_deploy_failed"
+        if plan.get("post_deploy_status") == "fail"
+        else "deploy_failed"
+        if plan.get("deploy_status") == "fail"
+        else "testing_qualification_failed"
+        if plan.get("reason") == "testing_qualification_failed"
+        else "testing_reconcile_failed"
+    )
 
 
 def product_preview_request(

@@ -2290,7 +2290,15 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             ),
         )
         self.assertEqual(check.steps[-1].state, "blocked")
-        self.assertEqual(check.steps[-1].code, "testing_reconcile_failed")
+        self.assertEqual(check.steps[-1].code, "deploy_failed")
+        self.assertTrue(
+            any(
+                check.steps[-1].code in incident.summary
+                for incident in self.store.list_public_ingress_incident_records(
+                    product="site", instance_name="testing", status="open"
+                )
+            )
+        )
         self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
         self.assertEqual(len(triggered), 1)
         records = self.store.list_deployment_records(context_name="cm", instance_name="testing")

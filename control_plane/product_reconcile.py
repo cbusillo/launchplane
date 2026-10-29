@@ -3132,8 +3132,6 @@ def run_product_reconcile_once(
                 if key in request.last_plan:
                     outcome.plan[key] = request.last_plan[key]
     plan = dict(outcome.plan)
-    if request.target_kind == "testing" and outcome.error:
-        plan.setdefault("last_failed_error_code", "testing_reconcile_failed")
     timing = {
         "requested_at": request.requested_at,
         "started_at": started_at,

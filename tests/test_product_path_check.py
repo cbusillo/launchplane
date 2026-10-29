@@ -241,7 +241,7 @@ class ProductPathCheckTests(unittest.TestCase):
             ("done", "clear"),
             ("pending", "unknown"),
             ("running", "unknown"),
-            ("failed", "unknown"),
+            ("failed", "blocked"),
         ):
             with (
                 self.subTest(state=state),
