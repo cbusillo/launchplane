@@ -725,17 +725,25 @@ and retains managed integration/source filtering.
 Source-free reuse also requires the retained target's original source history,
 including failed and successful operations on that recipient. Today's `none`
 mode, an absent source reference or a serving generation cannot qualify old data.
-A legacy receipt must explicitly report no upstream restore, no snapshot restore
-and no completed restore; missing fields remain unknown. An original with an
-upstream, snapshot, import or retained-copy source cannot qualify as source-free.
-An unresolved original recipient also retains the fence.
+Legacy receipts lack a complete pre-effect source decision and remain unknown;
+ordinary old successful receipts cannot qualify a source-free refresh. An original
+with an upstream, snapshot, import or retained-copy source cannot qualify as
+source-free. An unresolved original recipient also retains the fence, except for
+a completed creation with explicit no-effect evidence and no allocated target or
+effect checkpoint. Disjoint concrete recipients do not lend each other authority.
 
 New operations retain their effective source decision in the immutable reservation
 intent before the first provider effect. Execution resolves it again and refuses
 source drift before dispatch. Observation and replay retain the saved decision;
 they never infer or backfill it from current settings or a later success. Unknown
-historical origins remain preserved for supported qualification or independent
-recipient recovery; this guard supplies no new recovery or data-use authority.
+historical origins remain preserved; this guard supplies no new data-use authority.
+To continue preview review without qualifying an old recipient, use the existing
+normal preview flow on a separate PR, whose slug and resources form an independent
+recipient. Preserve the original PR, target, data and receipts. The new preview
+must meet its own source, safety, ownership and Client review gates; its success
+neither qualifies nor disposes of the old recipient. Same-PR retirement/recreation
+still requires its existing custody and disposal proof and is not a workaround
+for unknown data or a held original.
 
 Managed settings, aliases, protection reports, overrides and key policy are frozen
 for each bounded dispatch, with a lock timeout. Deploy/job waits hold no global

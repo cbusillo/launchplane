@@ -489,6 +489,7 @@ class OdooPreviewProviderMutationAdapter:
                         "status": "blocked",
                         "error_code": f"lane_movement.{error.code}",
                         "error_message": error.record_failure().description,
+                        "provider_effect_attempted": False,
                     },
                 ),
                 durable=error.code != "source_order_unavailable",
@@ -704,7 +705,12 @@ class OdooPreviewApplyOperation:
                 self.require_original_preservation()
                 if self.adapter._pre_mutation_guard is not None:
                     self.adapter._pre_mutation_guard()
-                self.adapter.capture_source_decision()
+                try:
+                    self.adapter.capture_source_decision()
+                except (ValueError, FileNotFoundError, click.ClickException) as error:
+                    raise OdooPreviewPlanProvenanceError(
+                        code="odoo_preview_source_unavailable", message=str(error)
+                    ) from error
             else:
                 existing = postgres.read_idempotency_record(
                     scope=self.reservation_scope,

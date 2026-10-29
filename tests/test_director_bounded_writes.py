@@ -107,8 +107,10 @@ class DirectorBoundedWritesFixture:
         self.payload["apply"]["dry_run_plan"]["compose_ref"] = "fixture-preview-target"
         self.plan_id = _PLAN_ID
         self.issue_preview()
-        if not record_source_history:
-            return
+        if record_source_history:
+            self.record_source_history()
+
+    def record_source_history(self) -> None:
         from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
         from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
 
@@ -146,7 +148,7 @@ class DirectorBoundedWritesFixture:
                     "state": "completed",
                     "response_status_code": 202,
                     "response_trace_id": "fixture-creation",
-                    "recorded_at": stamp,
+                    "recorded_at": reservation.updated_at,
                     "response_payload": {
                         "result": {
                             "status": "pass",

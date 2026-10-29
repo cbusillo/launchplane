@@ -418,6 +418,45 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             )
             observe.assert_not_called()
 
+    def test_source_capture_refusal_keeps_its_reason_without_reserving_or_dispatching(self) -> None:
+        from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
+        from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_sqlite_database_url(root / "state.db"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+            execute = Mock()
+            operation = prepare_odoo_preview_apply_operation(
+                control_plane_root=root,
+                record_store=store,
+                profile=profile,
+                apply_request=request,
+                issued_plan=_issued_plan(request),
+                reservation_scope=_WORKER_SCOPE,
+                idempotency_key=_PLAN_ID,
+                request_fingerprint="source-refusal",
+                trace_id="source-refusal",
+                execute_apply=execute,
+            )
+            cause = click.ClickException("Original source proof is unavailable")
+            with (
+                patch.object(operation.adapter, "capture_source_decision", side_effect=cause),
+                self.assertRaises(OdooPreviewPlanProvenanceError) as refused,
+            ):
+                operation.run(store)
+            self.assertIs(refused.exception.__cause__, cause)
+            self.assertEqual(str(refused.exception), str(cause))
+            self.assertIsNone(
+                store.read_idempotency_record_by_id(operation.adapter._deployment_record_id)
+            )
+            execute.assert_not_called()
+
     def test_capacity_or_provider_denial_releases_unused_preview_key(self) -> None:
         from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
         from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied

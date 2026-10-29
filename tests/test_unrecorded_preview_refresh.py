@@ -43,6 +43,7 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         created: bool = True,
         original_source: ProductSecretCopyFrom | None = None,
         original_snapshot: CleanTestingSnapshot | None = None,
+        capture_source_decision: bool = True,
     ) -> None:
         self.fixture = DirectorBoundedWritesFixture(self, record_source_history=False)
         self.store = self.fixture.store
@@ -71,7 +72,7 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
             request_fingerprint="original-request",
             trace_id="original-preview",
         )
-        if self.profile.preview.data_transport_mode == "none":
+        if capture_source_decision and self.profile.preview.data_transport_mode == "none":
             operation.adapter.capture_source_decision()
         original = self.store.reserve_mutation(
             scope=operation.reservation_scope,
@@ -201,6 +202,7 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
         for recorded in (False, True):
             for history in (
                 None,
+                {"upstream_restore_requested": "false"},
                 {"upstream_restore_requested": "true", "odoo_restore_completed": "true"},
                 {"upstream_restore_requested": "false", "odoo_restore_completed": "false"},
             ):
@@ -237,6 +239,38 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.status_code, 409, response.text)
                     execute.assert_not_called()
                     self.assert_original_preserved()
+
+    def test_independent_recipient_ignores_only_proven_unallocated_or_disjoint_originals(
+        self,
+    ) -> None:
+        from control_plane.preview_source import require_source_free_preview_history
+
+        self.prepare_fixture(capture_source_decision=False)
+        self.fixture.record_source_history()
+
+        def require_history() -> None:
+            require_source_free_preview_history(
+                self.store,
+                profile=self.profile,
+                issued_plan=_issued_plan(self.request),
+                operation_record_id="new-operation",
+            )
+
+        with self.assertRaises(ValueError):
+            require_history()
+        self.replace_original(
+            response_payload={"result": {"status": "blocked", "provider_effect_attempted": False}}
+        )
+        require_history()
+        self.assert_original_preserved()
+        self.replace_original(response_payload={"result": {"status": "fail"}})
+        with self.assertRaises(ValueError):
+            require_history()
+        self.replace_original(
+            response_payload={"result": {"status": "fail", "compose_id": "disjoint-recipient"}}
+        )
+        require_history()
+        self.assert_original_preserved()
 
     async def test_existing_target_failed_original_qualifies_without_lifecycle(self) -> None:
         self.prepare_fixture(created=False)

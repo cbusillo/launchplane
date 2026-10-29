@@ -39,8 +39,6 @@ def require_source_free_preview_original(
         source = PreviewSourceDecision.model_validate(decision)
         if source.source == "none" and not source.fishbowl_import:
             return
-    elif isinstance(evidence, dict) and all(evidence.get(key) == "false" for key in fields):
-        return
     raise ValueError("Preview original source history is unknown; preserve its data.")
 
 
@@ -74,27 +72,34 @@ def require_source_free_preview_history(
     ):
         if original.record_id == operation_record_id:
             continue
-        retained = original_preview_intent(original, profile=profile, store=store)
-        previous = retained.issued_plan.dry_run_plan
-        if retained.issued_plan.operation != "refresh":
+        intent = store.read_original_mutation_intent(original)
+        issued = OdooPreviewApplyInputsResult.model_validate(intent.get("issued_plan"))
+        previous = issued.dry_run_plan
+        if issued.operation != "refresh":
             continue
         result = original.response_payload.get("result")
         receipt_target = result.get("compose_id") if isinstance(result, dict) else None
+        creating = previous.compose_ref.startswith("${created.")
         if (
-            previous.compose_ref != plan.compose_ref
-            and receipt_target != plan.compose_ref
-            and not (previous.compose_ref.startswith("${created.") and not receipt_target)
+            creating
+            and not receipt_target
+            and original.state == "completed"
+            and not original.provider_effect_started_at
+            and not original.provider_effect_phase
+            and isinstance(result, dict)
+            and result.get("provider_effect_attempted") is False
         ):
             continue
         if (
-            receipt_target
-            and not previous.compose_ref.startswith("${created.")
-            and receipt_target != previous.compose_ref
+            previous.compose_ref != plan.compose_ref
+            and receipt_target != plan.compose_ref
+            and not (creating and not receipt_target)
         ):
+            continue
+        original_preview_intent(original, profile=profile, store=store)
+        if receipt_target and not creating and receipt_target != previous.compose_ref:
             raise ValueError("Preview original target receipt conflicts; preserve its data.")
         matched = True
-        require_source_free_preview_original(
-            original, store.read_original_mutation_intent(original)
-        )
+        require_source_free_preview_original(original, intent)
     if not matched:
         raise ValueError("Existing preview has no original source history; preserve its data.")
