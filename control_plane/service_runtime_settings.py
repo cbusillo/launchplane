@@ -6,6 +6,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.delivery_apply_receipt import apply_reviewed_service_bundle
+from control_plane.contracts.merge_train_stall import (
+    STALL_WORKFLOW_REF_KEY,
+    STALL_WORKFLOW_REPOSITORY_KEY,
+    parse_merge_train_stall_ref,
+    parse_merge_train_stall_repository,
+)
 from control_plane.discussion_reminders import (
     SETTINGS_KEY as DISCUSSION_REMINDERS_SETTING,
     DiscussionReminderSettings,
@@ -29,6 +35,8 @@ DECLARED_SERVICE_SETTINGS: Mapping[str, Callable[[str], object]] = MappingProxyT
     {
         PREVIEW_MEMORY_FLOORS_SETTING: parse_preview_memory_floors,
         DISCUSSION_REMINDERS_SETTING: DiscussionReminderSettings.model_validate_json,
+        STALL_WORKFLOW_REPOSITORY_KEY: parse_merge_train_stall_repository,
+        STALL_WORKFLOW_REF_KEY: parse_merge_train_stall_ref,
     }
 )
 
