@@ -5,6 +5,8 @@ import unittest
 import base64
 
 from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
+from control_plane.contracts.artifact_identity import ArtifactAddonSource
+from tests.support.artifact_manifests import artifact_manifest_v2
 from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from tests.test_merge_train_github import _github_pull_request
 
@@ -161,12 +163,14 @@ class DependabotClientReviewTests(unittest.TestCase):
             owner=SimpleNamespace(is_set=True, review_label="owner-review"),
             lanes=(SimpleNamespace(instance="prod", context="site"),),
         )
+        artifact = artifact_manifest_v2()
+        artifact.addon_sources = (
+            ArtifactAddonSource(repository="cbusillo/sellyouroutboard", ref=artifact.source_commit),
+        )
         store = SimpleNamespace(
             list_product_profile_records=lambda: (profile,),
             read_release_tuple_record=lambda **_: SimpleNamespace(artifact_id="live"),
-            read_artifact_manifest=lambda _: SimpleNamespace(
-                addon_sources=(SimpleNamespace(repository="cbusillo/sellyouroutboard"),)
-            ),
+            read_artifact_manifest=lambda _: artifact,
         )
         reader = GitHubMergeTrainSnapshotReader(
             transport=RecordingMergeTrainGitHubTransport(

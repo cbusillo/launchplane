@@ -151,7 +151,7 @@ def release_decision_issue_body(
     for source in checklist.shared_sources:
         lines.extend(
             [
-                "## Shared website components",
+                "## Shared release inputs",
                 _literal(
                     f"Repository: {source.repository}\n"
                     f"Production: {source.production_commit}\n"

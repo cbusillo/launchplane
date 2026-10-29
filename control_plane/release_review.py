@@ -48,7 +48,8 @@ from control_plane.release_review_github import (
     recorded_preview_hosts,
     read_release_changes,
 )
-from control_plane.release_review_shared import read_shared_source_changes, repository_key
+from control_plane.release_review_shared import read_shared_source_changes
+from control_plane.artifact_release_inputs import repository_key
 from control_plane.odoo_website_settings import matches_production_origin
 from control_plane.release_compatibility import classify_release_database_compatibility
 from control_plane.workflows.launchplane import (
@@ -498,7 +499,7 @@ def build_release_review(
             review_label=profile.owner.review_label,
             policy_store=store,
         )
-        if production.shared_addons_digest != candidate.shared_addons_digest:
+        if profile.driver_id == "odoo":
             shared_sources, additional_changes = read_shared_source_changes(
                 production=store.read_artifact_manifest(production.artifact_id),
                 candidate=store.read_artifact_manifest(candidate.artifact_id),
@@ -719,7 +720,7 @@ def checklist_blockers(
                 f"The release contains {repository}commits without a merged pull request and Client test notes."
             )
     blockers.extend(checklist.additional_changes)
-    return tuple(blockers)
+    return tuple(dict.fromkeys(blockers))
 
 
 def unavailable_release_review(code: ReleaseEvidenceReason) -> ReleaseReviewStatus:
