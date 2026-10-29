@@ -177,6 +177,19 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             ]
         kwargs["receive"](frame)
 
+    async def assert_secret_separation_refused(self, production: str, candidate: str) -> None:
+        self.production["SERVICE_SECRET"] = production
+        self.preview_candidates = [candidate]
+        response = await self.collect()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn(":SERVICE_SECRET", response.text)
+        self.assertNotIn("private-production", response.text)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, "cm", self.issued.preview_slug
+            )
+        )
+
     async def test_production_url_password_in_preview_standalone_value_refuses(self) -> None:
         self.production["SMTP_URL"] = "smtps://sender:private-production-token@mail.example.invalid"
         self.preview_candidates = ["private-production-token"]
@@ -186,21 +199,38 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         spec = self.remote.call_args.kwargs["payload"]["preview_spec"]
         self.assertNotIn("private-production", str(spec))
 
-    async def test_shared_metadata_does_not_count_as_a_production_credential(self) -> None:
-        for production, preview in (
-            ("postgresql://u:private-token@db/x?sslmode=require", "require"),
+    async def test_credential_context_survives_decoding_and_url_queries(self) -> None:
+        for production, preview, suffix in (
             (
                 json.dumps(
-                    {"items": [f"metadata-{index}" for index in range(MAX_CREDENTIAL_CANDIDATES)]}
+                    {
+                        "webhook_url": "https://hooks.invalid/private-path-token",
+                        "region": "production",
+                    }
                 ),
-                "fixture-local-password",
+                "https://hooks.invalid/private-path-token",
+                "SERVICE_SECRET.webhook_url",
+            ),
+            (
+                "https://hooks.invalid/path?sig=private-signature",
+                "private-signature",
+                "SERVICE_SECRET.sig",
+            ),
+            (
+                json.dumps({"key": "destination", "value": {"value": "private-token"}}),
+                "private-token",
+                "SERVICE_SECRET.destination",
             ),
         ):
-            with self.subTest(preview=preview):
-                self.production["SERVICE_SECRET"] = production
-                self.preview_candidates = [preview]
-                response = await self.collect()
-                self.assertEqual(response.status_code, 202, response.text)
+            with self.subTest(suffix=suffix):
+                await self.assert_secret_separation_refused(production, preview)
+
+    async def test_large_unclassified_metadata_does_not_consume_the_credential_bound(self) -> None:
+        self.production["PUBLIC_OPTIONS"] = json.dumps(
+            {"items": [f"metadata-{index}" for index in range(MAX_CREDENTIAL_CANDIDATES)]}
+        )
+        response = await self.collect()
+        self.assertEqual(response.status_code, 202, response.text)
 
     async def test_ambiguous_public_url_purpose_refuses_without_weakening_bearer_url_protection(
         self,
@@ -208,15 +238,8 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         credential = "https://auth.invalid/public-or-bearer-path"
         for key in ("token_uri", "callback_secret_url"):
             with self.subTest(key=key):
-                self.production["SERVICE_SECRET"] = json.dumps({key: credential})
-                self.preview_candidates = [credential]
-                response = await self.collect()
-                self.assertEqual(response.status_code, 409, response.text)
-                self.assertIn(":" + key, response.text)
-                self.assertIsNone(
-                    self.store.read_disposable_lane_safety(
-                        self.profile.product, "cm", self.issued.preview_slug
-                    )
+                await self.assert_secret_separation_refused(
+                    json.dumps({key: credential}), credential
                 )
 
     async def test_credential_shaped_scalars_and_strings_remain_protected(self) -> None:
@@ -288,30 +311,19 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
 
     async def test_nested_bearer_url_is_protected_when_whole_payloads_differ(self) -> None:
         credential = "https://hooks.invalid/private-path-token"
-        self.production["SERVICE_SECRET"] = json.dumps(
-            {"callback_secret_url": credential, "region": "production"}
-        )
-        self.preview_candidates = [credential]
-        response = await self.collect()
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertIn(":callback_secret_url", response.text)
-        self.assertIsNone(
-            self.store.read_disposable_lane_safety(
-                self.profile.product, "cm", self.issued.preview_slug
-            )
+        await self.assert_secret_separation_refused(
+            json.dumps({"callback_secret_url": credential, "region": "production"}), credential
         )
 
-    async def test_nested_credential_names_keep_their_parent_context(self) -> None:
-        self.production["SERVICE_SECRET"] = json.dumps({"api_token": {"value": 12}})
-        self.preview_candidates = ["12"]
-        response = await self.collect()
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertIn(":api_token.value", response.text)
-        self.assertIsNone(
-            self.store.read_disposable_lane_safety(
-                self.profile.product, "cm", self.issued.preview_slug
-            )
-        )
+    async def test_nested_credential_names_keep_context_without_disclosing_payload_keys(
+        self,
+    ) -> None:
+        for payload, candidate in (
+            ({"api_token": {"value": 12}}, "12"),
+            ({"private-production-sensitive-key": "fixture-credential"}, "fixture-credential"),
+        ):
+            with self.subTest(candidate=candidate):
+                await self.assert_secret_separation_refused(json.dumps(payload), candidate)
 
     async def test_other_integrations_and_encoded_provider_secrets_are_compared(self) -> None:
         secret = "private-extra-production-token"
@@ -359,7 +371,8 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         response = await self.collect()
         self.assertEqual(response.status_code, 409, response.text)
         self.assertIn(
-            "preview_production_credential_separation_unproven:custom.api_token", response.text
+            "preview_production_credential_separation_unproven:ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64",
+            response.text,
         )
 
     async def test_credential_inventory_overflow_refuses_without_publication(self) -> None:
@@ -510,11 +523,12 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         )
         response = await self.collect()
         self.assertEqual(response.status_code, 409, response.text)
-        self.assertIsNone(
-            self.store.read_disposable_lane_safety(
-                self.profile.product, "cm", self.issued.preview_slug
-            )
+        safety = self.store.read_disposable_lane_safety(
+            self.profile.product, "cm", self.issued.preview_slug
         )
+        assert safety is not None
+        self.assertEqual(safety.production_resources, "shared")
+        self.remote.assert_not_called()
 
     async def test_generation_drift_and_provider_denial_cannot_publish(self) -> None:
         def changed(**kwargs: Any) -> None:

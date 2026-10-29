@@ -23953,7 +23953,22 @@ def create_launchplane_fastapi_app(
                 )
 
                 preview_reference = ""
-                if profile.driver_id == "odoo" and preview is not None:
+                preview_shared = (
+                    profile.driver_id == "odoo"
+                    and preview is not None
+                    and collect_disposable_lane_facts(
+                        store,
+                        context=observation.context,
+                        instance=observation.instance,
+                        target=target,
+                        target_id=target_id,
+                        binding_sha256=fingerprint,
+                    ).production_resources
+                    == "shared"
+                )
+                if preview_shared:
+                    odoo_usage = OdooTestingUsage(reason_code="target_alias")
+                elif profile.driver_id == "odoo" and preview is not None:
                     try:
                         preview_qualification: PreviewQualification = await run_in_threadpool(
                             collect_odoo_preview_qualification,
@@ -24123,6 +24138,8 @@ def create_launchplane_fastapi_app(
                 if published is None or published.binding_sha256 != fingerprint:
                     raise ValueError("The collected lane binding changed; collect again.")
                 evidence = published
+                if preview_shared:
+                    raise ValueError("preview_production_resources_shared")
                 return accepted_evidence_response(
                     trace_id=trace_id,
                     records={"product_profile": profile.product},

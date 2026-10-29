@@ -271,6 +271,14 @@ def credential_digest(nonce: str, value: str) -> str:
     return hashlib.sha256((nonce + value).encode()).hexdigest()
 
 
+def credential_child_name(parent: str, child: str) -> str:
+    return f"{parent}.{child}" if parent else child
+
+
+def credential_scalar_text(value: bool | int | float) -> tuple[str, str]:
+    return str(value), json.dumps(value)
+
+
 def credential_candidates(values: dict[str, str]) -> set[tuple[str, str]]:
     candidates: set[tuple[str, str]] = set()
     pending: list[tuple[str, object]] = list(values.items())
@@ -280,20 +288,20 @@ def credential_candidates(values: dict[str, str]) -> set[tuple[str, str]]:
             setting = value.get("key") or value.get("setting")
             literal = value.get("value")
             if isinstance(setting, str) and isinstance(literal, dict):
-                pending.append((setting, literal.get("value")))
+                pending.append((credential_child_name(name, setting), literal.get("value")))
             else:
                 pending.extend(
-                    (f"{name}.{key}" if name else key, item) for key, item in value.items()
+                    (credential_child_name(name, key), item) for key, item in value.items()
                 )
             continue
         if isinstance(value, list):
             pending.extend((name, item) for item in value)
             continue
         if isinstance(value, (bool, int, float)):
-            encoded_scalar = json.dumps(value)
-            if encoded_scalar != str(value):
+            scalar, encoded_scalar = credential_scalar_text(value)
+            if encoded_scalar != scalar:
                 pending.append((name, encoded_scalar))
-            value = str(value)
+            value = scalar
         if not isinstance(value, str) or not value or (name, value) in candidates:
             continue
         if len(value) > 1024 * 1024:
@@ -305,12 +313,14 @@ def credential_candidates(values: dict[str, str]) -> set[tuple[str, str]]:
             address = urlsplit("")
         password = address.password
         if password:
-            pending.append(("password", unquote(password)))
-        pending.extend(parse_qsl(address.query))
+            pending.append((credential_child_name(name, "password"), unquote(password)))
+        pending.extend(
+            (credential_child_name(name, str(key)), item) for key, item in parse_qsl(address.query)
+        )
         for encoded in (False, True):
             try:
                 pending.append(
-                    ("", json.loads(base64.b64decode(value, validate=True) if encoded else value))
+                    (name, json.loads(base64.b64decode(value, validate=True) if encoded else value))
                 )
             except (ValueError, UnicodeError):
                 continue
@@ -321,6 +331,8 @@ ODOO_TESTING_USAGE_HOST_PROGRAM = (
     COPY_RUNTIME_INSPECTION_LIBRARY
     + f"MAX_CREDENTIAL_CANDIDATES={MAX_CREDENTIAL_CANDIDATES}\n"
     + inspect.getsource(credential_digest)
+    + inspect.getsource(credential_child_name)
+    + inspect.getsource(credential_scalar_text)
     + inspect.getsource(credential_candidates)
     + r"""
 import base64,hashlib,json,subprocess,sys

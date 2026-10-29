@@ -28,11 +28,13 @@ the service. Production values and digests stay inside the service. The same
 candidate reader handles URLs, JSON and encoded payloads on both sides. The
 comparison includes all configured production-context integrations, provider
 credentials, including literal and secret-backed configuration parameters.
-Production candidates retain whole managed secrets and credential-named fragments
-from provider values, URLs, JSON and encoded payloads. Nested names retain their
+Production candidates retain whole managed secrets and every fragment of managed
+or credential-shaped provider values. Other provider values contribute only
+credential-named fragments. Nested names retain their
 credential context, and scalar values include their text representations. Short,
 numeric or boolean-looking values and bearer URLs stay protected. A collision
-refuses with the production key whose credential separation is unproven. An
+refuses with the production binding or environment key whose credential separation
+is unproven; keys inside credential payloads remain private. An
 untyped public endpoint under a credential-shaped field can conservatively refuse;
 its purpose must come from authoritative configuration, not its URL shape.
 Database parameters are read in a read-only transaction through the pinned
@@ -58,8 +60,8 @@ positive qualification. Provider authorization refusals remain denials.
 Successful collection can report `unused` or `in_use` and isolated production
 resources. Data custody and reproducibility remain UNKNOWN unless independently
 established; this read neither clones nor sanitizes data, and cannot qualify
-its historical origin. Existing protected-use, needed-copy and shared-resource
-records retain their protections. No lane, resource or credential is changed.
+its historical origin. Known shared aliases are recorded protectively before collection refuses.
+Existing protected-use, needed-copy and shared-resource records retain their protections. No lane, resource or credential is changed.
 
 ## Native generic-web testing deployment
 

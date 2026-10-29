@@ -218,13 +218,15 @@ def production_credentials(
     ):
         raise PreviewQualificationMissing("preview_production_resource_identity_unavailable")
     try:
-        candidates = {(key, value) for key, value in managed.items() if value}
-        candidates.update(
-            (key, value)
-            for values in (managed, current)
-            for key, value in credential_candidates(values)
-            if looks_like_credential(key, value)
-        )
+        candidates: set[tuple[str, str]] = set()
+        for values, managed_source in ((managed, True), (current, False)):
+            for key, raw in values.items():
+                protected = managed_source or looks_like_credential(key, raw)
+                candidates.update(
+                    (key, value)
+                    for name, value in credential_candidates({key: raw})
+                    if protected or looks_like_credential(name, value)
+                )
         if len(candidates) > MAX_CREDENTIAL_CANDIDATES:
             raise ValueError("credential_inventory_unavailable")
     except ValueError:
