@@ -189,6 +189,32 @@
         "modes": [
           "read"
         ],
+        "operation_id": "read_preview_snapshot_version",
+        "path": "/v1/products/{product}/preview-snapshot-version",
+        "purpose": "Read only recorded base-module version from an exact original-bound immutable snapshot without restore or database access.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "51efe119d112ccec7dfc354c088a72c4f788481f9c10b9b98eb0fc1ec27a825c",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
         "operation_id": "read_odoo_copy_aggregates",
         "path": "/v1/products/{product}/environments/{environment}/aggregate-counts",
         "purpose": "Read bounded aggregate counts from a qualified sanitized disposable testing copy with provenance and no data writes.",
@@ -1417,8 +1443,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "a6f690edeb93e5bee8763ba6df62aa76d5772a64"
+    "source_commit_sha": "b56a1c88d63118e1c36e6292897c48003b4b14bc"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "a89dbd6537f5ed18c6854d475a733712c3c36660e013aa9ebc489e386c44a4c9"
+  "semantic_digest_sha256": "612504dc87f0f9347ce878827dc95442cccd23595c1b185edb99d5f6f8b02ed4"
 }

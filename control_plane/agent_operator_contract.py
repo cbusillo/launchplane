@@ -155,6 +155,15 @@ OPERATION_SPECS = (
     ),
     OperationSpec(
         "GET",
+        "/v1/products/{product}/preview-snapshot-version",
+        "Read only recorded base-module version from an exact original-bound immutable snapshot without restore or database access.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
         "/v1/products/{product}/environments/{environment}/aggregate-counts",
         "Read bounded aggregate counts from a qualified sanitized disposable testing copy with provenance and no data writes.",
         ("service_api",),
