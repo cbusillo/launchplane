@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -218,7 +218,7 @@ class ArtifactIdentityManifest(BaseModel):
         )
 
         base_image_roles = {base_image.role for base_image in self.build_provenance.base_images}
-        if base_image_roles != {"runtime", "devtools"}:
+        if base_image_roles != set(get_args(ArtifactBaseImageRole)):
             raise ValueError(
                 "artifact manifest schema_version 2 requires runtime and devtools base image provenance"
             )

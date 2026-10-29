@@ -19,7 +19,6 @@ class ClientReleaseRepositoryStore(Protocol):
 def client_release_profiles(
     *, store: ClientReleaseRepositoryStore, repository: str
 ) -> tuple[LaunchplaneProductProfileRecord, ...]:
-    """Include shared addon inputs pinned in either current release lane."""
     key = repository_key(repository)
     result = []
     for profile in store.list_product_profile_records():

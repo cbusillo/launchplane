@@ -722,6 +722,8 @@ test("Client sees website settings before accepting the bound release", { tag: "
 
 
 test("Base image and build tool ranges keep their Client notes", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
   const response = await page.evaluate(async (nothingToTest) => {
@@ -745,4 +747,5 @@ test("Base image and build tool ranges keep their Client notes", async ({ page }
   }
   await expect(page.getByRole("region", { name: "Shared release inputs from example/build-tool", exact: true })).toContainText("Build packaging maintenance.");
   await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
+  expect(errors).toEqual([]);
 });

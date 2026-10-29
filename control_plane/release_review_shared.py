@@ -1,5 +1,3 @@
-"""Account for shared addon SHA ranges without waiving unexplained input changes."""
-
 import click
 
 from control_plane.artifact_release_inputs import (

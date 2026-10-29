@@ -1,9 +1,12 @@
 import re
 from collections.abc import Iterator
-from typing import NamedTuple
+from typing import NamedTuple, get_args
 from urllib.parse import urlsplit
 
-from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.artifact_identity import (
+    ArtifactBaseImageRole,
+    ArtifactIdentityManifest,
+)
 
 
 def repository_key(value: str) -> str:
@@ -63,7 +66,7 @@ def verified_release_inputs(
             unknown.append(f"{source.name}: UNKNOWN verified source repository and commit.")
         inputs[source.name] = source
     roles = {image.role for image in artifact.build_provenance.base_images}
-    for role in ("runtime", "devtools"):
+    for role in get_args(ArtifactBaseImageRole):
         if role not in roles:
             unknown.append(f"Base image {role}: UNKNOWN source provenance is missing.")
     if not artifact.build_provenance.build_tools:

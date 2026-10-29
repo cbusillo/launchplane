@@ -165,6 +165,45 @@ class SharedReleaseReviewTests(unittest.TestCase):
                 self.accept()
                 self.assertTrue(self.review().approved)
 
+    def test_product_repository_inputs_must_match_reviewed_product_commits(self) -> None:
+        for kind in ("addon_sources", "base_images", "build_tools"):
+            for candidate_ref in (HEAD, BASE, "main"):
+                with self.subTest(kind=kind, candidate_ref=candidate_ref):
+                    seed(self.store)
+                    for instance, source_ref in (("prod", BASE), ("testing", candidate_ref)):
+                        artifact = self.store.read_artifact_manifest(f"artifact-{instance}")
+                        if kind == "addon_sources":
+                            updated = artifact.model_copy(
+                                update={
+                                    "addon_sources": (
+                                        *artifact.addon_sources,
+                                        ArtifactAddonSource(
+                                            repository=profile().repository, ref=source_ref
+                                        ),
+                                    )
+                                }
+                            )
+                        else:
+                            provenance = artifact.build_provenance
+                            inputs = getattr(provenance, kind)
+                            source = inputs[0].model_copy(
+                                update={
+                                    "source_repository": profile().repository,
+                                    "source_ref": source_ref,
+                                }
+                            )
+                            updated = artifact.model_copy(
+                                update={
+                                    "build_provenance": provenance.model_copy(
+                                        update={kind: (source, *inputs[1:])}
+                                    )
+                                }
+                            )
+                        self.store.write_artifact_manifest(updated)
+                    self.assertEqual(self.review().checklist_complete, candidate_ref == HEAD)
+                    self.accept()
+                    self.assertEqual(self.review().approved, candidate_ref == HEAD)
+
     def test_unknown_build_input_preserves_known_ranges_and_repository_discovery(self) -> None:
         from control_plane.client_release_repositories import client_release_profiles
         from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
