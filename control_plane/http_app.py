@@ -23947,7 +23947,30 @@ def create_launchplane_fastapi_app(
                         ) from None
                     application_resources = application_resource_observation.model_dump(mode="json")
                 observed_at = store.disposable_lane_observation_time()
-                if profile.driver_id != "odoo" or observation.instance != "testing":
+                from control_plane.odoo_preview_qualification import (
+                    PreviewQualification,
+                    collect_odoo_preview_qualification,
+                )
+
+                preview_reference = ""
+                if profile.driver_id == "odoo" and preview is not None:
+                    try:
+                        preview_qualification: PreviewQualification = await run_in_threadpool(
+                            collect_odoo_preview_qualification,
+                            store,
+                            preview=preview,
+                            root=resolved_control_plane_root,
+                        )
+                    except NativeSourceAuthorizationDenied:
+                        raise _launchplane_http_error(
+                            status_code=403,
+                            trace_id=trace_id,
+                            code="authorization_denied",
+                            message="The provider refused the Odoo preview qualification read.",
+                        ) from None
+                    odoo_usage = preview_qualification.usage
+                    preview_reference = preview_qualification.reference
+                elif profile.driver_id != "odoo" or observation.instance != "testing":
                     odoo_usage = OdooTestingUsage(reason_code="unsupported_lane")
                 elif target is None or target_id is None:
                     odoo_usage = OdooTestingUsage(reason_code="target_unavailable")
@@ -24021,6 +24044,13 @@ def create_launchplane_fastapi_app(
                     odoo_usage=odoo_usage,
                 )
                 resource_facts: dict[str, str] | None = None
+                if preview_reference:
+                    resource_facts = {
+                        "production_resources": "isolated",
+                        "isolation_evidence": preview_reference,
+                        "usage_evidence": preview_reference
+                        + (":" + observed_at.isoformat() if facts.usage == "in_use" else ""),
+                    }
                 if (
                     profile.driver_id in {"odoo", "generic-web"}
                     and observation.instance == "testing"
@@ -24043,20 +24073,15 @@ def create_launchplane_fastapi_app(
                             code="authorization_denied",
                             message="The provider refused the testing resource inspection.",
                         ) from None
-                if fingerprint != disposable_lane_binding_sha256(
-                    store.read_product_profile_record(profile.product),
-                    store.read_dokploy_target_record(
-                        context_name=observation.context, instance_name=observation.instance
-                    )
-                    if target is not None
-                    else None,
-                    store.read_dokploy_target_id_record(
-                        context_name=observation.context, instance_name=observation.instance
-                    )
-                    if target_id is not None
-                    else None,
-                    preview,
-                    disposable_lane_configuration(store, observation.context, observation.instance),
+                if (
+                    fingerprint
+                    != resolve_disposable_observation_binding(
+                        store,
+                        product=profile.product,
+                        context=observation.context,
+                        instance=observation.instance,
+                        preview_id=observation.preview_id,
+                    ).binding_sha256
                 ):
                     raise ValueError("The lane changed during resource collection; collect again.")
                 previous = store.read_disposable_lane_safety(

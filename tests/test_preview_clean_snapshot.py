@@ -48,6 +48,137 @@ from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 
 
 class PreviewCleanSnapshotTests(unittest.TestCase):
+    containers: dict[str, dict[str, Any]]
+
+    def preview_usage(
+        self, *, integration_ok: bool = True, changed: bool = False
+    ) -> dict[str, Any]:
+        from control_plane.dokploy.compose import ODOO_WEB_START_COMMAND
+        from control_plane.odoo_testing_usage import ODOO_TESTING_USAGE_HOST_PROGRAM
+
+        identity = {
+            "product": "fixture",
+            "instance": "preview-target",
+            "preview_generation_id": "serving",
+        }
+        for service, container in self.containers.items():
+            container["State"] = {"Running": True, "StartedAt": "fixture"}
+            if service != "database":
+                container["Config"]["Cmd"] = [ODOO_WEB_START_COMMAND]
+                container["Config"]["Env"].append("PLATFORM_CONTEXT=fixture")
+                if not any(
+                    value.startswith("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=")
+                    for value in container["Config"]["Env"]
+                ):
+                    container["Config"]["Env"].append(
+                        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + json.dumps(identity)
+                    )
+        payload = {
+            "context": "fixture",
+            "instance": "preview",
+            "project": self.project,
+            "container_program": "fixture-usage",
+            "preview_spec": {
+                "generation": {"instance": "preview", "namespace": self.project},
+                "compose_project": self.project,
+                "database_name": self.database,
+                "image_reference": self.image,
+                "usage_only": True,
+                "preview_volumes": {
+                    "data": "preview-data",
+                    "database": "preview-db",
+                    "logs": "preview-logs",
+                },
+                "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
+                "runtime_identity": identity,
+                "credential_nonce": "fixture-nonce",
+                "forbidden_credential_keys": [],
+                "production_credential_hashes": [
+                    hashlib.sha256(b"fixture-nonceprivate-production-password").hexdigest()
+                ],
+                "integration_spec": "fixture-policy",
+                "integration_program": "fixture-integrations",
+            },
+        }
+
+        def read(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            self.assertIn(
+                arguments[:2],
+                (["docker", "ps"], ["docker", "inspect"], ["docker", "volume"], ["docker", "exec"]),
+            )
+            if arguments[1] != "exec":
+                return self.command(arguments, **kwargs)
+            if kwargs.get("input") == b"fixture-integrations":
+                frame_bytes = (
+                    b"integration_readback_ok=true\n"
+                    if integration_ok
+                    else b"integration_readback_ok=false\n"
+                )
+            else:
+                frame_bytes = json.dumps(
+                    {"type": "complete", "recent_signins": False, "authenticated_sessions": True}
+                ).encode()
+                if changed:
+                    self.containers["script-runner"]["Config"]["Env"].append(
+                        "OTHER_SETTING=changed"
+                    )
+            return subprocess.CompletedProcess(arguments, 0, stdout=frame_bytes, stderr=b"")
+
+        output = io.StringIO()
+        with (
+            patch("pathlib.Path.home", return_value=self.root),
+            patch("subprocess.run", side_effect=read),
+            patch(
+                "sys.argv",
+                ["probe", base64.b64encode(json.dumps(payload).encode()).decode(), "frame:"],
+            ),
+            redirect_stdout(output),
+        ):
+            exec(ODOO_TESTING_USAGE_HOST_PROGRAM, {"__name__": "__main__"})
+        self.assertNotIn("private-production-password", output.getvalue())
+        result = json.loads(output.getvalue().removeprefix("frame:"))
+        assert isinstance(result, dict)
+        return result
+
+    def test_preview_usage_reuses_physical_guard_and_refuses_credentials_ports_and_drift(
+        self,
+    ) -> None:
+        import copy
+
+        original = copy.deepcopy(self.containers)
+        for scenario, expected in (
+            ("complete", ""),
+            ("credentials", "resource_copy_execution_credentials_absent"),
+            ("ports", "resource_copy_host_ports_absent"),
+            ("identity", "resource_copy_runtime_identity_matches"),
+            ("integrations", "resource_integrations_isolated"),
+            ("changed", "runtime_changed"),
+        ):
+            with self.subTest(scenario=scenario):
+                self.containers = copy.deepcopy(original)
+                if scenario == "credentials":
+                    self.containers["database"]["Config"]["Env"].append(
+                        "POSTGRES_PASSWORD=private-production-password"
+                    )
+                elif scenario == "ports":
+                    self.containers["web"]["HostConfig"] = {
+                        "PortBindings": {"8069/tcp": [{"HostPort": "8069"}]}
+                    }
+                elif scenario == "identity":
+                    self.containers["web"]["Config"]["Env"].append(
+                        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON={}"
+                    )
+                result = self.preview_usage(
+                    integration_ok=scenario != "integrations", changed=scenario == "changed"
+                )
+                if expected:
+                    self.assertTrue(result["unavailable"], result)
+                    self.assertEqual(result["reason_code"], expected)
+                    self.assertNotIn("resources_qualified", result)
+                else:
+                    self.assertIs(result["resources_qualified"], True)
+                    self.assertIs(result["authenticated_sessions"], True)
+
     def setUp(self) -> None:
         temporary = self.enterContext(TemporaryDirectory())
         self.root = Path(temporary).resolve()
@@ -104,7 +235,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.overlay = self.root / "runner-overlay"
         self.overlay.mkdir()
         self.volume_created_at = datetime.now(timezone.utc).isoformat()
-        self.containers: dict[str, dict[str, Any]] = {
+        self.containers = {
             role: {
                 "Id": role,
                 "ExecIDs": None,

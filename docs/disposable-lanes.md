@@ -8,6 +8,35 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Recorded Odoo preview qualification
+
+The observations route's existing reviewed `collect` mode accepts an owned
+Odoo `preview_id` and its preview slug. It resolves the active serving
+generation, verifies its runtime identity against the immutable issued plan,
+and reads the completed deployment's concrete Compose ID. A current profile
+prefix or a different generation cannot select the recipient.
+
+Collection reuses the testing usage reader for recent successful sign-ins and
+authenticated session files, and the shared copy-runtime probe for actual
+mounts, backing storage, network membership and ports. It checks the running
+web and runner identities, compares their actual environments and the database
+container against current managed and provider production credentials, and runs
+the existing integration readback with no preview integration allowances.
+Only per-read salted credential digests reach the host probe. Production
+credential values, user identities, session identifiers and provider details
+are never returned. Authenticated sessions and recent sign-ins are independent
+boolean facts; this read creates no login or Odoo session.
+
+The reader rechecks provider, runtime, completed-operation and production
+authority before publication. Missing or changing facts refuse with a specific
+`preview_qualification_missing` reason or prerequisite code and publish no
+positive qualification. Provider authorization refusals remain denials.
+Successful collection can report `unused` or `in_use` and isolated production
+resources. Data custody and reproducibility remain UNKNOWN unless independently
+established; this read neither clones nor sanitizes data, and cannot qualify
+its historical origin. Existing protected-use, needed-copy and shared-resource
+records retain their protections. No lane, resource or credential is changed.
+
 ## Native generic-web testing deployment
 
 The existing `POST /v1/drivers/generic-web/deploy` accepts the authenticated

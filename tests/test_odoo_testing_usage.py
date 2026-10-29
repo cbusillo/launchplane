@@ -325,13 +325,32 @@ class UsageReaderTests(unittest.TestCase):
         )
         self.remote = self.enterContext(patch(module + "_read_remote"))
 
-    def read(self) -> Any:
+    def read(self, **kwargs: Any) -> Any:
         return read_odoo_testing_usage(
             target=self.target,
             target_id=self.target_id,
             control_plane_root=Path("/fixture"),
             database_url="sqlite+pysqlite://",
+            **kwargs,
         )
+
+    def test_preview_read_requires_resource_proof_with_both_usage_facts(self) -> None:
+        self.target.instance = self.target_id.instance = "pr-7"
+        spec = {"runtime_identity": {"instance": "pr-7", "context": "fixture"}}
+        for qualified in (None, False, True):
+            with self.subTest(qualified=qualified):
+                frame = {
+                    "type": "complete",
+                    "recent_signins": False,
+                    "authenticated_sessions": True,
+                }
+                if qualified is not None:
+                    frame["resources_qualified"] = qualified
+                self.remote.side_effect = lambda **kw: kw["receive"](frame)
+                result = self.read(preview_spec=spec)
+                self.assertEqual(result.usage, "in_use" if qualified is True else "unknown")
+                self.assertEqual(result.resources_qualified, qualified is True)
+                self.assertEqual(self.remote.call_args.kwargs["payload"]["instance"], "preview")
 
     def test_unused_requires_both_complete_false_facts(self) -> None:
         for recent, sessions in ((False, False), (True, False), (False, True), (True, True)):
