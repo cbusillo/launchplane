@@ -2315,13 +2315,16 @@ class NativeTestingRebuildExecution:
             return frame
 
         def absent() -> bool:
-            return read("removal-readback")["availability"] == "absent"
+            return bool(read("removal-readback")["availability"] == "absent")
+
+        def remove() -> None:
+            read("remove")
 
         try:
             self.run_effect(
                 phase,
                 absent,
-                lambda dispatch: dispatch(lambda: read("remove")),
+                lambda dispatch: dispatch(remove),
                 recovery=True,
                 removal_custody=custody,
                 exclude_undispatched=not bool(prior.provider_effect_started_at),
