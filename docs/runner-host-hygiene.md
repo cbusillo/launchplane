@@ -23,6 +23,79 @@ The current Launchplane surface implements report-only evidence, local
 apply-boundary planning, durable audit evidence, and a constrained self-hosted
 ops executor for the approved first lane.
 
+## Record-backed adapter qualification
+
+The service has a source integration for the existing executor. This does not
+activate a live migration or retire the Actions workflow below. Keep its
+settings and credentials until supported service-only key adoption, binding
+readback, isolated behavior qualification and rollback proof are complete.
+
+The existing service runtime-setting review/apply path accepts
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_CONFIGURATION` in the exact `launchplane`
+context's `RuntimeEnvironmentRecord`. Its JSON value is validated by
+`RunnerHostHygieneConfiguration` and the existing executor contract. It has no
+file, process-environment or inherited-record fallback. The projection maps the
+existing settings as follows:
+
+| Existing hygiene setting suffix | Configuration field |
+| --- | --- |
+| `HOST` | `host_name` |
+| `EXECUTION_LANE` | `execution_lane` |
+| `SERVICE_USER` | `service_user` |
+| `RETAINED_WARM_BUILDERS` | `retained_warm_builders` |
+| `RUNNER_WORKDIR_ROOTS` | `runner_workdir_roots` |
+| `GENERATED_RUN_CACHE_ROOTS` | `generated_run_cache_roots` |
+| `GITHUB_IDLE_BINDINGS` | `github_idle_bindings` |
+| `BUILDKIT_CACHE_BUDGETS` | `buildkit_cache_budgets` |
+| `DEFAULT_CACHE_BUDGET_BYTES` | `default_cache_budget_bytes` |
+| `GITHUB_APP_CLIENT_ID` | `github_app_client_id` |
+
+The suffixes above share `LAUNCHPLANE_RUNNER_HOST_HYGIENE_`. The record also
+names the existing scheduling `repository_scope` and the existing, separately
+approved `allowed_buildkit_state_volumes`. Arrays use the executor's structured
+root and binding fields rather than comma-separated workflow strings. Store
+the complete host manifest; local service-unit discovery still rejects extra
+or omitted services. Named budgets still select the Sunday builder actions.
+Changing the budget list is therefore a scope change, not routine tuning.
+
+`POST /v1/service/runner-host-hygiene/dispatch` returns the record revision
+digest, execution lane and validated executor requests. It accepts `report`,
+`maintenance` and `manual` intent. Scheduled intent accepts no manual overrides;
+manual intent selects existing targets without replacing stored roots,
+retained builders, budgets or allowlists. Both this route and
+`POST /v1/service/runner-host-hygiene/metadata` require the existing authorized
+hygiene workflow's `runner_host_hygiene_audit.write` identity, its signed run ID
+and the stored scheduling repository. These reads grant no cleanup authority.
+
+The metadata adapter uses the existing App through one exact, configured
+`launchplane_service` context SecretRecord/SecretBinding under
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY`. Global, instance and
+ambiguous key bindings fail closed. It verifies the App client ID, installation
+owner, exact Actions/Administration/Metadata read permissions and complete
+runtime-derived repository set. Short-lived read tokens stay in the service
+and are revoked after each metadata request, including failed scope checks.
+Only bounded typed idle samples or generated-cache run states leave it. Each
+sample rechecks the configuration digest; local process, open-handle and
+service-unit evidence remain separate executor observations.
+
+The consumer entrypoint is
+`uv run python -m control_plane.workflows.runner_host_hygiene_service_executor`.
+It takes `--intent-file`, `--service-url`, `--execution-lane`,
+`--audit-spool-root` and `--artifact-directory`; intent is the dispatch request
+JSON, including the current runner name and audit key. It authenticates with
+the existing workflow OIDC path and verifies the local host/user and scheduling
+repository before running any action. A minimal scheduler must still select
+the explicit execution lane **before** starting the job. Retain that bootstrap
+until a service scheduler selects it; a job-step lookup cannot set `runs-on`.
+
+The consumer attempts every dispatched action, preserves the existing durable
+audit envelopes and accepted terminal fields, and fails aggregate execution
+when any action fails or audit delivery remains pending. Run the existing
+`runner-host-hygiene-qualify` command on its per-action artifact files to assess
+report and maintenance qualification. No helper performs live import or
+settings deletion. Until qualified activation, rollback is the retained
+workflow with its existing settings; do not run both schedulers together.
+
 ## Report Contract
 
 The typed contract in `control_plane.contracts.runner_host_hygiene` separates

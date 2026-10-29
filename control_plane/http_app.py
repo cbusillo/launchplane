@@ -1,4 +1,7 @@
 from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+from control_plane.http_routes.runner_host_hygiene_configuration import (
+    register_runner_host_hygiene_configuration_routes,
+)
 from control_plane import odoo_business_hours_config
 from control_plane import browser_route_repair
 from control_plane.access_policy_review import github_account_login, github_account_for_login
@@ -28599,6 +28602,7 @@ def create_launchplane_fastapi_app(
     register_topology_read_routes(app, dependencies=read_route_dependencies)
     register_ingress_read_routes(app, dependencies=read_route_dependencies)
     register_runner_host_hygiene_read_routes(app, dependencies=read_route_dependencies)
+    register_runner_host_hygiene_configuration_routes(app, dependencies=read_route_dependencies)
     register_deployment_promotion_read_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(
