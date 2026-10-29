@@ -1034,7 +1034,12 @@ profiles; migration `a4c8e0f2b6d3` copied every one into
 then removed it. Repository inventory records were left in place.
 
 Repository mappings omit active repositories that two products share, naming
-them in `ambiguous_repositories`; other entries stay available.
+them in `ambiguous_repositories`; other entries stay available. Optional
+ambiguity references expose only product ids allowed by the caller's existing
+per-product profile-read scope. Their coverage distinguishes complete source
+collection reads, authorization-scoped results, limited sources, and unknown
+legacy evidence. Missing coverage capability remains unknown, and an empty
+reference list does not establish completeness.
 
 Full-profile writes cannot transfer standing acceptance to another repository
 or copied repository identity. Hold acceptance through the existing reviewed

@@ -52,6 +52,7 @@ def build_agent_context_service_payload(
     work_request_store: RepoProductMappingWorkRequestStore,
     preview_readiness_store: object,
     tenant_admission_section: AgentContextSection | None = None,
+    product_reference_allowed: Callable[[str], bool] | None = None,
 ) -> AgentContextPayload:
     normalized_repository = repository.strip()
     sections = {
@@ -60,6 +61,7 @@ def build_agent_context_service_payload(
                 generated_at=generated_at,
                 product_store=product_store,  # type: ignore[arg-type]
                 work_request_store=work_request_store,
+                product_reference_allowed=product_reference_allowed,
             )
         ),
         "preview_readiness": _available_section(

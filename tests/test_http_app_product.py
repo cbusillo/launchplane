@@ -1342,6 +1342,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             )
 
             response = await _get_agent_context(app, repository="every/example-site")
+            mapping_response = await _get_repo_product_mapping(app)
             app_store.close()
 
         self.assertEqual(response.status_code, 200)
@@ -1350,10 +1351,60 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["repository"], "every/example-site")
         sections = context["sections"]
         self.assertEqual(sections["repo_product_mapping"]["status"], "available")
+        context_mapping = sections["repo_product_mapping"]["payload"]["mapping"]
+        direct_mapping = mapping_response.json()["mapping"]
+        context_mapping.pop("generated_at")
+        direct_mapping.pop("generated_at")
+        self.assertEqual(
+            context_mapping,
+            direct_mapping,
+        )
         self.assertEqual(sections["preview_readiness"]["status"], "available")
         readiness = sections["preview_readiness"]["payload"]["readiness"]
         self.assertEqual(readiness["repository"], "every/example-site")
         self.assertEqual(readiness["items"][0]["readiness_status"], "ready")
+
+    async def test_ambiguous_product_references_preserve_scoped_profile_reads(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_url = _sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            _seed_agent_context_read_records(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            self.addCleanup(store.close)
+            profile = store.read_product_profile_record("example-site")
+            store.write_product_profile_record(
+                profile.model_copy(update={"product": "hidden-site"})
+            )
+            policy = _product_environment_read_policy(products=("launchplane",))
+            profile_policy = _product_profile_read_policy(product=profile.product)
+            policy = policy.model_copy(
+                update={"github_actions": policy.github_actions + profile_policy.github_actions}
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+            )
+
+            direct = await _get_repo_product_mapping(app)
+            context = await _get_agent_context(app, repository=profile.repository)
+            visible = await _get_product_profile(app, profile.product)
+            hidden = await _get_product_profile(app, "hidden-site")
+
+        self.assertEqual(direct.status_code, 200)
+        self.assertEqual(context.status_code, 200)
+        for mapping in (
+            direct.json()["mapping"],
+            context.json()["context"]["sections"]["repo_product_mapping"]["payload"]["mapping"],
+        ):
+            self.assertIn(profile.repository, mapping["ambiguous_repositories"])
+            self.assertEqual(
+                mapping["ambiguous_repository_product_references"],
+                [{"repository": profile.repository, "products": [profile.product]}],
+            )
+            self.assertEqual(mapping["product_reference_coverage"]["authorization"], "scoped")
+            self.assertNotIn("hidden-site", json.dumps(mapping))
+        self.assertEqual(visible.status_code, 200)
+        self.assertEqual(hidden.status_code, 403)
 
     async def test_agent_context_reads_require_identity(self) -> None:
         app = create_launchplane_fastapi_app(
