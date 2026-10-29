@@ -722,6 +722,21 @@ clears existing data nor creates a positive custody report. The qualified Direct
 refresh follows the [Odoo preview data-source policy](preview-workflow-contract.md#route-handoff)
 and retains managed integration/source filtering.
 
+Source-free reuse also requires the retained target's original source history,
+including failed and successful operations on that recipient. Today's `none`
+mode, an absent source reference or a serving generation cannot qualify old data.
+A legacy receipt must explicitly report no upstream restore, no snapshot restore
+and no completed restore; missing fields remain unknown. An original with an
+upstream, snapshot, import or retained-copy source cannot qualify as source-free.
+An unresolved original recipient also retains the fence.
+
+New operations retain their effective source decision in the immutable reservation
+intent before the first provider effect. Execution resolves it again and refuses
+source drift before dispatch. Observation and replay retain the saved decision;
+they never infer or backfill it from current settings or a later success. Unknown
+historical origins remain preserved for supported qualification or independent
+recipient recovery; this guard supplies no new recovery or data-use authority.
+
 Managed settings, aliases, protection reports, overrides and key policy are frozen
 for each bounded dispatch, with a lock timeout. Deploy/job waits hold no global
 transaction. A pre-effect admission refusal releases its reservation; a late

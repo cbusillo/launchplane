@@ -18,6 +18,7 @@ from typing import Any, cast
 
 import click
 from control_plane.lane_movement import LaneMovementRefused
+from control_plane.preview_source import PreviewSourceDecision, require_source_free_preview_history
 
 from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation_id,
@@ -119,6 +120,7 @@ class OdooPreviewProviderMutationAdapter:
         )
         self.execution_check: Callable[[], None] = lambda: None
         self.schedule_binding: dict[str, object] | None = None
+        self.source_decision: PreviewSourceDecision | None = None
 
     def capture_schedule_binding(self) -> None:
         from control_plane.dokploy import post_deploy, source
@@ -148,6 +150,35 @@ class OdooPreviewProviderMutationAdapter:
             return
         self.schedule_binding = binding.model_dump(mode="json")
 
+    def capture_source_decision(self) -> None:
+        from control_plane.odoo_preview_apply_http import (
+            _odoo_preview_service_environment,
+            resolve_preview_source_decision,
+        )
+
+        if self._issued_plan.operation != "refresh":
+            return
+        environment = (
+            _odoo_preview_service_environment(
+                control_plane_root_path=self._control_plane_root,
+                record_store=self._record_store,
+                profile=self._profile,
+                plan=self._issued_plan.dry_run_plan,
+                manifest=self._apply_request.apply.manifest,
+                database_url=self._database_url,
+                fishbowl_source=self._issued_plan.plan_request.fishbowl_source,
+            ).values
+            if self._profile.preview.data_transport_mode == "driver"
+            and not self._profile.preview.clean_testing_snapshot
+            else {}
+        )
+        self.source_decision = resolve_preview_source_decision(
+            record_store=self._record_store,
+            profile=self._profile,
+            issued_plan=self._issued_plan,
+            environment=environment,
+        )
+
     def original_intent(self) -> dict[str, object]:
         # The HTTP service resolves environment values from managed records;
         # caller values are ignored and must never become plaintext recovery data.
@@ -161,6 +192,11 @@ class OdooPreviewProviderMutationAdapter:
             "issued_plan": self._issued_plan.model_dump(mode="json"),
             "apply_request": retained_request.model_dump(mode="json"),
             **({"schedule_binding": self.schedule_binding} if self.schedule_binding else {}),
+            **(
+                {"effective_source": self.source_decision.model_dump(mode="json")}
+                if self.source_decision is not None
+                else {}
+            ),
         }
 
     def reconciliation_key(self) -> str:
@@ -326,6 +362,28 @@ class OdooPreviewProviderMutationAdapter:
             except Exception as error:
                 raise ProviderMutationRejectedError(error) from error
 
+        if self._issued_plan.operation == "refresh" and self.source_decision is None:
+            raise ProviderMutationRejectedError(
+                OdooPreviewPlanProvenanceError(
+                    code="odoo_preview_source_history_unknown",
+                    message="Original effective source is unavailable; observe the original without replaying effects.",
+                )
+            )
+        try:
+            require_source_free_preview_history(
+                self._record_store,
+                profile=self._profile,
+                issued_plan=self._issued_plan,
+                operation_record_id=self._deployment_record_id,
+                effective_source=self.source_decision,
+            )
+        except ValueError as error:
+            raise ProviderMutationRejectedError(
+                OdooPreviewPlanProvenanceError(
+                    code="odoo_preview_source_history_unknown", message=str(error)
+                )
+            ) from error
+
         effect_started = False
 
         def checkpoint_effect(phase: str) -> None:
@@ -389,6 +447,7 @@ class OdooPreviewProviderMutationAdapter:
                 provider_lease_check=lease.assert_current,
                 deployment_record_id=self._deployment_record_id,
                 runtime_identity=self._runtime_identity,
+                expected_source_decision=self.source_decision,
                 **(
                     {"recovery_reservation": lease.evidence_reservation()}
                     if self._apply_request.preserve_original_reservation_id
@@ -643,6 +702,20 @@ class OdooPreviewApplyOperation:
                 is None
             ):
                 self.require_original_preservation()
+                if self.adapter._pre_mutation_guard is not None:
+                    self.adapter._pre_mutation_guard()
+                self.adapter.capture_source_decision()
+            else:
+                existing = postgres.read_idempotency_record(
+                    scope=self.reservation_scope,
+                    route_path=self.route_path,
+                    idempotency_key=self.idempotency_key,
+                )
+                intent = postgres.read_original_mutation_intent(existing) if existing else {}
+                decision = intent.get("effective_source")
+                self.adapter.source_decision = (
+                    PreviewSourceDecision.model_validate(decision) if decision is not None else None
+                )
             return run_durable_provider_operation(
                 store=store,
                 scope=self.reservation_scope,

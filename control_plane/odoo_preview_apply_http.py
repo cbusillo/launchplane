@@ -15,6 +15,8 @@ from control_plane import odoo_instance_overrides as control_plane_odoo_instance
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import runtime_platform_credentials
+from control_plane.preview_source import PreviewSourceDecision
+
 from control_plane.clean_testing_snapshot import preview_snapshot
 from control_plane.odoo_testing_restore import preflight_fresh_testing_intent
 from control_plane.integration_readback import INTEGRATION_FAMILIES
@@ -487,6 +489,7 @@ def execute_odoo_preview_apply_result(
     qualify_existing_preview: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     recovery_reservation: object = None,
+    expected_source_decision: PreviewSourceDecision | None = None,
 ) -> dict[str, object]:
     from control_plane.preview_preservation import (
         PREVIEW_PRESERVATION_PHASES,
@@ -572,16 +575,17 @@ def execute_odoo_preview_apply_result(
             "smoke_check": service_dry_run_plan.operation == "refresh",
         }
     )
-    upstream_source = preview_uses_upstream_restore(profile, resolved_environment_values)
-    snapshot_source = (
-        profile.preview.clean_testing_snapshot and service_dry_run_plan.operation == "refresh"
-    )
-    retained_copy = (upstream_source or snapshot_source) and preview_has_completed_restore(
+    decision = resolve_preview_source_decision(
         record_store=record_store,
         profile=profile,
-        plan=service_dry_run_plan,
-        pr_number=issued_plan.plan_request.pr_number,
+        issued_plan=issued_plan,
+        environment=resolved_environment_values,
     )
+    if expected_source_decision is not None and decision != expected_source_decision:
+        raise ValueError("Preview effective source changed before execution; plan again.")
+    upstream_source = decision.source == "upstream"
+    snapshot_source = decision.source == "clean_snapshot"
+    retained_copy = decision.source == "retained"
     if snapshot_source and not retained_copy and service_dry_run_plan.clean_snapshot is None:
         raise ValueError("A new snapshot preview requires its issued clean source.")
     effective_mutation_guard = provider_mutation_guard
@@ -667,6 +671,33 @@ def execute_odoo_preview_apply_result(
         provider_mutation_guard=effective_mutation_guard,
     )
     return driver_result.model_dump(mode="json")
+
+
+def resolve_preview_source_decision(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: OdooPreviewApplyInputsResult,
+    environment: dict[str, str],
+) -> PreviewSourceDecision:
+    upstream = preview_uses_upstream_restore(profile, environment)
+    snapshot = profile.preview.clean_testing_snapshot and issued_plan.operation == "refresh"
+    retained = (upstream or snapshot) and preview_has_completed_restore(
+        record_store=record_store,
+        profile=profile,
+        plan=issued_plan.dry_run_plan,
+        pr_number=issued_plan.plan_request.pr_number,
+    )
+    return PreviewSourceDecision(
+        source="retained"
+        if retained
+        else "clean_snapshot"
+        if snapshot
+        else "upstream"
+        if upstream
+        else "none",
+        fishbowl_import=issued_plan.plan_request.fishbowl_source is not None,
+    )
 
 
 def preview_uses_upstream_restore(

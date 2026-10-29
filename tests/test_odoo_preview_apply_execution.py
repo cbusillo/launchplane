@@ -232,6 +232,40 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         self.assertFalse(execute.call_args.kwargs["restore_upstream"])
         self.assertFalse(execute.call_args.kwargs["restore_clean_snapshot"])
 
+    def test_changed_effective_source_refuses_before_the_driver_effect(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        profile.preview.data_transport_mode = "driver"
+        envelope = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        issued = _issued_plan(envelope)
+        expected = preview_http.resolve_preview_source_decision(
+            record_store=Mock(), profile=profile, issued_plan=issued, environment={}
+        )
+        with (
+            patch.object(preview_http, "refresh_odoo_preview_issued_plan", return_value=envelope),
+            patch.object(
+                preview_http,
+                "_odoo_preview_service_environment",
+                return_value=preview_http._OdooPreviewServiceEnvironment(
+                    values={"ODOO_UPSTREAM_HOST": "source.example.test"}
+                ),
+            ),
+            patch("control_plane.lane_movement.require_forward_preview_build"),
+            patch.object(preview_http, "preview_has_completed_restore", return_value=False),
+            patch.object(preview_http, "execute_odoo_preview_dokploy_apply") as execute,
+            self.assertRaises(ValueError),
+        ):
+            preview_http.execute_odoo_preview_apply_result(
+                control_plane_root_path=Path("."),
+                record_store=Mock(),
+                profile=profile,
+                request=envelope,
+                issued_plan=issued,
+                database_url=None,
+                deployment_record_id="fixture-changed-source",
+                expected_source_decision=expected,
+            )
+        execute.assert_not_called()
+
     def test_completed_restore_receipt_preserves_copy_and_unknown_binding_refuses_reset(
         self,
     ) -> None:

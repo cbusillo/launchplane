@@ -6971,6 +6971,14 @@ def create_launchplane_fastapi_app(
                     issued_plan.preview_slug,
                     allow_destroyed=issued_plan.operation == "refresh",
                 )
+                from control_plane.preview_source import require_source_free_preview_history
+
+                require_source_free_preview_history(
+                    record_store,
+                    profile=current_profile,
+                    issued_plan=issued_plan,
+                    operation_record_id=operation_record_id,
+                )
                 compose_id = issued_plan.dry_run_plan.compose_ref
                 creating_recipient = (
                     issued_plan.operation == "refresh"

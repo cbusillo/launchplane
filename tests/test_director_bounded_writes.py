@@ -33,7 +33,7 @@ from tests.test_odoo_preview_apply_execution import _issued_plan, _refresh_paylo
 
 
 class DirectorBoundedWritesFixture:
-    def __init__(self, owner: unittest.TestCase) -> None:
+    def __init__(self, owner: unittest.TestCase, *, record_source_history: bool = True) -> None:
         self.owner = owner
         temporary = TemporaryDirectory()
         owner.addCleanup(temporary.cleanup)
@@ -107,6 +107,55 @@ class DirectorBoundedWritesFixture:
         self.payload["apply"]["dry_run_plan"]["compose_ref"] = "fixture-preview-target"
         self.plan_id = _PLAN_ID
         self.issue_preview()
+        if not record_source_history:
+            return
+        from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
+        from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
+
+        original_request = OdooPreviewApplyEnvelope.model_validate(self.payload)
+        original_request.apply.dry_run_plan.compose_ref = "${created.composeId:fixture}"
+        original = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=original_request,
+            issued_plan=issue_odoo_preview_apply_plan(
+                result=_issued_plan(original_request), plan_id="fixture-creation"
+            ),
+            reservation_scope="fixture-creation",
+            idempotency_key="fixture-creation",
+            request_fingerprint="fixture-creation",
+            trace_id="fixture-creation",
+        )
+        if self.profile.preview.data_transport_mode == "none":
+            original.adapter.capture_source_decision()
+        reservation = self.store.reserve_mutation(
+            scope=original.reservation_scope,
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=original.idempotency_key,
+            request_fingerprint=original.request_fingerprint,
+            lease_owner="fixture-creation",
+            reconciliation_key=original.adapter.reconciliation_key(),
+            provider_target_key=original.adapter.target_key(),
+            original_intent=original.adapter.original_intent(),
+        ).record
+        assert reservation is not None
+        self.store.complete_mutation_reservation(
+            completion=reservation.model_copy(
+                update={
+                    "state": "completed",
+                    "response_status_code": 202,
+                    "response_trace_id": "fixture-creation",
+                    "recorded_at": stamp,
+                    "response_payload": {
+                        "result": {
+                            "status": "pass",
+                            "compose_id": self.payload["apply"]["dry_run_plan"]["compose_ref"],
+                        }
+                    },
+                }
+            )
+        )
 
     def make_app(
         self,
