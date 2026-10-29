@@ -1,5 +1,3 @@
-"""Read testing copy custody and private health without a provider mutation."""
-
 import inspect
 from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
 from typing import Any
@@ -160,7 +158,8 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
     ]
     availability = retained_copy_availability(containers, spec)
     unavailable = spec.get("allow_unavailable") is True and (
-        availability == "stopped"
+        spec.get("retiring") is True
+        or availability == "stopped"
         or matches_unavailable_web_process(
             spec.get("unavailable_web_process"), retained_web_process(containers, spec)
         )
@@ -170,7 +169,10 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
     web = web_members[0] if web_members else None
     database = database_members[0] if database_members else None
     states = [item.get("State", {}).get("Status") for item in members]
-    stopped = all(value in {"exited", "created"} for value in states)
+    stopped = all(
+        value in {"exited", "created"} or spec.get("retiring") is True and value == "dead"
+        for value in states
+    )
     environment = (
         dict(item.split("=", 1) for item in web["Config"].get("Env", []) if "=" in item)
         if web
@@ -305,35 +307,65 @@ def inventory():
 try:
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     containers=inventory()
-    result=qualify_retained_copy(containers,spec)
     own={item['Id'] for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==spec['project']}
-    if result.get('availability')!='absent':
-        backings=inspect_volume_backings(result['volumes'],containers,own)
-        result['physical_binding']=hashlib.sha256(json.dumps({'logical':result['resource_binding'],'backings':backings},sort_keys=True,separators=(',',':')).encode()).hexdigest()
-    if spec.get('physical_binding') and result['physical_binding']!=spec['physical_binding']:
-        raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
-    if spec.get('allow_unavailable') is True:
-        result['availability']=retained_copy_availability(containers,spec)
-        if result['availability']!='available':
-            result['inventory_sha256']=retained_inventory_sha256(containers,spec)
-            result['observation_sha256']=hashlib.sha256(json.dumps({'project':spec['project'],'context':spec['context'],'custody':result},sort_keys=True,separators=(',',':')).encode()).hexdigest()
-        if spec.get('unavailable_sha256') and result.get('observation_sha256')!=spec['unavailable_sha256']:
-            raise ValueError('The unavailable predecessor changed')
-    if spec['mode']=='readiness':
-        if result['web_stopped']:
-            raise CopyReadbackRefused(ReadbackPredicate.RUNTIME)
-        if not spec.get('identity') or not spec.get('health_path','').startswith('/'):
-            raise ValueError('Retained private health requires the original running process')
-        web=next(item for item in inventory() if item['Id']==result['web_id'])
-        environment=dict(item.split('=',1) for item in web['Config'].get('Env',[]) if '=' in item)
-        port=environment.get('ODOO_HTTP_PORT') or '8069'
-        if not port.isdigit() or not 0<int(port)<65536:
-            raise ValueError('Retained private health port is invalid')
-        health={'port':int(port),'path':spec['health_path'],'identity':spec['identity']}
-        docker('exec',result['web_id'],'python3','-c',HEALTH_PROGRAM,base64.b64encode(json.dumps(health).encode()).decode())
-        result['healthy']=True
-    elif spec['mode']!='read':
-        raise ValueError('Unsupported retained testing operation')
+    if spec['mode'] in {'remove','removal-readback'}:
+        expected=spec.get('container_ids')
+        if spec.get('allow_unavailable') is not True or not isinstance(expected,list) or not expected or not all(isinstance(value,str) and value for value in expected):
+            raise ValueError('Container removal requires admitted unavailable testing custody')
+        project_own=own
+        if spec.get('retiring') is True:
+            own=own.intersection(set(expected))
+        states={item['State']['Status'] for item in containers if item['Id'] in own}
+        if not own.issubset(set(expected)) or states.intersection({'running','restarting','paused'}):
+            result={'type':'complete','availability':'changed'}
+        elif not states.issubset({'exited','created','dead'}):
+            raise ValueError('Old testing container state is unverified')
+        elif spec['mode']=='remove':
+            if spec.get('retiring') is True and own:
+                qualified=qualify_retained_copy(containers,{**spec,'resource_binding':spec.get('resource_binding') if project_own==set(expected) else None})
+                backings=inspect_volume_backings(qualified['volumes'],containers,project_own)
+                physical=hashlib.sha256(json.dumps({'logical':qualified['resource_binding'],'backings':backings},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+                if project_own==set(expected) and physical!=spec.get('physical_binding'):
+                    raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
+            for identifier in sorted(own):
+                docker('rm',identifier)
+            containers=inventory()
+            if any(item['Id'] in own for item in containers):
+                raise ValueError('Old testing containers remain')
+            result={'type':'complete','availability':'absent'}
+        else:
+            result={'type':'complete','availability':'stopped' if own else 'absent'}
+    else:
+        result=qualify_retained_copy(containers,spec)
+        if result.get('availability')!='absent':
+            backings=inspect_volume_backings(result['volumes'],containers,own)
+            result['physical_binding']=hashlib.sha256(json.dumps({'logical':result['resource_binding'],'backings':backings},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        if spec.get('physical_binding') and result['physical_binding']!=spec['physical_binding']:
+            raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
+        if spec.get('allow_unavailable') is True:
+            result['availability']=retained_copy_availability(containers,spec)
+            if result['availability']!='available':
+                result['inventory_sha256']=retained_inventory_sha256(containers,spec)
+                result['observation_sha256']=hashlib.sha256(json.dumps({'project':spec['project'],'context':spec['context'],'custody':result},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+            if spec.get('unavailable_sha256') and result.get('observation_sha256')!=spec['unavailable_sha256']:
+                raise ValueError('The unavailable predecessor changed')
+        if spec.get('allow_unavailable') is True:
+            result['container_ids']=sorted(own)
+        if spec['mode']=='readiness':
+            if result['web_stopped']:
+                raise CopyReadbackRefused(ReadbackPredicate.RUNTIME)
+            if not spec.get('identity') or not spec.get('health_path','').startswith('/'):
+                raise ValueError('Retained private health requires the original running process')
+            web=next(item for item in inventory() if item['Id']==result['web_id'])
+            environment=dict(item.split('=',1) for item in web['Config'].get('Env',[]) if '=' in item)
+            port=environment.get('ODOO_HTTP_PORT') or '8069'
+            if not port.isdigit() or not 0<int(port)<65536:
+                raise ValueError('Retained private health port is invalid')
+            health={'port':int(port),'path':spec['health_path'],'identity':spec['identity']}
+            docker('exec',result['web_id'],'python3','-c',HEALTH_PROGRAM,base64.b64encode(json.dumps(health).encode()).decode())
+            result['healthy']=True
+        elif spec['mode'] not in {'read'}:
+            raise ValueError('Unsupported retained testing operation')
     print(sys.argv[2]+json.dumps(result),flush=True)
 except PermissionError:
     print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)

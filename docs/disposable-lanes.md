@@ -191,12 +191,15 @@ receipt must verify independent resources, local credentials and removal of live
 connections before candidate startup. Fresh private health and exact runtime
 identity precede switching the existing route. Applied/public health and identity
 at the original address precede metadata adoption and old-copy retirement.
-Retirement drains/stops the old runtime and preserves its storage and custody;
-physical deletion is outside this operation. Public probe URLs must use the
+A healthy predecessor is drained/stopped only after verification, preserving its
+storage and custody. An unavailable-origin rebuild removes the admitted stopped
+containers before preparing the new application; volumes remain for the existing
+post-verification disposable-lane retirement, including its only-needed-copy hold. Public probe URLs must use the
 stable lane origin. Missing, stale, unverified or skipped evidence preserves the
 intent for observation. A fresh verified failure or identity mismatch starts
-automatic rollback. An unavailable-origin attempt also reverses its own cutover
-if positively observed predecessor or ingress changes invalidate its admission.
+automatic rollback. Before cutover, a changed predecessor ends admission. Once the candidate is
+selected, only candidate health failure reverses the cutover; old-side changes
+do not reverse a verified candidate.
 
 Failed preparation or private readiness leaves the old copy serving. Failed
 public verification, including immediately before metadata adoption or before
@@ -226,15 +229,12 @@ and worker images together; older readers reject held publication plans and
 fail closed without changing their original records.
 The database and other owned dependencies may still be running. Their custody is
 retained, and the ordinary fenced stop runs after the candidate passes public
-health and metadata publication. A fresh retained-copy read immediately before
-retirement decides whether every service is already stopped and the stop can be
-skipped, unless the original stop has already been dispatched or completed.
-That durable effect resumes observation on replay. Admission-time state cannot
-skip a dependency that started later. After the candidate route is selected,
-an admitted running-unhealthy web may recover health on the same container and
-start time, with unchanged inventory, configuration and storage custody.
-Missing process evidence, a healthy replacement process or a reappeared Docker router
-still refuses continuation. The pre-write unavailable admission remains strict.
+health and metadata publication. A fresh retained-copy read immediately before retirement qualifies the current
+testing target and its independent storage. Once the new copy is selected and
+verified, a later process on that retiring target follows the same stop path:
+automatic deploys are disabled first, then the existing target-stop operation
+stops every remaining service. Fresh use, hold, placement and production-isolation
+checks still gate each mutation. Pre-cutover unavailable admission remains strict.
 A missing web or database does not invent its old data;
 every remaining mounted volume is still inspected for independent backing and
 foreign consumers. Both retained-copy and route observations use the same
@@ -256,8 +256,8 @@ witnesses. Unrelated application environment, image or Compose formatting change
 do not change that declaration witness. Listener witnesses cover the entrypoints
 and certificate resolvers used
 by this lane; unrelated proxy logging and other listeners do not change them.
-Candidate serving readback verifies these dependencies and external redirect
-behavior after the file is selected, as well as before its forward write.
+These admission checks run before the forward write. Serving readback still
+requires the applied candidate route, identity and public health.
 Candidate preparation, generated
 local credentials, sanitation, immutable build, private identity and public
 health checks use the ordinary lifecycle.
@@ -279,40 +279,56 @@ original is not started or advertised as healthy by rollback. Inverse readback
 waits for exact original bytes or absence and the captured lane-owned applied
 routing before reversing metadata. It reports current stopped, absent or present
 process state separately; a reappeared process has unverified health.
-After successful publication, automatic
-deployment of the old target is disabled and its stop is recorded as undispatched
-because it was already unavailable. That success receipt does not itself request
-rollback after a checkpoint interruption. Forward publication and retirement
-require complete, quiescent old-target deployment and data-workflow observations,
-including before disabling automatic deploys and after that disable. Those jobs
-cannot trap the inverse of our route artifact. Its data is never deleted here.
+After successful publication, automatic deployment of the old target is disabled
+and every current service must be observed stopped or absent. Qualified stopped
+containers are then removed without deleting volumes. A healthy new copy stays
+selected while any retirement prerequisite is unresolved.
+This receipt does not request rollback after a checkpoint interruption. Complete,
+quiescent old-target deployment and data-workflow observations gate admission
+before cutover. Later old-side work does not reverse the selected candidate.
 
 Stopped custody binds member identities, ownership labels and storage, separately
 from current stopped/absent state. Incidental Docker lifecycle timestamps do not
-invalidate an unchanged stopped copy. The exact admission witness gates the
-original forward writer. Once the candidate is selected, complete current stopped
-or absent evidence is sufficient; pruning stopped containers does not undo a
-verified independent candidate. A bound normal retirement-success receipt and
-its completed disable receipt resume without requalifying later old-side work,
-while the candidate's current ingress and public health are still verified.
-Removing or dead members have an uncertain lifecycle and keep forward work
-pending until complete current evidence proves stopped or absent. Original-file
-readback may report those positively inventoried members as present, without
-claiming health or allowing an incomplete inventory to count as absence.
-Undispatched retirement exclusions retain the actual latched admission or health
-failure cause.
-A changed predecessor before cutover can
-end admission once original artifact custody, no metadata adoption and terminal
-candidate custody are proved. After possible cutover and current recovery-custody
-checks, the worker persists the original admission refusal and
-settles or excludes the original physical writer. That settlement never allocates
-another initializer or sends another forward write, including after a busy call.
-Unknown or busy execution stays pending with the decision latched. Reappeared
-Docker routers are not adopted or modified: the existing inverse may restore
-only the exact original file or the exact candidate document this attempt wrote.
-Foreign file bytes, changed physical custody and metadata CAS conflicts remain
-fenced. The admission-change result retains its actual reason and does not
-invent a health failure.
+invalidate an unchanged stopped copy. Pre-start container removal accepts only admitted IDs in complete current
+inventory and refuses running or replacement members. Post-verification removal
+captures the freshly qualified stopped IDs and storage in its durable effect;
+replay settles that same custody before qualifying a later batch. A positively
+observed restart or re-enabled automatic deployment after a completed effect
+starts a successor linked to that completed receipt. An unsettled effect always
+retains its original key. A stop may repeat on that same key only after complete
+current target and host readback positively proves the qualified old services
+still running; unknown inventory or placement remains fenced.
+Once an old-target stop or post-verification cleanup has dispatched, retirement
+finishes forward. A later candidate health failure never restores the already
+retired copy. The final probe remains required and a failed probe is reported as
+failed health with the new copy still selected, leaving an ordinary fresh rebuild
+available. A distinct terminal error keeps older checkpoint readers from
+recomputing a failed final probe as green after a lost outer response.
+Pending/skipped health never proves completion. Pre-start removal does
+not cross this boundary; before retirement dispatch, health failure still restores
+the captured original ingress and metadata, including stopped/absent originals.
+Holds, positive use and active old-target work pause the queued operation with
+their exact reason. The lane safety record still protects positive use, including
+a report awaiting fresh collection after cutover. After those conditions end, the existing queued operation
+continues automatically on its original keys. No provider-console stop or separate
+Resume request is required for an observation-pending operation.
+Both removal stages use Docker removal without force or volume
+deletion. Interrupted removal finishes only its stopped or dead leftovers;
+absent members need no repeated removal. Preparation resumes with the observed absent original,
+while preserving the original ingress preimage and metadata for health rollback.
+
+A changed predecessor before cutover ends admission once original artifact
+custody, no metadata adoption and terminal candidate custody are proved.
+After selection, the candidate's applied route, identity and health remain
+required. Old-side drift or unknown ingress is reported without selecting the
+old copy. A candidate health failure still restores only the captured route file
+or its original absence and reverses metadata this attempt adopted. Foreign file
+bytes, changed physical custody and metadata CAS conflicts remain fenced.
+An admission-change result retains its actual reason and never invents a health
+failure. Old volumes remain under their existing retirement and only-copy rules.
+Already recorded admission rollbacks keep their original-key completion path;
+new old-side changes cannot start one. Older intents without a container-ID list
+keep their existing retirement behavior without gaining container-removal authority.
 
 `testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
 payloads, scoped by product, context and operation key. The envelope is completed

@@ -92,6 +92,8 @@ class TestingRebuildProvider(Protocol):
         """Drain/stop the old copy idempotently; retain its storage and custody."""
         ...
 
+    def retirement_committed(self, plan: TestingRebuildPlan) -> bool: ...
+
     def retirement_exclusion(self, plan: TestingRebuildPlan) -> TestingRetirementRecovery | None:
         """Read a prior terminal stop exclusion and fresh old-copy health.
 
@@ -373,23 +375,41 @@ def execute_testing_rebuild(
 
         if record.step == "retiring":
             provider.guard(plan, recovery=True)
+            committed = provider.retirement_committed(plan)
             observation = provider.current_route(plan)
             _route(observation, plan, plan.new)
             # The provider's original terminal exclusion is durable even if
             # its reply was lost before the rolling-back checkpoint committed.
-            recovery = provider.retirement_exclusion(plan) if record.retirement_started else None
+            recovery = (
+                provider.retirement_exclusion(plan)
+                if record.retirement_started and not committed
+                else None
+            )
             rollback = recovery is not None
+            if (
+                isinstance(plan.old, UnavailableTestingPredecessor)
+                and record.error == "candidate_public_health_failed"
+            ):
+                recovery = provider.unstarted_retirement(plan)
+                if recovery is None:
+                    raise TestingRebuildObservationUnavailable(
+                        "The original retirement is not proven excluded."
+                    )
+                rollback = True
             if not rollback:
                 try:
                     _serving(observation, plan, plan.new, clock())
                 except TestingRebuildHealthFailure:
-                    rollback = True
-                    if record.retirement_started:
-                        recovery = provider.unstarted_retirement(plan)
-                        if recovery is None:
-                            raise TestingRebuildObservationUnavailable(
-                                "The original retirement is not proven excluded."
-                            )
+                    if not committed:
+                        rollback = True
+                        if isinstance(plan.old, UnavailableTestingPredecessor):
+                            save(error="candidate_public_health_failed", route=observation)
+                        if record.retirement_started:
+                            recovery = provider.unstarted_retirement(plan)
+                            if recovery is None:
+                                raise TestingRebuildObservationUnavailable(
+                                    "The original retirement is not proven excluded."
+                                )
             if rollback:
                 if recovery is not None:
                     if (recovery.copy_id, recovery.host) != (plan.old.copy_id, plan.host):
@@ -418,6 +438,38 @@ def execute_testing_rebuild(
                     retirement_recovery=recovery,
                 )
 
+        if record.step == "retiring":
+            provider.guard(plan, recovery=True)
+            save(retirement_started=True)
+            provider.retire_old(plan)
+            observation = provider.current_route(plan)
+            _route(observation, plan, plan.new)
+            try:
+                _serving(observation, plan, plan.new, clock())
+            except TestingRebuildHealthFailure:
+                if provider.retirement_committed(plan):
+                    save(
+                        step="complete",
+                        route=observation,
+                        ended_at=clock(),
+                        error="candidate_public_health_failed_after_retirement",
+                    )
+                else:
+                    if isinstance(plan.old, UnavailableTestingPredecessor):
+                        save(error="candidate_public_health_failed", route=observation)
+                    recovery = provider.unstarted_retirement(plan)
+                    if recovery is None:
+                        raise TestingRebuildObservationUnavailable(
+                            "The original retirement is not proven excluded."
+                        )
+                    save(
+                        step="rolling_back",
+                        route=observation,
+                        error="candidate_public_health_failed",
+                        retirement_recovery=recovery,
+                    )
+            else:
+                save(step="complete", route=observation, ended_at=clock())
         if record.step == "rolling_back":
             provider.guard(plan, recovery=True)
             if isinstance(plan.old, UnavailableTestingPredecessor):
@@ -439,9 +491,4 @@ def execute_testing_rebuild(
             save(step="failed", route=observation, ended_at=clock())
             return record
 
-        if record.step == "retiring":
-            provider.guard(plan, recovery=True)
-            save(retirement_started=True)
-            provider.retire_old(plan)
-            save(step="complete", route=observation, ended_at=clock())
         return record
