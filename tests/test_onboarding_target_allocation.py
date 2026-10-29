@@ -3,6 +3,7 @@ from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 
+from control_plane.application_state_volume import ApplicationStateVolumeAdapter
 from control_plane.contracts.idempotency_record import (
     format_launchplane_mutation_timestamp,
     parse_launchplane_mutation_timestamp,
@@ -83,6 +84,12 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
 
     def assert_production_unchanged(self) -> None:
         super().assert_production_unchanged()
+        self.assertEqual(
+            self.store.read_dokploy_target_id_record(
+                context_name=self.context, instance_name="prod"
+            ),
+            self.production_id,
+        )
         self.assertEqual(self.store.list_authz_policy_records(), self.original_policies)
 
     async def post(self, *, idempotency_key: str = "new-site-allocation", **changes: Any) -> Any:
@@ -139,11 +146,13 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
         )
         return patch.object(self.store, "_database_mutation_timestamp", return_value=now)
 
-    async def test_uncertain_application_recovers_the_original_without_duplicate_creates(
-        self,
-    ) -> None:
+    def assert_no_authority_applied(self) -> None:
+        self.assertEqual(self.store.list_product_profile_records(), (self.profile,))
+        self.assert_production_unchanged()
+
+    async def recover_lost_response(self, path: str) -> None:
         await self.plan()
-        self.fail_after = APPLICATION_CREATE_PATH
+        self.fail_after = path
         uncertain = await self.post()
         self.assertEqual(uncertain.status_code, 409, uncertain.text)
         readback = await self.post(mode="readback")
@@ -156,21 +165,66 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
             [call.args[2] for call in self.provider.call_args_list],
             [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH, APPLICATION_CREATE_PATH],
         )
-        self.assertEqual(self.store.list_product_profile_records(), (self.profile,))
-        self.assert_production_unchanged()
+        self.assert_no_authority_applied()
 
-    async def test_partial_allocation_retains_only_reviewed_custody_under_its_original_key(
-        self,
-    ) -> None:
+    async def test_lost_project_response_recovers_without_duplicate_creates(self) -> None:
+        await self.recover_lost_response(PROJECT_CREATE_PATH)
+
+    async def test_lost_environment_response_recovers_without_duplicate_creates(self) -> None:
+        await self.recover_lost_response(ENVIRONMENT_CREATE_PATH)
+
+    async def test_lost_application_response_recovers_without_duplicate_creates(self) -> None:
+        await self.recover_lost_response(APPLICATION_CREATE_PATH)
+
+    async def recover_acknowledged_checkpoint(self, field: str) -> None:
         await self.plan()
-        self.fail_before = ENVIRONMENT_CREATE_PATH
+        checkpoint = ApplicationStateVolumeAdapter._checkpoint_phase
+
+        def interrupt(adapter: ApplicationStateVolumeAdapter, lease: Any, phase: str) -> None:
+            checkpoint(adapter, lease, phase)
+            acknowledged = json.loads(phase)
+            if field in acknowledged and "pending" not in acknowledged:
+                raise OSError("fixture: stopped after acknowledged allocation")
+
+        with patch.object(ApplicationStateVolumeAdapter, "_checkpoint_phase", new=interrupt):
+            uncertain = await self.post()
+        self.assertEqual(uncertain.status_code, 409, uncertain.text)
+        readback = await self.post(mode="readback")
+        self.assertEqual(readback.status_code, 202, readback.text)
+        self.assertTrue(json.loads(readback.json()["result"]["provider_effect_phase"])[field])
+        with self.expire_execution():
+            recovered = await self.post()
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        self.assertEqual(
+            [call.args[2] for call in self.provider.call_args_list],
+            [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH, APPLICATION_CREATE_PATH],
+        )
+        calls = self.provider.call_args_list.copy()
+        replay = await self.post()
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(self.provider.call_args_list, calls)
+        self.assert_no_authority_applied()
+
+    async def test_acknowledged_project_checkpoint_recovers_the_reviewed_plan(self) -> None:
+        await self.recover_acknowledged_checkpoint("project")
+
+    async def test_acknowledged_environment_checkpoint_recovers_the_reviewed_plan(self) -> None:
+        await self.recover_acknowledged_checkpoint("environment")
+
+    async def test_acknowledged_application_checkpoint_recovers_the_reviewed_plan(self) -> None:
+        await self.recover_acknowledged_checkpoint("application")
+
+    async def retain_reviewed_pending_phase(self, path: str, expected_creates: list[str]) -> None:
+        await self.plan()
+        self.fail_before = path
         uncertain = await self.post()
         self.assertEqual(uncertain.status_code, 409, uncertain.text)
         readback = await self.post(mode="readback")
         self.assertEqual(readback.status_code, 202, readback.text)
         result = readback.json()["result"]
-        self.assertEqual(json.loads(result["provider_effect_phase"])["project"], "created-project")
+        self.assertEqual(json.loads(result["provider_effect_phase"])["pending"], path)
         calls = self.provider.call_args_list.copy()
+        self.assertEqual([call.args[2] for call in calls], expected_creates)
         fresh = await self.post(idempotency_key="different-key")
         self.assertEqual(fresh.status_code, 400, fresh.text)
         with self.expire_execution():
@@ -187,8 +241,21 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
         self.assertEqual(replay.status_code, 202, replay.text)
         self.assertFalse(replay.json()["result"]["applied"])
         self.assertEqual(self.provider.call_args_list, calls)
-        self.assertEqual(self.store.list_product_profile_records(), (self.profile,))
-        self.assert_production_unchanged()
+        self.assert_no_authority_applied()
+
+    async def test_reviewed_custody_can_retain_pending_project_allocation(self) -> None:
+        await self.retain_reviewed_pending_phase(PROJECT_CREATE_PATH, [PROJECT_CREATE_PATH])
+
+    async def test_reviewed_custody_can_retain_pending_environment_allocation(self) -> None:
+        await self.retain_reviewed_pending_phase(
+            ENVIRONMENT_CREATE_PATH, [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH]
+        )
+
+    async def test_reviewed_custody_can_retain_pending_application_allocation(self) -> None:
+        await self.retain_reviewed_pending_phase(
+            APPLICATION_CREATE_PATH,
+            [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH, APPLICATION_CREATE_PATH],
+        )
 
     async def test_changed_reviewed_target_or_record_plan_refuses_before_effects(self) -> None:
         await self.plan()
@@ -358,4 +425,67 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
             self.app, "POST", "/v1/dokploy-targets/setup", payload=payload, headers=headers
         )
         self.assertEqual(applied.status_code, 202, applied.text)
+        self.assert_production_unchanged()
+
+    async def test_allocated_identity_survives_native_record_apply_and_original_key_replay(
+        self,
+    ) -> None:
+        allocation_plan = await self.plan()
+        records_payload = {
+            "product": "launchplane",
+            "mode": "dry_run",
+            "generic_web": self.intent.model_dump(mode="json"),
+        }
+
+        async def records(**changes: Any) -> Any:
+            return await request(
+                self.app,
+                "POST",
+                "/v1/product-onboarding/apply",
+                payload={**records_payload, **changes},
+                headers={
+                    **_browser_mutation_headers(self.manager, self.session),
+                    "Idempotency-Key": "native-onboarding-records",
+                },
+            )
+
+        planned = await records()
+        self.assertEqual(planned.status_code, 202, planned.text)
+        self.assertEqual(
+            planned.json()["result"]["plan_sha256"], allocation_plan["onboarding_plan_sha256"]
+        )
+        allocated = await self.post()
+        self.assertEqual(allocated.status_code, 202, allocated.text)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.intent.testing_context, instance_name="testing"
+        )
+        identity = self.store.read_dokploy_target_id_record(
+            context_name=target.context, instance_name=target.instance
+        )
+        calls = self.provider.call_args_list.copy()
+        records_payload.update(
+            mode="apply",
+            reviewed_plan_sha256=planned.json()["result"]["plan_sha256"],
+            resolved_target_id=identity.target_id,
+        )
+        mismatched = await records(resolved_target_id=self.production_id.target_id)
+        self.assertEqual(mismatched.status_code, 400, mismatched.text)
+        self.assertEqual(self.store.list_product_profile_records(), (self.profile,))
+        applied = await records()
+        self.assertEqual(applied.status_code, 202, applied.text)
+        registered_target = self.store.read_dokploy_target_record(
+            context_name=target.context, instance_name=target.instance
+        )
+        registered_identity = self.store.read_dokploy_target_id_record(
+            context_name=target.context, instance_name=target.instance
+        )
+        self.assertEqual(registered_identity.target_id, identity.target_id)
+        self.assertEqual(registered_target.target_name, target.target_name)
+        self.assertEqual(registered_target.project_name, target.project_name)
+        replayed = await records()
+        self.assertEqual(replayed.status_code, 202, replayed.text)
+        self.assertTrue(replayed.json()["replayed"])
+        allocation_replay = await self.post()
+        self.assertEqual(allocation_replay.status_code, 202, allocation_replay.text)
+        self.assertEqual(self.provider.call_args_list, calls)
         self.assert_production_unchanged()
