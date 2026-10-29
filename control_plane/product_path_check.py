@@ -219,12 +219,12 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             "Launchplane has not planned a testing deploy for this product yet.",
             "wait",
         )
-    if plan.get("reconcile_state") != "done":
+    if plan.get("reconcile_state") not in {"done", "failed"}:
         return _step(
             step_id,
             "unknown",
             "reconcile_not_done",
-            "The current testing reconcile has not completed; its saved plan may be older.",
+            "The current testing reconcile has no terminal outcome; its saved plan may be older.",
             "wait",
         )
     deployed = str(plan.get("deployed_operation_id") or "")
@@ -267,7 +267,8 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             record_ids=(_testing_artifact_id(plan["current_artifact_id"]),),
         )
     if (
-        plan.get("action") == "none"
+        plan.get("reconcile_state") == "done"
+        and plan.get("action") == "none"
         and plan.get("reason") == "already_deployed"
         and plan.get("held") is False
     ):

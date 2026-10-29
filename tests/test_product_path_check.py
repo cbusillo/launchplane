@@ -236,18 +236,13 @@ class ProductPathCheckTests(unittest.TestCase):
             last_plan=_completed_noop_plan(),
         )
         store = Mock()
-        for (state, expected), outcome in product(
+        for state, (outcome, done_state, failed_state) in product(
+            ("done", "pending", "running", "failed"),
             (
-                ("done", "clear"),
-                ("pending", "unknown"),
-                ("running", "unknown"),
-                ("failed", "unknown"),
-            ),
-            (
-                {},
-                {"deployed_operation_id": "operation-previous"},
-                {"queued_operation_id": "operation-previous"},
-                {"last_failed_operation_id": "operation-previous"},
+                ({}, "clear", "unknown"),
+                ({"deployed_operation_id": "operation-previous"}, "clear", "clear"),
+                ({"queued_operation_id": "operation-previous"}, "blocked", "blocked"),
+                ({"last_failed_operation_id": "operation-previous"}, "blocked", "blocked"),
             ),
         ):
             with (
@@ -271,12 +266,9 @@ class ProductPathCheckTests(unittest.TestCase):
                 check = build_product_path_check(
                     product="example-site", path="testing", inputs=inputs
                 )
-                if state == "done" and (
-                    "queued_operation_id" in outcome or "last_failed_operation_id" in outcome
-                ):
-                    expected = "blocked"
+                expected = {"done": done_state, "failed": failed_state}.get(state, "unknown")
                 self.assertEqual(_steps(check)["testing_deploy"][0], expected)
-                if state != "done":
+                if state in {"pending", "running"}:
                     self.assertEqual(check.steps[-1].record_ids, ())
 
     def test_promote_reports_every_blocker_at_once(self) -> None:
@@ -375,7 +367,7 @@ class ProductPathCheckTests(unittest.TestCase):
                         profile=_profile(),
                         testing_hold_active=False,
                         testing_reconcile_plan={
-                            "reconcile_state": "done",
+                            "reconcile_state": "failed",
                             "last_failed_operation_id": "operation-1",
                             "last_failed_error_code": code,
                             "last_failed_error_summary": "Fixed summary.",
