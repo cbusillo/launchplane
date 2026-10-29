@@ -4920,14 +4920,24 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.fail_after_stop = True
         with self.assertRaises(TimeoutError):
             self.execute()
+        observed = False
+
+        def unknown(**kwargs: Any) -> dict[str, Any]:
+            nonlocal observed
+            if kwargs["payload"].get("retiring"):
+                observed = True
+                raise NativeSourceUnavailable("Fixture cannot observe the retiring target")
+            return self.physical(**kwargs)
+
         with patch(
-            "control_plane.testing_rebuild_service.retained_copy_operation",
-            side_effect=NativeSourceUnavailable("Fixture cannot observe the retiring target"),
+            "control_plane.testing_rebuild_service.retained_copy_operation", side_effect=unknown
         ):
             for failed_health in (True, False):
+                observed = False
                 self.fail_public = failed_health
                 with self.assertRaises(service.NativeTestingRebuildPending):
                     self.execute()
+                self.assertTrue(observed)
                 self.assertEqual(self.effects, ["switch-new", "stop-old"])
         self.assertEqual(self.execute().deploy_status, "pass")
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
