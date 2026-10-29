@@ -21,7 +21,11 @@ import json,os,sys,time
 from pathlib import Path
 state_path=Path(os.environ['FAKE_DOCKER_STATE'])
 state=json.loads(state_path.read_text())
-args=sys.argv[1:]
+raw_args=sys.argv[1:]
+state.setdefault('raw_calls',[]).append(raw_args)
+if raw_args[:2]!=['--host','unix:///var/run/docker.sock']:
+    state['remote_routed']=True;state_path.write_text(json.dumps(state));raise SystemExit(97)
+args=raw_args[2:]
 state.setdefault('calls',[]).append(args);state_path.write_text(json.dumps(state))
 if state.get('fail') and args[:2] not in (['volume','rm'],):
     print('access denied',file=sys.stderr);raise SystemExit(1)
@@ -160,6 +164,8 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             "HOME": str(self.home),
             "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
             "FAKE_DOCKER_STATE": str(self.state_path),
+            "DOCKER_CONTEXT": "inherited-remote-context",
+            "DOCKER_HOST": "tcp://inherited-remote.invalid:2376",
         }
         result = subprocess.run(
             [sys.executable, "-c", self.fixture_program(exhaust_budget), payload, "FRAME:"],
@@ -216,6 +222,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         self.assertEqual(self.run_program("apply")["status"], "removed")
         state = json.loads(self.state_path.read_text())
         self.assertEqual(state["rm_args"], ["volume", "rm", "candidate"])
+        self.assertFalse(state.get("remote_routed", False))
         self.assertEqual(self.run_program("readback")["status"], "absent")
         self.assertEqual(self.run_program("apply")["status"], "absent")
 

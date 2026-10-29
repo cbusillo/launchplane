@@ -2,6 +2,7 @@ import inspect
 
 from control_plane.retained_volume_capture import (
     _batched_docker_inspect,
+    retained_volume_docker_command,
     retained_volume_engine_identity,
     retained_volume_identity,
 )
@@ -12,6 +13,7 @@ RETAINED_VOLUME_SWEEP_HOST_PROGRAM = (
     + inspect.getsource(retained_volume_identity)
     + inspect.getsource(retained_volume_engine_identity)
     + inspect.getsource(_batched_docker_inspect)
+    + inspect.getsource(retained_volume_docker_command)
     + r"""
 import base64,fcntl,hashlib,json,os,re,stat,subprocess,sys,time
 from pathlib import Path
@@ -52,7 +54,7 @@ def docker(*arguments,allow_failure=False):
     if remaining<=0:
         raise Unknown()
     try:
-        result=subprocess.run(['docker',*arguments],capture_output=True,timeout=min(10,remaining),check=False)
+        result=subprocess.run(retained_volume_docker_command(*arguments),capture_output=True,timeout=min(10,remaining),check=False)
     except (OSError,subprocess.SubprocessError):
         raise Unknown() from None
     if len(result.stdout)>8*1024*1024 or len(result.stderr)>1024*1024:
@@ -365,7 +367,7 @@ try:
         rm_timeout=10
         persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id})
         try:
-            result=subprocess.run(['docker','volume','rm',name],capture_output=True,timeout=rm_timeout,check=False)
+            result=subprocess.run(retained_volume_docker_command('volume','rm',name),capture_output=True,timeout=rm_timeout,check=False)
         except (OSError,subprocess.SubprocessError):
             raise Unknown() from None
         deadline=time.monotonic()+20

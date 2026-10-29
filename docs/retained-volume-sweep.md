@@ -14,6 +14,9 @@ names remain recorded with unknown identity when capture cannot qualify them.
 The primary Dokploy server, detached applications, older retirement records and
 unsupported storage remain ineligible; their existing retirement guards remain.
 No public application resource counts gain volume names or server coordinates.
+Every capture and sweep Docker command explicitly selects the managed server's
+local `/var/run/docker.sock`; inherited Docker host or context selectors cannot
+redirect inventory or exact-name removal away from that local engine.
 
 `POST /v1/retained-volume-sweep` is a DB-backed service operation for a signed-in
 admin or the Director's service agent. Supply `retirement_record_id` and

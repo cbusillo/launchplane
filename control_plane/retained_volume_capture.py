@@ -14,6 +14,10 @@ from control_plane.testing_application_capabilities import single_local_swarm_no
 _SAFE_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")
 
 
+def retained_volume_docker_command(*arguments: str) -> list[str]:
+    return ["docker", "--host", "unix:///var/run/docker.sock", *arguments]
+
+
 def _batched_docker_inspect(
     kind: str,
     identifiers: Sequence[str],
@@ -172,6 +176,7 @@ _RETAINED_VOLUME_CAPTURE_PROGRAM = (
     + inspect.getsource(_batched_docker_inspect)
     + inspect.getsource(retained_volume_identity)
     + inspect.getsource(retained_volume_engine_identity)
+    + inspect.getsource(retained_volume_docker_command)
     + r"""
 import hashlib,os,re,subprocess,sys,time
 from pathlib import Path
@@ -186,7 +191,7 @@ def docker(*args):
     remaining=deadline-time.monotonic()
     if remaining <= 0:
         raise ValueError('deadline')
-    result=subprocess.run(['docker',*args],capture_output=True,check=False,timeout=min(10,remaining))
+    result=subprocess.run(retained_volume_docker_command(*args),capture_output=True,check=False,timeout=min(10,remaining))
     if result.returncode or len(result.stdout)>8*1024*1024:
         raise ValueError('docker inventory unavailable')
     return result.stdout.decode('utf-8',errors='strict')

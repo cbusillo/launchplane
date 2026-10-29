@@ -351,7 +351,9 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                     command: list[str], **_kwargs: object
                 ) -> subprocess.CompletedProcess[bytes]:
                     nonlocal container_reads
-                    arguments = command[1:]
+                    if command[1:3] != ["--host", "unix:///var/run/docker.sock"]:
+                        raise OSError("The Docker fixture routed away from the local daemon")
+                    arguments = command[3:]
                     if arguments[:2] == ["node", "ls"]:
                         value = json.dumps({"ID": "node1", "Self": True})
                     elif arguments[:2] == ["service", "ps"]:
@@ -391,6 +393,13 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                 with (
                     patch.object(sys, "argv", ["capture", payload, "frame:"]),
                     patch.object(subprocess, "run", side_effect=docker),
+                    patch.dict(
+                        "os.environ",
+                        {
+                            "DOCKER_CONTEXT": "inherited-remote-context",
+                            "DOCKER_HOST": "tcp://inherited-remote.invalid:2376",
+                        },
+                    ),
                     redirect_stdout(output),
                 ):
                     exec(
