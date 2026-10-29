@@ -1085,6 +1085,42 @@ idempotency records; both identity values are required whenever the bearer token
 is configured. Admission and authority follow each endpoint
 and the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission).
 
+### Record-backed Director-agent verification
+
+The service can load these two Director-agent identities from its own records
+at startup. This is separate from retired ordinary-agent enrollment, sessions
+and leases. The service context's `RuntimeEnvironmentRecord` must explicitly
+set `LAUNCHPLANE_AGENT_BEARER_SOURCE` to `records` to activate this reader.
+Without that setting, the existing bootstrap identities remain in use.
+
+In record mode, that same context record supplies the existing
+`LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT`, `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`,
+`LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and `LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL`
+selectors. Each token comes from exactly one configured, write-only,
+context-scoped `launchplane_service` secret binding in context `launchplane`,
+using its existing token key. Other contexts, global secrets and lane secrets
+cannot supply it. Missing, ambiguous or unreadable token material, or incomplete
+selectors, disable the affected identity. Record mode never falls back to its
+environment token. An unavailable or ambiguous selector read, or an invalid
+source setting, disables both Director-agent identities.
+
+`LAUNCHPLANE_LOCAL_ADMIN_*` and engineering-review bootstrap credentials stay
+independent of this reader. Keeping the admin token available does not bypass
+the active-policy DB requirement or confer authority on a failed agent identity.
+Authentication still produces the same principal types, subjects and labels;
+existing endpoint and policy rules decide authority.
+
+This source capability does not transfer credentials or authorize activation.
+Before activation, qualify a supported write-only input from independent custody
+or a separately reviewed service-side transfer, exact principal equivalence,
+independent recovery and rollback in isolation. Do not extract or copy credentials
+or generate replacements. Keep the existing host and Actions inputs until live
+readback and rollback proof support their removal. Rolling back the source
+selection requires the preserved bootstrap inputs and an authorized record
+change followed by restart. No Actions input is removed by this reader.
+
+### Independent local-admin verification
+
 Rare `local_admin` operations use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` with configured
 `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT` and `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`.
 Both identity values are required whenever the bearer token is configured. Those

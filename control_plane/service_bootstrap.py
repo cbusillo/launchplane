@@ -31,6 +31,7 @@ from control_plane.service_auth import (
     TokenVerifier,
     load_authz_policy,
 )
+from control_plane.service_agent_identities import load_service_agent_identities
 from control_plane.service_human_auth import (
     GitHubOAuthClient,
     HumanSessionManager,
@@ -194,7 +195,9 @@ def create_launchplane_service_application(
         )
         if start_schedulers
         else None,
-        bearer_identity_config=_bearer_identity_config_from_env(),
+        bearer_identity_config=load_service_agent_identities(
+            store=service_record_store, bootstrap=_bearer_identity_config_from_env()
+        ),
         human_session_manager=human_session_manager,
         github_oauth_client=github_oauth_client,
         oauth_login_state_store=oauth_login_state_store,
