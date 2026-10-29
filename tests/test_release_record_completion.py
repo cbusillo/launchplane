@@ -503,6 +503,54 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.assertEqual(self.issue["state"], "open")
         self.assertEqual(len(self.comments), 1)
 
+    def test_closed_issue_and_unpublished_retry_preserve_outcomes_and_reconcile_closure(
+        self,
+    ) -> None:
+        self.issue["state"] = "closed"
+        self.advance()
+        self.assertEqual(len(self.comments), 1)
+        pending = self.decision.model_copy(
+            update={
+                "record_id": "unpublished-retry",
+                "decided_at": "2026-09-24T01:00:00Z",
+                "release_issue_url": "",
+            }
+        )
+        self.store.create_release_review_decision_record_if_absent(pending)
+        self.issue["state"] = "open"
+        assert self.release_run is not None
+        original = self.release_run
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: (
+                None if kwargs["decision"].record_id == pending.record_id else original
+            ),
+        ):
+            self.advance()
+            self.advance()
+        self.assertEqual(self.issue["state"], "open")
+        self.assertEqual(len(self.comments), 1)
+        self.store.record_release_review_decision_publication(
+            record_id=pending.record_id, release_issue_url=self.decision.release_issue_url
+        )
+        self.comments.append(
+            {
+                "id": 90,
+                "body": release_decision_marker(pending.record_id),
+                "performed_via_github_app": {"id": 77},
+            }
+        )
+        with patch(
+            "control_plane.client_release.read_client_release_run",
+            side_effect=lambda **kwargs: original.model_copy(
+                update={"decision_record_id": kwargs["decision"].record_id}
+            ),
+        ):
+            self.advance()
+            self.advance()
+        self.assertEqual(self.issue["state"], "closed")
+        self.assertEqual(len(self.comments), 3)
+
     def test_changed_run_after_issue_lookup_stays_open(self) -> None:
         github = self.github
 

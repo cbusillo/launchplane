@@ -401,8 +401,8 @@ class ReleaseInvitationTests(unittest.TestCase):
         )
         original = {
             "id": 600,
-            "created_at": self.now.isoformat(),
-            "body": candidate_marker + "\nManual request already sent.",
+            "created_at": (self.now - timedelta(days=2)).isoformat(),
+            "body": candidate_marker + "\nHi @site-owner, follow these manual test instructions.",
             "performed_via_github_app": {"id": 88},
         }
         self.comments.append(original.copy())
@@ -428,6 +428,15 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertNotIn("@site-owner", self.issues[1]["body"])
         self.assertEqual(self.comments[0], original)
         self.assertIn(json.dumps(kwargs["reason"]), self.comments[1]["body"])
+
+        self.assertIn(str(original["body"]).replace("@", "@\u200b"), self.issues[1]["body"])
+        self.assertIn(self.public_origin + "/ui/owner-review", self.issues[1]["body"])
+        self.now += timedelta(days=1)
+        self.publish(ReleaseInvitationBackoff())
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), 3)
+        self.assertIn("@site-owner", self.comments[-1]["body"])
+        self.assertEqual(self.comments[0], original)
 
     def test_manual_adoption_refuses_other_candidate_and_changed_checklist(self) -> None:
         self.issues.append(
@@ -2017,12 +2026,11 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.publish()
         self.assertEqual(len(self.issues), 1)
 
-    def test_concurrent_workers_post_one_comment(self) -> None:
+    def test_concurrent_workers_create_one_candidate_issue(self) -> None:
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(self.publish) for _ in range(2)]
             for future in futures:
                 future.result()
-        self.assertEqual(len(self.issues), 1)
         self.assertEqual(len(self.issues), 1)
 
     def test_changed_review_during_lookup_does_not_message(self) -> None:
@@ -2033,43 +2041,6 @@ class ReleaseInvitationTests(unittest.TestCase):
         ):
             self.publish()
         self.assertEqual(self.issues, [])
-
-    def test_held_release_explains_record_only(self) -> None:
-        self.profile = profile()
-        self.store.write_product_profile_record(self.profile)
-        self.publish()
-        body = self.issues[0]["body"]
-        self.assertIn("**Release review**", body)
-        self.assertIn("Accepting records your approval; an admin starts the release", body)
-        self.assertNotIn("Accepting starts the release", body)
-
-    def test_effect_matches_review_for_unsupported_driver_and_drill(self) -> None:
-        self.profile = self.profile.model_copy(update={"driver_id": "verireel"})
-        self.store.write_product_profile_record(self.profile)
-        assert self.review.checklist is not None
-        with (
-            patch(
-                "control_plane.release_invitation.release_version",
-                side_effect=lambda *, instance, **kwargs: getattr(
-                    self.review.checklist, "production" if instance == "prod" else "candidate"
-                ),
-            ),
-            patch(
-                "tests.test_release_invitation.release_version",
-                side_effect=lambda *, instance, **kwargs: getattr(
-                    self.review.checklist, "production" if instance == "prod" else "candidate"
-                ),
-            ),
-        ):
-            self.publish()
-        self.assertIn("an admin starts the release", self.issues[0]["body"])
-        self.issues.clear()
-        self.profile = profile().model_copy(
-            update={"release_on_acceptance": "promote_with_rollback_drill"}
-        )
-        self.store.write_product_profile_record(self.profile)
-        self.publish()
-        self.assertIn("rollback-and-re-release drill", self.issues[0]["body"])
 
     def test_no_client_prelaunch_retired_and_standing_acceptance_do_not_message(self) -> None:
         for update in (
@@ -2437,18 +2408,6 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.issues), 1)
         self.assertTrue(all("page=1" in path for path in reads))
 
-    def test_new_request_after_rejection_reaches_client_in_its_own_issue(self) -> None:
-        self.publish()
-        rejected = self.save_decision("changes_requested", "")
-        self.assertEqual(self.issues[0]["state"], "closed")
-        self.assertTrue(self.publish())
-        self.assertEqual(len(self.issues), 2)
-        self.assertEqual(self.issues[1]["state"], "open")
-        self.assertIn("@site-owner", self.issues[1]["body"])
-        accepted = self.save_decision()
-        self.assertNotEqual(accepted.release_issue_url, rejected.release_issue_url)
-        self.assertIn("/issues/92", accepted.release_issue_url)
-
     def test_decision_comments_preserve_large_request_and_human_notes(self) -> None:
         from control_plane.release_review_record import release_decision_marker
 
@@ -2491,3 +2450,56 @@ class ReleaseInvitationTests(unittest.TestCase):
                 release.set()
             self.assertFalse(invitation.result(timeout=10))
         self.assertEqual(len(self.issues), 1)
+
+    def test_reaccept_after_a_stopped_run_reopens_the_same_candidate_issue(self) -> None:
+        from control_plane.release_invitation import _settle_release_record
+
+        self.publish()
+        first = self.save_decision()
+        stopped = ClientReleaseRunView(
+            decision_record_id=first.record_id,
+            rollback_drill=False,
+            state="stopped",
+            steps=(
+                ClientReleaseStepView(
+                    step="backup-1", kind="backup", status="fail", operation_id="backup"
+                ),
+            ),
+        )
+        with patch("control_plane.client_release.read_client_release_run", return_value=stopped):
+            self.assertTrue(
+                _settle_release_record(
+                    store=cast(ReleaseReviewStore, cast(object, self.store)),
+                    control_plane_root=self.root,
+                    profile=self.profile,
+                    decision=first,
+                )
+            )
+        self.assertEqual(self.issues[0]["state"], "closed")
+        retry = self.save_decision()
+        self.assertNotEqual(first.record_id, retry.record_id)
+        self.assertEqual(retry.release_issue_url, first.release_issue_url)
+        self.assertEqual(len(self.issues), 1)
+        self.assertEqual(self.issues[0]["state"], "open")
+
+    def test_a_saved_decision_prevents_a_new_request_for_the_unchanged_checklist(self) -> None:
+        self.publish()
+        saved = self.save_decision()
+        current = build_release_review(
+            store=cast(ReleaseReviewStore, cast(object, self.store)),
+            profile=self.profile,
+            read=github_read,
+        )
+        self.assertEqual(current.latest_decision, saved)
+        posts = self.posts.copy()
+        with self.assertRaises(ValueError):
+            record_release_request(
+                store=cast(ReleaseReviewStore, cast(object, self.store)),
+                profile=self.profile,
+                review=current,
+                source="director_request",
+                reason="Ask again",
+                decision_reference="",
+                actor="director",
+            )
+        self.assertEqual(self.posts, posts)

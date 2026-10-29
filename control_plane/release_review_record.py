@@ -206,8 +206,6 @@ def publish_release_decision(
     decision: ReleaseReviewDecisionRecord,
 ) -> str:
     """Serialize lookup, creation and acknowledgement of a saved decision."""
-    from control_plane.release_invitation import release_candidate_identity
-
     stored = store.read_release_review_decision_record(
         product=decision.product, record_id=decision.record_id
     )
@@ -231,8 +229,9 @@ def publish_release_decision(
             previous.record_id,
         ):
             previous = item
-    identity = release_candidate_identity(profile, stored.checklist_digest)
-    with store.release_review_publication_lock(record_id=f"candidate:{profile.product}:{identity}"):
+    with store.release_review_publication_lock(
+        record_id=f"candidate:{profile.product}:{stored.checklist_digest}"
+    ):
         issue_url = _publish_release_decision_issue(
             control_plane_root=control_plane_root,
             profile=profile,
@@ -283,10 +282,7 @@ def _publish_release_decision_issue(
             release_issue_product_marker,
         )
 
-        from control_plane.release_invitation import release_candidate_identity
-
-        identity = release_candidate_identity(profile, decision.checklist_digest)
-        candidate_marker = release_candidate_issue_marker(identity)
+        candidate_marker = release_candidate_issue_marker(decision.checklist_digest)
         product_marker = release_issue_product_marker(profile.product)
         app_id = resolve_delivery_github_app_id(control_plane_root=control_plane_root)
         request = profile.release_request
@@ -300,18 +296,7 @@ def _publish_release_decision_issue(
             else decision.decided_at
         ).replace(microsecond=0)
         issue = None
-        if (
-            previous is not None
-            and previous.release_issue_url
-            and (
-                request is None
-                or (
-                    previous.record_id != request.client_decision_record_id
-                    and datetime.fromisoformat(previous.decided_at)
-                    >= datetime.fromisoformat(request.decided_at)
-                )
-            )
-        ):
+        if previous is not None and previous.release_issue_url:
             match = re.fullmatch(
                 rf"https://github\.com/{re.escape(profile.repository)}/issues/([1-9][0-9]*)",
                 previous.release_issue_url,

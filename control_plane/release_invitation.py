@@ -558,7 +558,9 @@ def _settle_release_record(
     from control_plane.release_review_record import release_decision_marker
 
     settled = False
-    with store.release_review_publication_lock(record_id=decision.record_id):
+    with store.release_review_publication_lock(
+        record_id=f"candidate:{profile.product}:{decision.checklist_digest}"
+    ):
         run = read_client_release_run(store=store, profile=profile, decision=decision)
         if run is None or run.decision_record_id != decision.record_id or not _finished(run):
             return False
@@ -604,8 +606,6 @@ def _settle_release_record(
                 )
                 if not decisions:
                     raise ValueError("Release record identity was not confirmed.")
-            if issue.get("state") == "closed":
-                return True
             if (
                 store.read_product_profile_record(profile.product) != profile
                 or store.read_release_review_decision_record(
@@ -644,8 +644,16 @@ def _settle_release_record(
             for other in saved_decisions:
                 if (
                     other.record_id == decision.record_id
-                    or other.release_issue_url != decision.release_issue_url
                     or not other.release_start
+                    or not (
+                        other.release_issue_url == decision.release_issue_url
+                        or (
+                            not other.release_issue_url
+                            and other.checklist_digest == decision.checklist_digest
+                            and (_timestamp(other.decided_at), other.record_id)
+                            > (_timestamp(decision.decided_at), decision.record_id)
+                        )
+                    )
                 ):
                     continue
                 if other.decision == "temporary_hotfix" and not any(
@@ -665,9 +673,9 @@ def _settle_release_record(
                 ):
                     active = True
                     break
-            if not active:
+            if not active and issue.get("state") != "closed":
                 _close_issue(path=path, token=token, number=number)
-            settled = True
+            settled = not active
     return settled
 
 
@@ -763,14 +771,18 @@ def publish_release_invitation(
             if not token:
                 raise ValueError("Release invitation source-control access is unavailable.")
             path = f"/repos/{quote(profile.repository)}/issues"
-            marker = release_candidate_issue_marker(request_decision.record_id)
+            marker = release_candidate_issue_marker(review.checklist_digest)
             product_marker = release_issue_product_marker(profile.product)
             app_id = resolve_delivery_github_app_id(control_plane_root=control_plane_root)
-            issues = _pages(
-                f"{path}?state=open&sort=updated&direction=desc",
-                token,
-                marker=release_request_issue_marker(profile.product),
-                issues_only=True,
+            issues = (
+                []
+                if receipt_due
+                else _pages(
+                    f"{path}?state=open&sort=updated&direction=desc",
+                    token,
+                    marker=release_request_issue_marker(profile.product),
+                    issues_only=True,
+                )
             )
             legacy = _legacy_release_requests(
                 issues=issues, profile=profile, path=path, token=token, last_decision=last_decision
@@ -800,9 +812,8 @@ def publish_release_invitation(
                 )
             ):
                 return False
-            identity = release_candidate_identity(profile, review.checklist_digest)
             with store.release_review_publication_lock(
-                record_id=f"candidate:{profile.product}:{identity}"
+                record_id=f"candidate:{profile.product}:{review.checklist_digest}"
             ):
                 candidates = _pages(
                     f"{path}?state=all&sort=created&direction=desc",
@@ -831,7 +842,7 @@ def publish_release_invitation(
                     checklist=review.checklist,
                     changes=client_changes,
                     origin=origin,
-                    digest=request_decision.record_id,
+                    digest=review.checklist_digest,
                 )
                 if issue is None:
                     if carried is not None:
@@ -845,6 +856,7 @@ def publish_release_invitation(
                             + (f"{reminder_marker}\n" if carried.reminded else "")
                             + f"\nExisting [review request](https://github.com/{profile.repository}/issues/{legacy_number}#issuecomment-{_release_comment_id(carried.request)}) carried over. Use the same release page; no second decision is needed.\n\n"
                             + "\n".join(_comment_lines(carried.request)).replace("@", "@\u200b")
+                            + f"\n\n[Open the release page]({origin}/ui/owner-review?product={quote(profile.product, safe='')}). Use the same pending Accept or Request changes; no second decision is needed."
                         )
                     created = github_api_request(
                         path=path,
@@ -879,23 +891,6 @@ def publish_release_invitation(
                     raise ValueError("Release invitation update was not confirmed.")
                 issue = result
             url = f"https://github.com/{profile.repository}/issues/{number}"
-            open_issues = _pages(f"{path}?state=open&sort=created&direction=desc", token)
-            decided_urls = {
-                item.release_issue_url
-                for item in store.list_release_review_decision_records(product=profile.product)
-                if item.release_issue_url
-            }
-            _retire_older_release_issues(
-                issues=open_issues,
-                decided_urls=decided_urls,
-                current=issue,
-                product_marker=product_marker,
-                legacy=legacy,
-                url=url,
-                path=path,
-                token=token,
-                app_id=app_id,
-            )
             if issue.get("state") == "closed":
                 return True
             due_line = next(
@@ -934,9 +929,26 @@ def publish_release_invitation(
                 if not isinstance(result, dict) or not isinstance(result.get("id"), int):
                     raise ValueError("Release invitation reminder was not confirmed.")
                 reminded = True
+            if not receipt_due:
+                open_issues = _pages(f"{path}?state=open&sort=created&direction=desc", token)
+                decided_urls = {
+                    item.release_issue_url
+                    for item in store.list_release_review_decision_records(product=profile.product)
+                    if item.release_issue_url
+                }
+                _retire_older_release_issues(
+                    issues=open_issues,
+                    decided_urls=decided_urls,
+                    current=issue,
+                    product_marker=product_marker,
+                    legacy=legacy,
+                    url=url,
+                    path=path,
+                    token=token,
+                    app_id=app_id,
+                )
             _remember_delivery(backoff, receipt, due, reminded)
-            return True
-    return False
+    return True
 
 
 def _release_invitation_body(
@@ -985,13 +997,6 @@ def _release_invitation_body(
         + "\n".join(notes)
         + f"\n\nStill one thing to do: [open the release page]({review_link}), {action}, then press **Accept** or **Request changes**. The release page lists every included change."
         + f"\n\n{effect}\n\nUpdated at: {_timestamp(request_decision.decided_at).astimezone(ZoneInfo('America/New_York')).strftime('%B %-d, %Y at %-I:%M %p ET')}"
-    )
-
-
-def release_candidate_identity(profile: LaunchplaneProductProfileRecord, digest: str) -> str:
-    request = profile.release_request
-    return (
-        request.record_id if request is not None and request.checklist_digest == digest else digest
     )
 
 
@@ -1045,7 +1050,21 @@ def _legacy_release_requests(
             and not any(line.startswith(COMPLETED_PREFIX) for line in _comment_lines(comment))
         ]
         request_marker = _request_marker(profile, last_decision)
-        request = _open_request(comments, request_marker, last_decision)
+        receipt = _open_request(comments, request_marker, last_decision)
+        request = receipt
+        if receipt is not None:
+            originals: list[int] = []
+            for line in _receipt_lines(receipt):
+                match = re.fullmatch(
+                    re.escape(ADOPTED_ORIGINAL_PREFIX) + r"([1-9][0-9]*) -->", line
+                )
+                if match is not None:
+                    originals.append(int(match[1]))
+            if originals:
+                matching = [comment for comment in comments if comment.get("id") in originals]
+                if len(originals) != 1 or len(matching) != 1:
+                    raise ValueError("Adopted release request original is unavailable.")
+                request = matching[0]
         current = [
             comment
             for comment in comments
@@ -1133,13 +1152,15 @@ def _retire_decided_legacy_requests(
     decision = _last_client_decision(store, profile)
     if decision is None or not decision.release_issue_url:
         return
-    fingerprint = profile.model_dump_json() + decision.model_dump_json()
+    fingerprint = json.dumps(
+        (profile.product, profile.repository, profile.owner.github_id), separators=(",", ":")
+    )
     if backoff is not None:
         previous, next_read = backoff.legacy_retirements.get(profile.product, ("", 0))
         if previous == fingerprint and monotonic() < next_read:
             return
         backoff.legacy_retirements[profile.product] = (fingerprint, monotonic() + 300)
-    with store.release_review_publication_lock(record_id=f"invitation:{profile.product}"):
+    with store.release_review_publication_lock(record_id=f"legacy-retirement:{profile.product}"):
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
         with launchplane_github_token(
             token_resolver=resolve_launchplane_github_token,
@@ -1176,7 +1197,12 @@ def _retire_decided_legacy_requests(
                         legacy=True,
                     )
         if backoff is not None:
-            backoff.legacy_retirements[profile.product] = (fingerprint, float("inf"))
+            backoff.legacy_retirements[profile.product] = (
+                fingerprint,
+                monotonic() + 300
+                if any(item.request is not None for item in legacy)
+                else float("inf"),
+            )
 
 
 def adopt_release_invitation(
@@ -1266,9 +1292,7 @@ def adopt_release_invitation(
                 f"{path}?state=all&sort=updated&direction=desc",
                 token,
                 app_id=app_id,
-                marker=release_candidate_issue_marker(
-                    release_candidate_identity(profile, checklist_digest)
-                ),
+                marker=release_candidate_issue_marker(checklist_digest),
                 issues_only=True,
             )
             if candidates:

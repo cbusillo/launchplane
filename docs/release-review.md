@@ -88,9 +88,11 @@ redacted failure reason. They separately report the version currently recorded
 in production, identifying the reviewed, previous or another version by commit.
 Unavailable reasons or production evidence are stated explicitly; a past
 successful promotion is never used to infer what production runs now.
-Temporary-hotfix review requests remain open for the Client to decide. Already
-closed records are left alone. The saved decision and original request remain in the same issue; the decision and outcome are comments on it. Retries reuse the outcome
-receipt and the confirmed issue-closure path.
+Temporary-hotfix review requests remain open for the Client to decide. A closed
+issue still receives a missing outcome. The saved decision and original request
+remain in the same issue; the decision and outcome are comments on it. Retries
+reuse the outcome receipt and confirm closure only after other release actions
+on that candidate have finished, including a saved retry awaiting publication.
 
 ## Odoo business hours
 
@@ -316,10 +318,10 @@ that released version without asking the Client again.
 
 Each reviewed candidate has one issue in the product repository. Its body opens
 with the Client's mention, what to test, the reason for the request and the
-release-page link. Its identity binds the complete checklist digest, including
-both lane versions, source changes and reviewed settings. A later candidate gets a new issue. A renewed request after rejection or a stopped
-release also gets a new issue, even when its checklist is unchanged; the earlier
-attempt stays closed with its history. The publisher closes an undecided predecessor with a link to the
+release-page link. Its identity is the complete checklist digest, including both lane versions,
+source changes and reviewed settings. A later checklist gets a new issue. Re-accepting a stopped release reopens the
+same candidate issue and adds its new decision as a comment. A saved decision
+prevents another request for the unchanged checklist. The publisher closes an undecided predecessor with a link to the
 replacement; it never reopens a shared requests thread or rewrites old invitation
 comments. A decided release keeps its own issue until its run finishes.
 
@@ -336,9 +338,10 @@ promotion gate.
 A candidate publication lock serializes its issue creation and decision comments
 across replicas. Checklist compilation and legacy carryover reads do not hold this
 lock. The saved decision is acknowledged afterward under its own publication lock;
-those transactions never nest on the acceptance path. A lost issue-create, decision-update or storage acknowledgement is
-recovered from the existing issue rather than creating another. New candidate
-issues must be authored by the configured Delivery App. Candidate lookup stops at the page containing its marker or an issue older than
+those transactions never nest on the acceptance path. A lost issue-create,
+decision-comment or storage acknowledgement is recovered from the existing issue rather than creating another. New candidate
+issues must be authored by the configured Delivery App. Candidate lookup stops at
+the page containing its marker or an issue older than
 the saved request, using creation order. A later decision can reuse the preceding
 published decision's exact issue URL. Closed repository history alone cannot block
 publication. Pending-candidate supersession and legacy request discovery scan the
@@ -351,8 +354,10 @@ to notify them.
 
 Legacy shared threads are read only for carryover. A pending request for the exact
 candidate moves into its candidate issue with the original request and a link
-back. The original comment remains unchanged. Carryover adds no second Client
-mention or acceptance requirement and preserves both the original reminder deadline
+back. An adopted receipt resolves back to that original comment and its creation time;
+the receipt itself is never substituted for the request. The original comment
+remains unchanged. Carryover includes the supported release-page link, adds no
+second Client mention or acceptance requirement, and preserves the original reminder deadline
 and an already-sent reminder. Only after the candidate issue exists does the
 shared thread close with a pointer. A legacy request that has a published decision
 can instead point to its existing decision issue, including when the shared thread
@@ -441,8 +446,12 @@ still apply.
 New candidate issue markers bind the checklist and product. Existing issue bodies
 can refresh test-note annotations for that same checklist; their request time
 and reminder deadline stay fixed. Decision markers identify each saved action in the candidate issue's comments
-or a standalone decision's original body. Legacy request and adoption markers are compatibility
-evidence for the carryover path, never acceptance authority.
+or a standalone decision's original body. Legacy request and adoption markers are compatibility evidence for the carryover
+path, never acceptance authority. Historical retirement has its own lock and
+cannot hold up request creation. Complete absent or retired legacy sets are cached
+for that product, repository and Client identity for the worker's lifetime;
+pending or incomplete reads remain retryable. Reminders follow durable receipts
+before broad supersession cleanup, so a cleanup failure never duplicates a sent reminder.
 
 A saved, still-current release request gets at most one reminder per open review
 after three days, as a comment on its candidate issue. Its durable receipt prevents
@@ -575,19 +584,15 @@ no saved start records approval only; requests for changes withdraw approval,
 and admin overrides do not start a release. These statements describe the
 recorded action, not proof that its operations completed. Publication retries
 preserve existing historical issue bodies, including older wording.
-Publishers serialize candidate lookup, issue creation, decision comments and the
-stored URL acknowledgement with a per-decision storage lock. After waiting, a
-publisher reads the saved decision again and reuses its authoritative URL. The
-PostgreSQL holder reads and acknowledges that exact decision using its lock
-transaction's connection, so waiting publishers cannot exhaust the pool it
-needs to finish. The URL commits with that transaction before publication
-returns. Lock waits are bounded to five seconds (or an earlier configured
-statement timeout); storage failures leave the saved decision pending for retry.
+The saved URL commits with its acknowledgement transaction before publication
+returns. Lock waits are bounded to five seconds (or an earlier configured statement
+timeout); storage failures leave the saved decision pending for retry.
 The PostgreSQL transaction lock and local file lock release when their worker exits;
 an interrupted acknowledgement recovers the existing issue by its marker before
 any new creation. Local SQLite publication requires a file-backed database so
 separate processes share the file lock.
-The complete record uses one issue body. If GitHub rejects publication, the
+Each saved checklist is published once, in the issue body for a standalone decision
+or in its decision comment on an existing candidate issue. If GitHub rejects publication, the
 decision remains saved and promotion stays blocked; records are not split into
 comments. Retry recovery finds the earlier issue by the marker on its first
 line, `<!-- launchplane:release-decision:<record id> -->`, so a record written
