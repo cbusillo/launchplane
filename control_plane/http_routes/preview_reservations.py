@@ -161,7 +161,7 @@ def register_preview_reservation_read_routes(
         summary="Read recorded base version from one original-bound immutable preview source",
         responses={
             code: {"model": dependencies.error_response_model}
-            for code in (401, 403, 404, 409, 422, 503)
+            for code in (401, 403, 404, 409, 503)
         },
     )
 
