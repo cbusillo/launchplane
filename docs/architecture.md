@@ -188,9 +188,6 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   resolution, credentials, and trigger/wait execution run here.
 - The tracked Dokploy route catalog resolves from Launchplane DB-backed target
   records plus DB-backed target-id records.
-- The tracked Dokploy route catalog is limited to stable remote lanes
-  (`testing`, `prod`). Pull-request previews flow through Launchplane preview
-  records instead of tracked Dokploy lane entries.
 - Launchplane baseline release tuples belong here as explicit control-plane data.
   Tuple entries carry exact repo SHAs for preview-manifest resolution, not
   floating branch names.
@@ -288,8 +285,10 @@ configuration or record authority.
   truth.
 - Do not add product capability to file-backed JSON, local CLI writers,
   compatibility readers, or transitional GitHub credential/workflow paths.
-  Move required testing, rehearsal, diagnostics, and recovery into retained
-  boundaries, then delete the obsolete code, docs, commands, and tests.
+  Before deleting obsolete code, docs, commands, or tests, migrate required
+  local-development, test, rehearsal, diagnostic, and recovery capabilities into
+  generic test infrastructure, supported read models, admin APIs, or narrow
+  root-of-trust recovery paths.
 - New cross-product integrations should target the Launchplane service boundary
   driven by forge events, not repo-local CLI mutation or product-repo calls into
   Launchplane.
@@ -301,18 +300,12 @@ configuration or record authority.
 
 ## Driver Ownership Status
 
-Product repos keep source, build, and verification, while Launchplane owns the durable service routes, DB-backed records,
-managed-secret/runtime authority, driver execution, and admin read models for
-the current Odoo and VeriReel deployment, promotion, rollback, backup, and
-preview paths.
+Driver ownership follows the [repo boundary](#repo-boundary) and the
+[core-and-driver layers](#launchplane-core-and-drivers). Extend drivers
+incrementally behind the existing service and read-model contracts rather than
+creating a second migration track.
 
-Future driver work should be incremental capability expansion behind the same
-service/read-model contract, not a second migration track.
-
-Compatibility paths are deletion-bound, not a permanent architecture layer.
 Production-capable mutation paths must use typed Launchplane service routes with
-DB-backed authority or explicit admin input. Any required local-development,
-test, rehearsal, diagnostic, or recovery capability must migrate into generic
-test infrastructure, supported read models, admin APIs, or narrow
-root-of-trust recovery paths before the obsolete compatibility implementation is
-deleted.
+DB-backed authority or explicit admin input. The [implementation
+posture](#implementation-posture) owns compatibility migration and deletion
+requirements.
