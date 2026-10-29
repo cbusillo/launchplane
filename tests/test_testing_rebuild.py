@@ -208,7 +208,12 @@ class TestingProvider:
             raise TimeoutError("fixture lost publication reply")
 
     def retire_old(self, plan: TestingRebuildPlan) -> None:
-        if self.serving != plan.new or self.published != plan.new or self.bad_public:
+        if (
+            self.serving != plan.new
+            or self.published != plan.new
+            or self.bad_public
+            and not self.retirement_committed(plan)
+        ):
             raise AssertionError("Retirement requires a healthy authoritative successor.")
         if self.refuse_stop:
             self.stop_refused_before_dispatch = True
@@ -217,6 +222,9 @@ class TestingProvider:
         self.old_running = False
         if self.lose_stop_reply:
             raise TimeoutError("fixture stop reply lost")
+
+    def retirement_committed(self, plan: TestingRebuildPlan) -> bool:
+        return plan == self.plan and "retire" in self.actions
 
     def retirement_exclusion(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
         if not self.stop_excluded:
@@ -610,14 +618,16 @@ class TestingRebuildTests(unittest.TestCase):
         self.assertTrue(self.provider.old_running)
         self.assertNotIn("retire", self.provider.actions)
 
-    def test_unknown_stop_cannot_rollback_even_if_candidate_now_unhealthy(self) -> None:
+    def test_dispatched_stop_finishes_forward_and_records_bad_final_health(self) -> None:
         self.provider.lose_stop_reply = True
         with self.assertRaises(TimeoutError):
             self.run_rebuild()
         self.provider.bad_public = True
-        with self.assertRaises(ValueError):
-            self.run_rebuild()
-        self.assertEqual(self.store.load(self.plan).step, "retiring")
+        self.provider.lose_stop_reply = False
+        result = self.run_rebuild()
+        self.assertEqual(result.step, "complete")
+        self.assertTrue(result.error)
+        self.assertEqual(self.provider.serving, self.plan.new)
         self.assertNotIn("switch:old", self.provider.actions)
         self.assertFalse(self.provider.old_running)
 
