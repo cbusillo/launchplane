@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -19,17 +20,18 @@ from control_plane.contracts.runner_host_hygiene_idle import RunnerHostHygieneId
 from control_plane.workflows.runner_host_hygiene_audit_spool import RunnerHostHygieneAuditSpool
 from control_plane.workflows.runner_host_hygiene_executor import (
     BearerTokenProvider,
-    GitHubIdleEvidenceReader,
+    GitHubIdleSampleReader,
     GitHubRunStateReader,
     RunnerHostHygieneExecutorRequest,
     build_local_command_runner,
     build_refreshing_service_audit_poster,
     execute_runner_host_hygiene_executor,
     validate_local_executor_environment,
-    _github_binding_subject_key,
 )
 
 PostServiceJson = Callable[[str, dict[str, object]], object]
+EXPECTED_ARTIFACTS_FILE = "runner-host-hygiene-expected.txt"
+_LOGGER = logging.getLogger(__name__)
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -80,9 +82,7 @@ def build_service_hygiene_readers(
     request: RunnerHostHygieneExecutorRequest,
     configuration_sha256: str,
     post: PostServiceJson,
-) -> tuple[GitHubIdleEvidenceReader, GitHubRunStateReader]:
-    pending_sample: dict[str, tuple[RunnerHostHygieneIdleObservation, ...]] = {}
-
+) -> tuple[GitHubIdleSampleReader, GitHubRunStateReader]:
     def read_metadata(**selection: object) -> RunnerHostHygieneMetadata:
         payload = RunnerHostHygieneMetadataRequest.model_validate(
             {
@@ -98,38 +98,8 @@ def build_service_hygiene_readers(
             raise ValueError("Hygiene evidence belongs to another configuration.")
         return response
 
-    def idle(
-        repository: str, lane: str, runner: str, exclude: bool
-    ) -> tuple[RunnerHostHygieneIdleObservation, ...]:
-        expected_exclusion = (
-            repository == request.repository_scope.lower()
-            and lane == request.execution_lane.lower()
-        )
-        if exclude != expected_exclusion:
-            raise ValueError("Hygiene self-exclusion must match the dispatched executor.")
-        matches = [
-            binding
-            for binding in request.github_idle_bindings
-            if (binding.repository_scope, binding.execution_lane, binding.runner_name)
-            == (repository, lane, runner)
-        ]
-        if len(matches) != 1:
-            raise ValueError("Hygiene evidence requires an exact dispatched binding.")
-        subject = _github_binding_subject_key(matches[0])
-        if subject not in pending_sample:
-            observations = read_metadata(kind="idle").observations
-            pending_sample.clear()
-            pending_sample.update(
-                {
-                    _github_binding_subject_key(binding): tuple(
-                        observation
-                        for observation in observations
-                        if observation.subject_key == _github_binding_subject_key(binding)
-                    )
-                    for binding in request.github_idle_bindings
-                }
-            )
-        return pending_sample.pop(subject)
+    def idle() -> tuple[RunnerHostHygieneIdleObservation, ...]:
+        return read_metadata(kind="idle").observations
 
     def runs(repository: str, run_ids: tuple[int, ...]) -> Mapping[int, str]:
         roots = [
@@ -174,13 +144,21 @@ def execute_service_hygiene_dispatch(
     for request in dispatch.requests:
         if (
             request.execution_lane != execution_lane
-            or request.repository_scope != repository_scope
+            or request.repository_scope.casefold() != repository_scope.casefold()
             or request.current_runner_name != intent.current_runner_name
         ):
             raise ValueError("Hygiene dispatch does not match the running job.")
         validate_local_executor_environment(request=request)
+    artifacts = tuple(
+        artifact_directory / f"runner-host-hygiene-audit-evidence-{index}.json"
+        for index in range(len(dispatch.requests))
+    )
+    artifact_directory.mkdir(parents=True, exist_ok=True)
+    (artifact_directory / EXPECTED_ARTIFACTS_FILE).write_text(
+        "".join(f"{artifact.name}\n" for artifact in artifacts)
+    )
     results: list[dict[str, object]] = []
-    for index, request in enumerate(dispatch.requests):
+    for request, artifact in zip(dispatch.requests, artifacts, strict=True):
         idle, runs = build_service_hygiene_readers(
             request=request,
             configuration_sha256=dispatch.configuration_sha256,
@@ -196,14 +174,14 @@ def execute_service_hygiene_dispatch(
                 ),
                 audit_spool=RunnerHostHygieneAuditSpool(
                     root=audit_spool_root,
-                    artifact_file=artifact_directory
-                    / f"runner-host-hygiene-audit-evidence-{index}.json",
+                    artifact_file=artifact,
                 ),
-                github_idle_evidence_reader=idle,
+                github_idle_sample_reader=idle,
                 github_run_state_reader=runs,
             )
             results.append({**result.model_dump(mode="json"), "mutate": request.mutate})
-        except (click.ClickException, OSError, ValueError):
+        except Exception as error:
+            _LOGGER.warning("Hygiene executor invocation failed (%s)", type(error).__name__)
             results.append(
                 {
                     "status": "failed",

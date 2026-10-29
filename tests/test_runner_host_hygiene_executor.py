@@ -350,7 +350,8 @@ def execute_runner_host_hygiene_executor(
     **kwargs: Any,
 ) -> Any:
     kwargs.setdefault("audit_delivery_sleeper", lambda _seconds: None)
-    kwargs.setdefault("github_idle_evidence_reader", _github_idle_evidence_reader)
+    if "github_idle_sample_reader" not in kwargs:
+        kwargs.setdefault("github_idle_evidence_reader", _github_idle_evidence_reader)
     if request.mutate and kwargs.get("audit_spool") is None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             kwargs["audit_spool"] = RunnerHostHygieneAuditSpool(
@@ -1343,19 +1344,68 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         )
 
     def test_cache_prune_completes_when_unrelated_workdir_evidence_is_partial(self) -> None:
-        command_runner = _CommandRunner(runner_workdir_status="partial")
+        for whole_sample in (False, True):
+            with self.subTest(whole_sample=whole_sample):
+                command_runner = _CommandRunner(runner_workdir_status="partial")
+                request = _request(mutate=True)
 
-        result = execute_runner_host_hygiene_executor(
-            request=_request(mutate=True),
-            remote_runner=command_runner,
-            audit_poster=_AuditPoster(),
-        )
+                def sample() -> tuple[RunnerHostHygieneIdleObservation, ...]:
+                    return tuple(
+                        observation
+                        for binding in request.github_idle_bindings
+                        for observation in _github_idle_evidence_reader(
+                            binding.repository_scope, binding.execution_lane, binding.runner_name
+                        )
+                    )
 
-        self.assertEqual(result.status, "completed")
-        self.assertIn("post evidence still needs attention", result.message)
-        self.assertTrue(
-            any(command[:5] == _ENGINE_PRUNE_PREFIX for command in command_runner.commands)
-        )
+                options = {"github_idle_sample_reader": sample} if whole_sample else {}
+                result = execute_runner_host_hygiene_executor(
+                    request=request,
+                    remote_runner=command_runner,
+                    audit_poster=_AuditPoster(),
+                    **options,
+                )
+                self.assertEqual(result.status, "completed")
+                self.assertIn("post evidence still needs attention", result.message)
+                self.assertTrue(
+                    any(command[:5] == _ENGINE_PRUNE_PREFIX for command in command_runner.commands)
+                )
+
+    def test_whole_sample_reader_survives_action_started_recovery(self) -> None:
+        request = _request(mutate=True)
+
+        def sample() -> tuple[RunnerHostHygieneIdleObservation, ...]:
+            return tuple(
+                observation
+                for binding in request.github_idle_bindings
+                for observation in _github_idle_evidence_reader(
+                    binding.repository_scope, binding.execution_lane, binding.runner_name
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            spool = RunnerHostHygieneAuditSpool(root=Path(directory) / "spool")
+            with self.assertRaises(RuntimeError):
+                execute_runner_host_hygiene_executor(
+                    request=request,
+                    remote_runner=_CrashingCommandRunner(),
+                    audit_poster=_AuditPoster(),
+                    audit_spool=spool,
+                    github_idle_sample_reader=sample,
+                )
+            poster = _AuditPoster()
+            result = execute_runner_host_hygiene_executor(
+                request=_request(mutate=True, resolve_action_started=True),
+                remote_runner=_CommandRunner(),
+                audit_poster=poster,
+                audit_spool=spool,
+                github_idle_sample_reader=sample,
+            )
+        self.assertTrue(result.reconciled)
+        self.assertEqual(result.status, "failed")
+        report = poster.audits[-1].post_apply_report
+        assert report is not None
+        self.assertEqual(report.idle_convergences[0].status, "idle")
 
     def test_executor_uses_root_owned_workdir_usage_helper(self) -> None:
         command_runner = _CommandRunner(runner_workdir_bytes=12_345)

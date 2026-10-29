@@ -185,6 +185,7 @@ AuditPoster = Callable[[RunnerHostHygieneApplyAuditRecord, str], dict[str, objec
 BearerTokenProvider = Callable[[], str]
 AuditDeliverySleeper = Callable[[float], None]
 GitHubRunStateReader = Callable[[str, tuple[int, ...]], Mapping[int, str]]
+GitHubIdleSampleReader = Callable[[], tuple[RunnerHostHygieneIdleObservation, ...]]
 GitHubIdleEvidenceReader = Callable[
     [str, str, str, bool],
     tuple[RunnerHostHygieneIdleObservation, ...],
@@ -600,6 +601,7 @@ def execute_runner_host_hygiene_executor(
     audit_delivery_sleeper: AuditDeliverySleeper = time.sleep,
     github_run_state_reader: GitHubRunStateReader | None = None,
     github_idle_evidence_reader: GitHubIdleEvidenceReader | None = None,
+    github_idle_sample_reader: GitHubIdleSampleReader | None = None,
 ) -> RunnerHostHygieneExecutorResult:
     if request.mutate and audit_spool is None:
         raise click.ClickException(
@@ -614,6 +616,7 @@ def execute_runner_host_hygiene_executor(
             audit_delivery_sleeper=audit_delivery_sleeper,
             github_run_state_reader=github_run_state_reader,
             github_idle_evidence_reader=github_idle_evidence_reader,
+            github_idle_sample_reader=github_idle_sample_reader,
         )
         if reconciliation_result is not None:
             return reconciliation_result
@@ -623,6 +626,7 @@ def execute_runner_host_hygiene_executor(
         remote_runner=remote_runner,
         github_run_state_reader=github_run_state_reader,
         github_idle_evidence_reader=github_idle_evidence_reader,
+        github_idle_sample_reader=github_idle_sample_reader,
         idle_observation_sleeper=audit_delivery_sleeper,
     )
     if request.mutate:
@@ -783,6 +787,7 @@ def execute_runner_host_hygiene_executor(
         remote_runner=remote_runner,
         github_run_state_reader=github_run_state_reader,
         github_idle_evidence_reader=github_idle_evidence_reader,
+        github_idle_sample_reader=github_idle_sample_reader,
         idle_observation_sleeper=audit_delivery_sleeper,
     )
     if pre_action_report is None:
@@ -892,6 +897,7 @@ def execute_runner_host_hygiene_executor(
         remote_runner=remote_runner,
         github_run_state_reader=github_run_state_reader,
         github_idle_evidence_reader=github_idle_evidence_reader,
+        github_idle_sample_reader=github_idle_sample_reader,
         idle_observation_sleeper=audit_delivery_sleeper,
     )
     if post_report is None:
@@ -950,6 +956,7 @@ def _reconcile_audit_spool(
     audit_delivery_sleeper: AuditDeliverySleeper,
     github_run_state_reader: GitHubRunStateReader | None,
     github_idle_evidence_reader: GitHubIdleEvidenceReader | None,
+    github_idle_sample_reader: GitHubIdleSampleReader | None = None,
 ) -> RunnerHostHygieneExecutorResult | None:
     for original_envelope in audit_spool.list_for(
         host_name=request.host_name,
@@ -1033,6 +1040,7 @@ def _reconcile_audit_spool(
                 remote_runner=remote_runner,
                 github_run_state_reader=github_run_state_reader,
                 github_idle_evidence_reader=github_idle_evidence_reader,
+                github_idle_sample_reader=github_idle_sample_reader,
                 idle_observation_sleeper=audit_delivery_sleeper,
             )
             if post_report is None:
@@ -1339,6 +1347,7 @@ def collect_runner_host_hygiene_report(
     remote_runner: RemoteCommandRunner,
     github_run_state_reader: GitHubRunStateReader | None = None,
     github_idle_evidence_reader: GitHubIdleEvidenceReader | None = None,
+    github_idle_sample_reader: GitHubIdleSampleReader | None = None,
     idle_observation_sleeper: AuditDeliverySleeper = time.sleep,
 ) -> RunnerHostHygieneReport:
     df_result = _require_remote_success(
@@ -1401,6 +1410,7 @@ def collect_runner_host_hygiene_report(
             request=request,
             remote_runner=remote_runner,
             github_idle_evidence_reader=github_idle_evidence_reader,
+            github_idle_sample_reader=github_idle_sample_reader,
             sleeper=idle_observation_sleeper,
         )
         if request.action != "prune_generated_run_cache"
@@ -1730,6 +1740,7 @@ def _collect_full_host_idle_convergence(
     request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
     github_idle_evidence_reader: GitHubIdleEvidenceReader | None,
+    github_idle_sample_reader: GitHubIdleSampleReader | None = None,
     sleeper: AuditDeliverySleeper,
 ) -> RunnerHostHygieneIdleConvergence:
     process_results: list[RemoteCommandResult] = []
@@ -1749,6 +1760,7 @@ def _collect_full_host_idle_convergence(
             _read_github_idle_sample(
                 request=request,
                 github_idle_evidence_reader=github_idle_evidence_reader,
+                github_idle_sample_reader=github_idle_sample_reader,
             )
         )
         if sample_index + 1 < request.idle_observation_count:
@@ -1802,7 +1814,10 @@ def _read_github_idle_sample(
     *,
     request: RunnerHostHygieneExecutorRequest,
     github_idle_evidence_reader: GitHubIdleEvidenceReader | None,
+    github_idle_sample_reader: GitHubIdleSampleReader | None = None,
 ) -> tuple[RunnerHostHygieneIdleObservation, ...]:
+    if github_idle_evidence_reader is not None and github_idle_sample_reader is not None:
+        raise ValueError("Choose a binding reader or a whole-host sample reader, not both.")
     observed_at = utc_now_timestamp()
     if not request.github_idle_bindings:
         subject_key = _public_identity_key("host-bindings", "missing")
@@ -1817,6 +1832,20 @@ def _read_github_idle_sample(
             )
             for source in ("github_jobs", "github_runners")
         )
+    sample: tuple[RunnerHostHygieneIdleObservation, ...] = ()
+    sample_reason = "source_missing"
+    if github_idle_sample_reader is not None:
+        try:
+            sample = github_idle_sample_reader()
+            subjects = {
+                _github_binding_subject_key(binding) for binding in request.github_idle_bindings
+            }
+            if any(item.subject_key not in subjects for item in sample):
+                sample = ()
+                sample_reason = "source_contradictory"
+        except (OSError, ValueError):
+            sample = ()
+            sample_reason = "source_unavailable"
     observations: list[RunnerHostHygieneIdleObservation] = []
     for binding in request.github_idle_bindings:
         subject_key = _github_binding_subject_key(binding)
@@ -1824,8 +1853,11 @@ def _read_github_idle_sample(
             binding.repository_scope == request.repository_scope.lower()
             and binding.execution_lane == request.execution_lane.lower()
         )
-        if github_idle_evidence_reader is None:
-            returned: tuple[RunnerHostHygieneIdleObservation, ...] = ()
+        if github_idle_sample_reader is not None:
+            returned = tuple(item for item in sample if item.subject_key == subject_key)
+            unavailable_reason = sample_reason
+        elif github_idle_evidence_reader is None:
+            returned = ()
             unavailable_reason = "source_unavailable"
         else:
             try:
@@ -2255,7 +2287,7 @@ def validate_local_executor_environment(
         raise click.ClickException(
             "Generated run cache mutation requires GITHUB_REPOSITORY scope evidence."
         )
-    if github_repository and github_repository != request.repository_scope:
+    if github_repository and github_repository.casefold() != request.repository_scope.casefold():
         raise click.ClickException(
             "Runner host hygiene repository scope must match GITHUB_REPOSITORY."
         )
@@ -4289,6 +4321,7 @@ def _collect_terminal_report(
     remote_runner: RemoteCommandRunner,
     github_run_state_reader: GitHubRunStateReader | None,
     github_idle_evidence_reader: GitHubIdleEvidenceReader | None,
+    github_idle_sample_reader: GitHubIdleSampleReader | None = None,
     idle_observation_sleeper: AuditDeliverySleeper,
 ) -> RunnerHostHygieneReport | None:
     try:
@@ -4297,6 +4330,7 @@ def _collect_terminal_report(
             remote_runner=remote_runner,
             github_run_state_reader=github_run_state_reader,
             github_idle_evidence_reader=github_idle_evidence_reader,
+            github_idle_sample_reader=github_idle_sample_reader,
             idle_observation_sleeper=idle_observation_sleeper,
         )
     except click.ClickException:

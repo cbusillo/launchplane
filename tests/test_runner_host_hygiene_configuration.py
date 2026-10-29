@@ -46,6 +46,9 @@ from control_plane.workflows import runner_host_hygiene_service_executor as clie
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorResult
 from control_plane.workflows.runner_host_hygiene_executor import _github_binding_subject_key
+from control_plane.workflows.runner_host_hygiene_executor import _read_github_idle_sample
+from control_plane.workflows.runner_host_hygiene_executor import validate_local_executor_environment
+import click
 from control_plane.contracts.runner_host_hygiene_idle import RunnerHostHygieneIdleObservation
 from tests.support.http import request as http_request
 from tests.support.stores import sqlite_database_url
@@ -222,6 +225,33 @@ class HygieneConfigurationTests(HygieneConfigurationFixture):
             terminal_response={"accepted": True, "maintenance_completed": True},
             message="done",
         )
+        first = dispatch.requests[0]
+        validate_local_executor_environment(
+            request=first,
+            env={"GITHUB_REPOSITORY": first.repository_scope.swapcase()},
+            current_user=first.service_user,
+            current_host=first.host_name,
+        )
+        with self.assertRaises(click.ClickException):
+            validate_local_executor_environment(
+                request=first,
+                env={"GITHUB_REPOSITORY": "unconfigured/repository"},
+                current_user=first.service_user,
+                current_host=first.host_name,
+            )
+        invocation_count = 0
+
+        def execute_action(**_options: object) -> RunnerHostHygieneExecutorResult:
+            nonlocal invocation_count
+            manifest_entries = (
+                (Path(directory) / client.EXPECTED_ARTIFACTS_FILE).read_text().splitlines()
+            )
+            self.assertEqual(len(manifest_entries), len(dispatch.requests))
+            invocation_count += 1
+            if invocation_count == 1:
+                raise RuntimeError("synthetic invocation failure")
+            return accepted
+
         with (
             TemporaryDirectory() as directory,
             patch(
@@ -229,19 +259,28 @@ class HygieneConfigurationTests(HygieneConfigurationFixture):
             ),
             patch(
                 "control_plane.workflows.runner_host_hygiene_service_executor.execute_runner_host_hygiene_executor",
-                side_effect=[ValueError("blocked"), accepted, accepted, accepted],
+                side_effect=execute_action,
             ) as execute,
+            patch(
+                "control_plane.workflows.runner_host_hygiene_service_executor.RunnerHostHygieneAuditSpool"
+            ) as spool,
+            self.assertLogs(client.__name__, level="WARNING"),
         ):
             results = client.execute_service_hygiene_dispatch(
                 intent=intent,
                 post=lambda path, payload: dispatch.model_dump(mode="json"),
                 execution_lane=self.configuration.execution_lane,
-                repository_scope=self.configuration.repository_scope,
+                repository_scope=self.configuration.repository_scope.swapcase(),
                 service_url="https://service.invalid",
                 bearer_token_provider=lambda: "synthetic",
                 audit_spool_root=Path(directory),
                 artifact_directory=Path(directory),
             )
+            expected = (Path(directory) / client.EXPECTED_ARTIFACTS_FILE).read_text().splitlines()
+            self.assertEqual(
+                expected, [call.kwargs["artifact_file"].name for call in spool.call_args_list]
+            )
+            self.assertFalse((Path(directory) / expected[0]).exists())
         self.assertEqual(execute.call_count, len(dispatch.requests))
         self.assertEqual(results[0]["status"], "failed")
         self.assertEqual(results[-1]["terminal_response"], accepted.terminal_response)
@@ -367,24 +406,61 @@ class HygieneConfigurationTests(HygieneConfigurationFixture):
             request=request, configuration_sha256=digest, post=post
         )
         for sample_number in (1, 2):
-            for binding in request.github_idle_bindings:
-                observations = idle(
-                    binding.repository_scope,
-                    binding.execution_lane,
-                    binding.runner_name,
-                    binding.repository_scope == request.repository_scope
-                    and binding.execution_lane == request.execution_lane,
-                )
-                self.assertEqual(
-                    {item.subject_key for item in observations},
-                    {_github_binding_subject_key(binding)},
-                )
+            observations = _read_github_idle_sample(
+                request=request, github_idle_evidence_reader=None, github_idle_sample_reader=idle
+            )
+            self.assertEqual(
+                {item.subject_key for item in observations},
+                {_github_binding_subject_key(binding) for binding in request.github_idle_bindings},
+            )
             self.assertEqual(len(calls), sample_number)
         self.assertEqual(runs("example/other", (21, 22)), {21: "completed", 22: "completed"})
         with self.assertRaises(ValueError):
             runs("unconfigured/repo", (21,))
         with self.assertRaises(ValueError):
-            idle("example/control", "ops", "ops-runner", False)
+            _read_github_idle_sample(
+                request=request,
+                github_idle_evidence_reader=lambda *_args: (),
+                github_idle_sample_reader=idle,
+            )
+
+    def test_failed_whole_sample_is_read_once_and_marks_every_binding_unavailable(self) -> None:
+        (request,) = self.dispatch()
+        for failure in (OSError, ValueError):
+            with self.subTest(failure=failure):
+                calls: list[dict[str, object]] = []
+
+                def post(_path: str, payload: dict[str, object]) -> object:
+                    calls.append(payload)
+                    raise failure("synthetic metadata failure")
+
+                sample, _ = client.build_service_hygiene_readers(
+                    request=request, configuration_sha256="a" * 64, post=post
+                )
+                for sample_count in (1, 2):
+                    observations = _read_github_idle_sample(
+                        request=request,
+                        github_idle_evidence_reader=None,
+                        github_idle_sample_reader=sample,
+                    )
+                    self.assertEqual(len(calls), sample_count)
+                    self.assertEqual(len(observations), len(idle_sample(self.configuration)))
+                    self.assertTrue(
+                        all(
+                            item.reason_code == "source_unavailable" and item.state == "unknown"
+                            for item in observations
+                        )
+                    )
+        rows = (
+            *idle_sample(self.configuration),
+            idle_sample(self.configuration)[0].model_copy(update={"subject_key": "unexpected"}),
+        )
+        contradictory = _read_github_idle_sample(
+            request=request,
+            github_idle_evidence_reader=None,
+            github_idle_sample_reader=lambda: rows,
+        )
+        self.assertTrue(all(item.reason_code == "source_contradictory" for item in contradictory))
 
 
 class HygieneMetadataTests(HygieneConfigurationFixture):

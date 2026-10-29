@@ -77,8 +77,10 @@ set. Every issued token is limited to Actions/Administration/Metadata read;
 extra existing installation permissions require no grant change. Short-lived
 read tokens stay in the service and are revoked after each metadata request,
 including failed scope checks. One idle request reads the complete host sample
-with one token; the consumer consumes that sample once across all bindings,
-then obtains a fresh sample for the next observation. It retains no token cache.
+with one token. The executor accepts that whole sample at its observation
+boundary and applies its existing per-binding provenance checks, including on
+unavailable samples. Legacy local binding readers remain supported. The new
+consumer retains no sample or token cache.
 Only bounded typed idle samples or generated-cache run states leave it. Each
 sample rechecks the configuration digest; local process, open-handle and
 service-unit evidence remain separate executor observations.
@@ -101,6 +103,20 @@ per-action artifact files to assess report and maintenance qualification,
 including report-only and manual dry runs. No helper performs live import or
 settings deletion. Until qualified activation, rollback is the retained
 workflow with its existing settings; do not run both schedulers together.
+
+Use the job's temporary directory for `--artifact-directory`. Before attempting
+any action, the consumer writes `runner-host-hygiene-expected.txt` with every
+expected artifact basename. Pass every listed file to qualification, including
+missing files; a glob can silently omit a failed action. With
+`--artifact-directory "$RUNNER_TEMP"`, the existing qualification command is:
+
+```bash
+audit_args=()
+while IFS= read -r artifact; do
+  audit_args+=(--audit-file "$RUNNER_TEMP/$artifact")
+done < "$RUNNER_TEMP/runner-host-hygiene-expected.txt"
+uv run launchplane runner-host-hygiene-qualify "${audit_args[@]}" --require-qualified
+```
 
 ## Report Contract
 
