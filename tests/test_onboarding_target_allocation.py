@@ -703,6 +703,7 @@ class OnboardingTargetAllocationTests(_OnboardingTargetAllocationFixture):
             mode="apply",
             reviewed_plan_sha256=planned.json()["result"]["plan_sha256"],
             resolved_target_id=identity.target_id,
+            allocation_id=allocation_plan["allocation_id"],
         )
         mismatched = await records(resolved_target_id="unallocated-application")
         self.assertEqual(mismatched.status_code, 400, mismatched.text)
