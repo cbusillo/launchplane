@@ -66,6 +66,8 @@ with store.release_review_publication_lock(record_id="interrupted-publication"):
 class FakeReleaseIssues:
     """Issue API with a controllable first lookup and a lost POST response."""
 
+    app_id = 77
+
     def __init__(self) -> None:
         self.issues: list[dict[str, object]] = []
         self.comments: list[dict[str, object]] = []
@@ -110,7 +112,7 @@ class FakeReleaseIssues:
                 comment = {
                     "id": len(self.comments) + 1,
                     "body": body["body"],
-                    "performed_via_github_app": {"id": 77},
+                    "performed_via_github_app": {"id": self.app_id},
                 }
                 self.comments.append(comment)
                 if self.lose_response:
@@ -121,7 +123,7 @@ class FakeReleaseIssues:
                 "number": 99 + len(self.issues),
                 "state": "open",
                 "body": body["body"],
-                "performed_via_github_app": {"id": 77},
+                "performed_via_github_app": {"id": self.app_id},
             }
             self.issues.append(issue)
         if self.lose_response:
@@ -156,7 +158,8 @@ def concurrent_publication(
             return_value="test-token",
         ),
         patch(
-            "control_plane.release_review_record.resolve_delivery_github_app_id", return_value=77
+            "control_plane.release_review_record.resolve_delivery_github_app_id",
+            return_value=FakeReleaseIssues.app_id,
         ),
         patch.object(stores[1], "release_review_publication_lock", contender_lock),
         ThreadPoolExecutor(max_workers=2) as workers,
@@ -205,7 +208,7 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         self.enterContext(
             patch(
                 "control_plane.release_review_record.resolve_delivery_github_app_id",
-                return_value=77,
+                return_value=FakeReleaseIssues.app_id,
             )
         )
         token = patch(

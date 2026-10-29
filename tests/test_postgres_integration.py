@@ -6983,7 +6983,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         from tests.test_release_review import decision, profile, seed
         from tests.test_release_review_record import FakeReleaseIssues
 
-        for phase in ("read", "acknowledgement"):
+        for phase in ("lookup", "create"):
             with self.subTest(phase=phase), _head_postgres_database() as url:
                 engine = create_engine(url, pool_size=3, max_overflow=0, pool_timeout=0.2)
                 with patch("control_plane.storage.postgres._build_engine", return_value=engine):
@@ -6997,15 +6997,11 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     holder_ready, resume_holder = threading.Event(), threading.Event()
                     original_read = store.read_release_review_decision_record
 
-                    def read(**kwargs: Any) -> ReleaseReviewDecisionRecord:
-                        if phase == "read" and not holder_ready.is_set():
-                            holder_ready.set()
-                            if not resume_holder.wait(10):
-                                raise AssertionError("Lock holder was not resumed")
-                        return original_read(**kwargs)
-
                     def request(**kwargs: Any) -> object:
-                        if kwargs.get("method", "GET") == "GET" and phase == "acknowledgement":
+                        if (
+                            kwargs.get("method", "GET") == ("GET" if phase == "lookup" else "POST")
+                            and not holder_ready.is_set()
+                        ):
                             holder_ready.set()
                             if not resume_holder.wait(10):
                                 raise AssertionError("Lock holder was not resumed")
@@ -7020,9 +7016,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         )
 
                     with (
-                        patch.object(
-                            store, "read_release_review_decision_record", side_effect=read
-                        ),
                         patch(
                             "control_plane.release_review_record.github_api_request",
                             side_effect=request,
@@ -7030,6 +7023,10 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         patch(
                             "control_plane.release_review_record.resolve_launchplane_github_token",
                             return_value="test-token",
+                        ),
+                        patch(
+                            "control_plane.release_review_record.resolve_delivery_github_app_id",
+                            return_value=github.app_id,
                         ),
                         ThreadPoolExecutor(max_workers=3) as workers,
                     ):
@@ -7108,6 +7105,10 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                                 patch(
                                     "control_plane.release_review_record.resolve_launchplane_github_token",
                                     return_value="test-token",
+                                ),
+                                patch(
+                                    "control_plane.release_review_record.resolve_delivery_github_app_id",
+                                    return_value=github.app_id,
                                 ),
                             ):
                                 with self.assertRaises(ValueError):
@@ -16469,6 +16470,10 @@ class RealPostgresReleaseReviewHttpTests(release_review_http_tests._ReleaseRevie
             patch(
                 "control_plane.release_review_record.resolve_launchplane_github_token",
                 return_value="test-token",
+            ),
+            patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=github.app_id,
             ),
             patch(
                 "control_plane.http_app.publish_release_decision",
