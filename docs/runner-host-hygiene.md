@@ -23,6 +23,101 @@ The current Launchplane surface implements report-only evidence, local
 apply-boundary planning, durable audit evidence, and a constrained self-hosted
 ops executor for the approved first lane.
 
+## Record-backed adapter qualification
+
+The service has a source integration for the existing executor. This does not
+activate a live migration or retire the Actions workflow below. Keep its
+settings and credentials until supported service-only key adoption, binding
+readback, isolated behavior qualification and rollback proof are complete.
+
+The existing service runtime-setting review/apply path accepts
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_CONFIGURATION` in the exact `launchplane`
+context's `RuntimeEnvironmentRecord`. Its JSON value is validated by
+`RunnerHostHygieneConfiguration` and the existing executor contract. It has no
+file, process-environment or inherited-record fallback. The projection maps the
+existing settings as follows:
+
+| Existing hygiene setting suffix | Configuration field |
+| --- | --- |
+| `HOST` | `host_name` |
+| `EXECUTION_LANE` | `execution_lane` |
+| `SERVICE_USER` | `service_user` |
+| `RETAINED_WARM_BUILDERS` | `retained_warm_builders` |
+| `RUNNER_WORKDIR_ROOTS` | `runner_workdir_roots` |
+| `GENERATED_RUN_CACHE_ROOTS` | `generated_run_cache_roots` |
+| `GITHUB_IDLE_BINDINGS` | `github_idle_bindings` |
+| `BUILDKIT_CACHE_BUDGETS` | `buildkit_cache_budgets` |
+| `DEFAULT_CACHE_BUDGET_BYTES` | `default_cache_budget_bytes` |
+| `GITHUB_APP_CLIENT_ID` | `github_app_client_id` |
+
+The suffixes above share `LAUNCHPLANE_RUNNER_HOST_HYGIENE_`. The record also
+names the existing scheduling `repository_scope` and the existing, separately
+approved `allowed_buildkit_state_volumes`. Arrays use the executor's structured
+root and binding fields rather than comma-separated workflow strings. Store
+the complete host manifest; local service-unit discovery still rejects extra
+or omitted services. Named budgets still select the Sunday builder actions.
+Changing the budget list is therefore a scope change, not routine tuning.
+
+`POST /v1/service/runner-host-hygiene/dispatch` returns the normalized configuration
+digest, execution lane and validated executor requests. It accepts `report`,
+`maintenance` and `manual` intent. Scheduled intent accepts no manual overrides;
+scheduled audit keys use the service's UTC date, host and authenticated run ID.
+Manual intent selects existing targets without replacing stored roots,
+retained builders, budgets or allowlists. Both this route and
+`POST /v1/service/runner-host-hygiene/metadata` require the existing authorized
+hygiene workflow's `runner_host_hygiene_audit.write` identity, its signed run ID
+and the stored scheduling repository. These reads grant no cleanup authority.
+
+The metadata adapter uses the existing App through one exact, configured
+`launchplane_service` context SecretRecord/SecretBinding under
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY`. Global, instance and
+ambiguous key bindings fail closed. It verifies the App client ID, installation
+account, existing installation grants and complete runtime-derived repository
+set. Every issued token is limited to Actions/Administration/Metadata read;
+extra existing installation permissions require no grant change. Short-lived
+read tokens stay in the service and are revoked after each metadata request,
+including failed scope checks. One idle request reads the complete host sample
+with one token. The executor accepts that whole sample at its observation
+boundary and applies its existing per-binding provenance checks, including on
+unavailable samples. Legacy local binding readers remain supported. The new
+consumer retains no sample or token cache.
+Only bounded typed idle samples or generated-cache run states leave it. Each
+sample rechecks the configuration digest; local process, open-handle and
+service-unit evidence remain separate executor observations.
+
+The consumer entrypoint is
+`uv run python -m control_plane.workflows.runner_host_hygiene_service_executor`.
+It takes `--intent-file`, `--service-url`, `--execution-lane`,
+`--audit-spool-root` and `--artifact-directory`; intent is the dispatch request
+JSON, including the current runner name and a manual audit key when applicable.
+It authenticates with the existing workflow OIDC path and verifies the local host/user and scheduling
+repository before running any action. A minimal scheduler must still select
+the explicit execution lane **before** starting the job. Retain that bootstrap
+until a service scheduler selects it; a job-step lookup cannot set `runs-on`.
+
+The consumer attempts every dispatched action and preserves the existing durable
+audit envelopes and accepted terminal fields. Like the existing executor CLI,
+it fails for invocation exceptions, pending audit delivery or a mutation that
+does not complete. Run the existing `runner-host-hygiene-qualify` command on the
+per-action artifact files to assess report and maintenance qualification,
+including report-only and manual dry runs. No helper performs live import or
+settings deletion. Until qualified activation, rollback is the retained
+workflow with its existing settings; do not run both schedulers together.
+
+Use the job's temporary directory for `--artifact-directory`. Before attempting
+any action, the consumer writes `runner-host-hygiene-expected.txt` with every
+expected artifact basename. Pass every listed file to qualification, including
+missing files; a glob can silently omit a failed action. With
+`--artifact-directory "$RUNNER_TEMP"`, the existing qualification command is:
+
+```bash
+audit_args=()
+while IFS= read -r artifact; do
+  audit_args+=(--audit-file "$RUNNER_TEMP/$artifact")
+done < "$RUNNER_TEMP/runner-host-hygiene-expected.txt"
+uv run launchplane runner-host-hygiene-qualify "${audit_args[@]}" --require-qualified
+```
+
 ## Report Contract
 
 The typed contract in `control_plane.contracts.runner_host_hygiene` separates
