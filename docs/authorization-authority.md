@@ -893,12 +893,6 @@ Production policy changes are a Director decision made through the supported
 DB-native administration route; total-lockout recovery remains explicitly
 deferred.
 
-The ordinary-agent delegated-delivery pilot is retired (see
-[DIRECTION.md](../DIRECTION.md#retired)); issue
-[#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes its code.
-Do not stage or install its `operator.ordinary-agent-delivery-administration`
-managed set.
-
 After parity and administration gates pass, protected desired-set secrets and
 routine authorization workflows must be retired. GitHub may remain an identity
 provider and transport for already-authorized workloads. No total-lockout
@@ -1037,45 +1031,15 @@ schema-v3 seed and unbound replacement stay fenced. Historical
 `runtime_capability_at_setup` and `policy_v3_write_supported` values on stored
 records are history only, not authority.
 
-### Preparing Agent Delivery Administration
+### Retained Agent Delivery Administration Records
 
-The Access policy workbench can prepare the closed
-`ordinary-agent-delivery-administration` candidate with an add or remove intent.
-Preparation derives the immutable GitHub ID from the signed-in browser session
-and the schema from the single active policy record. It requires existing
-managed `authz_policy_operation.propose` authority and strict immutable-ID
-administrator authority; it cannot repair missing policy-administration access.
-The browser supplies no principal, policy fragment, managed IDs, scope, actions,
-quorum change, or routine reason.
-
-The candidate owns a separate managed set for one pilot administrator. Its rule
-contains exactly the five explicit Agent delivery activation lifecycle actions,
-the authenticated immutable ID, the admin role, and global Launchplane scope.
-An occupied set with a different identity or shape refuses preparation. Adding
-access also refuses conflicting explicit activation authority; overlapping
-authority does not prevent removing this isolated set. Legacy empty-action rules remain
-unchanged and do not count as explicit activation authority. The foundational
-policy-operation set and all unrelated policy content remain untouched.
-
-Both intents create ordinary `managed-authz-policy-set` plans through the
-existing planner. Preparation may persist a planned operation and event; it
-does not write policy, approve a plan, change schema or quorum, enroll an agent,
-start a worker, or call a provider. Existing approval, current-policy checks,
-worker execution, CAS, and read-back still govern any policy change. Already
-satisfied intents create no new plan. Removal proposes an empty desired fragment
-for only this set and refuses while an unstopped current activation could lose
-its stop controls. Revoking an operation approval before worker claim and
-removing an already-installed administration rule are different operations.
-If an activation starts after removal was prepared, the policy write refuses
-under the shared authorization lock. Stop that activation before preparing a
-fresh removal; re-planning alone does not clear this condition.
-
-The five lifecycle actions are prepared together because an approved activation
-setup still writes only a qualification-only intent. They do not authorize the
-separate ordinary-agent policy, provider, or worker changes. The pilot is
-retired, so do not install this set; only its removal remains supported. This
-composer is a constrained input path for an existing
-admin, not a replacement bootstrap or total-lockout recovery.
+The retired `ordinary-agent-delivery-administration` candidate and its replay
+are no longer accepted by authorization-candidate preparation. Stored records
+remain readable, and administration-rule removal stays guarded by activation
+history. Do not stage or install the retired
+`operator.ordinary-agent-delivery-administration` managed set; remove existing
+rules through a managed-policy-set plan or managed-rule-set reconcile. Schema-3
+parsing and retained request validation remain supported.
 
 ### Preparing Administrator Product Evidence Access
 
