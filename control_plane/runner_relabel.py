@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.runner_lane_registration import (
     RunnerLaneRegistrationAuditRecord,
     RunnerLaneRegistrationPolicy,
@@ -90,6 +91,31 @@ def actor_identity(identity: LaunchplaneIdentity) -> dict[str, object]:
 
 def actor_scope(actor: dict[str, object]) -> str:
     return "runner-relabel:" + canonical_json_sha256(actor)
+
+
+def bound_operation(
+    store: PostgresRecordStore, review: dict[str, Any]
+) -> LaunchplaneIdempotencyRecord | None:
+    claim = store.read_runner_relabel_document("review-operation", review["review_id"])
+    if (
+        claim is None
+        or claim["actor"] != review["actor"]
+        or claim["review_sha256"] != review["review_sha256"]
+    ):
+        return None
+    original = store.read_idempotency_record(
+        scope=actor_scope(review["actor"]),
+        route_path=ROUTE.format(policy_id=review["policy_id"]),
+        idempotency_key=claim["key"],
+    )
+    intent = {"review": review, "actor": review["actor"], "operation_key": claim["key"]}
+    if (
+        original is None
+        or original.request_fingerprint != canonical_json_sha256(intent)
+        or store.read_original_mutation_intent(original) != intent
+    ):
+        return None
+    return original
 
 
 def load_policy(store: PostgresRecordStore, policy_id: str) -> dict[str, Any]:
@@ -206,9 +232,14 @@ def _create_review(
             or list(body.desired_custom_labels) != original["before_custom_labels"]
         ):
             raise ValueError("Inverse labels must match the original before snapshot.")
-        claim = store.read_runner_relabel_document("review-operation", body.inverse_of_review_id)
-        if claim is None:
-            raise ValueError("Inverse requires an original operation.")
+        operation = bound_operation(store, original)
+        if (
+            operation is None
+            or operation.state != "completed"
+            or operation.response_status_code is None
+            or not 200 <= operation.response_status_code < 300
+        ):
+            raise ValueError("Inverse requires a successful exact original operation.")
     review: dict[str, Any] = {
         "review_id": uuid4().hex,
         "policy_id": policy_id,
@@ -325,16 +356,17 @@ class RunnerRelabelAdapter:
                 "present", response_status_code=409, response_payload=self.refusal()
             )
         terminal = self.store.read_runner_relabel_document("terminal", provider_operation_key)
-        if self.evidence_only:
+        if self.evidence_only or (terminal is not None and terminal["status"] == "rejected"):
             if (
                 terminal is not None
-                and terminal.get("status") == "completed"
+                and terminal.get("status") in ("completed", "rejected")
                 and terminal.get("review_sha256") == self.review["review_sha256"]
             ):
                 return ProviderObservation(
                     "present",
+                    response_status_code=409 if terminal["status"] == "rejected" else 202,
                     response_payload=self.response(
-                        {"status": "completed", "evidence_recovered": True}
+                        {**terminal["result"], "evidence_recovered": True}
                     ),
                 )
             return ProviderObservation("unknown")
@@ -391,8 +423,16 @@ class RunnerRelabelAdapter:
         store = self.store
         review = self.review
         dispatched = False
+        rejected = False
 
         def post(audit: RunnerLaneRegistrationAuditRecord, key: str) -> dict[str, object]:
+            if audit.status != "planned" and (not dispatched or rejected):
+                audit = audit.model_copy(
+                    update={
+                        "status": "failed",
+                        "message": "provider_rejected" if rejected else "refused_before_dispatch",
+                    }
+                )
             store.write_runner_relabel_document(
                 "planned" if audit.status == "planned" else "terminal-audit",
                 provider_operation_key,
@@ -411,7 +451,7 @@ class RunnerRelabelAdapter:
                     def request(
                         self, *, method: str, path: str, body: dict[str, object] | None = None
                     ) -> object:
-                        nonlocal dispatched
+                        nonlocal dispatched, rejected
                         if method != "PUT":
                             result = transport.request(method=method, path=path, body=body)
                             if path.endswith("/labels") and _labels(result).automatic != tuple(
@@ -440,7 +480,11 @@ class RunnerRelabelAdapter:
                                 raise ValueError("Reviewed runner policy changed.")
                             store.require_current_provider_execution(session, captured)
                             dispatched = True
-                            return transport.request(method=method, path=path, body=body)
+                            try:
+                                return transport.request(method=method, path=path, body=body)
+                            except MergeTrainGitHubError as error:
+                                rejected = error.status_code == 422
+                                raise
 
                 self_authorize = self.authorize_effect
                 guarded = FencedTransport()
@@ -467,6 +511,21 @@ class RunnerRelabelAdapter:
                         reservation=evidence_lease.evidence_reservation(),
                     )
                     return ProviderMutationOutcome(202, self.response(result))
+                if rejected:
+                    result = {"status": "provider_rejected", "write_attempted": True}
+                    store.write_runner_relabel_document(
+                        "terminal",
+                        provider_operation_key,
+                        {
+                            "status": "rejected",
+                            "review_sha256": review["review_sha256"],
+                            "result": result,
+                        },
+                        reservation=evidence_lease.evidence_reservation(),
+                    )
+                    return ProviderMutationOutcome(
+                        409, self.response(result), provider_effect_performed=False
+                    )
                 if dispatched:
                     raise ProviderMutationUnknownError(
                         "Runner outcome requires original-key observation."

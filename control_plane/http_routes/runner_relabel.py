@@ -32,6 +32,7 @@ from control_plane.runner_relabel import (
     RunnerRelabelInactive,
     actor_identity,
     actor_scope,
+    bound_operation,
     create_review,
     load_policy,
 )
@@ -207,7 +208,6 @@ def register_runner_relabel_routes(
         try:
             record_store = database(store)
             policy_for_caller(record_store, identity, policy_id, "runner_relabel.plan")
-            load_policy(record_store, policy_id)
             result = await run_in_worker_thread(
                 lambda: create_review(record_store, policy_id, body, actor_identity(identity))
             )
@@ -246,9 +246,7 @@ def register_runner_relabel_routes(
             caller = actor_identity(identity)
             actor = saved["actor"]
             if (
-                saved is None
-                or (body.mode == "apply" and actor != caller)
-                or saved["policy_id"] != policy_id
+                (body.mode == "apply" and actor != caller)
                 or saved["review_sha256"] != body.expected_review_sha256
                 or saved["review_sha256"]
                 != canonical_json_sha256({k: v for k, v in saved.items() if k != "review_sha256"})
@@ -286,15 +284,8 @@ def register_runner_relabel_routes(
                 {"review": saved, "actor": actor, "operation_key": key}
             ).model_dump(mode="json")
             if body.mode != "apply":
-                original = record_store.read_idempotency_record(
-                    scope=actor_scope(actor),
-                    route_path=route,
-                    idempotency_key=key,
-                )
-                if (
-                    original is None
-                    or record_store.read_original_mutation_intent(original) != intent
-                ):
+                original = bound_operation(record_store, saved)
+                if original is None or original.idempotency_key != key:
                     raise ValueError("Original runner operation is unavailable.")
 
             def operation(active_store: PostgresRecordStore) -> DurableProviderOperationResult:
@@ -341,16 +332,7 @@ def register_runner_relabel_routes(
             saved = review_for_caller(
                 active_store, identity, policy_id, review_id, "runner_relabel.read"
             )
-            claim = active_store.read_runner_relabel_document("review-operation", review_id)
-            operation = (
-                None
-                if claim is None
-                else active_store.read_idempotency_record(
-                    scope=actor_scope(saved["actor"]),
-                    route_path=ROUTE.format(policy_id=policy_id),
-                    idempotency_key=claim["key"],
-                )
-            )
+            operation = bound_operation(active_store, saved)
             return accepted_evidence_response(
                 trace_id=trace,
                 records={},

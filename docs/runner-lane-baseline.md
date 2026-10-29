@@ -282,7 +282,9 @@ Use these service routes in order:
    admin. The operation retains immutable original intent and planned evidence,
    fences the repository ID/runner ID across actors and keys, rechecks policy
    and lease immediately before dispatch, attempts at most one PUT, then reads
-   back independently. One review is bound permanently to one operation key.
+   back independently. One review is bound permanently to one operation key. A key conflict needs
+   a fresh review/key; GET receipts and inverse creation verify the exact saved
+   original intent and never borrow another review's receipt.
 4. `GET .../reviews/{review_id}` returns a scope-authorized stored review and
    original operation receipt without provider calls or reservation changes.
    `mode: reconcile` on the operations route observes the original operation
@@ -296,8 +298,11 @@ Use these service routes in order:
    automatic-label agreement can settle the fence; this proves the observed
    state, not attribution to a particular writer. Absent or ambiguous state
    stays unknown and never authorizes another PUT. `mode: recover-evidence`
-   consults only service-retained successful terminal evidence and constructs
-   no provider transport. Both recovery modes retain actor/key/review binding.
+   consults only service-retained terminal success or exact-PUT validation
+   rejection evidence and constructs no provider transport. Only a 422 from
+   that PUT records a known provider rejection; a later read failure, server
+   error or timeout keeps the original fence. A rejected PUT returns a durable
+   409, and a new review/key can proceed without replaying it. Both recovery modes retain actor/key/review binding.
 5. An inverse is a fresh review with `inverse_of_review_id`, desired labels
    equal to the saved original before snapshot, then a new explicit apply/key.
    It is subject to fresh identity, policy, authorization and target-fence checks.

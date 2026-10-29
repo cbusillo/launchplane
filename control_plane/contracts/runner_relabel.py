@@ -168,6 +168,6 @@ class RunnerRelabelOriginalIntent(RunnerRelabelModel):
 
 
 class RunnerRelabelTerminal(RunnerRelabelModel):
-    status: Literal["completed"]
+    status: Literal["completed", "rejected"]
     review_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     result: dict[str, object]

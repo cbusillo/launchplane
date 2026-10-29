@@ -18,7 +18,10 @@ from control_plane.contracts.runner_relabel import (
     RunnerRelabelReviewRequest,
     RunnerRelabelRunner,
 )
-from control_plane.provider_operations import run_durable_provider_operation
+from control_plane.provider_operations import (
+    run_durable_provider_operation,
+    build_provider_operation_key,
+)
 from control_plane.runner_relabel import (
     ROUTE,
     RunnerRelabelAdapter,
@@ -37,6 +40,8 @@ class RunnerTransport:
         self.custom: tuple[str, ...] = ("general",)
         self.automatic: tuple[str, ...] = ("self-hosted", "linux")
         self.puts = 0
+        self.put_error: int | None = None
+        self.read_error_after_put = False
         self.unknown = False
         self.busy = False
         self.runner_name = "general-1"
@@ -44,9 +49,15 @@ class RunnerTransport:
         self.put_paths: list[str] = []
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
+        from control_plane.merge_train_github import MergeTrainGitHubError
+
+        if method == "GET" and self.puts and self.read_error_after_put:
+            raise MergeTrainGitHubError("fixture post-read failure", status_code=422)
         if method == "PUT":
             self.puts += 1
             self.put_paths.append(path)
+            if self.put_error is not None:
+                raise MergeTrainGitHubError("fixture rejected request", status_code=self.put_error)
             assert body is not None
             values = body["labels"]
             assert isinstance(values, list) and all(isinstance(value, str) for value in values)
@@ -195,6 +206,48 @@ class RunnerRelabelNativeTests(unittest.TestCase):
         self.assertEqual(self.run_change(review, observe=True).status, "reconcile_required")
         self.assertEqual(self.transport.puts, 1)
 
+    def test_only_exact_put_validation_rejection_settles_without_retry(self) -> None:
+        review = self.review()
+        self.transport.put_error = 422
+        result = self.run_change(review)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.response_status_code, 409)
+        self.assertEqual(self.transport.puts, 1)
+        assert result.record is not None
+        audit = self.store.read_runner_relabel_document(
+            "terminal-audit",
+            build_provider_operation_key(
+                scope=result.record.scope,
+                route_path=result.record.route_path,
+                idempotency_key=result.record.idempotency_key,
+                request_fingerprint=result.record.request_fingerprint,
+                reconciliation_key=result.record.reconciliation_key,
+            ),
+        )
+        assert audit is not None
+        self.assertEqual(audit["message"], result.response_payload["result"]["status"])
+        self.transport.put_error = None
+        self.assertEqual(self.run_change(self.review(), key="fresh").status, "completed")
+        self.assertEqual(self.transport.puts, 2)
+
+    def test_put_server_failure_retains_original_target_fence(self) -> None:
+        review = self.review()
+        self.transport.put_error = 503
+        self.assertEqual(self.run_change(review).status, "reconcile_required")
+        self.transport.put_error = None
+        self.assertEqual(self.run_change(review, observe=True).status, "reconcile_required")
+        self.assertEqual(self.run_change(self.review(), key="fresh").status, "target_busy")
+        self.assertEqual(self.transport.puts, 1)
+
+    def test_post_put_validation_failure_is_not_terminal_put_rejection(self) -> None:
+        review = self.review()
+        self.transport.read_error_after_put = True
+        self.assertEqual(self.run_change(review).status, "reconcile_required")
+        self.assertEqual(
+            self.run_change(review, observe=True, evidence_only=True).status, "reconcile_required"
+        )
+        self.assertEqual(self.transport.puts, 1)
+
     def test_policy_and_runner_drift_refuse_before_put(self) -> None:
         for drift in ("busy", "name", "automatic", "policy"):
             with self.subTest(drift=drift):
@@ -217,10 +270,22 @@ class RunnerRelabelNativeTests(unittest.TestCase):
                     self.transport.runner_name = "foreign"
                 else:
                     self.transport.automatic = ("self-hosted", "windows")
-                try:
-                    self.run_change(review, key=drift)
-                except ValueError:
-                    pass
+                result = self.run_change(review, key=drift)
+                self.assertEqual(result.response_status_code, 409)
+                if drift == "policy":
+                    assert result.record is not None
+                    audit = self.store.read_runner_relabel_document(
+                        "terminal-audit",
+                        build_provider_operation_key(
+                            scope=result.record.scope,
+                            route_path=result.record.route_path,
+                            idempotency_key=result.record.idempotency_key,
+                            request_fingerprint=result.record.request_fingerprint,
+                            reconciliation_key=result.record.reconciliation_key,
+                        ),
+                    )
+                    assert audit is not None
+                    self.assertEqual(audit["message"], result.response_payload["result"]["status"])
                 self.assertEqual(self.transport.puts, 0)
                 self.transport.busy = False
                 self.transport.runner_name = "general-1"
@@ -374,33 +439,41 @@ class RunnerRelabelNativeTests(unittest.TestCase):
             revoke.assert_called_once_with(installation_token=token)
 
     def test_retained_terminal_evidence_recovers_lost_completion_without_provider(self) -> None:
-        review = self.review()
-        with patch.object(
-            self.store,
-            "complete_mutation_reservation",
-            side_effect=OSError("fixture completion lost"),
-        ):
-            with self.assertRaises(OSError):
-                self.run_change(review)
-        self.assertEqual(self.transport.puts, 1)
-        self.factory.reset_mock()
-        original = self.store.read_idempotency_record(
-            scope=actor_scope(self.actor),
-            route_path=ROUTE.format(policy_id="fixture"),
-            idempotency_key="original",
-        )
-        assert original is not None
-        after_expiry = format_launchplane_mutation_timestamp(
-            parse_launchplane_mutation_timestamp(
-                original.lease_expires_at, field_name="lease_expires_at"
-            )
-            + timedelta(seconds=1)
-        )
-        with patch.object(self.store, "_database_mutation_timestamp", return_value=after_expiry):
-            self.assertEqual(
-                self.run_change(review, observe=True, evidence_only=True).status, "adopted"
-            )
-        self.factory.assert_not_called()
+        for rejected in (False, True):
+            with self.subTest(rejected=rejected):
+                review = self.review()
+                self.transport.put_error = 422 if rejected else None
+                before = self.transport.puts
+                key = str(rejected)
+                with patch.object(
+                    self.store,
+                    "complete_mutation_reservation",
+                    side_effect=OSError("fixture completion lost"),
+                ):
+                    with self.assertRaises(OSError):
+                        self.run_change(review, key=key)
+                self.assertEqual(self.transport.puts, before + 1)
+                self.factory.reset_mock()
+                original = self.store.read_idempotency_record(
+                    scope=actor_scope(self.actor),
+                    route_path=ROUTE.format(policy_id="fixture"),
+                    idempotency_key=key,
+                )
+                assert original is not None
+                after_expiry = format_launchplane_mutation_timestamp(
+                    parse_launchplane_mutation_timestamp(
+                        original.lease_expires_at, field_name="lease_expires_at"
+                    )
+                    + timedelta(seconds=1)
+                )
+                with patch.object(
+                    self.store, "_database_mutation_timestamp", return_value=after_expiry
+                ):
+                    recovered = self.run_change(review, key=key, observe=True, evidence_only=True)
+                self.assertEqual(recovered.status, "adopted")
+                self.assertEqual(recovered.response_status_code, 409 if rejected else 202)
+                self.factory.assert_not_called()
+                self.transport.put_error = None
 
     def test_revocation_failure_preserves_review_apply_and_observation_results(self) -> None:
         from control_plane.contracts.runner_relabel import RunnerRelabelCapability

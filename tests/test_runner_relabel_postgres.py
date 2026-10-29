@@ -350,6 +350,61 @@ class HttpRunnerRelabelPostgresTests(http_scenarios.HttpRunnerRelabelTests):
         self.assertEqual(receipt["trace_id"], first.json()["trace_id"])
         self.assertEqual(self.fixture.transport.puts, 1)
 
+    async def test_reused_key_never_exposes_another_review_receipt_or_permits_its_inverse(
+        self,
+    ) -> None:
+        first = await self.reviewed_operation()
+        applied = await self.operate(first)
+        self.assertEqual(applied.status_code, 202, applied.text)
+        second = await self.reviewed_operation()
+        refused = await self.operate(second)
+        self.assertEqual(refused.status_code, 409, refused.text)
+        read = await request(
+            self.app,
+            "GET",
+            self.path + "/" + second["review_id"],
+            headers={"Cookie": self.sessions.session_cookie_header(self.session)},
+        )
+        self.assertEqual(read.status_code, 202, read.text)
+        self.assertIsNone(read.json()["result"]["operation"])
+        inverse = await request(
+            self.app,
+            "POST",
+            self.path,
+            headers=self.headers(),
+            payload={
+                **self.body,
+                "desired_custom_labels": read.json()["result"]["review"]["before_custom_labels"],
+                "inverse_of_review_id": second["review_id"],
+            },
+        )
+        self.assertEqual(inverse.status_code, 409, inverse.text)
+        self.assertEqual(self.fixture.transport.puts, 1)
+
+    async def test_http_validation_rejection_replays_and_new_review_can_proceed(self) -> None:
+        body = await self.reviewed_operation()
+        self.fixture.transport.put_error = 422
+        rejected = await self.operate(body)
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        replay = await self.operate(body)
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.assertEqual(self.fixture.transport.puts, 1)
+        receipt = await request(
+            self.app,
+            "GET",
+            self.path + "/" + body["review_id"],
+            headers={"Cookie": self.sessions.session_cookie_header(self.session)},
+        )
+        self.assertEqual(receipt.status_code, 202, receipt.text)
+        self.assertEqual(
+            receipt.json()["result"]["operation"]["response_status_code"], rejected.status_code
+        )
+        self.fixture.transport.put_error = None
+        fresh = await self.reviewed_operation()
+        applied = await self.operate(fresh, key="fresh")
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(self.fixture.transport.puts, 2)
+
     async def test_http_unknown_operation_reconciles_without_second_put(self) -> None:
         body = await self.reviewed_operation()
         self.fixture.transport.unknown = True
@@ -429,7 +484,6 @@ class HttpRunnerRelabelPostgresTests(http_scenarios.HttpRunnerRelabelTests):
                             "runner_relabel.plan",
                             "runner_relabel.apply",
                             "runner_relabel.read",
-                            "runner_relabel.recover",
                         ],
                     }
                 ]
