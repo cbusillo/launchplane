@@ -2374,7 +2374,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertIn(f"/issues/{real['number']}", self.save_decision().release_issue_url)
         self.assertEqual(self.issues[0]["state"], "open")
 
-    def test_closed_shared_history_gets_a_pointer_and_pending_request_stays_open(self) -> None:
+    def test_closed_shared_history_is_preserved_and_pending_request_stays_open(self) -> None:
         from control_plane.release_invitation import _retire_decided_legacy_requests
 
         older = decision(self.store, date=(self.now - timedelta(days=3)).isoformat())
@@ -2392,7 +2392,7 @@ class ReleaseInvitationTests(unittest.TestCase):
             backoff=None,
         )
         self.assertEqual(shared["state"], "closed")
-        self.assertIn(older.release_issue_url, str(shared["body"]))
+        self.assertEqual(shared["body"], release_request_issue_marker(self.profile.product))
         self.assertEqual(self.comments, [])
         pending = {
             "number": 92,
@@ -2557,3 +2557,30 @@ class ReleaseInvitationTests(unittest.TestCase):
                 actor="director",
             )
         self.assertEqual(self.posts, posts)
+
+    def test_retirement_does_not_scan_unrelated_closed_history(self) -> None:
+        from control_plane.release_invitation import _retire_decided_legacy_requests
+
+        older = decision(self.store, date=(self.now - timedelta(days=3)).isoformat())
+        self.store.create_release_review_decision_record_if_absent(older)
+        original = self.github
+        closed = [
+            {"number": 1000 + index, "state": "closed", "body": "unrelated"} for index in range(100)
+        ]
+
+        def history(**kwargs: Any) -> object:
+            if "state=all" in kwargs["path"]:
+                return closed
+            return original(**kwargs)
+
+        backoff = ReleaseInvitationBackoff()
+        with patch("control_plane.release_invitation.github_api_request", history):
+            for _ in range(2):
+                _retire_decided_legacy_requests(
+                    store=cast(ReleaseReviewStore, cast(object, self.store)),
+                    control_plane_root=self.root,
+                    profile=self.profile,
+                    backoff=backoff,
+                )
+        self.assertEqual(self.posts, [])
+        self.assertEqual(self.edits, [])

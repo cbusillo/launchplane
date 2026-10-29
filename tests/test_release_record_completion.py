@@ -13,7 +13,11 @@ from control_plane.client_release import (
     ClientReleaseStepView,
     ClientReleaseStepStatus,
 )
-from control_plane.release_invitation import advance_release_invitations, ReleaseInvitationBackoff
+from control_plane.release_invitation import (
+    advance_release_invitations,
+    ReleaseInvitationBackoff,
+    release_candidate_issue_marker,
+)
 from control_plane.release_review_record import release_decision_marker
 from control_plane.release_event_waits import settle_product_release_waits
 from control_plane.storage.postgres import PostgresRecordStore
@@ -38,7 +42,9 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.issue: dict[str, Any] = {
             "number": 99,
             "state": "open",
-            "body": release_decision_marker(self.decision.record_id),
+            "body": release_candidate_issue_marker(self.decision.checklist_digest)
+            + "\n"
+            + release_decision_marker(self.decision.record_id),
         }
         self.comments: list[dict[str, Any]] = []
         self.calls: list[tuple[str, str]] = []
@@ -730,3 +736,10 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         calls = self.calls.copy()
         self.advance(backoff)
         self.assertEqual(self.calls, calls)
+
+    def test_closed_legacy_decision_issue_does_not_receive_a_backfill_notice(self) -> None:
+        self.issue["state"] = "closed"
+        self.issue["body"] = release_decision_marker(self.decision.record_id)
+        self.advance()
+        self.assertEqual(self.comments, [])
+        self.assertEqual(self.issue["state"], "closed")

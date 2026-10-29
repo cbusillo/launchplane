@@ -89,7 +89,8 @@ in production, identifying the reviewed, previous or another version by commit.
 Unavailable reasons or production evidence are stated explicitly; a past
 successful promotion is never used to infer what production runs now.
 Temporary-hotfix review requests remain open for the Client to decide. A closed
-issue still receives a missing outcome. The saved decision and original request
+candidate issue still receives a missing outcome; already-closed legacy
+per-decision issues keep their historical behavior and receive no backfill notice. The saved decision and original request
 remain in the same issue; the decision and outcome are comments on it. Retries
 reuse the outcome receipt. Outstanding recorded operations, unknown run evidence,
 an unpublished or unfinished current release intent, and pending hotfix review
@@ -330,7 +331,7 @@ comments. A decided release keeps its own issue until its run finishes.
 
 The signed-in Client's decision is posted as a comment on that same issue,
 together with the complete saved checklist and release action. This keeps the
-request and any human notes intact and avoids repeatedly growing the issue body. Request changes closes the issue
+request and discussion comments intact and avoids repeatedly growing the issue body. Request changes closes the issue
 immediately unless it starts a temporary-hotfix rollback. Accepted releases close
 with their persisted outcome; missing, pending or reconciliation-required work
 keeps them open. A temporary hotfix starts its own issue with the existing review
@@ -338,8 +339,8 @@ notice, and its Client decision uses that issue too. These issues project saved
 Launchplane records. Editing an issue never accepts a release or changes a
 promotion gate.
 
-A candidate publication lock serializes issue creation, request-body refresh,
-reminder publication, decisions and outcomes across replicas. Invitation mutations
+A candidate publication lock serializes issue creation, request-body updates,
+reminders, decisions and outcomes across replicas. Invitation mutations
 recheck saved candidate decisions under that lock. Checklist compilation and legacy carryover reads do not hold this
 lock. The saved decision is acknowledged afterward under its own publication lock;
 those transactions never nest on the acceptance path. A lost issue-create,
@@ -364,8 +365,8 @@ remains unchanged. Carryover includes the supported release-page link, adds no
 second Client mention or acceptance requirement, and preserves the original reminder deadline
 and an already-sent reminder. Only after the candidate issue exists does the
 shared thread close with a pointer. A legacy request that has a published decision
-can instead point to its existing decision issue, including when the shared thread
-was already closed. Pending requests remain open until carried over or decided.
+can instead point to its existing decision issue. Closed historical threads
+are preserved with their existing decision links. Pending requests remain open until carried over or decided.
 No real product or destination is configured in source.
 
 The manual receipt-adoption route remains for legacy manual or former-App requests.
@@ -447,13 +448,15 @@ lookup blocked while the next release pass runs within the configured worker
 cadence. Shutdown joins both threads; this is scheduling isolation, not a
 provider latency guarantee. All existing checklist, candidate and release gates
 still apply.
-New candidate issue markers bind the checklist and product. Existing issue bodies
-can refresh test-note annotations for that same checklist; their request time
-and reminder deadline stay fixed. Decision markers identify each saved action in the candidate issue's comments
+New candidate issue markers bind the checklist and product. Launchplane owns
+the generated request body and refreshes test-note annotations for that same
+checklist. Human discussion belongs in comments, which the publishers preserve.
+The request time and reminder deadline stay fixed. Decision markers identify each saved action in the candidate issue's comments
 or a standalone decision's original body. Legacy request and adoption markers are compatibility evidence for the carryover
 path, never acceptance authority. Both retirement paths use the same separate
 lock for mutations, refresh the target body and preserve a confirmed legacy
-pointer. Historical discovery does not hold that lock or the candidate lock. Complete absent or retired legacy sets are cached
+pointer. Historical discovery reads only open threads and does not hold that lock or the
+candidate lock. Closed history cannot keep retirement scanning forever. Complete absent or retired legacy sets are cached
 for that product, repository and Client identity for the worker's lifetime;
 pending or incomplete reads remain retryable. Reminders follow durable receipts
 before broad supersession cleanup, so a cleanup failure never duplicates a sent reminder.

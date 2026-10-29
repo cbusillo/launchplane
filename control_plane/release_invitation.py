@@ -606,6 +606,10 @@ def _settle_release_record(
                 )
                 if not decisions:
                     raise ValueError("Release record identity was not confirmed.")
+            if issue.get("state") == "closed" and _receipt_lines(issue)[:1] != [
+                release_candidate_issue_marker(decision.checklist_digest)
+            ]:
+                return True
             if (
                 store.read_product_profile_record(profile.product) != profile
                 or store.read_release_review_decision_record(
@@ -821,6 +825,13 @@ def publish_release_invitation(
             with store.release_review_publication_lock(
                 record_id=f"candidate:{profile.product}:{review.checklist_digest}"
             ):
+                saved_decisions = store.list_release_review_decision_records(
+                    product=profile.product
+                )
+                if store.read_product_profile_record(profile.product) != profile or any(
+                    item.checklist_digest == review.checklist_digest for item in saved_decisions
+                ):
+                    return False
                 candidates = _pages(
                     f"{path}?state=all&sort=created&direction=desc",
                     token,
@@ -841,9 +852,9 @@ def publish_release_invitation(
                     )
                 ):
                     return False
-                if any(
-                    item.checklist_digest == review.checklist_digest
-                    for item in store.list_release_review_decision_records(product=profile.product)
+                if (
+                    store.list_release_review_decision_records(product=profile.product)
+                    != saved_decisions
                 ):
                     return False
                 issue = candidates[0] if candidates else None
@@ -1199,7 +1210,7 @@ def _retire_decided_legacy_requests(
             raise ValueError("Release record source-control access is unavailable.")
         path = f"/repos/{quote(profile.repository)}/issues"
         issues = _pages(
-            f"{path}?state=all&sort=updated&direction=desc",
+            f"{path}?state=open&sort=updated&direction=desc",
             token,
             marker=release_request_issue_marker(profile.product),
             issues_only=True,
