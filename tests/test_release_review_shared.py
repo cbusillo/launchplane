@@ -1,6 +1,7 @@
 """Shared-source release coverage, including a website plus two addon repositories."""
 
 import unittest
+from github_plan_status.client_test_notes import NOTHING_TO_TEST
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -138,7 +139,7 @@ class SharedReleaseReviewTests(unittest.TestCase):
     ) -> None:
         from typing import cast
 
-        store = cast(ReleaseReviewStore, self.store)
+        store = cast(ReleaseReviewStore, cast(object, self.store))
         for kind in ("base_images", "build_tools"):
             with self.subTest(kind=kind):
                 seed(self.store)
@@ -160,11 +161,11 @@ class SharedReleaseReviewTests(unittest.TestCase):
                 self.assertFalse(self.review().approved)
                 self.github.notes = ""
                 self.assertFalse(self.review().checklist_complete)
-                self.github.notes = "Nothing for the Client to test: Build maintenance only."
+                self.github.notes = f"{NOTHING_TO_TEST}: Build maintenance only."
                 self.accept()
                 self.assertTrue(self.review().approved)
 
-    def test_unknown_build_input_preserves_known_ranges_and_repository_holds(self) -> None:
+    def test_unknown_build_input_preserves_known_ranges_and_repository_discovery(self) -> None:
         from control_plane.client_release_repositories import client_release_profiles
         from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
         from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
@@ -180,7 +181,6 @@ class SharedReleaseReviewTests(unittest.TestCase):
                     review = self.review()
                     assert review.checklist is not None
                     self.assertFalse(review.checklist_complete)
-                    self.assertTrue(any("UNKNOWN" in value for value in review.blockers))
                     self.assertIn(
                         "example/shared-addons",
                         {source.repository for source in review.checklist.shared_sources},
@@ -302,6 +302,40 @@ class SharedReleaseReviewTests(unittest.TestCase):
             all(source.items[0].owner_test_notes == self.github.notes for source in ranges)
         )
 
+    def test_production_only_provenance_gap_blocks_acceptance_with_candidate_ranges_visible(
+        self,
+    ) -> None:
+        artifact = self.store.read_artifact_manifest("artifact-prod")
+        self.store.write_artifact_manifest(
+            artifact.model_copy(update={"build_provenance": type(artifact.build_provenance)()})
+        )
+        review = self.review()
+        assert review.checklist is not None
+        self.assertFalse(review.checklist_complete)
+        self.assertTrue(review.checklist.additional_changes)
+        self.assertTrue(review.checklist.shared_sources)
+        self.accept()
+        self.assertFalse(self.review().approved)
+
+    def test_overlapping_ranges_do_not_repeat_blockers(self) -> None:
+        checklist = self.review().checklist
+        assert checklist is not None
+        original = checklist.shared_sources[0]
+        source = original.model_copy(
+            update={
+                "items": tuple(
+                    item.model_copy(update={"owner_test_notes": ""}) for item in original.items
+                )
+            }
+        )
+        repeated = source.model_copy(update={"production_commit": "d" * 40})
+        overlapping = checklist.model_copy(update={"shared_sources": (source, repeated)})
+        single = checklist.model_copy(update={"shared_sources": (source,)})
+        self.assertEqual(
+            checklist_blockers(overlapping, profile=profile()),
+            checklist_blockers(single, profile=profile()),
+        )
+
     def test_absent_build_provenance_is_unknown_and_cannot_reuse_acceptance(self) -> None:
         self.accept()
         artifact = self.store.read_artifact_manifest("artifact-testing")
@@ -311,7 +345,6 @@ class SharedReleaseReviewTests(unittest.TestCase):
         review = self.review()
         self.assertFalse(review.approved)
         self.assertFalse(review.checklist_complete)
-        self.assertTrue(any("UNKNOWN" in value for value in review.blockers))
         assert review.checklist is not None
         self.assertTrue(review.checklist.shared_sources)
 

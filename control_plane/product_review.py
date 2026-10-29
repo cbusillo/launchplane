@@ -19,7 +19,7 @@ from control_plane.contracts.product_review import (
     ProductReviewDecision,
     ProductReviewDecisionRecord,
 )
-from control_plane.release_review_shared import repository_key
+from control_plane.artifact_release_inputs import repository_key
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.product_reconcile_read import product_preview_request, preview_refresh_failure
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity

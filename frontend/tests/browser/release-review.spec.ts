@@ -1,3 +1,4 @@
+import { NOTHING_TO_TEST } from "../../src/release-review-model";
 import { waitForState, expect, test } from "./state";
 import type { Request } from "@playwright/test";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
@@ -723,17 +724,17 @@ test("Client sees website settings before accepting the bound release", { tag: "
 test("Base image and build tool ranges keep their Client notes", async ({ page }) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
-  const response = await page.evaluate(async () => {
+  const response = await page.evaluate(async (nothingToTest) => {
     const fixtures = await import("/ui/src/dev-fixtures.ts");
     const response = fixtures.releaseReviewForFixture("products");
     const template = response.review.checklist.shared_sources[0];
     response.review.checklist.shared_sources = [
       { ...template, repository: "example/base-image", production_commit: "a".repeat(40) },
       { ...template, repository: "example/base-image", production_commit: "b".repeat(40) },
-      { ...template, repository: "example/build-tool", items: [{ ...template.items[0], owner_test_notes: "Nothing for the Client to test: Build packaging maintenance." }] },
+      { ...template, repository: "example/build-tool", items: [{ ...template.items[0], owner_test_notes: `${nothingToTest}: Build packaging maintenance.` }] },
     ];
     return response;
-  });
+  }, NOTHING_TO_TEST);
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "client", organizations: [], teams: [] } } }));
   await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
   await page.goto("/ui/owner-review?product=example-site");

@@ -4,7 +4,7 @@ import click
 
 from control_plane.artifact_release_inputs import (
     verified_release_inputs,
-    repository_key as repository_key,
+    repository_key,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.release_review import SharedSourceReview
@@ -64,12 +64,12 @@ def read_shared_source_changes(
         after_selectors = _selectors(candidate, repository)
     except ValueError:
         before_selectors, after_selectors = {}, {}
-        unexplained.append("Shared website component source selection is UNKNOWN or ambiguous.")
+        unexplained.append("Shared release input source selection is UNKNOWN or ambiguous.")
     reviews = []
     for key in sorted(before_selectors.keys() | after_selectors.keys()):
         if before_selectors.get(key) != after_selectors.get(key):
             unexplained.append(
-                f"Shared website component {key} changed its source selection without review coverage."
+                f"Shared release input {key} changed its source selection without review coverage."
             )
     for key, production_commit, candidate_commit in sorted(ranges):
         try:
@@ -86,7 +86,7 @@ def read_shared_source_changes(
             # Preserve the existing release-scoped admin review path. Client
             # acceptance still cannot waive unavailable shared coverage.
             unexplained.append(
-                f"Shared website component {key} could not be fully reviewed "
+                f"Shared release input {key} could not be fully reviewed "
                 f"({production_commit} to {candidate_commit}). Admin review is required."
             )
             continue

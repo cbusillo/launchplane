@@ -72,7 +72,7 @@ from control_plane.client_test_notes import ClientTestNotes, change_client_revie
 from control_plane.contracts.text_fields import require_text
 from control_plane.dependency_update_review import dependency_update_policy, pure_dependency_update
 from control_plane.contracts.merge_train_policy import MergeTrainEnqueuePolicy
-from control_plane.release_review_shared import repository_key
+from control_plane.artifact_release_inputs import repository_key
 from control_plane.client_release_repositories import (
     ClientReleaseRepositoryStore,
     client_release_profiles,
