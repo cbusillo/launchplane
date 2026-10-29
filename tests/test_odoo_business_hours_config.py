@@ -979,10 +979,10 @@ class CalendarConfigurationHttpTests(CalendarRuntimeFixture, unittest.IsolatedAs
         original = self.store.write_product_authority_bundle
         raced = self.profile.model_copy(update={"display_name": "Concurrent name"})
 
-        def commit_race(bundle: Any) -> None:
+        def commit_race(bundle: Any, **write_options: Any) -> None:
             if bundle.product_profiles:
                 self.store.write_product_profile_record(raced)
-            original(bundle)
+            original(bundle, **write_options)
 
         with patch.object(self.store, "write_product_authority_bundle", side_effect=commit_race):
             response = await self.post(body, "racing-policy")
