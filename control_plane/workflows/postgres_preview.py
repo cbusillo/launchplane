@@ -25,6 +25,8 @@ from control_plane.contracts.runtime_identity import (
     runtime_identity_env,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.postgres_preview import effective_postgres_preview_profile
 from control_plane.workflows.preview_resource_destroy import (
     PREVIEW_CLEANUP_SAFETY_UNKNOWN,
     destroy_dokploy_preview_resource,
@@ -37,9 +39,11 @@ from control_plane.workflows.generic_web_application_lifecycle import (
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 from control_plane.workflows.generic_web_preview import (
     _configure_application,
+    _ensure_domain,
     _delete_application,
     _delete_domain,
 )
+from control_plane.preview_namespaces import require_unique_preview_namespaces
 from control_plane.contracts.snapshot_protocol import snapshot_protocol_default
 from control_plane import runtime_platform_credentials
 from control_plane.dokploy import memory_capacity
@@ -109,7 +113,7 @@ class PostgresPreviewRefreshRequest(BaseModel):
             raise ValueError("PostgreSQL preview refresh requires anchor_head_sha.")
         if not self.preview_slug.strip():
             raise ValueError("PostgreSQL preview refresh requires preview_slug.")
-        if self.preview_slug.strip() != self.slug_template.replace(
+        if self.preview_slug.strip() != self.slug_template.strip().replace(
             "{number}", str(self.anchor_pr_number)
         ):
             raise ValueError(
@@ -128,6 +132,7 @@ class PostgresPreviewDestroyRequest(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     context: str
     anchor_repo: str
+    anchor_pr_url: str = ""
     anchor_pr_number: int = Field(ge=1)
     preview_slug: str
     slug_template: str = snapshot_protocol_default("pr-{number}")
@@ -142,7 +147,7 @@ class PostgresPreviewDestroyRequest(BaseModel):
             raise ValueError("PostgreSQL preview destroy requires anchor_repo.")
         if not self.preview_slug.strip():
             raise ValueError("PostgreSQL preview destroy requires preview_slug.")
-        if self.preview_slug.strip() != self.slug_template.replace(
+        if self.preview_slug.strip() != self.slug_template.strip().replace(
             "{number}", str(self.anchor_pr_number)
         ):
             raise ValueError(
@@ -198,6 +203,7 @@ class _DatabaseParts(BaseModel):
 
 class _PreviewNamespaceStore(Protocol):
     def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+    def list_preview_records(self) -> tuple[PreviewRecord, ...]: ...
 
 
 def _require_unique_preview_namespaces(
@@ -207,21 +213,28 @@ def _require_unique_preview_namespaces(
         raise PostgresPreviewRefreshConfigError(
             "Preview namespace ownership requires product profile inventory."
         )
-    profiles = cast(_PreviewNamespaceStore, record_store).list_product_profile_records()
+    if not callable(getattr(record_store, "list_preview_records", None)):
+        raise PostgresPreviewRefreshConfigError(
+            "Preview namespace ownership requires preview inventory."
+        )
+    store = cast(_PreviewNamespaceStore, record_store)
+    profiles = store.list_product_profile_records()
     if not any(other.product == profile.product for other in profiles):
         raise PostgresPreviewRefreshConfigError(
             "Preview namespace ownership requires the stored product profile."
         )
-    for other in profiles:
-        if other.product == profile.product:
-            continue
-        if (
-            other.preview.app_name_prefix == profile.preview.app_name_prefix
-            or other.preview.transport_database_prefix == profile.preview.transport_database_prefix
-        ):
-            raise PostgresPreviewRefreshConfigError(
-                "Preview namespace belongs to another product; choose unique application and database prefixes."
-            )
+    try:
+        require_unique_preview_namespaces(
+            profile,
+            profiles,
+            retained_contexts={
+                record.context
+                for record in store.list_preview_records()
+                if record.state != "destroyed"
+            },
+        )
+    except ValueError as error:
+        raise PostgresPreviewRefreshConfigError(str(error)) from error
 
 
 def _preview_app_name(preview_slug: str, prefix: str) -> str:
@@ -658,71 +671,6 @@ def _restore_existing_application(
     )
 
 
-def _ensure_domain(
-    *,
-    host: str,
-    token: str,
-    application_id: str,
-    preview_host: str,
-    runtime_port: int,
-    certificate_type: str,
-) -> tuple[str, tuple[str, ...]]:
-    raw_domains = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/domain.byApplicationId",
-        query={"applicationId": application_id},
-    )
-    domains = raw_domains if isinstance(raw_domains, list) else []
-    existing: JsonObject | None = None
-    stale_domain_ids: list[str] = []
-    for raw_domain in domains:
-        domain = dokploy_api.as_json_object(raw_domain)
-        if domain is None:
-            continue
-        domain_host = str(domain.get("host") or "").strip()
-        domain_id = str(domain.get("domainId") or "").strip()
-        if domain_host == preview_host and domain_id:
-            existing = domain
-            continue
-        if domain_id:
-            stale_domain_ids.append(domain_id)
-    payload: JsonObject = {
-        "host": preview_host,
-        "path": "/",
-        "internalPath": "/",
-        "port": runtime_port,
-        "https": True,
-        "applicationId": application_id,
-        "certificateType": certificate_type,
-        "customCertResolver": None,
-        "composeId": None,
-        "serviceName": None,
-        "domainType": "application",
-        "previewDeploymentId": None,
-        "stripPath": False,
-    }
-    if existing is not None:
-        existing_domain_id = str(existing.get("domainId") or "").strip()
-        dokploy_api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/domain.update",
-            method="POST",
-            payload={"domainId": existing_domain_id, **payload},
-        )
-        return "", tuple(stale_domain_ids)
-    created = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/domain.create",
-        method="POST",
-        payload=payload,
-    )
-    created_domain = dokploy_api.as_json_object(created)
-    return str((created_domain or {}).get("domainId") or "").strip(), tuple(stale_domain_ids)
-
-
 def _upsert_application_schedule(
     *,
     host: str,
@@ -1045,11 +993,14 @@ def execute_postgres_preview_refresh(
     *,
     control_plane_root: Path,
     request: PostgresPreviewRefreshRequest,
+    prepare_preview: Callable[[], None],
     preview_id: str = "",
     preview_generation_id: str = "",
     record_store: object | None = None,
     profile: LaunchplaneProductProfileRecord,
 ) -> PostgresPreviewRefreshResult:
+    legacy_https = profile.preview.transport_extension == "verireel-postgres"
+    profile = effective_postgres_preview_profile(profile)
     _require_unique_preview_namespaces(record_store, profile)
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
@@ -1158,6 +1109,8 @@ def execute_postgres_preview_refresh(
     except runtime_platform_credentials.PlatformCredentialRefusedError as error:
         raise PostgresPreviewRefreshConfigError(error.message) from error
 
+    prepare_preview()
+
     try:
         admin_database_url = _build_admin_database_url(template_database_url)
         _run_application_command(
@@ -1214,6 +1167,7 @@ def execute_postgres_preview_refresh(
             preview_host=preview_host,
             runtime_port=profile.runtime_port,
             certificate_type=profile.preview.domain_certificate_type,
+            https=legacy_https or urlparse(preview_url).scheme == "https",
         )
         latest_before = dokploy_api.latest_deployment_for_target(
             host=host,
@@ -1328,9 +1282,11 @@ def execute_postgres_preview_destroy(
     *,
     control_plane_root: Path,
     request: PostgresPreviewDestroyRequest,
+    prepare_destroy: Callable[[], None],
     record_store: object | None = None,
     profile: LaunchplaneProductProfileRecord,
 ) -> PostgresPreviewDestroyResult:
+    profile = effective_postgres_preview_profile(profile)
     _require_unique_preview_namespaces(record_store, profile)
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     template_target, template_application = _template_application_payload(
@@ -1394,6 +1350,8 @@ def execute_postgres_preview_destroy(
         username=role_name,
         password="",
     )
+
+    prepare_destroy()
 
     cleanup_errors: list[str] = []
     if application_id:

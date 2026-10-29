@@ -121,16 +121,24 @@ health path, URL environment keys and generated secrets. The testing template
 must expose a PostgreSQL `DATABASE_URL` and its image must provide Node and `pg`
 for database administration. Its health endpoint must return `ok: true` and
 the injected runtime identity. Choose application and database prefixes unique
-to the product; provisioning and cleanup refuse conflicting saved namespaces. `preview.generated_secret_env` maps application
+to the product; storage checks the prospective profile set and provisioning and
+cleanup refuse overlapping rendered namespaces, including default prefixes and
+slug prefixes. Clean up retained previews before changing their resource names,
+source, template or transport. Disabling previews leaves cleanup available.
+`preview.generated_secret_env` maps application
 environment keys to `urlsafe` or `base64`; values are generated for each preview
 and retained on refresh, never copied from testing. Other template credentials
 are removed. `preview_url_env_keys` and `preview_domain_env_keys` replace the
 product-specific URL rewriting. Maintenance and schedules remain profile-owned.
 This uses the existing isolated PostgreSQL preparation and cleanup rather than
-the plain preview path. Stored `verireel-postgres` declarations convert to these
-fields only on storage reads, preserving their prefixes and generated-secret encodings;
-subsequent profile writes use `postgres`. New profile and transition inputs
-reject the retired name. New products declare their own keys
+the plain preview path. Stored `verireel-postgres` declarations remain unchanged
+when read, including profiles embedded in retirement records and their hash
+fences. An execution-only adapter preserves the historical generated keys,
+encodings, URL keys, port, health path and certificate behavior. A reviewed
+generic-web transition materializes the canonical preview declaration and shows
+the effective endpoint before and after; it does not rewrite production endpoint
+settings. New profile and transition inputs reject the retired name.
+New products declare their own keys
 and prefixes through the product profile or reviewed generic-web transition.
 Historical deployment
 and backup records and retired instance-scoped policy grants remain readable;

@@ -2099,6 +2099,27 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_preview_operation_excludes_resource_renaming_until_it_finishes(self) -> None:
+        from control_plane.preview_namespaces import preview_product_operation_key
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        with _store_for_fresh_head_database() as store:
+            profile = _driver_profile()
+            store.write_product_profile_record(profile)
+            renamed = profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"app_name_suffix": "-new"})}
+            )
+            with store.serialize_preview_refresh(
+                preview_id=preview_product_operation_key(profile.product),
+                dedicated=True,
+                shared=True,
+            ):
+                with self.assertRaises(ValueError):
+                    store.write_product_profile_record(renamed)
+                self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            store.write_product_profile_record(renamed)
+            self.assertEqual(store.read_product_profile_record(profile.product), renamed)
+
     def test_schema_column_catalog_reads_do_not_grow_per_required_table(self) -> None:
         from control_plane.storage.postgres import Base
 

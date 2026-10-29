@@ -11,15 +11,20 @@ import type { AcceptedEvidenceResponse, ApplyProductGenericWebTransitionData, La
 
 type TransitionRequest = ApplyProductGenericWebTransitionData["body"];
 type Declarations = Pick<TransitionRequest, "lanes" | "preview">;
-interface Review { request: TransitionRequest; changed: boolean; driverBefore: string }
+interface Review { request: TransitionRequest; changed: boolean; driverBefore: string; endpointBefore?: string; endpointAfter?: string }
 
-function previewDeclarations(preview: Declarations["preview"]): Declarations["preview"] {
+function previewDeclarations(preview: Declarations["preview"] | LaunchplaneProductProfileRecord["preview"]): Declarations["preview"] {
   if (!preview) return preview;
   const extensions = preview.generic_web_extensions;
   return {
     data_transport_mode: preview.data_transport_mode,
     ...(extensions && (extensions.maintenance?.length || extensions.schedules?.length || extensions.verification_extension) ? { generic_web_extensions: extensions } : {}),
-    transport_extension: preview.transport_extension ?? "",
+    transport_extension: preview.transport_extension === "verireel-postgres" ? "postgres" : preview.transport_extension ?? "",
+    ...(preview.transport_extension === "verireel-postgres" ? {} : {
+      generated_secret_env: preview.generated_secret_env ?? {},
+      preview_url_env_keys: preview.preview_url_env_keys ?? [],
+      preview_domain_env_keys: preview.preview_domain_env_keys ?? [],
+    }),
     transport_database_prefix: preview.transport_database_prefix ?? "",
     app_name_suffix: preview.app_name_suffix ?? "",
   };
@@ -40,12 +45,18 @@ function parseDeclarations(raw: string): Declarations {
   // The typed service validates every field before returning a review.
   return value as Declarations;
 }
+function endpointSummary(value: unknown): string {
+  if (!value || typeof value !== "object") return "not reported";
+  const endpoint = value as Record<string, unknown>;
+  if (typeof endpoint.runtime_port !== "number" || typeof endpoint.health_path !== "string" || typeof endpoint.certificate_type !== "string") return "not reported";
+  return `port ${endpoint.runtime_port}, health ${endpoint.health_path}, certificate ${endpoint.certificate_type}`;
+}
 function readReview(response: AcceptedEvidenceResponse, product: string, reason: string): Review | null {
   const result = response.result;
   if (!result || result.product !== product || result.driver_after !== "generic-web" || typeof result.driver_before !== "string" ||
       typeof result.changed !== "boolean" || typeof result.plan_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(result.plan_sha256) ||
       !Array.isArray(result.lanes) || !result.preview || typeof result.preview !== "object") return null;
-  return { changed: result.changed, driverBefore: result.driver_before, request: {
+  return { changed: result.changed, driverBefore: result.driver_before, endpointBefore: endpointSummary(result.preview_endpoint_before), endpointAfter: endpointSummary(result.preview_endpoint_after), request: {
     schema_version: 1, mode: "apply", reason, lanes: result.lanes as TransitionRequest["lanes"],
     preview: result.preview as TransitionRequest["preview"], reviewed_plan_sha256: result.plan_sha256,
   } };
@@ -187,6 +198,9 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
         {lane.extensions.maintenance?.map(command => <p key={command.name}>{command.name}: <code>{command.command}</code></p>)}
         {lane.extensions.schedules?.map(schedule => <p key={schedule.name}>{schedule.name}: <code>{schedule.command}</code> · {schedule.cron_expression} · {schedule.enabled ? "enabled" : "disabled"}</p>)}
       </div>)}<p>Preview transport: {review.request.preview?.transport_extension || review.request.preview?.data_transport_mode}; application suffix: {review.request.preview?.app_name_suffix || "none"}</p>
+      <p>Preview endpoint: {review.endpointBefore ?? "not reported"} → {review.endpointAfter ?? "not reported"}</p>
+      <p>Generated preview secrets: {Object.entries(review.request.preview?.generated_secret_env ?? {}).map(([key, encoding]) => `${key} (${encoding})`).join(", ") || "none"}</p>
+      <p>Preview URL keys: {review.request.preview?.preview_url_env_keys?.join(", ") || "none"}; domain keys: {review.request.preview?.preview_domain_env_keys?.join(", ") || "none"}</p>
     </div> : null}
     <div className="product-config-actions">
       <button className="button" type="button" disabled={locked || current === null || !definition || !reason.trim() || Boolean(fixtureMode)} onClick={() => void reviewTransition()}>Review shared-web transition</button>

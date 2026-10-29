@@ -103,6 +103,15 @@ to echo them, and persists that observed identity on the same explicit generatio
 Product-local preview slugs are not substitutes for Launchplane's canonical
 preview and generation identities.
 
+PostgreSQL provisioning performs inert template, configuration and environment
+checks before publishing pending preview and deploying generation evidence.
+That evidence is atomically bound to the current profile before the first provider
+effect and prevents resource declarations changing during provisioning. A failed
+preflight returns a failed operation without creating resource evidence or
+replacing a serving preview's evidence. Destroy uses the same profile check and
+serialization before its first provider effect; an already destroyed record is
+an idempotent success.
+
 Because product callers pin reusable workflows while the service deploys
 independently, add any future destroy outcome to the `reusable-preview-feedback-status.yml` allowlist
 and roll caller pins forward before the deployed service starts emitting it.

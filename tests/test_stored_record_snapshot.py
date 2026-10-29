@@ -39,8 +39,9 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         self.store.write_product_profile_record(profile)
         legacy = profile.model_dump(mode="json")
         legacy["preview"]["transport_extension"] = "verireel-postgres"
-        for key in ("generated_secret_env", "preview_url_env_keys", "preview_domain_env_keys"):
-            legacy["preview"].pop(key, None)
+        legacy["preview"].pop("generated_secret_env", None)
+        legacy["preview"]["preview_url_env_keys"] = []
+        legacy["preview"]["preview_domain_env_keys"] = []
         with self.store._engine.begin() as connection:
             connection.execute(
                 update(LaunchplaneProductProfileRow)
@@ -54,10 +55,17 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         )
         restored = self.store._read_product_profile_payload(scrubbed)
         self.assertEqual(
-            restored.preview.generated_secret_env, profile.preview.generated_secret_env
+            restored.preview.generated_secret_env, legacy["preview"].get("generated_secret_env", {})
         )
-        self.assertEqual(restored.preview.transport_extension, profile.preview.transport_extension)
-        self.assertEqual(self.store.read_product_profile_record(profile.product), profile)
+        self.assertEqual(
+            restored.preview.transport_extension, legacy["preview"]["transport_extension"]
+        )
+        self.assertEqual(
+            self.store.read_product_profile_record(profile.product),
+            LaunchplaneProductProfileRecord.model_validate(
+                legacy, context={"stored_product_profile": True}
+            ),
+        )
 
     def setUp(self) -> None:
         self.directory = TemporaryDirectory()

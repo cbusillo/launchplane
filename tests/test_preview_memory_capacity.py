@@ -300,6 +300,7 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
         ):
             with self.assertRaises(memory_capacity.PreviewMemoryCapacityRefused):
                 execute_postgres_preview_refresh(
+                    prepare_preview=lambda: None,
                     record_store=_preview_store(),
                     profile=_driver_profile(),
                     control_plane_root=Path("."),

@@ -11,6 +11,8 @@ import click
 from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
+from control_plane.contracts.postgres_preview import effective_postgres_preview_profile
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import DokployTargetDefinition
 from control_plane.workflows.postgres_preview import PostgresPreviewDestroyRequest
@@ -36,7 +38,10 @@ from tests.test_generic_web_preview_extensions import _driver_profile
 
 
 def _preview_store(profile: object = None) -> object:
-    return SimpleNamespace(list_product_profile_records=lambda: (profile or _driver_profile(),))
+    return SimpleNamespace(
+        list_product_profile_records=lambda: (profile or _driver_profile(),),
+        list_preview_records=lambda: (),
+    )
 
 
 def _template_target() -> DokployTargetDefinition:
@@ -80,7 +85,10 @@ class PostgresPreviewDriverTests(unittest.TestCase):
         other = profile.model_copy(update={"product": "other"})
         for store in (
             object(),
-            SimpleNamespace(list_product_profile_records=lambda: (profile, other)),
+            SimpleNamespace(
+                list_product_profile_records=lambda: (profile, other),
+                list_preview_records=lambda: (),
+            ),
         ):
             with (
                 self.subTest(store=store),
@@ -90,6 +98,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
             ):
                 with self.assertRaises(PostgresPreviewRefreshConfigError):
                     execute_postgres_preview_refresh(
+                        prepare_preview=lambda: None,
                         record_store=store,
                         profile=profile,
                         control_plane_root=Path("."),
@@ -97,6 +106,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
                     )
                 with self.assertRaises(PostgresPreviewRefreshConfigError):
                     execute_postgres_preview_destroy(
+                        prepare_destroy=lambda: None,
                         record_store=store,
                         profile=profile,
                         control_plane_root=Path("."),
@@ -130,7 +140,11 @@ class PostgresPreviewDriverTests(unittest.TestCase):
         restored = ProductPreviewProfile.model_validate(
             legacy, context={"stored_product_profile": True}
         )
-        self.assertEqual(restored, _driver_profile().preview)
+        self.assertEqual(restored.transport_extension, legacy["transport_extension"])
+        profile = _driver_profile().model_copy(update={"preview": restored})
+        self.assertEqual(
+            effective_postgres_preview_profile(profile).preview, _driver_profile().preview
+        )
 
     def test_generated_secrets_cannot_replace_managed_preview_keys(self) -> None:
         from control_plane.contracts.product_profile_record import ProductPreviewProfile
@@ -138,8 +152,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
         payload = _driver_profile().preview.model_dump(mode="json")
         for key in (
             "DATABASE_URL",
-            "GH_TOKEN",
-            "DOKPLOY_TOKEN",
+            *PLATFORM_CREDENTIAL_KEYS,
             "LAUNCHPLANE_PRODUCT",
             "invalid key",
             *payload["preview_url_env_keys"],
@@ -168,6 +181,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
             self.assertRaises(PostgresPreviewRefreshConfigError),
         ):
             execute_postgres_preview_refresh(
+                prepare_preview=lambda: None,
                 record_store=_preview_store(),
                 control_plane_root=Path("."),
                 request=_refresh_request(),
@@ -248,6 +262,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
                     with self.assertRaises(PostgresPreviewRefreshConfigError):
                         if operation == "destroy":
                             execute_postgres_preview_destroy(
+                                prepare_destroy=lambda: None,
                                 record_store=_preview_store(),
                                 profile=_driver_profile(),
                                 control_plane_root=Path(directory),
@@ -261,6 +276,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
                             )
                         else:
                             execute_postgres_preview_refresh(
+                                prepare_preview=lambda: None,
                                 record_store=_preview_store(),
                                 profile=_driver_profile(),
                                 control_plane_root=Path(directory),
@@ -344,6 +360,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
             ) as build_command,
         ):
             result = execute_postgres_preview_destroy(
+                prepare_destroy=lambda: None,
                 record_store=_preview_store(),
                 profile=_driver_profile(),
                 control_plane_root=Path(temporary_directory_name),
@@ -363,6 +380,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
             ):
                 drop.reset_mock()
                 refused = execute_postgres_preview_destroy(
+                    prepare_destroy=lambda: None,
                     record_store=_preview_store(),
                     profile=_driver_profile(),
                     control_plane_root=Path(temporary_directory_name),
@@ -386,6 +404,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
                     drop.reset_mock()
                     build_command.reset_mock()
                     retried = execute_postgres_preview_destroy(
+                        prepare_destroy=lambda: None,
                         record_store=_preview_store(),
                         profile=_driver_profile(),
                         control_plane_root=Path(temporary_directory_name),
@@ -471,6 +490,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
                 ) as database_cleanup,
             ):
                 result = execute_postgres_preview_destroy(
+                    prepare_destroy=lambda: None,
                     record_store=_preview_store(),
                     profile=_driver_profile(),
                     control_plane_root=Path(directory),
@@ -737,6 +757,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
         ):
             with self.assertRaises(PostgresPreviewRefreshConfigError) as refusal:
                 execute_postgres_preview_refresh(
+                    prepare_preview=lambda: None,
                     record_store=_preview_store(),
                     profile=_driver_profile(),
                     control_plane_root=Path("."),
@@ -764,6 +785,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
         ):
             with self.assertRaises(PostgresPreviewRefreshTransportError):
                 execute_postgres_preview_refresh(
+                    prepare_preview=lambda: None,
                     record_store=_preview_store(),
                     profile=_driver_profile(),
                     control_plane_root=Path(temporary_directory_name),
@@ -801,6 +823,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
         ):
             with self.assertRaises(PostgresPreviewRefreshTransportError):
                 execute_postgres_preview_refresh(
+                    prepare_preview=lambda: None,
                     record_store=_preview_store(),
                     profile=_driver_profile(),
                     control_plane_root=Path(temporary_directory_name),
@@ -842,6 +865,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
         ):
             with self.assertRaises(PostgresPreviewRefreshTransportError):
                 execute_postgres_preview_refresh(
+                    prepare_preview=lambda: None,
                     record_store=_preview_store(),
                     profile=_driver_profile(),
                     control_plane_root=Path(temporary_directory_name),
@@ -877,6 +901,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
         ):
             with self.assertRaises(PostgresPreviewRefreshTransportError):
                 execute_postgres_preview_refresh(
+                    prepare_preview=lambda: None,
                     record_store=_preview_store(),
                     profile=_driver_profile(),
                     control_plane_root=Path(directory),
@@ -974,6 +999,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
             ) as health,
         ):
             result = execute_postgres_preview_refresh(
+                prepare_preview=lambda: None,
                 record_store=_preview_store(profile),
                 profile=profile,
                 control_plane_root=Path(temporary_directory_name),
@@ -1043,6 +1069,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
             ) as run_command,
         ):
             result = execute_postgres_preview_refresh(
+                prepare_preview=lambda: None,
                 record_store=_preview_store(),
                 profile=_driver_profile(),
                 control_plane_root=Path(temporary_directory_name),
@@ -1130,6 +1157,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
             ),
         ):
             result = execute_postgres_preview_refresh(
+                prepare_preview=lambda: None,
                 record_store=_preview_store(),
                 profile=_driver_profile(),
                 control_plane_root=Path(temporary_directory_name),

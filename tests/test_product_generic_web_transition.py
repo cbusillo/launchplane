@@ -74,6 +74,42 @@ def draft(record: LaunchplaneProductProfileRecord) -> dict[str, object]:
 
 
 class GenericWebTransitionTests(unittest.TestCase):
+    def test_legacy_transition_reviews_effective_endpoint_without_rewriting_runtime_settings(
+        self,
+    ) -> None:
+        from control_plane.contracts.postgres_preview import effective_postgres_preview_profile
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        payload = _driver_profile().model_dump(mode="json")
+        payload["runtime_port"] = 8081
+        payload["health_path"] = "/ready"
+        payload["preview"]["transport_extension"] = "verireel-postgres"
+        payload["preview"]["domain_certificate_type"] = "letsencrypt"
+        payload["preview"].pop("generated_secret_env")
+        before = LaunchplaneProductProfileRecord.model_validate(
+            payload, context={"stored_product_profile": True}
+        )
+        raw = before.model_dump_json()
+        request = ProductGenericWebTransitionRequest.model_validate(
+            {
+                "lanes": [
+                    {"context": lane.context, "instance": lane.instance, "extensions": {}}
+                    for lane in before.lanes
+                ],
+                "reason": "Retain preview declarations",
+            }
+        )
+        plan, after = build_generic_web_transition_plan(before, request)
+        effective = effective_postgres_preview_profile(before)
+        self.assertEqual(before.model_dump_json(), raw)
+        self.assertEqual(after.preview, effective.preview)
+        self.assertEqual(plan.preview_endpoint_before.runtime_port, effective.runtime_port)
+        self.assertEqual(plan.preview_endpoint_before.health_path, effective.health_path)
+        self.assertEqual(plan.preview_endpoint_after.runtime_port, before.runtime_port)
+        self.assertEqual(plan.preview_endpoint_after.health_path, before.health_path)
+        self.assertEqual(after.runtime_port, before.runtime_port)
+        self.assertEqual(after.health_path, before.health_path)
+
     def test_declared_hooks_replace_only_driver_extension_fields_and_bind_review(self) -> None:
         before = profile()
         request = ProductGenericWebTransitionRequest.model_validate(draft(before))

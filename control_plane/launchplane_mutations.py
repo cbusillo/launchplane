@@ -11,6 +11,7 @@ from control_plane.contracts.preview_mutation_request import (
 )
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.workflows.launchplane import (
     PreviewMutationRecordStore,
     apply_generation_failed_transition,
@@ -49,6 +50,7 @@ class _PreviewGenerationEvidenceWriteStore(Protocol):
         *,
         preview_record: PreviewRecord,
         generation_record: PreviewGenerationRecord,
+        expected_profile: LaunchplaneProductProfileRecord | None = None,
     ) -> tuple[object, object]: ...
 
 
@@ -291,12 +293,15 @@ def apply_launchplane_generation_evidence(
     record_store: LaunchplaneMutationStore,
     preview_request: PreviewMutationRequest,
     generation_request: PreviewGenerationMutationRequest,
+    expected_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> dict[str, object]:
     _validate_preview_generation_request_alignment(
         preview_request=preview_request,
         generation_request=generation_request,
     )
     bundled_write = getattr(record_store, "write_preview_generation_evidence_records", None)
+    if expected_profile is not None and not callable(bundled_write):
+        raise ValueError("Profile-bound preview preparation requires bundled evidence storage.")
     if callable(bundled_write):
         preview_record = build_launchplane_preview_from_request(
             control_plane_root_path=control_plane_root_path,
@@ -340,6 +345,7 @@ def apply_launchplane_generation_evidence(
         ).write_preview_generation_evidence_records(
             preview_record=transitioned_preview,
             generation_record=generation_record,
+            **({"expected_profile": expected_profile} if expected_profile is not None else {}),
         )
     else:
         generation_path = record_store.write_preview_generation_record(generation_record)

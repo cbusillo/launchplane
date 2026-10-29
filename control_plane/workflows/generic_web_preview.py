@@ -52,6 +52,10 @@ from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
+from control_plane.preview_namespaces import (
+    effective_preview_app_name_prefix as effective_preview_app_name_prefix,
+    preview_product_operation_key,
+)
 from control_plane import runtime_platform_credentials
 from control_plane.dokploy import memory_capacity
 from control_plane.dokploy import api as dokploy_api
@@ -439,10 +443,6 @@ def _destroy_request_with_resolved_preview_slug(
     )
 
 
-def effective_preview_app_name_prefix(*, profile: LaunchplaneProductProfileRecord) -> str:
-    return profile.preview.app_name_prefix.strip() or f"{profile.product}-preview"
-
-
 def preview_application_name(
     *, app_name_prefix: str, preview_slug: str, app_name_suffix: str = ""
 ) -> str:
@@ -640,6 +640,7 @@ def _ensure_domain(
     preview_host: str,
     runtime_port: int,
     certificate_type: Literal["none", "letsencrypt"],
+    https: bool | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     raw_domains = dokploy_api.dokploy_request(
         host=host,
@@ -666,7 +667,7 @@ def _ensure_domain(
         "path": "/",
         "internalPath": "/",
         "port": runtime_port,
-        "https": certificate_type == "letsencrypt",
+        "https": certificate_type == "letsencrypt" if https is None else https,
         "applicationId": application_id,
         "certificateType": certificate_type,
         "customCertResolver": None,
@@ -1379,7 +1380,7 @@ def serialize_generic_web_product_operation(
     serialize = getattr(record_store, "serialize_preview_refresh", None)
     if callable(serialize):
         with serialize(
-            preview_id=f"product-retirement:{product}", dedicated=True, shared=not exclusive
+            preview_id=preview_product_operation_key(product), dedicated=True, shared=not exclusive
         ):
             yield
     else:

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 from control_plane.generic_web_onboarding import GenericWebOnboardingIntent
+from control_plane.preview_namespaces import (
+    preview_resource_declaration_changed,
+    preview_product_operation_key,
+    validate_preview_profile_writes,
+    require_unique_preview_namespaces,
+)
 from control_plane.timestamps import utc_now_timestamp as _utc_now_timestamp
 
 from control_plane.contracts.public_hosts import retained_hostname_identity
@@ -5831,7 +5837,12 @@ class PostgresRecordStore(HumanSessionStore):
     def _read_payload(*, model_type: type[RecordModel], payload: PayloadDict) -> RecordModel:
         if model_type is LaunchplaneProductProfileRecord:
             return cast(RecordModel, PostgresRecordStore._read_product_profile_payload(payload))
-        return model_type.model_validate(payload)
+        return model_type.model_validate(
+            payload,
+            context={"stored_product_profile": True}
+            if model_type is ProductRetirementRecord
+            else None,
+        )
 
     def _write_row(self, row: Base) -> None:
         with self._session_factory() as session:
@@ -6329,6 +6340,66 @@ class PostgresRecordStore(HumanSessionStore):
             session.merge(row)
         self._after_product_authority_bundle_step(step_name)
 
+    def _require_preview_profile_in_session(
+        self, session: Any, expected_profile: LaunchplaneProductProfileRecord
+    ) -> None:
+        self._lock_product_authority_bundle_write(session)
+        row = session.get(LaunchplaneProductProfileRow, expected_profile.product)
+        if row is None or self._read_product_profile_payload(row.payload) != expected_profile:
+            raise ValueError("Product profile changed before preview preparation.")
+        require_unique_preview_namespaces(
+            expected_profile,
+            (
+                self._read_product_profile_payload(row.payload)
+                for row in session.scalars(select(LaunchplaneProductProfileRow))
+            ),
+            retained_contexts=set(
+                session.scalars(
+                    select(LaunchplanePreviewRow.context).where(
+                        LaunchplanePreviewRow.state != "destroyed"
+                    )
+                )
+            ),
+        )
+
+    def _validate_preview_profile_writes_in_session(
+        self, session: Any, replacements: tuple[LaunchplaneProductProfileRecord, ...]
+    ) -> None:
+        if not replacements:
+            return
+        profiles = tuple(
+            self._read_product_profile_payload(row.payload)
+            for row in session.scalars(select(LaunchplaneProductProfileRow))
+        )
+        validate_preview_profile_writes(
+            profiles=profiles,
+            replacements=replacements,
+            previews=(
+                PreviewRecord.model_validate(row.payload)
+                for row in session.scalars(
+                    select(LaunchplanePreviewRow).where(LaunchplanePreviewRow.state != "destroyed")
+                )
+            ),
+        )
+        if self._engine.dialect.name == "postgresql":
+            current = {profile.product: profile for profile in profiles}
+            for replacement in sorted(replacements, key=lambda item: item.product):
+                if not preview_resource_declaration_changed(
+                    current.get(replacement.product), replacement
+                ):
+                    continue
+                key = preview_product_operation_key(replacement.product)
+                if self._preview_refresh_is_held(key, exclusive=True):
+                    continue
+                excluded = session.scalar(
+                    text("SELECT pg_try_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                    {"lock_name": self._preview_refresh_lock_name(key)},
+                )
+                if excluded is not True:
+                    raise ValueError(
+                        "A preview operation is still running; finish it before changing preview resource declarations."
+                    )
+
     def _product_profile_row(
         self, record: LaunchplaneProductProfileRecord
     ) -> LaunchplaneProductProfileRow:
@@ -6739,6 +6810,7 @@ class PostgresRecordStore(HumanSessionStore):
             if not write_transaction_started:
                 self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            self._validate_preview_profile_writes_in_session(session, bundle.product_profiles)
             reservation_reader = getattr(
                 self._provider_evidence_context, "reservation_reader", None
             )
@@ -19858,9 +19930,16 @@ class PostgresRecordStore(HumanSessionStore):
             "A retired preview requires fresh generation evidence before it can resume."
         )
 
-    def write_preview_record(self, record: PreviewRecord) -> None:
+    def write_preview_record(
+        self,
+        record: PreviewRecord,
+        *,
+        expected_profile: LaunchplaneProductProfileRecord | None = None,
+    ) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if expected_profile is not None:
+                self._require_preview_profile_in_session(session, expected_profile)
             self._lock_preview_authority_write(session, preview=record)
             record = self._check_preview_retirement_write(session, record)
             session.merge(
@@ -19950,6 +20029,10 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.commit()
 
+    @staticmethod
+    def _preview_refresh_lock_name(preview_id: str) -> str:
+        return f"launchplane-preview-refresh:{preview_id}"
+
     @contextmanager
     def serialize_preview_refresh(
         self, *, preview_id: str, dedicated: bool = False, shared: bool = False
@@ -19973,7 +20056,7 @@ class PostgresRecordStore(HumanSessionStore):
             lock_function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
             session.execute(
                 text(f"select {lock_function}(hashtextextended(:lock_name, 0))"),
-                {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
+                {"lock_name": self._preview_refresh_lock_name(normalized_preview_id)},
             )
             held = getattr(self._preview_execution_context, "held", ())
             self._preview_execution_context.held = (
@@ -20014,9 +20097,12 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         preview_record: PreviewRecord,
         generation_record: PreviewGenerationRecord,
+        expected_profile: LaunchplaneProductProfileRecord | None = None,
     ) -> tuple[None, None]:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if expected_profile is not None:
+                self._require_preview_profile_in_session(session, expected_profile)
             self._lock_preview_authority_write(
                 session, preview=preview_record, generation=generation_record
             )
@@ -28986,6 +29072,7 @@ class PostgresRecordStore(HumanSessionStore):
             # Same order as bundle writes, which may check context ownership.
             self._lock_product_authority_bundle_write(session)
             self._lock_landing_authority(session, landing_authority.product_profile(record.product))
+            self._validate_preview_profile_writes_in_session(session, (record,))
             session.merge(self._product_profile_row(record))
             session.commit()
 
@@ -29316,6 +29403,7 @@ class PostgresRecordStore(HumanSessionStore):
                     session.delete(reservation_row)
                     session.commit()
                 return ProductProfileCompareWriteResult(status="history_conflict")
+        self._validate_preview_profile_writes_in_session(session, (replacement_record,))
         row.display_name = replacement_record.display_name
         row.repository = replacement_record.repository
         row.driver_id = replacement_record.driver_id
@@ -29874,6 +29962,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "source": "service:product-retirement",
                 }
             )
+            self._validate_preview_profile_writes_in_session(session, (retired,))
             session.merge(self._product_profile_row(retired))
             session.add(
                 LaunchplaneProductRetirementRow(

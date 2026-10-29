@@ -6,6 +6,8 @@ from typing import ContextManager, Protocol, cast
 
 from pydantic import Field, model_validator
 
+from control_plane.preview_namespaces import POSTGRES_PREVIEW_TRANSPORTS
+
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
@@ -28,6 +30,9 @@ from control_plane.launchplane_mutations import (
     resolve_next_launchplane_preview_generation_identity,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.drivers.generic_web_preview_dispatch import _generic_web_preview_anchor_pr_url
+from control_plane.workflows.launchplane import build_preview_record_from_request
 from control_plane.lane_movement import (
     LaneBuild,
     LaneMovementRefused,
@@ -44,6 +49,12 @@ from control_plane.workflows.postgres_preview import (
     execute_postgres_preview_destroy,
     execute_postgres_preview_refresh,
 )
+
+
+class _ProfileBoundPreviewStore(Protocol):
+    def write_preview_record(
+        self, record: PreviewRecord, *, expected_profile: LaunchplaneProductProfileRecord
+    ) -> object: ...
 
 
 class _ProductProfileStore(Protocol):
@@ -131,7 +142,7 @@ def apply_postgres_preview_refresh_result(
                 if (
                     not profile.is_active
                     or profile.driver_id != "generic-web"
-                    or profile.preview.transport_extension != "postgres"
+                    or profile.preview.transport_extension not in POSTGRES_PREVIEW_TRANSPORTS
                     or profile.preview.context != request.refresh.context
                     or profile.repository.partition("/")[2] != request.refresh.anchor_repo
                 ):
@@ -169,11 +180,52 @@ def apply_postgres_preview_refresh_result(
             anchor_repo=request.refresh.anchor_repo,
             anchor_pr_number=request.refresh.anchor_pr_number,
         )
+        prepared = False
+
+        def prepare_preview() -> None:
+            nonlocal prepared
+            now = utc_now_timestamp()
+            apply_launchplane_generation_evidence(
+                control_plane_root_path=control_plane_root,
+                record_store=cast(LaunchplaneMutationStore, record_store),
+                expected_profile=execution_profile,
+                preview_request=PreviewMutationRequest(
+                    context=request.refresh.context,
+                    anchor_repo=request.refresh.anchor_repo,
+                    anchor_pr_number=request.refresh.anchor_pr_number,
+                    anchor_pr_url=request.refresh.anchor_pr_url,
+                    canonical_url=request.refresh.preview_url
+                    or _postgres_preview_url_for_failed_records(request=request.refresh),
+                    state="pending",
+                    created_at=now,
+                    updated_at=now,
+                    eligible_at=now,
+                ),
+                generation_request=PreviewGenerationMutationRequest(
+                    context=request.refresh.context,
+                    anchor_repo=request.refresh.anchor_repo,
+                    anchor_pr_number=request.refresh.anchor_pr_number,
+                    anchor_pr_url=request.refresh.anchor_pr_url,
+                    anchor_head_sha=request.refresh.anchor_head_sha,
+                    sequence=generation_identity.sequence,
+                    generation_id=generation_identity.generation_id,
+                    state="deploying",
+                    requested_reason="external_preview_refresh",
+                    requested_at=now,
+                    resolved_manifest_fingerprint=_postgres_preview_manifest_fingerprint(
+                        request.refresh
+                    ),
+                    artifact_id=request.refresh.image_reference,
+                ),
+            )
+            prepared = True
+
         try:
             driver_result = execute_postgres_preview_refresh(
                 record_store=record_store,
                 control_plane_root=control_plane_root,
                 request=request.refresh,
+                prepare_preview=prepare_preview,
                 preview_id=generation_identity.preview_id,
                 preview_generation_id=generation_identity.generation_id,
                 profile=execution_profile,
@@ -192,6 +244,8 @@ def apply_postgres_preview_refresh_result(
                 preview_url=_postgres_preview_url_for_failed_records(request=request.refresh),
                 error_message=error_message,
             )
+        if not prepared:
+            return {}, driver_result.model_dump(mode="json")
         records = apply_postgres_preview_refresh_records(
             control_plane_root=control_plane_root,
             record_store=record_store,
@@ -209,12 +263,85 @@ def apply_postgres_preview_destroy_result(
     request: PostgresPreviewDestroyEnvelope,
     execution_profile: LaunchplaneProductProfileRecord,
 ) -> tuple[dict[str, object], dict[str, object]]:
+    preview_id = resolve_launchplane_preview_id(
+        context=request.destroy.context,
+        anchor_repo=request.destroy.anchor_repo,
+        anchor_pr_number=request.destroy.anchor_pr_number,
+    )
+    with _preview_refresh_serialization(
+        record_store=record_store, preview_id=preview_id, dedicated=True
+    ):
+        return _apply_postgres_preview_destroy_result_unserialized(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=request,
+            execution_profile=execution_profile,
+        )
+
+
+def _apply_postgres_preview_destroy_result_unserialized(
+    *,
+    control_plane_root: Path,
+    record_store: object,
+    request: PostgresPreviewDestroyEnvelope,
+    execution_profile: LaunchplaneProductProfileRecord,
+) -> tuple[dict[str, object], dict[str, object]]:
+    existing = find_preview_record(
+        record_store=cast(PreviewMutationRecordStore, record_store),
+        context_name=request.destroy.context,
+        anchor_repo=request.destroy.anchor_repo,
+        anchor_pr_number=request.destroy.anchor_pr_number,
+    )
+    if existing is not None and existing.state == "destroyed":
+        now = utc_now_timestamp()
+        return {"transition": "destroyed"}, PostgresPreviewDestroyResult(
+            destroy_status="pass",
+            destroy_started_at=now,
+            destroy_finished_at=now,
+            application_name="",
+            application_id="",
+            preview_url=existing.canonical_url,
+        ).model_dump(mode="json")
+    prepared = False
+
+    def prepare_destroy() -> None:
+        nonlocal existing, prepared
+        if existing is None:
+            now = utc_now_timestamp()
+            existing = build_preview_record_from_request(
+                control_plane_root=control_plane_root,
+                record_store=cast(PreviewMutationRecordStore, record_store),
+                request=PreviewMutationRequest(
+                    context=request.destroy.context,
+                    anchor_repo=request.destroy.anchor_repo,
+                    anchor_pr_number=request.destroy.anchor_pr_number,
+                    anchor_pr_url=request.destroy.anchor_pr_url
+                    or _generic_web_preview_anchor_pr_url(
+                        request=None,
+                        profile=execution_profile,
+                        anchor_pr_number=request.destroy.anchor_pr_number,
+                    ),
+                    canonical_url=f"https://{request.destroy.preview_slug}.preview-config-missing.launchplane.invalid",
+                    state="pending",
+                    created_at=now,
+                    updated_at=now,
+                    eligible_at=now,
+                ),
+            )
+        cast(_ProfileBoundPreviewStore, record_store).write_preview_record(
+            existing, expected_profile=execution_profile
+        )
+        prepared = True
+
     driver_result = execute_postgres_preview_destroy(
         record_store=record_store,
         control_plane_root=control_plane_root,
         request=request.destroy,
+        prepare_destroy=prepare_destroy,
         profile=execution_profile,
     )
+    if not prepared:
+        return {}, driver_result.model_dump(mode="json")
     records = apply_postgres_preview_destroy_records(
         record_store=record_store,
         request=request.destroy,

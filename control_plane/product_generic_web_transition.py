@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.contracts.postgres_preview import (
     PreviewSecretEncoding,
+    effective_postgres_preview_profile,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -65,11 +66,29 @@ class ProductGenericWebTransitionRequest(BaseModel):
         return self
 
 
+class GenericWebPreviewEndpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    runtime_port: int
+    health_path: str
+    certificate_type: Literal["none", "letsencrypt"]
+
+
+def _preview_endpoint(profile: LaunchplaneProductProfileRecord) -> GenericWebPreviewEndpoint:
+    effective = effective_postgres_preview_profile(profile)
+    return GenericWebPreviewEndpoint(
+        runtime_port=effective.runtime_port,
+        health_path=effective.health_path,
+        certificate_type=effective.preview.domain_certificate_type,
+    )
+
+
 class ProductGenericWebTransitionPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product: str
     driver_before: str
+    preview_endpoint_before: GenericWebPreviewEndpoint
+    preview_endpoint_after: GenericWebPreviewEndpoint
     driver_after: Literal["generic-web"] = "generic-web"
     lanes: tuple[GenericWebLaneDeclaration, ...]
     preview: GenericWebPreviewDeclaration
@@ -102,7 +121,11 @@ def build_generic_web_transition_plan(
         for lane in lanes
     ):
         raise ValueError("The testing verification extension requires the recorded testing lane.")
-    preview = profile.preview
+    preview = (
+        effective_postgres_preview_profile(profile).preview
+        if profile.preview.transport_extension == "verireel-postgres"
+        else profile.preview
+    )
     if request.preview is not None:
         updates = request.preview.model_dump(exclude_unset=True, exclude={"generic_web_extensions"})
         if request.preview.generic_web_extensions is not None:
@@ -156,6 +179,8 @@ def build_generic_web_transition_plan(
         ProductGenericWebTransitionPlan(
             product=profile.product,
             driver_before=profile.driver_id,
+            preview_endpoint_before=_preview_endpoint(profile),
+            preview_endpoint_after=_preview_endpoint(replacement),
             lanes=lane_declarations,
             preview=preview_declaration,
             changed=profile != replacement,

@@ -332,11 +332,11 @@ def _generic_web_preview_destroy_anchor_pr_number(
 
 def _generic_web_preview_anchor_pr_url(
     *,
-    request: GenericWebPreviewRefreshRequest,
+    request: GenericWebPreviewRefreshRequest | None,
     profile: LaunchplaneProductProfileRecord,
     anchor_pr_number: int,
 ) -> str:
-    if request.anchor_pr_url.strip():
+    if request is not None and request.anchor_pr_url.strip():
         return request.anchor_pr_url.strip()
     return f"https://github.com/{profile.repository.strip()}/pull/{anchor_pr_number}"
 

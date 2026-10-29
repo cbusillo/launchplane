@@ -4,6 +4,8 @@ from pathlib import Path
 
 import click
 
+from control_plane.preview_namespaces import POSTGRES_PREVIEW_TRANSPORTS
+
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.drivers.generic_web_preview_dispatch import (
     _generic_web_preview_anchor_head_sha,
@@ -223,4 +225,7 @@ def apply_generic_web_preview_driver_destroy(
 
 
 def _uses_postgres_transport(profile: LaunchplaneProductProfileRecord) -> bool:
-    return profile.driver_id == "generic-web" and profile.preview.transport_extension == "postgres"
+    return (
+        profile.driver_id == "generic-web"
+        and profile.preview.transport_extension in POSTGRES_PREVIEW_TRANSPORTS
+    )
