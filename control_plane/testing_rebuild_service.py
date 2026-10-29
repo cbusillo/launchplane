@@ -1613,46 +1613,46 @@ class NativeTestingRebuildExecution:
     def remove_old_containers(self) -> None:
         if not isinstance(self.intent.old, UnavailableTestingPredecessor):
             return
-        identifiers = self.intent.retained.get("container_ids")
-        if identifiers is None:
-            proof = retained_copy_operation(
-                host=self.host,
-                token=self.token,
-                server_id=self.intent.server_id,
-                payload=self.retained_payload("read"),
-            )
-            if proof.get("observation_sha256") != self.intent.old.observation_sha256:
-                raise NativeTestingRebuildPending(
-                    "The original container IDs cannot be recovered from admitted custody."
-                )
-            identifiers = proof.get("container_ids", [])
-        if not identifiers:
-            if self.intent.old.availability == "stopped":
-                raise NativeTestingRebuildPending(
-                    "The admitted stopped container IDs are unavailable."
-                )
-            return
-
-        def read(mode: str) -> dict[str, Any]:
-            proof = retained_copy_operation(
-                host=self.host,
-                token=self.token,
-                server_id=self.intent.server_id,
-                payload={**self.retained_payload(mode), "container_ids": identifiers},
-            )
-            if proof.get("availability") == "changed":
-                raise NativeTestingRebuildAdmissionChanged(
-                    "The admitted stopped testing containers changed."
-                )
-            return proof
-
-        def absent() -> bool:
-            return read("removal-readback").get("availability") == "absent"
-
-        def remove() -> None:
-            read("remove")
-
         if not self.removed_old_containers:
+            identifiers = self.intent.retained.get("container_ids")
+            if identifiers is None:
+                proof = retained_copy_operation(
+                    host=self.host,
+                    token=self.token,
+                    server_id=self.intent.server_id,
+                    payload=self.retained_payload("read"),
+                )
+                if proof.get("observation_sha256") != self.intent.old.observation_sha256:
+                    raise NativeTestingRebuildPending(
+                        "The original container IDs cannot be recovered from admitted custody."
+                    )
+                identifiers = proof.get("container_ids", [])
+            if not identifiers:
+                if self.intent.old.availability == "stopped":
+                    raise NativeTestingRebuildPending(
+                        "The admitted stopped container IDs are unavailable."
+                    )
+                return
+
+            def read(mode: str) -> dict[str, Any]:
+                proof = retained_copy_operation(
+                    host=self.host,
+                    token=self.token,
+                    server_id=self.intent.server_id,
+                    payload={**self.retained_payload(mode), "container_ids": identifiers},
+                )
+                if proof.get("availability") == "changed":
+                    raise NativeTestingRebuildAdmissionChanged(
+                        "The admitted stopped testing containers changed."
+                    )
+                return proof
+
+            def absent() -> bool:
+                return read("removal-readback").get("availability") == "absent"
+
+            def remove() -> None:
+                read("remove")
+
             self.run_effect(
                 "remove-old-containers",
                 absent,
