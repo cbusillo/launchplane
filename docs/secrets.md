@@ -211,8 +211,9 @@ For an existing read-only import source, the same reference route accepts
 `create_missing: true` with `allowance_kind: "read_only_source"`. It selects only
 the already configured exact-testing-lane binding and requires a recorded
 `read_only_source` allowance with grant evidence for each recognized integration.
-Shared-safe bindings additionally need their own read-only sharing reason and
-evidence. Active key-safety rules, exact review, atomic metadata checks,
+Keys with no recognized integration are refused. Shared-safe bindings additionally
+need their own read-only sharing reason and evidence. Active key-safety rules,
+exact review, atomic metadata checks,
 idempotency and readback still apply. This records a pointer without reading,
 copying, reclassifying or creating a credential. It neither installs an importer
 nor syncs runtime settings, probes privileges or starts an import. Actual

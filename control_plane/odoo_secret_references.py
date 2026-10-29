@@ -42,6 +42,7 @@ from control_plane.storage.product_authority_bundle import (
 )
 
 ReferenceAllowanceKind = Literal["dev_store", "read_only_source"]
+_READ_ONLY_SOURCE_BINDING_MESSAGE = "Use this lane's existing qualified read-only source binding; reference creation accepts no credential value."
 
 
 class SecretReferenceStore(SiteSecretDeliveryStore, Protocol):
@@ -163,6 +164,7 @@ def selected_config_parameter_bindings(
     keys: tuple[str, ...],
     *,
     create_missing: bool = False,
+    allowance_kind: ReferenceAllowanceKind = "dev_store",
 ) -> dict[str, SecretBinding]:
     parameters = {item.key: item for item in record.config_parameters}
     records = {item.secret_id: item for item in authority.metadata.records}
@@ -198,7 +200,9 @@ def selected_config_parameter_bindings(
                 or (secret.scope == "context") != (not binding.instance)
             ):
                 raise ConfigParameterSecretReferenceError(
-                    f"Configure the lane's managed-secret field {env_key}, enter its value privately, then review this reference again.",
+                    _READ_ONLY_SOURCE_BINDING_MESSAGE
+                    if allowance_kind == "read_only_source"
+                    else f"Configure the lane's managed-secret field {env_key}, enter its value privately, then review this reference again.",
                     env_keys=env_keys,
                 )
         # Delivery has deterministic tie breaking. A repair must not endorse competing
@@ -280,21 +284,18 @@ def _new_testing_reference_authority(
                 "This parameter shares a runtime binding name with another parameter. Choose a distinct parameter name.",
             )
         binding = selected[key]
-        if (
-            binding.instance != record.instance
-            or binding.context != record.context
+        exact_lane = (binding.context, binding.instance) == (record.context, record.instance)
+        if allowance_kind == "dev_store" and (
+            not exact_lane
             or (
-                allowance_kind == "dev_store"
-                and (
-                    binding.declared_secret_class not in {"testing", "non_prod"}
-                    or binding.value_source != "supplied"
-                    or not any(
-                        requirement.binding_key == env_key
-                        and requirement.integration == RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
-                        and (requirement.context, requirement.instance)
-                        == (record.context, record.instance)
-                        for requirement in profile.expected_config.managed_secret_bindings
-                    )
+                binding.declared_secret_class not in {"testing", "non_prod"}
+                or binding.value_source != "supplied"
+                or not any(
+                    requirement.binding_key == env_key
+                    and requirement.integration == RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+                    and (requirement.context, requirement.instance)
+                    == (record.context, record.instance)
+                    for requirement in profile.expected_config.managed_secret_bindings
                 )
             )
         ):
@@ -303,7 +304,8 @@ def _new_testing_reference_authority(
                 "Declare this exact lane's managed-secret field and enter an independently supplied testing credential. Copied or provider-adopted credentials cannot create a testing reference.",
             )
         if allowance_kind == "read_only_source" and (
-            binding.declared_secret_class not in {"testing", "non_prod", "shared_safe"}
+            not exact_lane
+            or binding.declared_secret_class not in {"testing", "non_prod", "shared_safe"}
             or (
                 binding.declared_secret_class == "shared_safe"
                 and (
@@ -315,7 +317,7 @@ def _new_testing_reference_authority(
         ):
             raise TestingSecretReferenceRefusal(
                 "read_only_source_credential_required",
-                "Use this lane's existing qualified read-only source binding; reference creation accepts no credential value.",
+                _READ_ONLY_SOURCE_BINDING_MESSAGE,
             )
     try:
         target = store.read_dokploy_target_record(
@@ -406,7 +408,7 @@ def plan_secret_reference_reconciliation(
             "testing_lane_required", "New private integration references require a testing lane."
         )
     selected = selected_config_parameter_bindings(
-        record, authority, keys, create_missing=create_missing
+        record, authority, keys, create_missing=create_missing, allowance_kind=allowance_kind
     )
     target = None
     policies = None
