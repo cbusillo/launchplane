@@ -598,6 +598,12 @@ If `aborted` was saved before the terminal worker write, the same path verifies
 the old route and finishes the failure audit without creating another rollback.
 Expired-lease recovery reads the complete checkpoint history and production-write
 evidence, including death before the first dispatch of a reclaimed lease.
+An interrupted compatible inverse remains claimable before its pause is first
+saved, during fencing, and after writer resumption. Its prepared snapshot and
+any persisted pause must still belong to the original plan. Reclaiming does not
+prove drain or permit startup: those effect gates continue to require their
+complete native evidence. Inverse reconciliation retains the original operation,
+attempt and checkpoints after the forward attempt budget is exhausted.
 
 Before aborting an absent capture, the host atomically seals its native claim as
 cancelled, preventing delayed original dispatch from capturing later. Archive
