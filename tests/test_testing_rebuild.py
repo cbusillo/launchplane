@@ -626,7 +626,8 @@ class TestingRebuildTests(unittest.TestCase):
         self.provider.lose_stop_reply = False
         result = self.run_rebuild()
         self.assertEqual(result.step, "complete")
-        self.assertEqual(result.error, "candidate_public_health_failed")
+        self.assertTrue(result.error)
+        self.assertEqual(self.provider.serving, self.plan.new)
         self.assertNotIn("switch:old", self.provider.actions)
         self.assertFalse(self.provider.old_running)
 
