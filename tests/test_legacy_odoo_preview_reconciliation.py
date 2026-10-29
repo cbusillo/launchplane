@@ -25,10 +25,10 @@ from tests.support.http import request as http_request
 
 
 class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliationFixture):
+    driver_id = "odoo"
+
     def setUp(self) -> None:
         super().setUp()
-        self.profile = self.profile.model_copy(update={"driver_id": "odoo"})
-        self.store.write_product_profile_record(self.profile)
         self.composes: dict[str, dict[str, object]] = {}
         self.domains: dict[str, object] = {}
         self.reads: list[str] = []

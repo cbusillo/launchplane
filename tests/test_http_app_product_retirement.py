@@ -205,7 +205,12 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 store.close()
 
     def _no_target_store(
-        self, root: Path, *, database_url: str = "", previews: bool = True
+        self,
+        root: Path,
+        *,
+        database_url: str = "",
+        previews: bool = True,
+        preview_prefix: str | None = None,
     ) -> PostgresRecordStore:
         store = self._store(root, database_url=database_url)
         profile = store.read_product_profile_record("example-site")
@@ -217,6 +222,9 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         update={
                             "enabled": previews,
                             "context": profile.preview.context if previews else "",
+                            "app_name_prefix": profile.preview.app_name_prefix
+                            if preview_prefix is None
+                            else preview_prefix,
                         }
                     ),
                 }
@@ -651,22 +659,12 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
             ("Example Site PROD", "Example Preview", "example-previewing-abc123", False),
         ):
             with self.subTest(app_name=app_name), TemporaryDirectory() as directory:
-                store = self._no_target_store(Path(directory))
+                store = self._no_target_store(Path(directory), preview_prefix=preview_prefix)
                 target = store.read_dokploy_target_record(
                     context_name="example-site", instance_name="prod"
                 )
                 store.write_dokploy_target_record(
                     target.model_copy(update={"target_name": target_name})
-                )
-                profile = store.read_product_profile_record("example-site")
-                store.write_product_profile_record(
-                    profile.model_copy(
-                        update={
-                            "preview": profile.preview.model_copy(
-                                update={"app_name_prefix": preview_prefix}
-                            )
-                        }
-                    )
                 )
                 bound = bind_no_target_retirement(
                     record_store=store,

@@ -113,15 +113,77 @@ replay a previous failed attempt. Command text names an executable in the
 product artifact; runtime settings and managed bindings supply its secrets.
 
 Preview profiles using driver data transport can explicitly select the
-`verireel-postgres` transport extension through `transport_extension` while their
+`postgres` transport extension through `transport_extension` while their
 driver is `generic-web`, declaring its isolated database namespace through
 `transport_database_prefix`. The template lane, application prefix, database
-namespace and runtime product identity come from the profile. This uses the existing isolated PostgreSQL preparation
-and cleanup rather than the plain preview path. The VeriReel testing transition
-has qualified this declared shared path; the parallel deploy, promotion and rollback driver is removed. Historical deployment
+namespace and runtime product identity come from the profile, as do its port,
+health path, URL environment keys and generated secrets. The testing template
+must expose a PostgreSQL `DATABASE_URL` and its image must provide Node and `pg`
+for database administration. Application database URLs retain the template's
+scheme and connection options, replacing only credentials and the database name;
+see [PostgreSQL connection URIs](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING-URIS).
+Query parameters that override connection identity or contain credentials are
+refused before effects. Put connection identity in the URI authority/path and
+credentials in the managed testing template instead.
+The shared preview health contract requires the observed runtime identity to
+match and rejects an explicit `ok: false`. Choose application and database prefixes unique
+to the product; storage checks the prospective profile set and provisioning and
+cleanup refuse overlapping rendered namespaces, including default prefixes and
+slug prefixes. Clean up retained previews before changing their resource names,
+source, template or transport. Disabling previews leaves cleanup available.
+Environment rendering uses the plain-preview model: only `copied_env_keys` are
+inherited from testing, declared required keys must exist, and managed preview
+runtime settings, secrets and retired keys apply before generated credentials.
+Use managed preview records for nongenerated settings; unlisted template values
+are absent. Copied credentials use the shared runtime key-safety gate;
+PostgreSQL also checks for credentials inside copied URL query values. Existing
+plain-preview classification is unchanged. Declare the copy list explicitly when transitioning
+a historical PostgreSQL profile. `preview.generated_secret_env` maps application
+environment keys to `urlsafe` or `base64`; values are generated for each preview
+and retained on refresh, never copied from testing. `preview_url_env_keys` and
+`preview_domain_env_keys` replace the
+product-specific URL rewriting. Maintenance and schedules remain profile-owned.
+Domain keys receive the full preview hostname, as with plain previews; a product
+needing a static base domain declares that value in managed preview settings.
+`DATABASE_URL` belongs to this transport, and `generated_secret_env` assigns its
+keys to the generator. Those declarations take precedence over managed values,
+secrets and retired-key entries. Remove an application key's generator declaration
+to retire it or supply it through managed configuration. Database credentials
+remain required while this transport is enabled; clean up previews before
+switching transport to use a separately managed database connection.
+This uses the existing isolated PostgreSQL preparation and cleanup rather than
+the plain preview path. Stored `verireel-postgres` declarations remain unchanged
+when read, including profiles embedded in retirement records and their hash
+fences. Historical declarations support database-aware cleanup using their
+stored resource names and testing template, including when the product is
+retiring or previews are disabled. Use `/v1/drivers/generic-web/preview-destroy`
+through the existing authorized agent route. Retired products remain refused;
+cleanup does not rewrite the profile or its retirement hash fence.
+Before preview refresh or other profile edits, apply a reviewed generic-web transition from the product's
+Shared web driver panel. Declare `postgres`, `copied_env_keys`, `generated_secret_env`,
+`preview_url_env_keys` and `preview_domain_env_keys` explicitly from the product's
+runtime contract. Empty collections mean the product requires none; Launchplane
+does not infer product keys. Keep existing resource prefixes and slug/template
+settings when retained previews still need cleanup. The review shows the new
+preview endpoint and HTTPS policy; a legacy effective endpoint is reported as
+unknown. Production endpoint settings are not rewritten. New inputs reject the
+retired name.
+New products declare their own keys
+and prefixes through the product profile or reviewed generic-web transition.
+Historical deployment
 and backup records and retired instance-scoped policy grants remain readable;
 no retired release endpoint is enabled by those grants. Production still changes only through an
 accepted release.
+
+Historical lifecycle translation remains in
+[`product_application_lifecycle_migration.py`](../control_plane/contracts/product_application_lifecycle_migration.py).
+[Issue 3856](https://github.com/cbusillo/launchplane/issues/3856) tracks its removal
+after persisted profile declarations and retirement/snapshot compatibility are
+qualified; this refactor does not rewrite live records to remove that reader.
+
+Application-only product retirement cannot clean PostgreSQL databases or roles.
+Destroy retained PostgreSQL previews through their normal preview cleanup route
+before integrated or no-target product retirement.
 
 Product browser checks belong to the product's Build. VeriReel qualifies every
 candidate image using disposable app, database and browser containers before
@@ -465,10 +527,7 @@ deployment receipt.
 
 For declared preview transport, `preview.app_name_suffix` is part of the resource
 name used by creation, inventory and destruction. Existing VeriReel applications
-use `-app`; record that suffix explicitly when switching its profile. The named
-`verireel-postgres` transport retains VeriReel's Prisma, seed and environment
-interfaces while its template lane, product identity and resource prefixes come
-from the profile. It does not imply compatibility with other applications.
+use `-app`; record that suffix explicitly when switching its profile.
 
 A reservation keeps its original lifecycle declaration. Changing a declaration
 requires a new operation after exact recovery of the previous attempt; refusal

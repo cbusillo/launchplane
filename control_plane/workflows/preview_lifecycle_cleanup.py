@@ -16,7 +16,7 @@ from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview,
     resolve_launchplane_preview_id,
 )
-from control_plane.drivers.verireel_postgres_transport import _preview_refresh_serialization
+from control_plane.drivers.postgres_preview_transport import _preview_refresh_serialization
 from control_plane.workflows.launchplane import find_preview_record
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyRequest,
