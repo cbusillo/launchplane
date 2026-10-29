@@ -98,6 +98,32 @@ class ArchiveCountTests(unittest.TestCase):
 
 class SnapshotReaderTests(unittest.TestCase):
     def test_verified_archive_uses_only_offline_decoder_and_refuses_tampering(self) -> None:
+        self.verify_offline_archive(
+            reader.SNAPSHOT_AGGREGATE_PROGRAM,
+            COPY_ROWS,
+            "counts",
+            reader.count_archive_rows(BytesIO(COPY_ROWS), QUERY.model_dump()),
+        )
+
+    def test_version_metadata_uses_the_same_verified_offline_archive_and_tamper_refusals(
+        self,
+    ) -> None:
+        from tests.test_odoo_snapshot_version import MODULE_ROWS
+
+        self.verify_offline_archive(
+            reader.SNAPSHOT_VERSION_PROGRAM,
+            MODULE_ROWS,
+            "metadata",
+            reader.read_base_module_version(BytesIO(MODULE_ROWS)),
+        )
+
+    def verify_offline_archive(
+        self,
+        program: str,
+        rows: bytes,
+        field: str,
+        expected: object,
+    ) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             library: dict[str, Any] = {}
@@ -129,10 +155,10 @@ class SnapshotReaderTests(unittest.TestCase):
             )
             spec = dict(
                 snapshot=snapshot.model_dump(mode="json"),
-                query=QUERY.model_dump(),
+                query=QUERY.model_dump() if field == "counts" else {"table": "ir_module_module"},
                 project="fixture-copy",
             )
-            process = Mock(stdout=BytesIO(COPY_ROWS))
+            process = Mock(stdout=BytesIO(rows))
             process.wait.return_value = 0
             process.poll.return_value = 0
             files = {
@@ -157,11 +183,17 @@ class SnapshotReaderTests(unittest.TestCase):
             ):
                 output = StringIO()
                 with redirect_stdout(output):
-                    exec(reader.SNAPSHOT_AGGREGATE_PROGRAM, {})
+                    exec(program, {})
                 frame = json.loads(output.getvalue().removeprefix("FRAME:"))
-                self.assertEqual(frame["counts"]["duplicate_rows"], 3)
+                self.assertEqual(frame[field], expected)
                 arguments = decode.call_args.args[0]
                 self.assertIn("--file=-", arguments)
+                self.assertEqual(arguments[4:7], ["env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin"])
+                self.assertEqual(
+                    arguments[-1],
+                    "--table=" + (QUERY.table if field == "counts" else "ir_module_module"),
+                )
+                self.assertIs(decode.call_args.kwargs["stdin"].closed, True)
                 self.assertFalse(any(arg.startswith(("-d", "--dbname")) for arg in arguments))
                 self.assertEqual(
                     files,
@@ -175,14 +207,14 @@ class SnapshotReaderTests(unittest.TestCase):
                 archive.write_bytes(b"tampered archive")
                 output = StringIO()
                 with redirect_stdout(output):
-                    exec(reader.SNAPSHOT_AGGREGATE_PROGRAM, {})
+                    exec(program, {})
                 self.assertEqual(
                     json.loads(output.getvalue().removeprefix("FRAME:"))["unavailable"],
                     "snapshot_unavailable",
                 )
                 decode.assert_not_called()
                 archive.write_bytes(b"fixture custom archive")
-                process.stdout = BytesIO(COPY_ROWS)
+                process.stdout = BytesIO(rows)
                 digest = hashlib.file_digest
 
                 def change_after_hash(stream: Any, algorithm: str) -> Any:
@@ -195,8 +227,8 @@ class SnapshotReaderTests(unittest.TestCase):
                     patch.object(hashlib, "file_digest", side_effect=change_after_hash),
                     redirect_stdout(output),
                 ):
-                    exec(reader.SNAPSHOT_AGGREGATE_PROGRAM, {})
-                self.assertNotIn("counts", json.loads(output.getvalue().removeprefix("FRAME:")))
+                    exec(program, {})
+                self.assertNotIn(field, json.loads(output.getvalue().removeprefix("FRAME:")))
 
     def test_matching_completed_provenance_required_before_any_provider_read(self) -> None:
         fixture = DiagnosticFixture()
