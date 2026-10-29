@@ -220,6 +220,14 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             "Launchplane has not planned a testing deploy for this product yet.",
             "wait",
         )
+    if plan.get("reconcile_state") not in {"done", "failed"}:
+        return _step(
+            step_id,
+            "unknown",
+            "reconcile_not_done",
+            "The current testing reconcile has no terminal outcome; its saved plan may be older.",
+            "wait",
+        )
     deployed = str(plan.get("deployed_operation_id") or "")
     queued = str(plan.get("queued_operation_id") or "")
     failed = str(plan.get("last_failed_operation_id") or "")
