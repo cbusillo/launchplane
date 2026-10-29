@@ -1018,6 +1018,7 @@ def register_production_recipient_routes(
         RecipientRetirementAdapter,
         RecipientRetirementPlan,
         RecipientRetirementRequest,
+        retirement_request_fingerprint,
     )
 
     async def retire_old_recipient(
@@ -1106,9 +1107,7 @@ def register_production_recipient_routes(
                     identity=identity,
                     route_path=RETIREMENT_ROUTE.format(product=product),
                     idempotency_key=adapter.original_key,
-                    request_fingerprint=request_fingerprint(
-                        {"product": product, **body.model_dump(mode="json")}
-                    ),
+                    request_fingerprint=retirement_request_fingerprint(product, body),
                     trace_id=trace,
                     adapter=adapter,
                     in_progress_message="Retirement remains under its original key.",

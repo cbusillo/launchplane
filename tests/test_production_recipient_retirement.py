@@ -24,6 +24,10 @@ from control_plane.production_recipient_recovery import RecipientRecoveryAdapter
 from control_plane.production_consumer_reads import QualifiedSourceCycle
 from control_plane.production_recipient import custody, runtime_values
 from control_plane.production_recipient_retirement_names import require_unretired_provider_name
+from control_plane.production_recipient_retirement_names import (
+    provider_name_guard,
+    require_available_name,
+)
 from control_plane.provider_operations import run_durable_provider_operation
 from tests import test_production_recipient_publication as publication_tests
 
@@ -162,6 +166,9 @@ class RecipientRetirementTests(unittest.TestCase):
             "containers": [],
             "volumes": [deepcopy(row) for row in self.resources if row["name"] not in self.removed],
             "engine_identity": "3" * 64,
+            "boot_id": "fixture-boot",
+            "monotonic": 100,
+            "received_at": datetime.now(timezone.utc).timestamp(),
         }
 
     def fetch(self, **kwargs: Any) -> Any:
@@ -219,7 +226,9 @@ class RecipientRetirementTests(unittest.TestCase):
             scope=selected.scope,
             route_path=retirement.RETIREMENT_ROUTE.format(product=selected.product),
             idempotency_key=selected.original_key,
-            request_fingerprint="b" * 64,
+            request_fingerprint=retirement.retirement_request_fingerprint(
+                selected.product, selected.request
+            ),
             lease_owner="retirement-worker",
             response_trace_id=selected.trace_id,
             adapter=selected,
@@ -249,6 +258,7 @@ class RecipientRetirementTests(unittest.TestCase):
         self.assertEqual(self.removed, {row["name"] for row in self.resources})
         self.assertEqual(self.run_retirement().response_payload, first.response_payload)
         self.assertEqual(len(self.effects), 1)
+
         with self.assertRaises(ValueError):
             retirement.require_before_retirement(saved)
         with self.assertRaises(ValueError):
@@ -344,6 +354,110 @@ class RecipientRetirementTests(unittest.TestCase):
             self.assertEqual(self.run_retirement().status, "completed")
         self.assertEqual(len(self.effects), 1)
 
+    def test_retirement_reserves_old_target_without_holding_replacement_release_target(
+        self,
+    ) -> None:
+        self.unknown_volume = True
+        result = self.run_retirement()
+        self.assertEqual(result.status, "reconcile_required")
+        origin = self.adapter.provider_target_origin()
+        self.assertEqual(origin.target_id, self.record.retained_target_id.target_id)
+        self.assertNotEqual(origin.target_id, self.record.target_id)
+        self.assertFalse(
+            self.store.list_held_provider_target_reservations(
+                provider_target_key=origin.model_copy(
+                    update={"target_id": self.record.target_id}
+                ).target_key()
+            )
+        )
+
+    def test_pre_start_refusal_releases_reservation_and_same_key_can_retry(self) -> None:
+        original = self.adapter.references
+        count = 0
+
+        def references(*args: Any) -> None:
+            nonlocal count
+            count += 1
+            if count == 2:
+                raise ValueError("transient before start")
+            original(*args)
+
+        with (
+            patch.object(type(self.adapter), "references", side_effect=references),
+            self.assertRaises(ValueError),
+        ):
+            self.run_retirement()
+        self.assertFalse(self.effects)
+        self.assertEqual(self.run_retirement().status, "completed")
+
+    def test_started_but_undispatched_can_continue_with_same_key(self) -> None:
+        original = self.adapter.start
+
+        def interrupted(*args: Any) -> Any:
+            original(*args)
+            raise TimeoutError("worker stopped before dispatch")
+
+        with patch.object(type(self.adapter), "start", side_effect=interrupted):
+            self.assertEqual(self.run_retirement().status, "reconcile_required")
+        self.assertFalse(self.effects)
+        self.assertEqual(self.run_retirement().status, "completed")
+
+    def test_fresh_evidence_can_replace_expired_references_under_original_key(self) -> None:
+        self.lose_delete_reply = True
+        self.assertEqual(self.run_retirement().status, "reconcile_required")
+        self.adapter.request = self.adapter.request.model_copy(
+            update={
+                "recovery_generation": "refreshed-recovery",
+                "backup_record_id": "refreshed-protection",
+            }
+        )
+        record, manifest, authority, _ = self.adapter.current()
+        self.assertEqual(
+            self.adapter.digest(record, manifest, authority),
+            self.adapter.request.reviewed_plan_sha256,
+        )
+        self.assertEqual(self.run_retirement().status, "completed")
+
+    def test_fenced_no_effect_volume_attempt_can_continue_under_original_key(self) -> None:
+        original = self.volume
+        first = True
+
+        def transient(*args: Any, **kwargs: Any) -> Any:
+            nonlocal first
+            if args[2] == "apply" and first:
+                first = False
+                raise ValueError("guard refused before host dispatch")
+            return original(*args, **kwargs)
+
+        with patch.object(retirement, "_host_result", side_effect=transient):
+            self.assertEqual(self.run_retirement().status, "reconcile_required")
+            self.assertEqual(self.run_retirement().status, "completed")
+        self.assertEqual(self.removed, {row["name"] for row in self.resources})
+
+    def test_old_metadata_absence_without_host_absence_stays_unknown_without_redelete(self) -> None:
+        self.lose_delete_reply = True
+        self.assertEqual(self.run_retirement().status, "reconcile_required")
+        self.deleted = False
+        self.assertEqual(self.run_retirement().status, "reconcile_required")
+        self.assertEqual(len(self.effects), 1)
+        self.assertFalse(self.volume_calls)
+
+    def test_reserved_old_name_and_identity_cannot_be_rebound_after_completion(self) -> None:
+        self.assertEqual(self.run_retirement().status, "completed")
+        with (
+            self.assertRaises(ValueError),
+            provider_name_guard(self.store, self.record.retained_target.target_name),
+        ):
+            self.fail("retired name admitted")
+        current = self.store.read_provider_target_record(
+            context_name=self.record.context, instance_name="prod"
+        )
+        with self.assertRaises(ValueError):
+            self.store.write_provider_target_record(
+                current.model_copy(update={"target_id": self.record.retained_target_id.target_id})
+            )
+        require_available_name(({"execution": {}, "legacy": "unrelated"},), "new-project")
+
     def test_testing_settings_and_foreign_volume_ownership_retain_volumes(self) -> None:
         self.store.write_runtime_environment_record(
             RuntimeEnvironmentRecord(
@@ -404,3 +518,33 @@ class RecipientRetirementTests(unittest.TestCase):
         self.assertEqual(self.run_retirement().status, "reconcile_required")
         self.assertFalse(self.volume_calls)
         self.assertEqual(len(self.effects), 1)
+
+
+class RetirementProtectionTests(unittest.TestCase):
+    def test_existing_backup_guard_and_post_window_capture_both_apply(self) -> None:
+        import click
+        from tests.test_production_promotion_backup import ProductionPromotionBackupTests
+
+        fixture = ProductionPromotionBackupTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        store = fixture.capture(retirement.GENERIC_WEB_PROMOTION_BACKUP_ACTION)
+        capture = store.read_backup_gate_record("backup-example")
+        record: Any = SimpleNamespace(product=capture.context, context=capture.context)
+        request: Any = SimpleNamespace(backup_record_id=capture.record_id)
+        oldest = min(
+            datetime.fromisoformat(capture.evidence[key])
+            for key in ("snapshot_finished_at", "independent_backup_finished_at")
+        )
+        retirement.require_retirement_protection(
+            store, record, request, oldest - timedelta(seconds=1)
+        )
+        with self.assertRaises(ValueError):
+            retirement.require_retirement_protection(
+                store, record, request, oldest + timedelta(seconds=1)
+            )
+        store.write_backup_gate_record(capture.model_copy(update={"status": "fail"}))
+        with self.assertRaises(click.ClickException):
+            retirement.require_retirement_protection(
+                store, record, request, oldest - timedelta(seconds=1)
+            )

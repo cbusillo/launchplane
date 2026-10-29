@@ -43,9 +43,11 @@ if (mode not in {'dry-run','apply','readback'} or not isinstance(name,str)
     or not isinstance(operation,str) or not operation or len(operation)>512):
     emit('unknown','invalid_request')
     raise SystemExit
-if retirement and (not isinstance(retirement,dict) or set(retirement)!={'binding','fresh_until'}
+if retirement and (not isinstance(retirement,dict) or set(retirement)!={'binding','fresh_until','boot_id','monotonic_deadline'}
     or not isinstance(retirement['binding'],str) or re.fullmatch(r'[a-f0-9]{64}',retirement['binding']) is None
-    or type(retirement['fresh_until']) not in (int,float)):
+    or type(retirement['fresh_until']) not in (int,float)
+    or type(retirement['monotonic_deadline']) not in (int,float)
+    or not isinstance(retirement['boot_id'],str) or not retirement['boot_id']):
     emit('unknown','invalid_request')
     raise SystemExit
 
@@ -374,7 +376,9 @@ try:
         inventory(backing,root)
         if not retirement:
             empty(backing)
-        elif not math.isfinite(retirement['fresh_until']) or not time.time() < retirement['fresh_until']:
+        elif (not math.isfinite(retirement['fresh_until']) or not math.isfinite(retirement['monotonic_deadline'])
+            or Path('/proc/sys/kernel/random/boot_id').read_text().strip()!=retirement['boot_id']
+            or not time.monotonic() < retirement['monotonic_deadline']):
             raise Held()
         remaining=deadline-time.monotonic()
         if remaining<10:

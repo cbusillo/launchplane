@@ -7656,6 +7656,17 @@ class PostgresRecordStore(HumanSessionStore):
         session: Any,
         write: ProviderTargetWrite,
     ) -> None:
+        from control_plane.production_recipient_retirement_names import require_available_name
+
+        if write.record.provider_id == "dokploy":
+            require_available_name(
+                (
+                    dict(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductionRecipientRow))
+                ),
+                write.record.display_name,
+                write.record.target_id,
+            )
         conflicting_identity_statement = select(LaunchplaneProviderTargetRow).where(
             LaunchplaneProviderTargetRow.provider_id == write.record.provider_id,
             LaunchplaneProviderTargetRow.target_category == write.record.target_category,

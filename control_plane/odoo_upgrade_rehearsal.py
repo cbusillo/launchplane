@@ -1827,6 +1827,7 @@ class OdooRehearsalAdapter:
                 try:
                     create_isolated_placement(
                         self.root,
+                        record_store=self.store,
                         namespace=record.rehearsal_id,
                         server_id=record.server_id,
                         description=REHEARSAL_PROJECT_DESCRIPTION,

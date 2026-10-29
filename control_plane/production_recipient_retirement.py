@@ -105,6 +105,30 @@ class RetirementDispatchLease:
         self.lease.checkpoint_effect(phase)
 
 
+def retirement_request_fingerprint(product: str, request: RecipientRetirementRequest) -> str:
+    from control_plane.http_routes.mutation_support import request_fingerprint
+
+    return request_fingerprint(
+        {
+            "product": product,
+            **request.model_dump(mode="json", exclude={"recovery_generation", "backup_record_id"}),
+        }
+    )
+
+
+def latest_volume_permit(
+    record: ProductionRecipientRecord, identity: str
+) -> tuple[str, dict[str, Any]]:
+    prefix = "retirement_permit:" + identity + ":"
+    keys = sorted(
+        (key for key in record.execution if key.startswith(prefix)),
+        key=lambda key: int(key.removeprefix(prefix)),
+    )
+    if not keys:
+        return "", {}
+    return keys[-1], record.execution[keys[-1]]
+
+
 def require_before_retirement(record: ProductionRecipientRecord) -> None:
     if record.phase in RETIREMENT_PHASES or record.execution.get("retirement_started_at"):
         raise ValueError(
@@ -351,7 +375,7 @@ class RecipientRetirementAdapter:
             instance="prod",
             provider_id="dokploy",
             target_type="compose",
-            target_id=record.target_id,
+            target_id=record.retained_target_id.target_id,
         )
 
     def target_key(self) -> str:
@@ -362,12 +386,12 @@ class RecipientRetirementAdapter:
 
     def require_original(self, record: ProductionRecipientRecord) -> None:
         owner = record.execution.get("retirement_owner")
-        if owner and owner != {
-            "actor": self.actor,
-            "scope": self.scope,
-            "key": self.original_key,
-            "plan": self.request.reviewed_plan_sha256,
-        }:
+        if owner and (
+            (owner.get("actor"), owner.get("scope"), owner.get("key"))
+            != (self.actor, self.scope, self.original_key)
+            or self.request.reviewed_plan_sha256
+            and owner.get("plan") != self.request.reviewed_plan_sha256
+        ):
             raise ValueError("Retain retirement's original actor, key and reviewed plan.")
 
     def current(self) -> tuple[ProductionRecipientRecord, dict[str, Any], dict[str, Any], float]:
@@ -409,8 +433,14 @@ class RecipientRetirementAdapter:
         )
         if not _inventory_clear(self.root, probe, ignored_compose_id=manifest["target"]):
             raise ValueError("Old Compose provider references are incomplete or protected.")
-        for reservation in self.store.list_held_provider_target_reservations():
-            if reservation.provider_target_key != self.target_key():
+        for reservation in self.store.list_held_provider_target_reservations(
+            provider_target_key=self.target_key()
+        ):
+            if (reservation.scope, reservation.route_path, reservation.idempotency_key) != (
+                self.scope,
+                RETIREMENT_ROUTE.format(product=self.product),
+                self.original_key,
+            ):
                 raise ValueError("An unsettled provider operation retains custody.")
 
     def digest(
@@ -419,7 +449,13 @@ class RecipientRetirementAdapter:
         return canonical_sha256(
             {
                 "request": self.request.model_dump(
-                    mode="json", exclude={"mode", "reviewed_plan_sha256"}
+                    mode="json",
+                    exclude={
+                        "mode",
+                        "reviewed_plan_sha256",
+                        "recovery_generation",
+                        "backup_record_id",
+                    },
                 ),
                 "preparation": record.plan_sha256,
                 "publication": record.publication,
@@ -449,7 +485,7 @@ class RecipientRetirementAdapter:
                     status=record.execution.get(
                         "retirement_volume:" + row["identity"],
                         "unknown"
-                        if record.execution.get("retirement_permit:" + row["identity"])
+                        if latest_volume_permit(record, row["identity"])[0]
                         else "held"
                         if row["held"]
                         else "eligible",
@@ -481,24 +517,32 @@ class RecipientRetirementAdapter:
                     "present",
                     response_payload=self.response(self.plan(record, manifest, reconciliation_key)),
                 )
+            if not record.execution.get("retirement_compose_dispatched"):
+                return ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
             self.require_compose_absent(manifest)
             reconciled = {}
             for row in manifest["resources"]:
                 identity = row["identity"]
-                permit = record.execution.get("retirement_permit:" + identity)
-                if not permit or record.execution.get("retirement_volume:" + identity):
+                permit_key, permit = latest_volume_permit(record, identity)
+                if (
+                    not permit
+                    or record.execution.get("retirement_fenced:" + permit_key)
+                    or record.execution.get("retirement_volume:" + identity)
+                ):
                     continue
                 status, reason = _host_result(
                     self.root,
                     volume_binding(manifest, row),
                     "readback",
-                    provider_operation_key,
+                    provider_operation_key + ":" + permit_key,
                     retirement=permit,
                 )
                 if status == "absent":
                     reconciled[identity] = "absent"
                 elif status == "held" and reason in {"never_started", "no_effect"}:
-                    reconciled[identity] = "held"
+                    reconciled[identity] = "fenced"
                 else:
                     return ProviderObservation("unknown")
             self.reconciled = reconciled
@@ -521,12 +565,9 @@ class RecipientRetirementAdapter:
                 or not isinstance(lease, ProviderEvidenceLease)
             ):
                 raise ValueError("Review the exact unstarted retirement and original key.")
-        except (ValueError, OSError, click.ClickException) as error:
-            if self.record().execution.get("retirement_started_at"):
-                raise ProviderMutationUnknownError(
-                    "Retirement evidence must be refreshed under its original custody."
-                ) from error
-            raise ProviderMutationRejectedError(error) from error
+        except Exception as error:
+            self.reject_unstarted(error, provider_operation_key)
+            raise
 
         def save(**entries: Any) -> None:
             nonlocal record
@@ -548,11 +589,11 @@ class RecipientRetirementAdapter:
                     record, manifest, authority, digest, provider_operation_key, lease
                 )
             if not record.execution.get("retirement_compose_dispatched"):
-                save(retirement_compose_dispatched=True)
                 if datetime.now(timezone.utc).timestamp() >= until:
                     raise ValueError("Retirement evidence expired before Compose dispatch.")
-                lease.checkpoint_effect("retirement_delete_compose")
                 host, token = source.read_dokploy_config(control_plane_root=self.root)
+                lease.checkpoint_effect("retirement_delete_compose")
+                save(retirement_compose_dispatched=True)
                 api.dokploy_request(
                     host=host,
                     token=token,
@@ -566,17 +607,21 @@ class RecipientRetirementAdapter:
                 identity = row["identity"]
                 if record.execution.get("retirement_volume:" + identity):
                     continue
-                if identity in getattr(self, "reconciled", {}):
-                    save(**{"retirement_volume:" + identity: self.reconciled[identity]})
+                permit_key, previous_permit = latest_volume_permit(record, identity)
+                reconciled = getattr(self, "reconciled", {}).get(identity)
+                if reconciled == "absent":
+                    save(**{"retirement_volume:" + identity: "absent"})
                     continue
-                if record.execution.get("retirement_permit:" + identity):
+                if reconciled == "fenced":
+                    save(**{"retirement_fenced:" + permit_key: True})
+                if previous_permit and not record.execution.get("retirement_fenced:" + permit_key):
                     raise ProviderMutationUnknownError(
                         "Observe the original volume step before continuing."
                     )
                 _, _, current_authority, current_until = self.current()
                 if current_authority != authority:
                     raise ValueError("Current publication authority changed.")
-                self.require_compose_absent(manifest)
+                host_observed = self.require_compose_absent(manifest)
                 binding = volume_binding(manifest, row)
                 held = (
                     row["held"]
@@ -586,8 +631,18 @@ class RecipientRetirementAdapter:
                 if held:
                     save(**{"retirement_volume:" + identity: "held"})
                     continue
-                permit = {"binding": digest, "fresh_until": min(until, current_until)}
-                save(**{"retirement_permit:" + identity: permit})
+                attempt = int(permit_key.rsplit(":", 1)[-1]) + 1 if permit_key else 1
+                permit_key = "retirement_permit:" + identity + ":" + str(attempt)
+                fresh_until = min(until, current_until)
+                permit = {
+                    "binding": digest,
+                    "fresh_until": fresh_until,
+                    "boot_id": host_observed["boot_id"],
+                    "monotonic_deadline": host_observed["monotonic"]
+                    + fresh_until
+                    - host_observed["received_at"],
+                }
+                save(**{permit_key: permit})
 
                 def validate_volume_dispatch() -> None:
                     if (
@@ -604,12 +659,15 @@ class RecipientRetirementAdapter:
                     self.root,
                     binding,
                     "apply",
-                    provider_operation_key,
+                    provider_operation_key + ":" + permit_key,
                     RetirementDispatchLease(lease, validate_volume_dispatch),
                     retirement=permit,
                 )
                 if status == "held" and reason in {"never_started", "no_effect"}:
-                    save(**{"retirement_volume:" + identity: "held"})
+                    save(**{"retirement_fenced:" + permit_key: True})
+                    raise ProviderMutationUnknownError(
+                        "The original volume attempt was fenced without effect; refresh evidence before another original-key apply."
+                    )
                 elif status in {"removed", "absent"}:
                     save(**{"retirement_volume:" + identity: "absent"})
                 else:
@@ -625,9 +683,21 @@ class RecipientRetirementAdapter:
                 202, self.response(self.plan(terminal, manifest, digest))
             )
         except Exception as error:
+            self.reject_unstarted(error, provider_operation_key)
+            raise
+
+    def reject_unstarted(self, error: Exception, operation: str) -> None:
+        try:
+            started = self.record().execution.get("retirement_operation") == operation
+        except Exception:
             raise ProviderMutationUnknownError(
-                "Retain original retirement custody and permanently reserved names; observe only."
+                "Original retirement custody is unreadable."
             ) from error
+        if started:
+            raise ProviderMutationUnknownError(
+                "Retain original retirement custody; reconcile recorded steps before continuation."
+            ) from error
+        raise ProviderMutationRejectedError(error) from error
 
     def start(
         self,
@@ -657,15 +727,19 @@ class RecipientRetirementAdapter:
                 },
             }
         )
-        self.store.write_production_recipient(
-            expected=record.model_dump(mode="json"),
-            replacement=retiring.model_dump(mode="json"),
-            reservation=lease.evidence_reservation(),
-            expected_authority=authority,
-        )
+        from control_plane.production_recipient_retirement_names import provider_name_guard
+
+        with provider_name_guard(self.store, manifest["project"]):
+            self.references(record, manifest)
+            self.store.write_production_recipient(
+                expected=record.model_dump(mode="json"),
+                replacement=retiring.model_dump(mode="json"),
+                reservation=lease.evidence_reservation(),
+                expected_authority=authority,
+            )
         return retiring
 
-    def require_compose_absent(self, manifest: dict[str, Any]) -> None:
+    def require_compose_absent(self, manifest: dict[str, Any]) -> dict[str, Any]:
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         try:
             api.fetch_dokploy_target_payload(
@@ -682,3 +756,4 @@ class RecipientRetirementAdapter:
             or observed["engine_identity"] != manifest["engine_identity"]
         ):
             raise ValueError("The old project still has host effects or changed engine identity.")
+        return observed

@@ -192,6 +192,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             "from pathlib import Path\nfrom unittest.mock import patch\nimport json,os\n"
             "read_text=Path.read_text\nmount_reads=[0]\n"
             "def fixture_read(path,*args,**kwargs):\n"
+            "    if path==Path('/proc/sys/kernel/random/boot_id'): return 'fixture-boot'\n"
             "    if path==Path('/proc/self/mountinfo'):\n"
             "        mount_reads[0]+=1\n"
             "        return '1 0 8:1 / / rw - ext4 /dev/sda rw\\n'\n"

@@ -12981,6 +12981,52 @@ class RealPostgresRecipientRetirementTests(recipient_retirement_tests.RecipientR
         self.database_url = self.enterContext(_head_postgres_database())
         super().setUp()
 
+    def test_waiting_creation_rechecks_committed_retirement_reservation(self) -> None:
+        from control_plane.production_recipient_retirement_names import provider_name_guard
+
+        record, manifest, _, _ = self.adapter.current()
+
+        def create() -> None:
+            with provider_name_guard(self.store, manifest["project"]):
+                self.fail("Creation reused the retired project")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with provider_name_guard(self.store, manifest["project"]):
+                waiting = pool.submit(create)
+                blocked = False
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with self.store._engine.connect() as connection:
+                        blocked = bool(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+                                )
+                            )
+                        )
+                    if blocked:
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(blocked, "Creation did not wait for retirement admission")
+                retiring = record.model_copy(
+                    update={
+                        "phase": "retiring_old",
+                        "execution": {
+                            **record.execution,
+                            "retirement_started_at": datetime.now(timezone.utc).isoformat(),
+                            "retirement_manifest": manifest,
+                        },
+                    }
+                )
+                self.store.write_production_recipient(
+                    expected=record.model_dump(mode="json"),
+                    replacement=retiring.model_dump(mode="json"),
+                )
+            with self.assertRaises(ValueError):
+                waiting.result(timeout=5)
+        with provider_name_guard(self.store, "an-independent-new-project"):
+            pass
+
 
 class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:

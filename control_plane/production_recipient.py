@@ -1029,13 +1029,18 @@ class ProductionRecipientAdapter:
                     }
                 record = self.save(record, phase=phase)
                 checkpoint(phase)
-                result = api.dokploy_request(
-                    host=host,
-                    token=token,
-                    path=path,
-                    method="POST",
-                    payload=cast(api.JsonObject, body),
-                )
+                from control_plane.production_recipient_retirement_names import provider_name_guard
+
+                with provider_name_guard(
+                    self.store, record.namespace if field == "composeId" else ""
+                ):
+                    result = api.dokploy_request(
+                        host=host,
+                        token=token,
+                        path=path,
+                        method="POST",
+                        payload=cast(api.JsonObject, body),
+                    )
                 if (
                     field == "projectId"
                     and isinstance(result, dict)

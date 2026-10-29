@@ -1,4 +1,5 @@
 import inspect
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -149,7 +150,7 @@ def capture():
                 raise ValueError('aliased backing')
     if single_local_swarm_node(docker)!=nodes or load('info','--format','{{json .}}')['ID']!=engine_id:
         raise ValueError('host changed')
-    return {'project_absent':not found,'containers':found,'volumes':result,'engine_identity':retained_volume_engine_identity(engine_id)}
+    return {'project_absent':not found,'containers':found,'volumes':result,'engine_identity':retained_volume_engine_identity(engine_id),'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'monotonic':time.monotonic()}
 try:
     result=capture()
     print(sys.argv[2]+json.dumps({'type':'complete','result':result},sort_keys=True),flush=True)
@@ -179,6 +180,10 @@ def inspect_retirement_resources(root: Path, spec: dict[str, Any]) -> dict[str, 
         or result.get("unknown")
         or not isinstance(result.get("project_absent"), bool)
         or not isinstance(result.get("volumes"), list)
+        or not isinstance(result.get("boot_id"), str)
+        or not result["boot_id"]
+        or type(result.get("monotonic")) not in (float, int)
     ):
         raise ValueError("Old-resource custody is unknown.")
+    result["received_at"] = datetime.now(timezone.utc).timestamp()
     return result

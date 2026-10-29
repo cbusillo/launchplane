@@ -640,6 +640,10 @@ and current destination protection must qualify. Every irreversible dispatch
 rechecks current authority and references. Recovery freshness is never renewed
 by replay, and retirement never automatically captures again. A newly reviewed
 capture remains a separately authorized operation with its normal write pause.
+An original-key continuation can supply newly qualified recovery and protection
+record IDs without changing its resource plan. A later change to the published
+lane's owned authority refuses eligibility; this operation does not adopt a new
+publication or reinterpret evidence from a different runtime.
 
 The reviewed plan binds the provider definition, host engine, old containers,
 volume backing identities and ownership. All current provider target categories,
@@ -649,13 +653,17 @@ shared project networks or paths, schedules, backups, routing, bind or anonymous
 storage and changed ownership cannot qualify the corresponding destructive step.
 Populated storage is allowed only through this retirement's bound, expiring
 permission; ordinary prelaunch kept-volume cleanup still requires emptiness.
+The host permission uses its observed boot identity and monotonic deadline, so
+a wall-clock offset cannot extend freshness or carry permission across a reboot.
 
 Before provider dispatch, a leased compare-and-write records `fallback_ended_at`
 and enters `retiring_old`. Old-target inverse, writer resume and release recovery
 then refuse. The retained provider name and identity stay reserved permanently;
 supported target creation/adoption requires a new name. The active replacement,
-its monitors and backup policies continue, and a completed retirement does not
+its monitors and backup policies continue, and retirement does not
 block later Client releases.
+Target creation and retirement admission share a short database exclusion;
+requested names that can generate the retired project name are reserved too.
 
 Dokploy metadata deletion uses `deleteVolumes=false`. Neither an acknowledgement
 nor a missing provider record proves host cleanup. Host inventory must separately
@@ -674,3 +682,6 @@ reports retained custody without claiming fresh eligibility. A completed operati
 can report protected volumes as `held`; it does not claim those volumes were
 removed. Recovery archives, execution tombstones, writer witnesses, shared backups
 and testing resources remain in custody.
+An original volume attempt positively fenced before dispatch can continue as a
+new recorded step under the same service operation. A volume protected by a real
+reference remains `held`; a transient no-effect attempt does not mark it retired.

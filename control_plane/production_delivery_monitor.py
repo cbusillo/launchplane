@@ -1067,7 +1067,7 @@ def _later_completed_recipient_release(
         or decision.checklist.owner_github_id != profile.owner.github_id
         or decision.actor_github_id != profile.owner.github_id
         or record is None
-        or record.phase != "published"
+        or record.phase not in {"published", "retiring_old", "old_retired"}
         or record.image_reference != decision.checklist.candidate.artifact_id
         or record.request.source_commit != decision.checklist.candidate.source_commit
         or record.execution.get("release_trace") != "client-release-" + decision.record_id

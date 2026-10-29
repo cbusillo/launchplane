@@ -2304,21 +2304,27 @@ def _resolve_or_create_compose(
     memory_capacity.require_preview_host_memory_capacity(
         host=host, token=token, server_id=server_id, database_url=database_url
     )
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    name_store = PostgresRecordStore(database_url=database_url) if database_url else None
     provider_effect_checkpoint("compose_create")
-    created = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/compose.create",
-        method="POST",
-        payload={
-            "name": plan.compose_name,
-            "appName": plan.compose_name,
-            "description": f"Launchplane Odoo preview {plan.preview_slug}",
-            "environmentId": plan.environment_id,
-            "serverId": server_id,
-            "composeType": "docker-compose",
-        },
-    )
+    from control_plane.production_recipient_retirement_names import provider_name_guard
+
+    with provider_name_guard(name_store, plan.compose_name):
+        created = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/compose.create",
+            method="POST",
+            payload={
+                "name": plan.compose_name,
+                "appName": plan.compose_name,
+                "description": f"Launchplane Odoo preview {plan.preview_slug}",
+                "environmentId": plan.environment_id,
+                "serverId": server_id,
+                "composeType": "docker-compose",
+            },
+        )
     created_compose = dokploy_api.as_json_object(created)
     compose_id = str((created_compose or {}).get("composeId") or "").strip()
     if not compose_id:

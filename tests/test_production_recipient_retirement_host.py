@@ -31,7 +31,9 @@ class RetirementHostTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                RETIREMENT_RESOURCE_PROGRAM,
+                "from pathlib import Path\nfrom unittest.mock import patch\nread=Path.read_text\n"
+                "with patch.object(Path,'read_text',lambda p,*a,**k:'fixture-boot' if str(p)=='/proc/sys/kernel/random/boot_id' else read(p,*a,**k)):\n"
+                f"    exec({RETIREMENT_RESOURCE_PROGRAM!r})",
                 base64.b64encode(json.dumps(spec).encode()).decode(),
                 "FRAME:",
             ],
@@ -88,11 +90,16 @@ class RetirementHostTests(unittest.TestCase):
     def test_populated_removal_requires_fresh_retirement_and_fences_late_dispatch(self) -> None:
         (self.fixture.data / "business-data").write_text("synthetic retained state")
         self.assertEqual(self.fixture.run_program("apply")["status"], "held")
-        permit = {"binding": "a" * 64, "fresh_until": time.time() + 60}
+        permit = {
+            "binding": "a" * 64,
+            "fresh_until": time.time() + 60,
+            "boot_id": "fixture-boot",
+            "monotonic_deadline": 1000,
+        }
         self.assertEqual(
-            self.fixture.run_program(
-                "apply", retirement={**permit, "fresh_until": time.time() - 1}
-            )["status"],
+            self.fixture.run_program("apply", retirement={**permit, "monotonic_deadline": -1})[
+                "status"
+            ],
             "held",
         )
         self.assertEqual(
@@ -107,3 +114,20 @@ class RetirementHostTests(unittest.TestCase):
             ],
             "removed",
         )
+
+    def test_changed_boot_and_expired_monotonic_permit_protect_populated_volume(self) -> None:
+        (self.fixture.data / "business-data").write_text("synthetic retained state")
+        permit = {
+            "binding": "a" * 64,
+            "fresh_until": time.time() + 600,
+            "boot_id": "different-boot",
+            "monotonic_deadline": 1000,
+        }
+        self.assertEqual(self.fixture.run_program("apply", retirement=permit)["status"], "held")
+        self.assertEqual(
+            self.fixture.run_program(
+                "apply", retirement={**permit, "boot_id": "fixture-boot", "monotonic_deadline": -1}
+            )["status"],
+            "held",
+        )
+        self.assertFalse(json.loads(self.fixture.state_path.read_text()).get("removed"))

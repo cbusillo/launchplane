@@ -681,7 +681,12 @@ def create_dokploy_application_target(
         application_payload["description"] = application_description.strip()
     if server_id.strip():
         application_payload["serverId"] = server_id.strip()
-    created_application = mutate_provider(host, token, APPLICATION_CREATE_PATH, application_payload)
+    from control_plane.production_recipient_retirement_names import provider_name_guard
+
+    with provider_name_guard(record_store, app_name.strip() or "application"):
+        created_application = mutate_provider(
+            host, token, APPLICATION_CREATE_PATH, application_payload
+        )
     application_id = _extract_provider_id(created_application, "applicationId", "application")
 
     adoption = adopt_dokploy_target(
@@ -923,7 +928,10 @@ def create_dokploy_compose_target(
     }
     if compose_description.strip():
         compose_payload["description"] = compose_description.strip()
-    created_compose = mutate_provider(host, token, COMPOSE_CREATE_PATH, compose_payload)
+    from control_plane.production_recipient_retirement_names import provider_name_guard
+
+    with provider_name_guard(record_store, app_name.strip() or normalized_target_name):
+        created_compose = mutate_provider(host, token, COMPOSE_CREATE_PATH, compose_payload)
     compose_id = _extract_provider_id(created_compose, "composeId", "compose")
 
     adoption_fetch = fetch_target_payload
