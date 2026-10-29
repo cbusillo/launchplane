@@ -30,13 +30,16 @@ comparison includes all configured production-context integrations, provider
 credentials, including literal and secret-backed configuration parameters.
 Production candidates retain whole managed secrets and every fragment of managed
 or credential-shaped provider values. Other provider values contribute only
-credential-named fragments. Nested names retain their
-credential context, and scalar values include their text representations. Short,
-numeric or boolean-looking values and bearer URLs stay protected. A collision
+credential-named fragments. Nested names retain their credential context, and
+scalar values include their text representations. Within managed values and
+credential-named provider fragments, short, numeric or boolean-looking values
+and bearer URLs stay protected. A collision
 refuses with the production binding or environment key whose credential separation
 is unproven; keys inside credential payloads remain private. An
-untyped public endpoint under a credential-shaped field can conservatively refuse;
-its purpose must come from authoritative configuration, not its URL shape.
+untyped public endpoint, port or flag inside a protected value also refuses when
+it matches the preview, including public fields of two structured secrets.
+That leaves credential separation unproven until its purpose is established;
+URL or scalar shape alone cannot supply that fact.
 Database parameters are read in a read-only transaction through the pinned
 database image; the production database is not inventoried. Preview parameters
 are compared only against known managed and provider production values. This
@@ -60,8 +63,12 @@ positive qualification. Provider authorization refusals remain denials.
 Successful collection can report `unused` or `in_use` and isolated production
 resources. Data custody and reproducibility remain UNKNOWN unless independently
 established; this read neither clones nor sanitizes data, and cannot qualify
-its historical origin. Known shared aliases are recorded protectively before collection refuses.
-Existing protected-use, needed-copy and shared-resource records retain their protections. No lane, resource or credential is changed.
+its historical origin. A production alias found in the preview slug's stored
+target ID is recorded protectively before collection refuses. Aliases found
+only through the completed deployment, or discovered after that pre-check,
+refuse without positive qualification. Existing protected-use, needed-copy and
+shared-resource records retain their protections. No lane, resource or
+credential is changed.
 
 ## Native generic-web testing deployment
 

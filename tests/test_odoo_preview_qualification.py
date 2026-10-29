@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 import base64
 import click
@@ -5,6 +6,9 @@ import json
 from typing import Any
 from unittest.mock import Mock, patch
 
+from control_plane.contracts.odoo_post_deploy_payload import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+from control_plane.disposable_lane_collection import collect_disposable_lane_facts
+from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import (
@@ -177,12 +181,14 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             ]
         kwargs["receive"](frame)
 
-    async def assert_secret_separation_refused(self, production: str, candidate: str) -> None:
-        self.production["SERVICE_SECRET"] = production
+    async def assert_secret_separation_refused(
+        self, production: str, candidate: str, *, key: str = "SERVICE_SECRET"
+    ) -> None:
+        self.production[key] = production
         self.preview_candidates = [candidate]
         response = await self.collect()
         self.assertEqual(response.status_code, 409, response.text)
-        self.assertIn(":SERVICE_SECRET", response.text)
+        self.assertTrue(response.json()["error"]["message"].endswith(":" + key), response.text)
         self.assertNotIn("private-production", response.text)
         self.assertIsNone(
             self.store.read_disposable_lane_safety(
@@ -225,6 +231,16 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             with self.subTest(suffix=suffix):
                 await self.assert_secret_separation_refused(production, preview)
 
+    async def test_unclassified_root_keeps_credential_ancestors_through_decode_and_query(
+        self,
+    ) -> None:
+        address = "https://hooks.invalid/x?sig=private-signature"
+        for value in (address, json.dumps({"destination": address})):
+            with self.subTest(value=value):
+                await self.assert_secret_separation_refused(
+                    json.dumps({"webhook_secret": value}), "private-signature", key="APP_CONFIG"
+                )
+
     async def test_large_unclassified_metadata_does_not_consume_the_credential_bound(self) -> None:
         self.production["PUBLIC_OPTIONS"] = json.dumps(
             {"items": [f"metadata-{index}" for index in range(MAX_CREDENTIAL_CANDIDATES)]}
@@ -256,7 +272,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             ("auth_signup.reset_password", "True", 409),
         ):
             with self.subTest(key=key, value=value):
-                self.production["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"] = base64.b64encode(
+                self.production[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = base64.b64encode(
                     json.dumps(
                         {
                             "config_parameters": [
@@ -307,7 +323,17 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         )
         assert safety is not None
         self.assertEqual(safety.usage, "in_use")
-        self.assertTrue(safety.usage_evidence.startswith("service:staff-testing-hold:"), safety)
+        held = collect_disposable_lane_facts(
+            self.store,
+            context="cm",
+            instance=self.issued.preview_slug,
+            target=self.store.read_dokploy_target_record(
+                context_name="cm", instance_name=self.issued.preview_slug
+            ),
+            target_id=None,
+            binding_sha256=safety.binding_sha256,
+        )
+        self.assertTrue(safety.usage_evidence.startswith(held.usage_evidence), safety)
 
     async def test_nested_bearer_url_is_protected_when_whole_payloads_differ(self) -> None:
         credential = "https://hooks.invalid/private-path-token"
@@ -359,7 +385,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             response = await self.collect()
         self.assertEqual(response.status_code, 409, response.text)
         self.assertIn("preview_production_credential_separation_unproven", response.text)
-        self.production["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"] = base64.b64encode(
+        self.production[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = base64.b64encode(
             json.dumps(
                 {
                     "config_parameters": [
@@ -370,8 +396,10 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         ).decode()
         response = await self.collect()
         self.assertEqual(response.status_code, 409, response.text)
-        self.assertIn(
-            "preview_production_credential_separation_unproven:ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64",
+        self.assertTrue(
+            response.json()["error"]["message"].endswith(
+                ":" + ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+            ),
             response.text,
         )
 
@@ -465,8 +493,6 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                     if missing == "generation"
                     else self.preview
                 )
-                from contextlib import nullcontext
-
                 guard = (
                     patch.object(self.store, "read_idempotency_record_by_id", return_value=None)
                     if missing == "completion"
@@ -543,14 +569,33 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             )
             self.read_frame(**kwargs)
 
-        for effect, expected in (
-            (changed, 409),
-            (NativeSourceAuthorizationDenied("private-provider-error"), 403),
+        for effect, expected, provider_status in (
+            (changed, 409, None),
+            (NativeSourceAuthorizationDenied("private-provider-error"), 403, None),
+            (None, 403, 401),
+            (None, 403, 403),
         ):
-            with self.subTest(expected=expected):
+            with self.subTest(expected=expected, provider_status=provider_status):
                 self.store.write_preview_generation_record(self.generation)
+                self.remote.reset_mock()
                 self.remote.side_effect = effect
-                response = await self.collect()
+                provider_denial = (
+                    patch(
+                        "control_plane.odoo_preview_qualification.api.fetch_dokploy_target_payload",
+                        side_effect=DokployRequestFailed(
+                            method="GET",
+                            path="/compose.one",
+                            detail="private-provider-error",
+                            status_code=provider_status,
+                        ),
+                    )
+                    if provider_status
+                    else nullcontext()
+                )
+                with provider_denial:
+                    response = await self.collect()
+                if provider_status:
+                    self.remote.assert_not_called()
                 self.assertEqual(response.status_code, expected, response.text)
                 self.assertNotIn("private-provider-error", response.text)
                 self.assertIsNone(
