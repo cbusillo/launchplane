@@ -29,8 +29,11 @@ from tests import test_production_recipient_publication as publication_tests
 
 
 class RecipientRetirementTests(unittest.TestCase):
+    database_url = ""
+
     def setUp(self) -> None:
         self.publication = publication_tests.RecipientPublicationTests()
+        self.publication.database_url = self.database_url
         with patch.object(self.publication, "customize_preparation", side_effect=self.customize):
             self.publication.setUp()
         self.addCleanup(self.publication.doCleanups)
@@ -324,6 +327,22 @@ class RecipientRetirementTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.adapter.current()
         self.assertFalse(self.effects)
+
+    def test_competing_key_cannot_enter_while_original_delete_is_running(self) -> None:
+        original_delete = self.delete
+
+        def competing(**kwargs: Any) -> Any:
+            self.assertEqual(
+                self.run_retirement(
+                    replace(self.adapter, original_key="competing-retirement")
+                ).status,
+                "target_busy",
+            )
+            return original_delete(**kwargs)
+
+        with patch.object(api, "dokploy_request", side_effect=competing):
+            self.assertEqual(self.run_retirement().status, "completed")
+        self.assertEqual(len(self.effects), 1)
 
     def test_testing_settings_and_foreign_volume_ownership_retain_volumes(self) -> None:
         self.store.write_runtime_environment_record(

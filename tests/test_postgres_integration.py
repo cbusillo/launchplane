@@ -34,6 +34,7 @@ from tests import test_testing_retry as testing_retry_tests
 from tests import test_browser_route_repair as browser_repair_tests
 from tests import test_release_review_http as release_review_http_tests
 from tests import test_production_recipient_release_settings as recipient_settings_tests
+from tests import test_production_recipient_retirement as recipient_retirement_tests
 from tests import test_accepted_recipient_delivery_recovery as recipient_delivery_tests
 from tests import test_generic_web_compose_refusal as compose_refusal_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
@@ -12972,6 +12973,13 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
 
     def test_committed_receipt_survives_later_provider_drift(self) -> None:
         self.fixture.test_committed_receipt_survives_later_provider_drift()
+
+
+@unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
+class RealPostgresRecipientRetirementTests(recipient_retirement_tests.RecipientRetirementTests):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
 
 
 class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
