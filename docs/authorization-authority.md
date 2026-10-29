@@ -1198,11 +1198,8 @@ The set deliberately leaves out:
   uses Launchplane's onboarding record route, through the compatibility workflow
   or a signed-in admin session. Browser generic-web apply requires the recorded
   testing application from target setup.
-  The authenticated Director agent has a separate bounded generic-web path for
-  a new product with its reviewed record digest and recorded testing application.
-  It preserves that identity and generated names, checks unowned testing/preview
-  contexts and absent deployments atomically, and supports original-key replay.
-  Advanced manifests still require the broad action; it is not a standing grant.
+  The Director agent's bounded new-product path follows the
+  [native onboarding contract](operations.md#native-target-allocation).
 - `dokploy_target.setup`. It is checked on product and context `launchplane`,
   so it reaches every product's Dokploy targets. `dokploy_target.lane_setup` is
   the lane-scoped alternative (see the Dokploy target setup section in

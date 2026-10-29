@@ -36,7 +36,7 @@ from control_plane.workflows.dokploy_target_adoption import (
 )
 
 
-class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
+class _OnboardingTargetAllocationFixture(_ApplicationStateVolumeFixture):
     def setUp(self) -> None:
         super().setUp()
         self.original_policies = self.store.list_authz_policy_records()
@@ -115,6 +115,8 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
         )
         return result
 
+
+class OnboardingTargetAllocationTests(_OnboardingTargetAllocationFixture):
     async def test_admin_plans_allocates_replays_and_reads_original_without_product_or_policy_apply(
         self,
     ) -> None:
@@ -375,12 +377,31 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
             "generic_web": self.intent.model_dump(mode="json"),
             "reviewed_plan_sha256": result["onboarding_plan_sha256"],
             "resolved_target_id": target_id.target_id,
+            "allocation_id": result["allocation_id"],
         }
         record_headers = {**headers, "Idempotency-Key": "agent-records"}
+        missing_key = await request(
+            self.app,
+            "POST",
+            "/v1/product-onboarding/apply",
+            payload=record_payload,
+            headers={"Authorization": headers["Authorization"]},
+        )
+        self.assertEqual(missing_key.status_code, 400, missing_key.text)
         for changes, status in (
+            ({"allocation_id": ""}, 400),
             ({"resolved_target_id": self.production_id.target_id}, 400),
             ({"product": "unrelated-product"}, 400),
             ({"generic_web": {**self.intent.model_dump(mode="json"), "runtime_port": 8080}}, 409),
+            (
+                {
+                    "generic_web": {**self.intent.model_dump(mode="json"), "runtime_port": 8080},
+                    "reviewed_plan_sha256": generic_web_onboarding_plan_sha256(
+                        self.intent.model_copy(update={"runtime_port": 8080})
+                    ),
+                },
+                400,
+            ),
         ):
             with self.subTest(changes=changes):
                 refused = await request(
@@ -482,6 +503,7 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
             headers=headers,
         )
         self.assertEqual(allocated.status_code, 202, allocated.text)
+        payload["allocation_id"] = plan["allocation_id"]
         write = self.store.write_new_product_onboarding_bundle
         for context in (self.intent.testing_context, self.intent.preview_context):
 

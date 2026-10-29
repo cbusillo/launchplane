@@ -1,136 +1,91 @@
-from pathlib import Path
-from tempfile import TemporaryDirectory
-import unittest
-
-from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
-from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
     _browser_mutation_headers,
     _github_human_identity,
-    _github_human_product_config_policy,
-    _github_oauth_config,
-    _RejectingVerifier,
 )
 from tests.support.http import lifespan_client
-from tests.support.stores import _sqlite_database_url
+from tests.test_onboarding_target_allocation import _OnboardingTargetAllocationFixture
 
 
-class NativeProductOnboardingTests(unittest.IsolatedAsyncioTestCase):
+class NativeProductOnboardingTests(_OnboardingTargetAllocationFixture):
     async def test_admin_reviews_and_applies_records_without_caller_grants(self) -> None:
-        with TemporaryDirectory() as temporary_directory:
-            store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory) / "records.sqlite3")
+        allocation = await self.plan()
+        allocated = await self.post()
+        self.assertEqual(allocated.status_code, 202, allocated.text)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.intent.testing_context, instance_name="testing"
+        )
+        target_id = self.store.read_dokploy_target_id_record(
+            context_name=target.context, instance_name=target.instance
+        )
+        reader = self.manager.issue(_github_human_identity(role="read_only"))
+        review = {
+            "product": "launchplane",
+            "mode": "dry_run",
+            "generic_web": self.intent.model_dump(mode="json"),
+        }
+        original_policy = self.policy.model_dump(mode="json")
+        async with lifespan_client(self.app) as client:
+            for headers in (
+                {"Cookie": self.manager.session_cookie_header(self.session)},
+                _browser_mutation_headers(self.manager, reader),
+            ):
+                refused = await client.post(
+                    "/v1/product-onboarding/apply", json=review, headers=headers
+                )
+                self.assertEqual(refused.status_code, 403, refused.text)
+            planned = await client.post(
+                "/v1/product-onboarding/apply",
+                json=review,
+                headers=_browser_mutation_headers(self.manager, self.session),
             )
-            store.ensure_schema()
-            self.addCleanup(store.close)
-            policy = _github_human_product_config_policy(
-                actions=("generic_web_onboarding.plan", "product_onboarding.apply"),
-                product="launchplane",
-                context="launchplane",
-            )
-            session_manager = HumanSessionManager(
-                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
-            )
-            session = session_manager.issue(_github_human_identity())
-            reader = session_manager.issue(_github_human_identity(role="read_only"))
-            app = create_launchplane_fastapi_app(
-                verifier=_RejectingVerifier(),
-                authz_policy=policy,
-                human_session_manager=session_manager,
-                record_store_factory=lambda: store,
-            )
-            intent = {
-                "product": "new-site",
-                "display_name": "New site",
-                "repository": "example/new-site",
-                "repository_id": "321",
-                "repository_owner_id": "654",
-                "image_repository": "ghcr.io/example/new-site",
-                "runtime_port": 8080,
-                "health_path": "/healthz",
-                "preview_base_url": "https://preview.example.invalid",
+            self.assertEqual(planned.status_code, 202, planned.text)
+            self.assertEqual(self.store.list_product_profile_records(), (self.profile,))
+            applied_request = {
+                **review,
+                "mode": "apply",
+                "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+                "resolved_target_id": target_id.target_id,
+                "allocation_id": allocation["allocation_id"],
             }
-            review = {"product": "launchplane", "mode": "dry_run", "generic_web": intent}
-            original_policy = policy.model_dump(mode="json")
-            async with lifespan_client(app) as client:
-                for headers in (
-                    {"Cookie": session_manager.session_cookie_header(session)},
-                    _browser_mutation_headers(session_manager, reader),
-                ):
-                    refused = await client.post(
-                        "/v1/product-onboarding/apply", json=review, headers=headers
-                    )
-                    self.assertEqual(refused.status_code, 403, refused.text)
-                planned = await client.post(
-                    "/v1/product-onboarding/apply",
-                    json=review,
-                    headers=_browser_mutation_headers(session_manager, session),
-                )
-                self.assertEqual(planned.status_code, 202, planned.text)
-                self.assertFalse(store.list_product_profile_records())
-                applied_request = {
-                    **review,
-                    "mode": "apply",
-                    "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
-                    "resolved_target_id": "allocated-application",
-                }
-                headers = {
-                    **_browser_mutation_headers(session_manager, session),
-                    "Idempotency-Key": "native-onboarding-records",
-                }
-                mismatch = await client.post(
-                    "/v1/product-onboarding/apply",
-                    json={**applied_request, "generic_web": {**intent, "runtime_port": 9090}},
-                    headers=headers,
-                )
-                self.assertEqual(mismatch.status_code, 409, mismatch.text)
-                headers.update(_browser_mutation_headers(session_manager, session))
-                missing_target = await client.post(
-                    "/v1/product-onboarding/apply", json=applied_request, headers=headers
-                )
-                self.assertEqual(missing_target.status_code, 400, missing_target.text)
-                self.assertFalse(store.list_product_profile_records())
-                target = DokployTargetRecord(
-                    context="new-site-testing",
-                    instance="testing",
-                    target_type="application",
-                    project_name="allocated-project",
-                    target_name="allocated-target",
-                    updated_at="2026-10-28T00:00:00Z",
-                    source_label="test:setup",
-                )
-                store.write_dokploy_target_record(target)
-                store.write_dokploy_target_id_record(
-                    DokployTargetIdRecord(
-                        context=target.context,
-                        instance=target.instance,
-                        target_id=str(applied_request["resolved_target_id"]),
-                        updated_at=target.updated_at,
-                        source_label=target.source_label,
-                    )
-                )
-                headers.update(_browser_mutation_headers(session_manager, session))
-                applied = await client.post(
-                    "/v1/product-onboarding/apply", json=applied_request, headers=headers
-                )
-                self.assertEqual(applied.status_code, 202, applied.text)
-                headers.update(_browser_mutation_headers(session_manager, session))
-                replayed = await client.post(
-                    "/v1/product-onboarding/apply", json=applied_request, headers=headers
-                )
-                self.assertEqual(replayed.status_code, 202, replayed.text)
-                self.assertTrue(replayed.json()["replayed"])
-            profile = store.read_product_profile_record(str(intent["product"]))
-            self.assertEqual(profile.repository_id, intent["repository_id"])
-            self.assertEqual(profile.lanes[0].instance, "testing")
-            self.assertEqual(
-                store.read_dokploy_target_id_record(
-                    context_name=profile.lanes[0].context, instance_name="testing"
-                ).target_id,
-                applied_request["resolved_target_id"],
+            headers = {
+                **_browser_mutation_headers(self.manager, self.session),
+                "Idempotency-Key": "native-onboarding-records",
+            }
+            changed_intent = self.intent.model_copy(update={"runtime_port": 9090})
+            revised_plan = await client.post(
+                "/v1/product-onboarding/apply",
+                json={**review, "generic_web": changed_intent.model_dump(mode="json")},
+                headers=_browser_mutation_headers(self.manager, self.session),
             )
-            self.assertEqual(policy.model_dump(mode="json"), original_policy)
-            self.assertFalse(store.list_authz_policy_records())
+            self.assertEqual(revised_plan.status_code, 202, revised_plan.text)
+            headers.update(_browser_mutation_headers(self.manager, self.session))
+            changed = await client.post(
+                "/v1/product-onboarding/apply",
+                json={
+                    **applied_request,
+                    "generic_web": changed_intent.model_dump(mode="json"),
+                    "reviewed_plan_sha256": revised_plan.json()["result"]["plan_sha256"],
+                },
+                headers=headers,
+            )
+            self.assertEqual(changed.status_code, 400, changed.text)
+            headers.update(_browser_mutation_headers(self.manager, self.session))
+            applied = await client.post(
+                "/v1/product-onboarding/apply", json=applied_request, headers=headers
+            )
+            self.assertEqual(applied.status_code, 202, applied.text)
+            headers.update(_browser_mutation_headers(self.manager, self.session))
+            replayed = await client.post(
+                "/v1/product-onboarding/apply", json=applied_request, headers=headers
+            )
+            self.assertEqual(replayed.status_code, 202, replayed.text)
+            self.assertTrue(replayed.json()["replayed"])
+        profile = self.store.read_product_profile_record(self.intent.product)
+        self.assertEqual(profile.repository_id, self.intent.repository_id)
+        adopted = self.store.read_dokploy_target_record(
+            context_name=target.context, instance_name=target.instance
+        )
+        self.assertEqual(adopted.target_name, target.target_name)
+        self.assertEqual(adopted.project_name, target.project_name)
+        self.assertEqual(self.policy.model_dump(mode="json"), original_policy)
+        self.assert_production_unchanged()
