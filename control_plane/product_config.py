@@ -14,6 +14,7 @@ from control_plane import provider_key_adoption, runtime_platform_credentials
 from control_plane import product_secret_copy
 from control_plane.preview_settings import validate_preview_scope
 from control_plane import secrets as control_plane_secrets
+from control_plane.service_agent_identities import AGENT_SELECTOR_KEYS
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.public_hosts import normalize_public_hosts
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentScope
@@ -179,7 +180,10 @@ def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, ob
         context_name=context_name,
         instance_name=instance_name,
     )
-    runtime_env = _normalize_product_config_runtime_env(runtime_input["env"])
+    runtime_env = _normalize_product_config_runtime_env(
+        runtime_input["env"],
+        non_secret_keys=AGENT_SELECTOR_KEYS if context_name == "launchplane" else frozenset(),
+    )
     secrets = _product_config_secret_inputs(
         payload,
         context_name=context_name,
@@ -985,7 +989,9 @@ def _provider_adoption_value_origin(
     return "provider"
 
 
-def _normalize_product_config_runtime_env(raw_env: object) -> dict[str, ScalarValue]:
+def _normalize_product_config_runtime_env(
+    raw_env: object, *, non_secret_keys: frozenset[str] = frozenset()
+) -> dict[str, ScalarValue]:
     if not isinstance(raw_env, dict):
         raise ProductConfigError("Product config runtime_env.env must be a JSON object.")
     env: dict[str, ScalarValue] = {}
@@ -993,7 +999,7 @@ def _normalize_product_config_runtime_env(raw_env: object) -> dict[str, ScalarVa
         if not isinstance(raw_key, str):
             raise ProductConfigError("Product config runtime env keys must be strings.")
         key_name = _normalize_runtime_environment_key(raw_key)
-        if is_secret_shaped_runtime_key(key_name):
+        if is_secret_shaped_runtime_key(key_name) and key_name not in non_secret_keys:
             raise ProductConfigError(
                 f"Runtime environment key {key_name!r} must be written as a managed secret."
             )
