@@ -27,35 +27,53 @@ def main() -> int:
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
-    if args.original_reservation_id:
+    if any(
+        value == ""
+        for value in (
+            args.product,
+            args.original_reservation_id,
+            args.table,
+            args.key,
+            args.partition,
+            args.active,
+            args.expected_snapshot_id,
+            args.expected_database_sha256,
+        )
+    ):
+        parser.error("Supplied read arguments cannot be empty.")
+    if args.original_reservation_id is not None:
         if not args.expected_snapshot_id or not args.expected_database_sha256:
             parser.error(
                 "Version reads require --expected-snapshot-id and --expected-database-sha256."
             )
-        if args.key or args.partition or args.active is not None:
+        if args.key is not None or args.partition is not None or args.active is not None:
             parser.error("Version reads do not accept aggregate column options.")
-    elif not args.key:
+    elif args.key is None:
         parser.error("Aggregate reads require --key.")
-    elif args.expected_snapshot_id or args.expected_database_sha256:
+    elif args.expected_snapshot_id is not None or args.expected_database_sha256 is not None:
         parser.error("Original snapshot bindings require --original-reservation-id.")
     helper = args.operator_helper.expanduser().resolve(strict=True)
     if helper.name != "launchplane-write-action.py":
         parser.error("Select the installed Launchplane operator helper.")
     try:
         query: AggregateQuery | version.SnapshotVersionQuery
-        if args.original_reservation_id:
-            query = version.SnapshotVersionQuery(
-                original_reservation_id=args.original_reservation_id,
-                expected_snapshot_id=args.expected_snapshot_id,
-                expected_database_sha256=args.expected_database_sha256,
+        if args.original_reservation_id is not None:
+            query = version.SnapshotVersionQuery.model_validate(
+                {
+                    "original_reservation_id": args.original_reservation_id,
+                    "expected_snapshot_id": args.expected_snapshot_id,
+                    "expected_database_sha256": args.expected_database_sha256,
+                }
             )
             path = version.ROUTE.format(product=quote(args.product, safe=""))
         else:
-            query = AggregateQuery(
-                table=args.table,
-                key=args.key,
-                partition=args.partition,
-                active=args.active or "active",
+            query = AggregateQuery.model_validate(
+                {
+                    "table": args.table,
+                    "key": args.key,
+                    "partition": args.partition,
+                    "active": "active" if args.active is None else args.active,
+                }
             )
             path = ROUTE.format(product=quote(args.product, safe=""), environment="testing")
         transport = runpy.run_path(str(helper), run_name="copy_aggregate_transport")
@@ -100,6 +118,7 @@ def main() -> int:
             trace = transport["public_trace_id"](raw.get("trace_id"))
             code = raw.get("error", {}).get("code", "aggregate_unavailable")
             if code not in {
+                "database_storage_required",
                 "snapshot_version_unavailable",
                 "snapshot_original_unavailable",
                 "snapshot_binding_mismatch",

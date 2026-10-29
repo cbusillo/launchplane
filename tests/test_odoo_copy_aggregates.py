@@ -398,6 +398,7 @@ class AggregateClientTests(unittest.TestCase):
             helper = Path(temporary) / "launchplane-write-action.py"
             helper.write_text("")
             for service_code, expected in (
+                ("database_storage_required", "database_storage_required"),
                 ("snapshot_unavailable", "snapshot_unavailable"),
                 ("private_secret", "aggregate_unavailable"),
             ):

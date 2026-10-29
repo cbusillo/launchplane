@@ -2,6 +2,7 @@ from io import BytesIO
 import unittest
 
 from control_plane import odoo_copy_aggregates as reader
+from control_plane.odoo_runtime_reads import OdooRuntimeReadError
 
 
 MODULE_ROWS = (
@@ -145,31 +146,42 @@ class SnapshotVersionBindingTests(unittest.TestCase):
         from unittest.mock import patch
         from control_plane import odoo_snapshot_version as version
 
-        for changes in (
-            {"original_reservation_id": "mutation-reservation-" + "d" * 64},
-            {"expected_snapshot_id": "d" * 64},
-            {"expected_database_sha256": "d" * 64},
+        for changes, status, code in (
+            (
+                {"original_reservation_id": "mutation-reservation-" + "d" * 64},
+                404,
+                "snapshot_original_unavailable",
+            ),
+            ({"expected_snapshot_id": "d" * 64}, 409, "snapshot_binding_mismatch"),
+            ({"expected_database_sha256": "d" * 64}, 409, "snapshot_binding_mismatch"),
         ):
             with (
                 self.subTest(changes=changes),
                 patch.object(version, "read_snapshot_archive") as archive,
             ):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(OdooRuntimeReadError) as raised:
                     version.read_snapshot_version(
                         store=self.store,
                         product=self.profile.product,
                         query=self.query.model_copy(update=changes),
                     )
+                self.assertEqual(
+                    (raised.exception.status_code, raised.exception.code), (status, code)
+                )
                 archive.assert_not_called()
         changed = self.profile.model_copy(update={"product": "foreign-product"})
         self.store.write_product_profile_record(changed)
         with (
             patch.object(version, "read_snapshot_archive") as archive,
-            self.assertRaises(ValueError),
+            self.assertRaises(OdooRuntimeReadError) as raised,
         ):
             version.read_snapshot_version(
                 store=self.store, product=changed.product, query=self.query
             )
+        self.assertEqual(
+            (raised.exception.status_code, raised.exception.code),
+            (409, "snapshot_binding_mismatch"),
+        )
         archive.assert_not_called()
 
     def test_archive_failure_stage_is_retained_without_provider_detail(self) -> None:
@@ -219,10 +231,14 @@ class SnapshotVersionBindingTests(unittest.TestCase):
             patch.object(self.store, "read_original_mutation_intent", return_value={}),
             patch.object(version, "read_snapshot_archive") as archive,
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaises(OdooRuntimeReadError) as raised:
                 version.read_snapshot_version(
                     store=self.store, product=self.profile.product, query=self.query
                 )
+            self.assertEqual(
+                (raised.exception.status_code, raised.exception.code),
+                (409, "snapshot_binding_mismatch"),
+            )
             archive.assert_not_called()
 
     def test_service_reuses_preview_read_scope_and_refuses_overrides_without_leaking_errors(
@@ -275,13 +291,18 @@ class SnapshotVersionBindingTests(unittest.TestCase):
             )
             self.assertIsNone(response.json()["result"]["metadata"]["preparation_stage"])
             self.assertEqual(response.headers["cache-control"], "no-store")
-            self.assertEqual(
+            self.assertCountEqual(
                 [call.kwargs["action"] for call in allowed.call_args_list],
                 ["preview.read", "operations.read"],
             )
-            self.assertEqual(allowed.call_args.kwargs["target"].instances, ("testing",))
-            self.assertEqual(allowed.call_args.kwargs["context"], self.profile.preview.context)
-            self.assertEqual(allowed.call_args.kwargs["product"], self.profile.product)
+            scoped = next(
+                call.kwargs
+                for call in allowed.call_args_list
+                if call.kwargs["action"] == "operations.read"
+            )
+            self.assertEqual(scoped["target"].instances, ("testing",))
+            self.assertEqual(scoped["context"], self.profile.preview.context)
+            self.assertEqual(scoped["product"], self.profile.product)
             archive.reset_mock()
             allowed.return_value = False
             self.assertEqual(asyncio.run(request(app, "GET", path)).status_code, 403)
@@ -443,6 +464,10 @@ class SnapshotVersionClientTests(unittest.TestCase):
             run_name="snapshot_usage_test",
         )
         for arguments in (
+            ["--original-reservation-id", "", "--key", "name"],
+            ["--table", "", "--key", "name"],
+            ["--table", "product_template", "--key", "name", "--active", ""],
+            ["--table", "product_template", "--key", "name", "--expected-snapshot-id", ""],
             ["--table", "product_template"],
             ["--table", "product_template", "--key", "name", "--expected-snapshot-id", "a" * 64],
             ["--original-reservation-id", "mutation-reservation-" + "a" * 64],
