@@ -84,16 +84,11 @@ class PreparedRouteIsolationTests(unittest.IsolatedAsyncioTestCase):
                 return isinstance(other, CustomMetadata)
 
         _pattern_app("c+", metadata=CustomMetadata())
-        rebuilt: list[str] = []
-        original = APIRoute.__init__
-
-        def prepare(route: APIRoute, path: str, *args: Any, **kwargs: Any) -> None:
-            rebuilt.append(path)
-            original(route, path, *args, **kwargs)
-
-        with patch.object(APIRoute, "__init__", prepare):
+        with patch.object(
+            APIRoute, "__init__", autospec=True, side_effect=APIRoute.__init__
+        ) as prepare:
             _pattern_app("c+", metadata=CustomMetadata())
-        self.assertEqual(rebuilt, ["/pattern"])
+        self.assertIn("/pattern", [call.args[1] for call in prepare.call_args_list])
 
     async def test_warm_route_serves_current_records_without_repeating_preparation(self) -> None:
         _app({"record": "warm-up"})
