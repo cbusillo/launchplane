@@ -78,11 +78,16 @@ def validate_onboarding_target_request(request: DokployTargetSetupEnvelope) -> N
 
 
 def require_unallocated_onboarding_contexts(
-    store: PostgresRecordStore, intent: GenericWebOnboardingIntent
+    store: PostgresRecordStore,
+    intent: GenericWebOnboardingIntent,
+    *,
+    allocated_testing: bool = False,
 ) -> None:
     from control_plane.application_state_volume import require_no_held_state_volume
 
     require_no_held_state_volume(store, intent.preview_context)
+    if allocated_testing:
+        require_no_held_state_volume(store, intent.testing_context)
     contexts = {intent.testing_context, intent.preview_context}
     for profile in store.list_product_profile_records():
         owned = {lane.context for lane in profile.lanes} | set(profile.historical_contexts)
@@ -94,6 +99,11 @@ def require_unallocated_onboarding_contexts(
             )
     if any(
         record.context in contexts
+        and not (
+            allocated_testing
+            and record.context == intent.testing_context
+            and record.instance == "testing"
+        )
         for records in (
             store.list_dokploy_target_records(),
             store.list_dokploy_target_id_records(),

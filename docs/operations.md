@@ -2931,6 +2931,16 @@ create, deletes resources or applies onboarding/policy records. Retained
 allocations keep their original custody and cannot resume creating resources.
 Apply the separately reviewed product-record plan only after allocation succeeds.
 
+The authenticated Director agent can use `POST /v1/product-onboarding/apply`
+with `generic_web` and `mode: dry_run` to review the record plan, then apply it
+with `reviewed_plan_sha256`, the recorded application's `resolved_target_id`
+and an original `Idempotency-Key`. Apply preserves the allocated application
+identity and generated project/target names. The product must still be new;
+the testing and preview contexts must remain unowned, without deployments or
+other targets. These facts are checked under the atomic record-write lock.
+Unchanged original-key replay returns the committed receipt. Advanced manifests
+retain their existing service authorization; this path grants no broader action.
+
 Source support is not deployed qualification. Confirm the deployed schema,
 then prove plan/create/readback/original-key recovery/retention on isolated
 targets before removing the compatibility wrapper and its planner. Keep

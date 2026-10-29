@@ -17708,7 +17708,10 @@ def create_launchplane_fastapi_app(
             if onboarding_request.generic_web is not None and onboarding_request.mode == "dry_run"
             else "product_onboarding.apply"
         )
-        if not resolved_authz_policy_runtime.allows(
+        director_onboarding = (
+            onboarding_request.generic_web is not None and director_agent_identity(identity)
+        )
+        if not director_onboarding and not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=onboarding_action,
             product=onboarding_request.product,
@@ -17836,9 +17839,9 @@ def create_launchplane_fastapi_app(
                         instance_name="testing",
                     )
                 except FileNotFoundError as error:
-                    if isinstance(identity, GitHubHumanIdentity):
+                    if isinstance(identity, GitHubHumanIdentity) or director_onboarding:
                         raise ValueError(
-                            "Browser onboarding requires the recorded testing application from target setup."
+                            "Native onboarding requires the recorded testing application from target setup."
                         ) from error
                 else:
                     adopted_onboarding_target_id = database_store.read_dokploy_target_id_record(
@@ -17927,17 +17930,22 @@ def create_launchplane_fastapi_app(
             result=driver_result,
         )
         try:
-            database_store.write_product_authority_bundle(
-                authority_bundle_with_apply_idempotency(
-                    bundle=authority_bundle,
-                    identity=identity,
-                    route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    request_fingerprint_value=payload_fingerprint,
-                    trace_id=trace_id,
-                    response=onboarding_response,
-                )
+            committed_bundle = authority_bundle_with_apply_idempotency(
+                bundle=authority_bundle,
+                identity=identity,
+                route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=onboarding_response,
             )
+            if director_onboarding:
+                assert onboarding_request.generic_web is not None
+                database_store.write_new_product_onboarding_bundle(
+                    committed_bundle, intent=onboarding_request.generic_web
+                )
+            else:
+                database_store.write_product_authority_bundle(committed_bundle)
         except (
             RuntimeEnvironmentConflictError,
             ProductProfileConflictError,

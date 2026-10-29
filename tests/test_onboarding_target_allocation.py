@@ -7,11 +7,16 @@ from control_plane.contracts.idempotency_record import (
     format_launchplane_mutation_timestamp,
     parse_launchplane_mutation_timestamp,
 )
-from control_plane.generic_web_onboarding import GenericWebOnboardingIntent
+from control_plane.generic_web_onboarding import (
+    GenericWebOnboardingIntent,
+    build_generic_web_onboarding_manifest,
+    generic_web_onboarding_plan_sha256,
+)
 from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
 from control_plane.onboarding_target import onboarding_target_digests
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from tests.http_app_test_support import (
     _browser_mutation_headers,
@@ -358,4 +363,152 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
             self.app, "POST", "/v1/dokploy-targets/setup", payload=payload, headers=headers
         )
         self.assertEqual(applied.status_code, 202, applied.text)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.intent.testing_context, instance_name="testing"
+        )
+        target_id = self.store.read_dokploy_target_id_record(
+            context_name=target.context, instance_name=target.instance
+        )
+        record_payload = {
+            "product": "launchplane",
+            "generic_web": self.intent.model_dump(mode="json"),
+            "reviewed_plan_sha256": result["onboarding_plan_sha256"],
+            "resolved_target_id": target_id.target_id,
+        }
+        record_headers = {**headers, "Idempotency-Key": "agent-records"}
+        for changes, status in (
+            ({"resolved_target_id": self.production_id.target_id}, 400),
+            ({"product": "unrelated-product"}, 400),
+            ({"generic_web": {**record_payload["generic_web"], "runtime_port": 8080}}, 409),
+        ):
+            with self.subTest(changes=changes):
+                refused = await request(
+                    self.app,
+                    "POST",
+                    "/v1/product-onboarding/apply",
+                    payload={**record_payload, **changes},
+                    headers=record_headers,
+                )
+                self.assertEqual(refused.status_code, status, refused.text)
+        with scoped_agent_transport():
+            refused = await request(
+                self.app,
+                "POST",
+                "/v1/product-onboarding/apply",
+                payload=record_payload,
+                headers=record_headers,
+            )
+        self.assertEqual(refused.status_code, 403, refused.text)
+        manifest = build_generic_web_onboarding_manifest(
+            intent=self.intent, target_id=target_id.target_id
+        )
+        refused = await request(
+            self.app,
+            "POST",
+            "/v1/product-onboarding/apply",
+            payload={"product": "launchplane", "manifest": manifest.model_dump(mode="json")},
+            headers=record_headers,
+        )
+        self.assertEqual(refused.status_code, 403, refused.text)
+        calls = self.provider.call_args_list.copy()
+        records = await request(
+            self.app,
+            "POST",
+            "/v1/product-onboarding/apply",
+            payload=record_payload,
+            headers=record_headers,
+        )
+        self.assertEqual(records.status_code, 202, records.text)
+        adopted = self.store.read_dokploy_target_record(
+            context_name=target.context, instance_name=target.instance
+        )
+        self.assertEqual(adopted.target_name, target.target_name)
+        self.assertEqual(adopted.project_name, target.project_name)
+        self.assertEqual(
+            self.store.read_dokploy_target_id_record(
+                context_name=target.context, instance_name=target.instance
+            ).target_id,
+            target_id.target_id,
+        )
+        replay = await request(
+            self.app,
+            "POST",
+            "/v1/product-onboarding/apply",
+            payload=record_payload,
+            headers=record_headers,
+        )
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        existing = await request(
+            self.app,
+            "POST",
+            "/v1/product-onboarding/apply",
+            payload=record_payload,
+            headers={**record_headers, "Idempotency-Key": "different-record-key"},
+        )
+        self.assertEqual(existing.status_code, 400, existing.text)
+        self.assertEqual(self.provider.call_args_list, calls)
+        self.assert_production_unchanged()
+
+    async def test_director_records_require_a_target_and_unowned_contexts_at_commit(self) -> None:
+        self.app = self.make_app(_local_operator_bearer_config())
+        headers = {"Authorization": "Bearer local-operator-token", "Idempotency-Key": "records"}
+        payload = {
+            "product": "launchplane",
+            "generic_web": self.intent.model_dump(mode="json"),
+            "reviewed_plan_sha256": generic_web_onboarding_plan_sha256(self.intent),
+            "resolved_target_id": "created-application",
+        }
+        missing = await request(
+            self.app, "POST", "/v1/product-onboarding/apply", payload=payload, headers=headers
+        )
+        self.assertEqual(missing.status_code, 400, missing.text)
+        planned = await request(
+            self.app, "POST", "/v1/dokploy-targets/setup", payload=self.payload, headers=headers
+        )
+        self.assertEqual(planned.status_code, 202, planned.text)
+        plan = planned.json()["result"]
+        allocated = await request(
+            self.app,
+            "POST",
+            "/v1/dokploy-targets/setup",
+            payload={
+                **self.payload,
+                "mode": "apply",
+                "reviewed_target_request_sha256": plan["target_request_sha256"],
+                "reviewed_onboarding_plan_sha256": plan["onboarding_plan_sha256"],
+            },
+            headers=headers,
+        )
+        self.assertEqual(allocated.status_code, 202, allocated.text)
+        write = self.store.write_new_product_onboarding_bundle
+        for context in (self.intent.testing_context, self.intent.preview_context):
+
+            def conflicting_write(
+                bundle: ProductAuthorityBundle, *, intent: GenericWebOnboardingIntent
+            ) -> None:
+                self.store.write_product_profile_record(
+                    self.profile.model_copy(update={"historical_contexts": (context,)})
+                )
+                write(bundle, intent=intent)
+
+            with (
+                self.subTest(context=context),
+                patch.object(
+                    self.store, "write_new_product_onboarding_bundle", side_effect=conflicting_write
+                ),
+            ):
+                refused = await request(
+                    self.app,
+                    "POST",
+                    "/v1/product-onboarding/apply",
+                    payload=payload,
+                    headers=headers,
+                )
+                self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertEqual(
+                    self.store.list_product_profile_records(),
+                    (self.profile.model_copy(update={"historical_contexts": (context,)}),),
+                )
+            self.store.write_product_profile_record(self.profile)
         self.assert_production_unchanged()

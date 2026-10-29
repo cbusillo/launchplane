@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from control_plane.generic_web_onboarding import GenericWebOnboardingIntent
 from control_plane.timestamps import utc_now_timestamp as _utc_now_timestamp
 
 from control_plane.contracts.public_hosts import retained_hostname_identity
@@ -6481,6 +6482,19 @@ class PostgresRecordStore(HumanSessionStore):
 
     def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None:
         self._write_product_authority_bundle(bundle)
+
+    def write_new_product_onboarding_bundle(
+        self, bundle: ProductAuthorityBundle, *, intent: GenericWebOnboardingIntent
+    ) -> None:
+        from control_plane.onboarding_target import require_unallocated_onboarding_contexts
+
+        def guard(_session: Any) -> None:
+            try:
+                require_unallocated_onboarding_contexts(self, intent, allocated_testing=True)
+            except ValueError as error:
+                raise ProductProfileConflictError(str(error)) from error
+
+        self._write_product_authority_bundle(bundle, guard_provider=guard)
 
     def compare_and_write_product_authority_bundle(
         self, bundle: ProductAuthorityBundle, *, mutation: DbOnlyMutationRequest
