@@ -44,7 +44,7 @@ class GitHubAppIdentityTests(unittest.TestCase):
                     "permissions": {"administration": "write", "metadata": "read"},
                 }
             issued.append(kwargs)
-            self.fail("An unaccepted installation must not issue a token.")
+            raise AssertionError("An unaccepted installation must not issue a token.")
 
         with self.assertRaises(GitHubAppIdentityError):
             mint_runner_relabel_installation_token(

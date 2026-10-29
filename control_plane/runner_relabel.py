@@ -334,6 +334,8 @@ class RunnerRelabelAdapter:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
+        if reconciliation_key != self.reconciliation_key():
+            return ProviderObservation("unknown")
         original = self.store.read_idempotency_record(
             scope=actor_scope(self.review["actor"]),
             route_path=ROUTE.format(policy_id=self.policy.policy_id),
@@ -347,7 +349,7 @@ class RunnerRelabelAdapter:
         if (
             original is not None
             and original.state == "reconcile_required"
-            and not original.provider_effect_phase
+            and original.provider_effect_phase == provider_effect_phase == ""
             and not original.provider_effect_started_at
             and original.request_fingerprint == canonical_json_sha256(intent)
             and self.store.read_original_mutation_intent(original) == intent
@@ -425,7 +427,7 @@ class RunnerRelabelAdapter:
         dispatched = False
         rejected = False
 
-        def post(audit: RunnerLaneRegistrationAuditRecord, key: str) -> dict[str, object]:
+        def post(audit: RunnerLaneRegistrationAuditRecord, _key: str) -> dict[str, object]:
             if audit.status != "planned" and (not dispatched or rejected):
                 audit = audit.model_copy(
                     update={
@@ -448,17 +450,20 @@ class RunnerRelabelAdapter:
             with runner_transport(store, policy, write=True) as transport:
 
                 class FencedTransport:
+                    @staticmethod
                     def request(
-                        self, *, method: str, path: str, body: dict[str, object] | None = None
+                        *, method: str, path: str, body: dict[str, object] | None = None
                     ) -> object:
                         nonlocal dispatched, rejected
                         if method != "PUT":
-                            result = transport.request(method=method, path=path, body=body)
-                            if path.endswith("/labels") and _labels(result).automatic != tuple(
-                                review["automatic_labels"]
-                            ):
+                            provider_response = transport.request(
+                                method=method, path=path, body=body
+                            )
+                            if path.endswith("/labels") and _labels(
+                                provider_response
+                            ).automatic != tuple(review["automatic_labels"]):
                                 raise ValueError("Reviewed automatic runner labels changed.")
-                            return result
+                            return provider_response
                         expected_path = (
                             f"/repos/{policy.repository}/actions/runners/{runner.runner_id}/labels"
                         )
@@ -482,8 +487,8 @@ class RunnerRelabelAdapter:
                             dispatched = True
                             try:
                                 return transport.request(method=method, path=path, body=body)
-                            except MergeTrainGitHubError as error:
-                                rejected = error.status_code == 422
+                            except MergeTrainGitHubError as put_error:
+                                rejected = put_error.status_code == 422
                                 raise
 
                 self_authorize = self.authorize_effect

@@ -83,7 +83,6 @@ def register_runner_relabel_routes(
             action=action,
             product=policy.product,
             context=policy.context,
-            inherit_agent_read_role=True,
         ):
             raise PermissionError("Runner action is outside the caller's recorded scope.")
 

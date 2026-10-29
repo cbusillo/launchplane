@@ -240,7 +240,6 @@ class HttpRunnerRelabelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((response.status_code, response.json()["error"]["code"]), replies[0])
 
     async def test_provider_read_failures_are_sanitized_service_results(self) -> None:
-        from unittest.mock import patch
         from control_plane.merge_train_github import MergeTrainGitHubError
 
         for error in (
@@ -249,7 +248,7 @@ class HttpRunnerRelabelTests(unittest.IsolatedAsyncioTestCase):
         ):
             with (
                 self.subTest(error=type(error).__name__),
-                patch.object(self.fixture.transport, "request", side_effect=error),
+                scenarios.patch_attribute(self.fixture.transport, "request", side_effect=error),
             ):
                 response = await request(
                     self.app, "POST", self.path, headers=self.headers(), payload=self.body

@@ -21,6 +21,7 @@ from control_plane.contracts.runner_relabel import (
 from control_plane.provider_operations import (
     run_durable_provider_operation,
     build_provider_operation_key,
+    DurableProviderOperationResult,
 )
 from control_plane.runner_relabel import (
     ROUTE,
@@ -33,6 +34,10 @@ from control_plane.runner_relabel import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_runner_lane_relabel import labels
+
+
+def patch_attribute(target: object, name: str, *args: Any, **kwargs: Any) -> Any:
+    return patch.object(target, name, *args, **kwargs)
 
 
 class RunnerTransport:
@@ -168,6 +173,23 @@ class RunnerRelabelNativeTests(unittest.TestCase):
             allow_mutation=not observe,
         )
 
+    def assert_terminal_audit_matches_reply(self, result: DurableProviderOperationResult) -> None:
+        assert result.record is not None
+        audit = self.store.read_runner_relabel_document(
+            "terminal-audit",
+            build_provider_operation_key(
+                scope=result.record.scope,
+                route_path=result.record.route_path,
+                idempotency_key=result.record.idempotency_key,
+                request_fingerprint=result.record.request_fingerprint,
+                reconciliation_key=result.record.reconciliation_key,
+            ),
+        )
+        assert audit is not None
+        response_result = result.response_payload["result"]
+        assert isinstance(response_result, dict)
+        self.assertEqual(audit["message"], response_result["status"])
+
     def test_review_apply_replay_and_empty_inverse(self) -> None:
         self.transport.custom = ()
         review = self.review()
@@ -213,19 +235,7 @@ class RunnerRelabelNativeTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.response_status_code, 409)
         self.assertEqual(self.transport.puts, 1)
-        assert result.record is not None
-        audit = self.store.read_runner_relabel_document(
-            "terminal-audit",
-            build_provider_operation_key(
-                scope=result.record.scope,
-                route_path=result.record.route_path,
-                idempotency_key=result.record.idempotency_key,
-                request_fingerprint=result.record.request_fingerprint,
-                reconciliation_key=result.record.reconciliation_key,
-            ),
-        )
-        assert audit is not None
-        self.assertEqual(audit["message"], result.response_payload["result"]["status"])
+        self.assert_terminal_audit_matches_reply(result)
         self.transport.put_error = None
         self.assertEqual(self.run_change(self.review(), key="fresh").status, "completed")
         self.assertEqual(self.transport.puts, 2)
@@ -273,19 +283,7 @@ class RunnerRelabelNativeTests(unittest.TestCase):
                 result = self.run_change(review, key=drift)
                 self.assertEqual(result.response_status_code, 409)
                 if drift == "policy":
-                    assert result.record is not None
-                    audit = self.store.read_runner_relabel_document(
-                        "terminal-audit",
-                        build_provider_operation_key(
-                            scope=result.record.scope,
-                            route_path=result.record.route_path,
-                            idempotency_key=result.record.idempotency_key,
-                            request_fingerprint=result.record.request_fingerprint,
-                            reconciliation_key=result.record.reconciliation_key,
-                        ),
-                    )
-                    assert audit is not None
-                    self.assertEqual(audit["message"], result.response_payload["result"]["status"])
+                    self.assert_terminal_audit_matches_reply(result)
                 self.assertEqual(self.transport.puts, 0)
                 self.transport.busy = False
                 self.transport.runner_name = "general-1"

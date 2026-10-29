@@ -1,7 +1,6 @@
 from threading import Barrier, Event, Thread
 from contextlib import contextmanager
 from typing import Any, Iterator
-from unittest.mock import patch
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.storage.postgres import PostgresRecordStore
@@ -9,6 +8,7 @@ from control_plane.runner_relabel import ROUTE, RunnerRelabelAdapter, actor_scop
 from control_plane.contracts.runner_relabel import RunnerRelabelReviewRequest
 from control_plane.provider_operations import run_durable_provider_operation
 from tests import test_runner_relabel_native as scenarios
+from tests.test_runner_relabel_native import patch_attribute
 from tests.test_postgres_integration import _head_postgres_database
 from tests import test_http_runner_relabel as http_scenarios
 from tests.support.http import request
@@ -57,12 +57,12 @@ class RunnerRelabelPostgresTests(scenarios.RunnerRelabelNativeTests):
                                     barrier.wait(timeout=10)
                                 return result
 
-                            with patch.object(session, "scalar", side_effect=read):
+                            with patch_attribute(session, "scalar", side_effect=read):
                                 yield session
 
                     candidate = {**payload, "reason": "different candidate"} if change else payload
                     try:
-                        with patch.object(store, "_session_factory", side_effect=synchronized):
+                        with patch_attribute(store, "_session_factory", side_effect=synchronized):
                             store.write_runner_relabel_document("policy-review", key, candidate)
                         results.append("saved")
                     except ValueError:
@@ -417,7 +417,7 @@ class HttpRunnerRelabelPostgresTests(http_scenarios.HttpRunnerRelabelTests):
 
     async def test_http_successful_terminal_recovers_lost_completion_without_provider(self) -> None:
         body = await self.reviewed_operation()
-        with patch.object(
+        with patch_attribute(
             self.store,
             "complete_mutation_reservation",
             side_effect=OSError("fixture completion lost"),
@@ -438,7 +438,7 @@ class HttpRunnerRelabelPostgresTests(http_scenarios.HttpRunnerRelabelTests):
             + timedelta(seconds=1)
         )
         self.fixture.factory.reset_mock()
-        with patch.object(self.store, "_database_mutation_timestamp", return_value=after):
+        with patch_attribute(self.store, "_database_mutation_timestamp", return_value=after):
             recovered = await self.operate({**body, "mode": "recover-evidence"})
         self.assertEqual(recovered.status_code, 202, recovered.text)
         self.assertTrue(recovered.json()["result"]["evidence_recovered"])

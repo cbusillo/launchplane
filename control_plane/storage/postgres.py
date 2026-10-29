@@ -5600,7 +5600,7 @@ class PostgresRecordStore(HumanSessionStore):
     def read_runner_relabel_policy(
         self, policy_id: str, *, session: Session | None = None
     ) -> dict[str, Any] | None:
-        def read(active: Session) -> dict[str, Any] | None:
+        def read(active_session: Session) -> dict[str, Any] | None:
             from control_plane.contracts.canonical_json import canonical_json_sha256
 
             statement = (
@@ -5612,7 +5612,7 @@ class PostgresRecordStore(HumanSessionStore):
                 .order_by(LaunchplaneIdempotencyRow.attempt.desc())
                 .limit(1)
             )
-            row = active.scalar(statement)
+            row: LaunchplaneIdempotencyRow | None = active_session.scalar(statement)
             if row is None:
                 return None
             record = LaunchplaneIdempotencyRecord.model_validate(row.payload)
