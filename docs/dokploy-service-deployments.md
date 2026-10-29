@@ -612,20 +612,33 @@ typed product policy instead of overloading the generic-web deploy request.
 ## Ports And Health
 
 `runtime_port` is the container port the service listens on when it exposes an
-HTTP endpoint. For Discord Blue, use port `8787` for the Every Code bridge or a
+HTTP endpoint. For Discord Blue, use port `8787` for the agent-session bridge or a
 small health/control endpoint if that is the only HTTP surface.
 
-Stable lanes can verify health in two ways:
+Stable lanes can verify health through:
 
 - set `lane.health_url` to an explicit URL reachable by Launchplane, such as an
   internal bridge health endpoint
 - set `lane.base_url` and rely on `profile.health_path` to derive the health URL
+- enable a `private_http` health check referencing an active endpoint record
+  owned by that exact product, context and instance
 
-If neither value is set, generic-web promotion records skip health verification
-for that lane. Skipping health is acceptable only for an initial migration slice
-with other evidence, such as a successful Dokploy deployment plus product-owned
-log or smoke evidence. The preferred Discord Blue target is a reachable health
-URL on port `8787` so promotion can fail closed on a bad rollout.
+Promotion verifies every enabled private check through the existing private
+transport, including its scoped testing CA or verified testing-edge route when
+configured. Interrupted-release recovery uses that same verifier. Source health must
+match the qualified testing identity. Destination health must match the newly
+deployed identity; failure follows the existing automatic rollback, whose health
+must match the restored identity. Existing public and split-ingress health checks
+still run when a lane also has private checks. Missing, disabled or foreign
+endpoint authority refuses before deployment; private monitoring intent without
+an enabled private check also refuses. A private check is never silently skipped
+because the lane has no public URL. Legacy lanes with no health configuration
+retain their existing skipped result. A private check cannot qualify an older
+rollback record without a recorded runtime identity; recovery remains held until
+the intended runtime can be verified. These checks add no deployment, credential
+or release authority.
+
+The preferred Discord Blue target is its private health endpoint on port `8787`.
 For sync or worker products, the same endpoint should report whether the worker
 is actually fresh. For example, RepairShopr Sync should mark health unhealthy
 when the last successful sync is stale even if the process is running.
