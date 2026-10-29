@@ -380,6 +380,23 @@ class OnboardingTargetAllocationTests(_OnboardingTargetAllocationFixture):
             "allocation_id": result["allocation_id"],
         }
         record_headers = {**headers, "Idempotency-Key": "agent-records"}
+        browser_app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.policy,
+            human_session_manager=self.manager,
+            record_store_factory=lambda: self.store,
+        )
+        other_actor = await request(
+            browser_app,
+            "POST",
+            "/v1/product-onboarding/apply",
+            payload=record_payload,
+            headers={
+                **_browser_mutation_headers(self.manager, self.session),
+                "Idempotency-Key": "other-actor-records",
+            },
+        )
+        self.assertEqual(other_actor.status_code, 400, other_actor.text)
         missing_key = await request(
             self.app,
             "POST",
