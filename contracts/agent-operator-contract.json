@@ -863,7 +863,6 @@
         ],
         "schema_fingerprint_sha256": "97c57a4d12f191da974363dd089db8bc5baeb8826ac3edb59ac28d97c6ac9ca5",
         "supported_surfaces": [
-          "operator_ui",
           "service_api"
         ]
       },
@@ -1283,8 +1282,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "68df7dd0a7439238b1c7193b841b671d666c371f"
+    "source_commit_sha": "2f2df6748e0e27eab41e7f106b27acc3983861a7"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "891238524f43544eb8dbb2d08788be92b1702e03ed0e961082a4a7f6f56e4d98"
+  "semantic_digest_sha256": "b2c45302479c82905d60a592a9049a9d426f1c3ad380a4cf7ecc36bce94631ea"
 }

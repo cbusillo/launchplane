@@ -64,6 +64,10 @@ def retained_volume_identity(
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def retained_volume_engine_identity(engine_id: str) -> str:
+    return hashlib.sha256(engine_id.encode()).hexdigest()
+
+
 def capture_retained_volumes(
     *,
     host: str,
@@ -135,13 +139,12 @@ def capture_retained_volumes(
         if not isinstance(row, dict):
             return unknown, False
         volume = row.get("volume")
-        engine_id = row.get("engine_id")
+        engine_identity = row.get("engine_identity_sha256")
         device = row.get("backing_device")
         inode = row.get("backing_inode")
         if (
             not isinstance(volume, dict)
-            or not isinstance(engine_id, str)
-            or not engine_id
+            or not isinstance(engine_identity, str)
             or type(device) is not int
             or type(inode) is not int
             or device < 0
@@ -154,7 +157,8 @@ def capture_retained_volumes(
                 server_id=server_id,
                 application_id=application_id,
                 application_name=application_name,
-                volume_identity_sha256=retained_volume_identity(volume, engine_id, device, inode),
+                volume_identity_sha256=str(row.get("volume_identity_sha256") or ""),
+                engine_identity_sha256=engine_identity,
             )
         )
     if not configured.issubset(binding.volume_name for binding in bindings):
@@ -163,11 +167,13 @@ def capture_retained_volumes(
 
 
 _RETAINED_VOLUME_CAPTURE_PROGRAM = (
-    "from collections.abc import Callable,Sequence\nfrom typing import Any\nimport json\n"
+    "from collections.abc import Callable,Mapping,Sequence\nfrom typing import Any\nimport json\n"
     + inspect.getsource(single_local_swarm_node)
     + inspect.getsource(_batched_docker_inspect)
+    + inspect.getsource(retained_volume_identity)
+    + inspect.getsource(retained_volume_engine_identity)
     + r"""
-import os,re,subprocess,sys,time
+import hashlib,os,re,subprocess,sys,time
 from pathlib import Path
 
 spec=json.loads(__import__('base64').b64decode(__import__('sys').argv[1],validate=True))
@@ -262,7 +268,7 @@ def capture():
         if volume.get('Mountpoint')!=str(expected) or expected.parent.is_symlink() or expected.is_symlink() or not expected.is_dir():
             raise ValueError('volume backing unavailable')
         stat=expected.stat()
-        volumes.append({'volume':volume,'engine_id':engine,'backing_device':stat.st_dev,'backing_inode':stat.st_ino})
+        volumes.append({'volume':volume,'volume_identity_sha256':retained_volume_identity(volume,engine,stat.st_dev,stat.st_ino),'engine_identity_sha256':retained_volume_engine_identity(engine),'backing_device':stat.st_dev,'backing_inode':stat.st_ino})
     if single_local_swarm_node(docker)!=nodes or inspect_one('service',service['ID']).get('Spec')!=service.get('Spec'):
         raise ValueError('service inventory changed')
     if identifiers('service','ps','--no-trunc','--quiet',service['ID'])!=task_ids:

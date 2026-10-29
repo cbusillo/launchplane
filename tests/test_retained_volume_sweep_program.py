@@ -10,7 +10,10 @@ import unittest
 from typing import cast
 
 from control_plane.retained_volume_sweep_program import RETAINED_VOLUME_SWEEP_HOST_PROGRAM
-from control_plane.retained_volume_capture import retained_volume_identity
+from control_plane.retained_volume_capture import (
+    retained_volume_engine_identity,
+    retained_volume_identity,
+)
 
 
 DOCKER_FIXTURE = r"""#!/usr/bin/env python3
@@ -137,12 +140,20 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         identity: str | None = None,
         operation: str = "provider/key",
         exhaust_budget: bool = False,
+        engine_identity: str | None = None,
     ) -> dict[str, object]:
+        engine_id = self.state.get("engine", "engine-one")
+        assert isinstance(engine_id, str)
         spec = {
             "mode": mode,
             "volume": "candidate",
             "identity": identity or self.identity(),
             "operation": operation,
+            "engine_identity": (
+                retained_volume_engine_identity(engine_id)
+                if engine_identity is None
+                else engine_identity
+            ),
         }
         payload = base64.b64encode(json.dumps(spec).encode()).decode()
         environment = os.environ | {
@@ -221,6 +232,14 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             {"status": "unknown", "reason_code": "inventory_unavailable"},
         )
         self.assertNotIn("rm_args", json.loads(self.state_path.read_text()))
+
+    def test_fresh_absence_requires_matching_captured_engine_identity(self) -> None:
+        self.state["removed"] = True
+        self.write_state()
+
+        self.assertEqual(self.run_program()["status"], "absent")
+        self.assertEqual(self.run_program(engine_identity="0" * 64)["status"], "unknown")
+        self.assertEqual(self.run_program(engine_identity="")["status"], "unknown")
 
     def test_confirmed_no_effect_and_never_started_readbacks_settle_without_removal(self) -> None:
         self.assertEqual(self.run_program("readback")["reason_code"], "never_started")

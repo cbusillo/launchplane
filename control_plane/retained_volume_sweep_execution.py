@@ -179,6 +179,7 @@ def _host_result(
             "mode": mode,
             "volume": binding.volume_name,
             "identity": binding.volume_identity_sha256,
+            "engine_identity": binding.engine_identity_sha256,
             "operation": operation_key,
         },
         receive=frames.append,

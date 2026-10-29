@@ -355,7 +355,7 @@ OPERATION_SPECS = (
         "POST",
         RETAINED_VOLUME_SWEEP_ROUTE,
         "Inspect, apply, or read back one reviewed retained-volume retirement sweep without exposing provider bindings.",
-        ("operator_ui", "service_api"),
+        ("service_api",),
         ("dry-run", "apply", "readback"),
         "apply",
         ("reviewed_plan_sha256", "retirement_record_id", "minimum_age_seconds"),

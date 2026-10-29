@@ -28,6 +28,7 @@ from control_plane.product_retirement import (
 from control_plane.retained_volume_capture import (
     _RETAINED_VOLUME_CAPTURE_PROGRAM,
     capture_retained_volumes,
+    retained_volume_engine_identity,
     retained_volume_identity,
 )
 
@@ -94,7 +95,12 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                         "volumes": [
                             {
                                 "volume": volume,
-                                "engine_id": "engine-a",
+                                "volume_identity_sha256": retained_volume_identity(
+                                    volume, "engine-a", 2049, 88
+                                ),
+                                "engine_identity_sha256": retained_volume_engine_identity(
+                                    "engine-a"
+                                ),
                                 "backing_device": 2049,
                                 "backing_inode": 88,
                             }
@@ -134,6 +140,7 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                     application_id="application-a",
                     application_name="site-service",
                     volume_identity_sha256=retained_volume_identity(volume, "engine-a", 2049, 88),
+                    engine_identity_sha256=retained_volume_engine_identity("engine-a"),
                 ),
             ),
         )
@@ -166,6 +173,14 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                 server_id="server-a",
                 application_id="application-a",
                 application_name="site-service",
+            )
+        with self.assertRaises(ValidationError):
+            RetainedVolumeBinding(
+                volume_name="site-data",
+                server_id="server-a",
+                application_id="application-a",
+                application_name="site-service",
+                engine_identity_sha256="not-a-digest",
             )
         binding = RetainedVolumeBinding(
             volume_name="site-data",
@@ -233,6 +248,7 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
             application_id="private-application-marker",
             application_name="private-service-marker",
             volume_identity_sha256="a" * 64,
+            engine_identity_sha256="b" * 64,
         )
         record = record.model_copy(
             update={
@@ -252,6 +268,7 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
         self.assertNotIn("server_id", serialized)
         self.assertNotIn(binding.volume_name, serialized)
         self.assertNotIn(binding.server_id, serialized)
+        self.assertNotIn(binding.engine_identity_sha256, serialized)
 
     def test_modern_plan_binds_non_volume_mount_changes(self) -> None:
         payload = {"applicationId": "application-a", "status": "idle", "mounts": []}
@@ -386,6 +403,10 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                 self.assertEqual(frame["result"]["complete"], not drift)
                 if not drift:
                     self.assertEqual(frame["result"]["volumes"][0]["volume"], volume)
+                    self.assertEqual(
+                        frame["result"]["volumes"][0]["engine_identity_sha256"],
+                        retained_volume_engine_identity("engine1"),
+                    )
 
 
 def _observation_for_capture() -> ProductRetirementProviderObservation:

@@ -1,11 +1,16 @@
 import inspect
 
-from control_plane.retained_volume_capture import _batched_docker_inspect, retained_volume_identity
+from control_plane.retained_volume_capture import (
+    _batched_docker_inspect,
+    retained_volume_engine_identity,
+    retained_volume_identity,
+)
 
 
 RETAINED_VOLUME_SWEEP_HOST_PROGRAM = (
     "from collections.abc import Callable,Mapping,Sequence\nimport hashlib,json\n"
     + inspect.getsource(retained_volume_identity)
+    + inspect.getsource(retained_volume_engine_identity)
     + inspect.getsource(_batched_docker_inspect)
     + r"""
 import base64,fcntl,hashlib,json,os,re,stat,subprocess,sys,time
@@ -26,10 +31,12 @@ deadline=time.monotonic()+75
 name=spec.get('volume')
 mode=spec.get('mode')
 captured=spec.get('identity')
+captured_engine=spec.get('engine_identity','')
 operation=spec.get('operation')
 if (mode not in {'dry-run','apply','readback'} or not isinstance(name,str)
     or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',name) is None
     or not isinstance(captured,str) or re.fullmatch(r'[a-f0-9]{64}',captured) is None
+    or not isinstance(captured_engine,str) or (captured_engine and re.fullmatch(r'[a-f0-9]{64}',captured_engine) is None)
     or not isinstance(operation,str) or not operation or len(operation)>512):
     emit('unknown','invalid_request')
     raise SystemExit
@@ -333,6 +340,8 @@ try:
             emit('held','never_started')
             raise SystemExit
         if mode=='dry-run' and absence(engine_id):
+            if not captured_engine or retained_volume_engine_identity(engine_id)!=captured_engine:
+                raise Unknown()
             emit('absent','already_absent')
             raise SystemExit
         volume=one_volume(name)

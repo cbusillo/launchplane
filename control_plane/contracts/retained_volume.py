@@ -17,6 +17,7 @@ class RetainedVolumeBinding(BaseModel):
     application_id: str
     application_name: str
     volume_identity_sha256: str = ""
+    engine_identity_sha256: str = ""
 
     @field_validator("volume_name", "application_id", "application_name")
     @classmethod
@@ -26,7 +27,7 @@ class RetainedVolumeBinding(BaseModel):
             raise ValueError("Retained volume custody requires a bounded path-safe name.")
         return normalized
 
-    @field_validator("volume_identity_sha256")
+    @field_validator("volume_identity_sha256", "engine_identity_sha256")
     @classmethod
     def _validate_identity(cls, value: str) -> str:
         normalized = value.strip().lower()
