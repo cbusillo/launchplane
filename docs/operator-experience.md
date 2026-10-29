@@ -867,7 +867,11 @@ and active edge join. A blocked plan offers no Apply. A ready decision shows
 both custodians and binds their exact evidence; it changes no live route.
 Review a changed custodian or configuration report in the same card. Current
 health, runtime identity and TLS checks qualify every hostname without monthly
-re-attestation. Unchanged stored managed sources are rechecked on reads.
+re-attestation. Unchanged stored managed sources are rechecked on reads for
+both managed-only and split ingress, without rewriting the binding or its TLS
+snapshot. Changed or missing source evidence still warns; current TLS probes
+keep their own freshness deadline. Route changes retain their reviewed safety
+checks.
 Saving also enables strict runtime-identity HTTP checks and TLS checks for
 every hostname. The lane stays unverified until those observations are current.
 Evidence refreshes reload untouched custody fields. If saved custody changes
