@@ -138,7 +138,18 @@ class TestingStopExclusionReadback(FrozenRecord):
     runtime_identity: None = None
 
 
-TestingRetirementRecovery = TestingCopyReadiness | TestingStopExclusionReadback
+class TestingRetirementCompletionReadback(FrozenRecord):
+    copy_id: str
+    host: str
+    observed_at: datetime
+    evidence_id: str = Field(min_length=1)
+    completed: Literal[True]
+    runtime_identity: None = None
+
+
+TestingRetirementRecovery = (
+    TestingCopyReadiness | TestingStopExclusionReadback | TestingRetirementCompletionReadback
+)
 
 
 class TestingRouteObservation(FrozenRecord):
@@ -201,7 +212,7 @@ class TestingRebuildRecord(FrozenRecord):
             and self.retirement_started
             and self.retirement_recovery is None
         ):
-            raise ValueError("Rollback after a stop intent requires its undispatched-stop proof.")
+            raise ValueError("Rollback after a stop intent requires its settled retirement proof.")
         if self.retirement_recovery is not None and (
             not self.retirement_started
             or (
@@ -215,10 +226,13 @@ class TestingRebuildRecord(FrozenRecord):
         if (
             isinstance(self.plan.old, UnavailableTestingPredecessor)
             and self.retirement_recovery is not None
-            and (not isinstance(self.retirement_recovery, TestingStopExclusionReadback))
+            and not isinstance(
+                self.retirement_recovery,
+                (TestingStopExclusionReadback, TestingRetirementCompletionReadback),
+            )
         ):
             raise ValueError(
-                "Unavailable retirement recovery requires the original undispatched-stop receipt."
+                "Unavailable retirement recovery requires an excluded or completed retirement receipt."
             )
         if isinstance(self.route, TestingOriginalIngressReadback) and (
             not isinstance(self.plan.old, UnavailableTestingPredecessor)

@@ -296,7 +296,13 @@ replay settles that same custody before qualifying a later batch. A positively
 observed restart or re-enabled automatic deployment after a completed effect
 starts a successor linked to that completed receipt. An unsettled effect always
 retains its original key; rollback reads the latest effect rather than an older
-exclusion. Both removal stages use Docker removal without force or volume
+exclusion. For an unavailable original, health failure may use either an
+undispatched-stop receipt or a distinct completed-retirement receipt, never a
+claim that a dispatched stop was excluded. Existing cleanup first settles on its
+saved IDs and original key: an undispatched cleanup can be excluded, while an
+unknown dispatched cleanup remains fenced. Inverse preparation starts no new
+cleanup batch. A recorded health-failure exclusion remains binding on replay,
+even if health subsequently recovers. Both removal stages use Docker removal without force or volume
 deletion. Interrupted removal finishes only its stopped or dead leftovers;
 absent members need no repeated removal. Preparation resumes with the observed absent original,
 while preserving the original ingress preimage and metadata for health rollback.

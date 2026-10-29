@@ -64,6 +64,7 @@ from control_plane.contracts.testing_rebuild import (
     TestingRetirementRecovery,
     TestingOriginalIngressReadback,
     TestingStopExclusionReadback,
+    TestingRetirementCompletionReadback,
     TestingRouteReadback,
 )
 from control_plane.dokploy import api, compose, post_deploy, source
@@ -2087,6 +2088,9 @@ class NativeTestingRebuildExecution:
             current = successor
 
     def retire_old(self, plan: TestingRebuildPlan) -> None:
+        if isinstance(plan.old, UnavailableTestingPredecessor):
+            self.require_old_quiescent()
+
         def disable_auto_deploy(dispatch: Callable[[Callable[[], None]], None]) -> None:
             def send() -> None:
                 api.dokploy_request(
@@ -2181,31 +2185,44 @@ class NativeTestingRebuildExecution:
         self, plan: TestingRebuildPlan, *, after_health_failure: bool = False
     ) -> TestingRetirementRecovery | None:
         stop_phase, stop = self.latest_retirement_effect("retire-old")
-        if (
-            stop is None
-            or stop.state != "completed"
-            or stop.response_payload.get("not_dispatched") is not True
-        ):
+        if stop is None or stop.state != "completed":
             return None
         if (
-            stop.provider_effect_started_at
-            or stop.provider_target_key != self.adapter.target_key() + ":" + stop_phase
+            stop.provider_target_key != self.adapter.target_key() + ":" + stop_phase
             or stop.request_fingerprint
             != canonical_json_sha256({"intent": self.intent.digest, "phase": stop_phase})
         ):
-            raise ValueError("The original stop exclusion has different physical custody.")
+            raise ValueError("The original retirement receipt has different physical custody.")
+        excluded = stop.response_payload.get("not_dispatched") is True
+        if excluded and stop.provider_effect_started_at:
+            raise ValueError("A dispatched retirement cannot claim exclusion.")
         if isinstance(plan.old, UnavailableTestingPredecessor):
-            if (
-                not after_health_failure
-                and stop.response_payload.get("cause") == "predecessor_already_unavailable"
-            ):
+            cleanup_phase, cleanup = self.latest_retirement_effect("remove-retired-containers")
+            if cleanup is not None and cleanup.state != "completed":
                 return None
-            return TestingStopExclusionReadback(
+            recorded_failure = any(
+                receipt is not None
+                and receipt.state == "completed"
+                and receipt.response_payload.get("cause") == "candidate_public_health_failed"
+                for _, receipt in (
+                    (stop_phase, stop),
+                    (cleanup_phase, cleanup),
+                    self.latest_retirement_effect("disable-old-auto-deploy"),
+                )
+            )
+            if not after_health_failure and not recorded_failure:
+                return None
+            evidence = dict(
                 copy_id=plan.old.copy_id,
                 host=plan.host,
                 observed_at=datetime.now(UTC),
                 evidence_id=stop.record_id,
             )
+            if excluded:
+                return TestingStopExclusionReadback(**evidence)
+            return TestingRetirementCompletionReadback(**evidence, completed=True)
+        if not excluded:
+            return None
         proof = retained_copy_operation(
             host=self.host,
             token=self.token,
@@ -2235,7 +2252,11 @@ class NativeTestingRebuildExecution:
         # original fence. Unknown dispatched effects are observed, never retried.
         for phase in ("disable-old-auto-deploy", "retire-old"):
             current_phase, prior = self.latest_retirement_effect(phase)
-            if prior is not None and prior.provider_effect_started_at:
+            if (
+                prior is not None
+                and prior.state != "completed"
+                and prior.provider_effect_started_at
+            ):
                 if phase == "retire-old":
                     return None
                 self.run_effect(
@@ -2254,7 +2275,47 @@ class NativeTestingRebuildExecution:
                     exclude_cause=cause,
                     recovery=True,
                 )
+        if (
+            isinstance(plan.old, UnavailableTestingPredecessor)
+            and not self.settle_retirement_removal()
+        ):
+            return None
         return self.retirement_exclusion(plan, after_health_failure=True)
+
+    def settle_retirement_removal(self) -> bool:
+        phase, prior = self.latest_retirement_effect("remove-retired-containers")
+        if prior is None or prior.state == "completed":
+            return True
+        custody = self.store.read_original_mutation_intent(prior)["removal_custody"]
+
+        def absent() -> bool:
+            return (
+                retained_copy_operation(
+                    host=self.host,
+                    token=self.token,
+                    server_id=self.intent.server_id,
+                    payload={
+                        **self.retained_payload("removal-readback"),
+                        "retiring": True,
+                        "container_ids": custody["container_ids"],
+                    },
+                ).get("availability")
+                == "absent"
+            )
+
+        try:
+            self.run_effect(
+                phase,
+                absent,
+                lambda dispatch: None,
+                reconcile_only=True,
+                recovery=True,
+                removal_custody=custody,
+                exclude_undispatched=not bool(prior.provider_effect_started_at),
+            )
+        except NativeTestingRebuildPending:
+            return False
+        return True
 
     def run_effect(
         self,
@@ -2381,7 +2442,7 @@ class NativeTestingRebuildExecution:
                     if retiring_unavailable:
                         parent.require_old_quiescent()
                         parent.retiring_copy()
-                    if retiring_unavailable or action == "remove-old-containers":
+                    if retiring_unavailable or action == "remove-old-containers" or phase != action:
                         check_testing_rebuild_protection(
                             parent.root, parent.store, parent.operation, parent.intent
                         )

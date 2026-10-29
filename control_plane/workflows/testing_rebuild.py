@@ -18,6 +18,7 @@ from control_plane.contracts.testing_rebuild import (
     TestingRouteReadback,
     TestingOriginalIngressReadback,
     TestingStopExclusionReadback,
+    TestingRetirementCompletionReadback,
 )
 from control_plane.traffic_switch import (
     MAX_READINESS_AGE_SECONDS,
@@ -396,7 +397,10 @@ def execute_testing_rebuild(
                         raise ValueError("Retirement recovery belongs to another copy or address.")
                     if isinstance(plan.old, UnavailableTestingPredecessor):
                         if (
-                            not isinstance(recovery, TestingStopExclusionReadback)
+                            not isinstance(
+                                recovery,
+                                (TestingStopExclusionReadback, TestingRetirementCompletionReadback),
+                            )
                             or not 0
                             <= (clock() - recovery.observed_at).total_seconds()
                             <= MAX_READINESS_AGE_SECONDS

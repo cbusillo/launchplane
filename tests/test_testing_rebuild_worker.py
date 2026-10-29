@@ -952,6 +952,121 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.removed_container_ids, ["later-web", "later-database"])
         self.assertEqual(self.effects, ["switch-new", "stop-old", "stop-old"])
 
+    def test_queued_old_work_prevents_no_dispatch_retirement_completion(self) -> None:
+        self.admit_unavailable("stopped")
+        publish = service.NativeTestingRebuildExecution.publish
+
+        def queued(executor: Any, plan: Any, desired: Any, **kwargs: Any) -> None:
+            publish(executor, plan, desired, **kwargs)
+            self.deployment_history.return_value = [{"status": "queued"}]
+
+        with patch.object(service.NativeTestingRebuildExecution, "publish", new=queued):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.assertEqual(self.effects, ["switch-new"])
+        self.deployment_history.return_value = []
+        self.assertEqual(self.execute().deploy_status, "pass")
+
+    def test_fresh_use_protects_a_followup_stop_of_an_originally_healthy_copy(self) -> None:
+        remove = service.NativeTestingRebuildExecution.retire_old
+
+        def interrupted(executor: Any, plan: Any) -> None:
+            remove(executor, plan)
+            raise NativeSourceUnavailable("Fixture pauses after completed retirement")
+
+        with patch.object(service.NativeTestingRebuildExecution, "retire_old", new=interrupted):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.retained.update(stopped=False, web_stopped=False)
+        with patch.object(
+            service,
+            "read_odoo_testing_usage",
+            return_value=OdooTestingUsage("in_use", True, True, "complete"),
+        ):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.assertEqual(self.execute().deploy_status, "pass")
+        self.assertEqual(self.effects, ["switch-new", "stop-old", "stop-old"])
+
+    def test_health_failure_after_completed_unavailable_stop_restores_original_ingress(
+        self,
+    ) -> None:
+        self.admit_unavailable("stopped", partial=True)
+        remove = service.NativeTestingRebuildExecution.remove_old_containers
+
+        def held(executor: Any, *, retired: bool = False) -> None:
+            if retired:
+                raise NativeSourceUnavailable("Fixture pauses before retired cleanup")
+            remove(executor)
+
+        with patch.object(service.NativeTestingRebuildExecution, "remove_old_containers", new=held):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.fail_public = True
+        result = self.execute()
+        self.assertEqual(result.error_code, "candidate_public_health_failed")
+        self.assertEqual(self.effects, ["switch-new", "stop-old", "switch-old"])
+        self.assertEqual(self.current(), self.fixture.before)
+        self.assertIsNone(self.owned)
+        self.assertEqual(self.execute(), result)
+
+    def test_health_rollback_observes_unknown_cleanup_without_dispatching_again(self) -> None:
+        self.admit_unavailable("stopped", partial=True)
+        physical = self.physical
+
+        def unknown(**kwargs: Any) -> dict[str, Any]:
+            if kwargs["payload"]["mode"] == "remove":
+                raise TimeoutError("Fixture cleanup has an unknown outcome")
+            return physical(**kwargs)
+
+        with patch.object(service, "retained_copy_operation", side_effect=unknown):
+            with self.assertRaises(TimeoutError):
+                self.execute()
+        self.fail_public = True
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.assertFalse(hasattr(self, "removed_container_ids"))
+        self.retained.update(
+            availability="absent", stopped=True, web_stopped=True, container_ids=[]
+        )
+        self.assertEqual(self.execute().error_code, "candidate_public_health_failed")
+        self.assertEqual(self.effects, ["switch-new", "stop-old", "switch-old"])
+        self.assertFalse(hasattr(self, "removed_container_ids"))
+
+    def test_lost_cleanup_exclusion_keeps_its_recorded_health_failure_decision(self) -> None:
+        self.admit_unavailable("stopped", partial=True)
+        protection = service.check_testing_rebuild_protection
+
+        def held(*args: Any, **kwargs: Any) -> None:
+            if self.owned is not None and self.retained["stopped"]:
+                raise service.TestingRebuildRefused(
+                    "testing_staff_hold", "Fixture protects cleanup"
+                )
+            protection(*args, **kwargs)
+
+        with patch.object(service, "check_testing_rebuild_protection", side_effect=held):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.fail_public = True
+        effect = service.NativeTestingRebuildExecution.run_effect
+
+        def lost(executor: Any, *args: Any, **kwargs: Any) -> Any:
+            result = effect(executor, *args, **kwargs)
+            if kwargs.get("exclude_undispatched") and kwargs.get("removal_custody"):
+                raise NativeSourceUnavailable("Fixture lost cleanup exclusion reply")
+            return result
+
+        with patch.object(service.NativeTestingRebuildExecution, "run_effect", new=lost):
+            with self.assertRaises(service.NativeTestingRebuildPending):
+                self.execute()
+        self.fail_public = False
+        self.assertEqual(self.execute().error_code, "candidate_public_health_failed")
+        self.assertEqual(self.effects, ["switch-new", "stop-old", "switch-old"])
+        self.assertFalse(hasattr(self, "removed_container_ids"))
+        self.assertEqual(self.current(), self.fixture.before)
+
     def test_partial_unavailable_retirement_replays_a_lost_stop_reply(self) -> None:
         self.admit_unavailable("stopped", partial=True)
         self.fail_after_stop = True
