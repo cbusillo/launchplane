@@ -2902,6 +2902,7 @@ Before constructing the intent, read the target repository with the catalog's
 configured automation identity, which must already have read access:
 
 ```bash
+set -euo pipefail
 mkdir -p state/onboarding
 <catalog>/skills/github/scripts/gh-with-env-token api "repos/$PRODUCT_REPOSITORY" > state/onboarding/repository.json
 jq -e '
@@ -2987,8 +2988,9 @@ surface renders only the original target request and calls the unchanged
 immutable recovery worker. No repository token, product-record plan, caller-grant
 plan or authz reconciliation is requested.
 
-Keep every original dispatch input, including the reason and any explicit
-allocation key. For readback, set outer `mode=dry_run` and
+Keep the original target-affecting dispatch inputs, reason and any explicit
+allocation key. Former product metadata inputs remain accepted for compatibility
+but are optional and unused during recovery. For readback, set outer `mode=dry_run` and
 `allocation_control={"mode":"readback"}`. For continuation, use outer
 `mode=apply`, exact confirmation `APPLY GENERIC WEB ONBOARDING`, and
 `allocation_control={"mode":"apply"}`. Include the original `idempotency_key`

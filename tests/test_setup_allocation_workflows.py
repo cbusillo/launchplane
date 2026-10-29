@@ -36,7 +36,6 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
             "DOMAIN_CERTIFICATE_TYPE": "none",
             "REASON": "fixture recovery",
             "RELATED_ISSUE": "fixture issue",
-            "GITHUB_SHA": "fixture-source",
             "GITHUB_STEP_SUMMARY": str(self.root / "summary"),
         }
 
@@ -70,7 +69,6 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
             {"mode": "apply"},
             {"mode": "other"},
             {"mode": None},
-            {"retain_allocation": True},
             {
                 "mode": "readback",
                 "retain_allocation": True,
@@ -80,7 +78,6 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
             {"idempotency_key": 5},
             {"idempotency_key": "key\n"},
             {"retain_allocation": "true"},
-            {"expected_allocation_custody_sha256": "a" * 64},
             [],
             "readback",
         )
@@ -88,6 +85,15 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
             with self.subTest(control=invalid_control):
                 result = self.caller_step(
                     "Validate and normalize typed inputs", self.caller_env(invalid_control)
+                )
+                self.assertNotEqual(result.returncode, 0)
+        for control in (
+            {"mode": "apply", "retain_allocation": True},
+            {"mode": "apply", "expected_allocation_custody_sha256": "a" * 64},
+        ):
+            with self.subTest(control=control):
+                result = self.caller_step(
+                    "Validate and normalize typed inputs", self.caller_env(control, mode="apply")
                 )
                 self.assertNotEqual(result.returncode, 0)
         env = self.caller_env({"mode": "apply"}, mode="apply")
@@ -103,17 +109,10 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
         outputs = self.output_values()
         env.update(
             NORMALIZED_PRODUCT=outputs["product"],
-            NORMALIZED_PREVIEW_CONTEXT=outputs["preview_context"],
             NORMALIZED_PROJECT_NAME=outputs["project_name"],
             NORMALIZED_TARGET_NAME=outputs["target_name"],
             NORMALIZED_TESTING_CONTEXT=outputs["testing_context"],
-            RECOVERY=outputs["recovery"],
-            REPOSITORY_ID="",
-            REPOSITORY_OWNER_ID="",
-            DEFAULT_BRANCH="",
         )
-        if env["RECOVERY"] != "true":
-            env.update(REPOSITORY_ID="101", REPOSITORY_OWNER_ID="202", DEFAULT_BRANCH="main")
         result = self.caller_step("Render plan requests", env)
         self.assertEqual(result.returncode, 0, result.stderr)
         return env
@@ -132,7 +131,6 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
                 self.assertEqual(
                     outputs["target_plan_sha256"], hashlib.sha256(original_bytes).hexdigest()
                 )
-                self.assertFalse((self.root / "authz-reconcile-request.json").exists())
 
     def test_caller_refuses_new_onboarding_before_any_request(self) -> None:
         for control in (None, {}, {"idempotency_key": "fresh-reviewed-key"}):

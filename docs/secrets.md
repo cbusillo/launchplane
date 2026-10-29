@@ -351,8 +351,11 @@ authentication before creating a separate private token file.
   only in the executor step. The token is revoked at job completion and is not
   persisted in artifacts, audit records, logs, or Launchplane managed secrets.
   Do not retain a PAT fallback.
-- Conventional product onboarding uses a dedicated read-only GitHub App to
-  resolve immutable repository and repository-owner ids before protected review. Store its
+- Existing caller-rule maintenance in `Generic Web Preview Authorization` uses
+  a dedicated read-only GitHub App to resolve immutable repository and
+  repository-owner ids before protected review. New-product native onboarding
+  uses the configured source-host helper described in
+  [operations](operations.md#native-target-allocation). Store its
   client id in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID` and its private key
   in `LAUNCHPLANE_ONBOARDING_GITHUB_APP_PRIVATE_KEY`. Install it only on product
   repositories that admins may onboard and grant only repository Contents

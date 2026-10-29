@@ -18,19 +18,19 @@ name: Product Onboarding
         type: string
       display_name:
         description: Human-readable product name.
-        required: true
+        required: false
         type: string
       repository:
         description: Product repository in owner/name form.
-        required: true
+        required: false
         type: string
       image_repository:
         description: Immutable image repository, without a tag or digest.
-        required: true
+        required: false
         type: string
       runtime_port:
         description: Application runtime port.
-        required: true
+        required: false
         type: string
       health_path:
         description: Application health endpoint path.
@@ -49,7 +49,7 @@ name: Product Onboarding
         type: string
       preview_base_url:
         description: Root URL whose subdomains host previews, for example https://product-preview.example.com.
-        required: true
+        required: false
         type: string
       target_name:
         description: Application intent label; ordinary allocations use service-generated names.
@@ -75,7 +75,7 @@ name: Product Onboarding
         type: string
       domain_certificate_type:
         description: Preview TLS owner.
-        required: true
+        required: false
         default: none
         type: choice
         options:
@@ -100,7 +100,7 @@ name: Product Onboarding
         type: string
       related_issue:
         description: Single-line issue or change reference.
-        required: true
+        required: false
         type: string
 
 permissions:
@@ -117,7 +117,6 @@ jobs:
     outputs:
       product: ${{ steps.inputs.outputs.product }}
       recovery: ${{ steps.inputs.outputs.recovery }}
-      preview_context: ${{ steps.inputs.outputs.preview_context }}
       testing_context: ${{ steps.inputs.outputs.testing_context }}
       target_plan_sha256: ${{ steps.plan.outputs.target_plan_sha256 }}
     env:
@@ -125,22 +124,14 @@ jobs:
       MODE: ${{ inputs.mode }}
       ALLOCATION_CONTROL: ${{ inputs.allocation_control }}
       PRODUCT: ${{ inputs.product }}
-      DISPLAY_NAME: ${{ inputs.display_name }}
-      REPOSITORY: ${{ inputs.repository }}
-      IMAGE_REPOSITORY: ${{ inputs.image_repository }}
-      RUNTIME_PORT: ${{ inputs.runtime_port }}
       HEALTH_PATH: ${{ inputs.health_path }}
       TESTING_CONTEXT: ${{ inputs.testing_context }}
-      PREVIEW_CONTEXT: ${{ inputs.preview_context }}
-      PREVIEW_BASE_URL: ${{ inputs.preview_base_url }}
       TARGET_NAME: ${{ inputs.target_name }}
       PROJECT_NAME: ${{ inputs.project_name }}
       ENVIRONMENT_NAME: ${{ inputs.environment_name }}
       SERVER_ID: ${{ inputs.server_id }}
-      DOMAIN_CERTIFICATE_TYPE: ${{ inputs.domain_certificate_type }}
       CONFIRMATION: ${{ inputs.confirmation }}
       REASON: ${{ inputs.reason }}
-      RELATED_ISSUE: ${{ inputs.related_issue }}
     steps:
       - name: Validate and normalize typed inputs
         id: inputs
@@ -151,8 +142,6 @@ jobs:
           import json
           import os
           import re
-          from ipaddress import ip_address
-          from urllib.parse import urlparse
 
           def required(name: str, maximum: int = 300) -> str:
               value = os.environ[name].strip()
@@ -209,52 +198,13 @@ jobs:
           product = required("PRODUCT", 63).lower()
           if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", product) is None:
               raise SystemExit("product must use lowercase letters, numbers, and hyphens.")
-          repository = required("REPOSITORY")
-          repository_match = re.fullmatch(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)", repository)
-          if repository_match is None:
-              raise SystemExit("repository must use owner/name form.")
-          runtime_port = required("RUNTIME_PORT", 5)
-          if not runtime_port.isdecimal() or not 1 <= int(runtime_port) <= 65535:
-              raise SystemExit("runtime_port must be an integer from 1 through 65535.")
           health_path = required("HEALTH_PATH")
           if not health_path.startswith("/"):
               raise SystemExit("health_path must start with '/'.")
-          preview_base_url = required("PREVIEW_BASE_URL")
-          parsed_preview_base_url = urlparse(preview_base_url)
-          if parsed_preview_base_url.scheme not in {"http", "https"}:
-              raise SystemExit("preview_base_url must use http or https.")
-          if not parsed_preview_base_url.hostname:
-              raise SystemExit("preview_base_url requires a hostname.")
-          if parsed_preview_base_url.username or parsed_preview_base_url.password:
-              raise SystemExit("preview_base_url cannot contain credentials.")
-          if parsed_preview_base_url.hostname.startswith("*."):
-              raise SystemExit("preview_base_url must name the base host, not a wildcard.")
-          try:
-              ip_address(parsed_preview_base_url.hostname)
-          except ValueError:
-              pass
-          else:
-              raise SystemExit("preview_base_url must use a DNS hostname, not an IP address.")
-          if (
-              parsed_preview_base_url.path not in {"", "/"}
-              or parsed_preview_base_url.query
-              or parsed_preview_base_url.fragment
-          ):
-              raise SystemExit(
-                  "preview_base_url must be a root URL without path, query, or fragment."
-              )
-          try:
-              parsed_preview_base_url.port
-          except ValueError as error:
-              raise SystemExit("preview_base_url has an invalid port.") from error
-          required("DISPLAY_NAME")
-          required("IMAGE_REPOSITORY")
           required("REASON")
-          required("RELATED_ISSUE")
           if required("ENVIRONMENT_NAME") != "testing":
               raise SystemExit("environment_name must be testing.")
           testing_context = optional("TESTING_CONTEXT") or f"{product}-testing"
-          preview_context = optional("PREVIEW_CONTEXT") or f"{product}-preview"
           target_name = optional("TARGET_NAME") or f"{product}-testing"
           project_name = optional("PROJECT_NAME") or product
           optional("SERVER_ID")
@@ -262,10 +212,7 @@ jobs:
           with open(output, "a", encoding="utf-8") as handle:
               handle.write(f"product={product}\n")
               handle.write(f"recovery={str(recovery).lower()}\n")
-              handle.write(f"repository_owner={repository_match.group(1)}\n")
-              handle.write(f"repository_name={repository_match.group(2)}\n")
               handle.write(f"testing_context={testing_context}\n")
-              handle.write(f"preview_context={preview_context}\n")
               handle.write(f"target_name={target_name}\n")
               handle.write(f"project_name={project_name}\n")
           PY

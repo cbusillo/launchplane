@@ -323,10 +323,8 @@ The protected generic-web onboarding worker accepts an optional allocation_contr
 JSON input. Including mode readback or apply selects recovery only: it never
 applies product records or authorization records. The default key stays
 `generic-web-onboarding:target:<product>:<testing_context>:v1`. An explicit
-idempotency_key selects a stable original key for both normal apply and recovery.
-Use a fresh key only after reviewed retention or a confirmed pre-effect refusal;
-the service refuses fresh keys while unresolved custody still holds the lane.
-A key-only envelope runs normal onboarding under that key. Retention additionally requires
+idempotency_key selects the original key during recovery. The Product Onboarding
+wrapper refuses key-only envelopes and normal onboarding. Retention additionally requires
 retain_allocation: true and expected_allocation_custody_sha256. The worker verifies
 the original target request artifact digest even during recovery. Recovery needs
 no product or authorization plan artifacts. Successful product registration keeps
@@ -348,7 +346,7 @@ To continue the original allocation, select outer mode apply, provide its exact
 confirmation, and supply `{"mode":"apply"}`. For reviewed retention, add
 retain_allocation: true and expected_allocation_custody_sha256 to that envelope.
 Use the same explicit idempotency_key if the original apply supplied one. A
-key-only envelope still runs normal onboarding with all plan reviews. Neither
+key-only envelope is refused by Product Onboarding. Neither
 source landing grants access or activates the new worker trust anchor; those
 remain separate operations. A denied worker identity stays denied and follows
 the recorded activation path without switching callers or scopes.
