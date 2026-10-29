@@ -232,6 +232,40 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         self.assertFalse(execute.call_args.kwargs["restore_upstream"])
         self.assertFalse(execute.call_args.kwargs["restore_clean_snapshot"])
 
+    def test_changed_effective_source_refuses_before_the_driver_effect(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        profile.preview.data_transport_mode = "driver"
+        envelope = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        issued = _issued_plan(envelope)
+        expected = preview_http.resolve_preview_source_decision(
+            record_store=Mock(), profile=profile, issued_plan=issued, environment={}
+        )
+        with (
+            patch.object(preview_http, "refresh_odoo_preview_issued_plan", return_value=envelope),
+            patch.object(
+                preview_http,
+                "_odoo_preview_service_environment",
+                return_value=preview_http._OdooPreviewServiceEnvironment(
+                    values={"ODOO_UPSTREAM_HOST": "source.example.test"}
+                ),
+            ),
+            patch("control_plane.lane_movement.require_forward_preview_build"),
+            patch.object(preview_http, "preview_has_completed_restore", return_value=False),
+            patch.object(preview_http, "execute_odoo_preview_dokploy_apply") as execute,
+            self.assertRaises(ValueError),
+        ):
+            preview_http.execute_odoo_preview_apply_result(
+                control_plane_root_path=Path("."),
+                record_store=Mock(),
+                profile=profile,
+                request=envelope,
+                issued_plan=issued,
+                database_url=None,
+                deployment_record_id="fixture-changed-source",
+                expected_source_decision=expected,
+            )
+        execute.assert_not_called()
+
     def test_completed_restore_receipt_preserves_copy_and_unknown_binding_refuses_reset(
         self,
     ) -> None:
@@ -384,6 +418,45 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             )
             observe.assert_not_called()
 
+    def test_source_capture_refusal_keeps_its_reason_without_reserving_or_dispatching(self) -> None:
+        from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
+        from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_sqlite_database_url(root / "state.db"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+            execute = Mock()
+            operation = prepare_odoo_preview_apply_operation(
+                control_plane_root=root,
+                record_store=store,
+                profile=profile,
+                apply_request=request,
+                issued_plan=_issued_plan(request),
+                reservation_scope=_WORKER_SCOPE,
+                idempotency_key=_PLAN_ID,
+                request_fingerprint="source-refusal",
+                trace_id="source-refusal",
+                execute_apply=execute,
+            )
+            cause = click.ClickException("Original source proof is unavailable")
+            with (
+                patch.object(preview_http, "resolve_preview_source_decision", side_effect=cause),
+                self.assertRaises(OdooPreviewPlanProvenanceError) as refused,
+            ):
+                operation.run(store)
+            self.assertIs(refused.exception.__cause__, cause)
+            self.assertEqual(str(refused.exception), str(cause))
+            self.assertIsNone(
+                store.read_idempotency_record_by_id(operation.adapter._deployment_record_id)
+            )
+            execute.assert_not_called()
+
     def test_capacity_or_provider_denial_releases_unused_preview_key(self) -> None:
         from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
         from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
@@ -516,6 +589,12 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             self.assertEqual(result["status"], "blocked")
             self.assertEqual(result["error_code"], "lane_movement.ancestor_build")
             self.assertTrue(result["error_message"])
+            assert results[0].record is not None
+            persisted = store.read_idempotency_record_by_id(results[0].record.record_id)
+            assert persisted is not None
+            persisted_result = persisted.response_payload["result"]
+            assert isinstance(persisted_result, dict)
+            self.assertIs(persisted_result["provider_effect_attempted"], False)
             self.assertEqual(store.list_preview_records(), ())
             execute.assert_called_once()
             observe.assert_not_called()

@@ -47,6 +47,20 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
                 database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
             ),
         )
+        from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsRequest
+
+        allocation = self.provider.build_inputs(
+            profile=self.profile,
+            request=OdooPreviewApplyInputsRequest(
+                product=self.profile.product,
+                pr_number=5,
+                image_reference=self.profile.image.repository + "@sha256:" + "a" * 64,
+            ),
+        )["dry_run_plan"]
+        assert isinstance(allocation, dict)
+        self.provider.targets[(self.profile.preview.context, allocation["compose_name"])] = (
+            allocation["compose_ref"]
+        )
         self.native_interrupted = False
         self.fail_rebuild = False
         build = self.provider.build_inputs
@@ -60,6 +74,19 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
                 plan["clean_snapshot"] = self.clean_snapshot.model_dump(mode="json")
             return result
 
+        def original_target(**kwargs: Any) -> str:
+            plan = kwargs["request"].dry_run_plan
+            if not plan.compose_ref.startswith("${created."):
+                return str(plan.compose_ref)
+            return self.provider.targets.get((self.profile.preview.context, plan.compose_name), "")
+
+        self.enterContext(
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+                side_effect=original_target,
+            )
+        )
+
         def native(**kwargs: Any) -> bool:
             original = original_preview_intent(
                 kwargs["reservation"], profile=self.profile, store=self.store
@@ -72,6 +99,7 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
             if operation == "refresh" and (
                 self.fail_rebuild or not self.store.list_preview_records()
             ):
+                self.provider.allocate_target(kwargs["issued_plan"])
                 self.native_interrupted = True
                 raise ProviderMutationUnknownError("fixture interrupted restore")
             result = execute(**kwargs)
@@ -254,6 +282,8 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
                 data="only_copy",
             )
             kwargs["provider_effect_checkpoint"]("compose_destroy")
+            issued = kwargs["issued_plan"]
+            self.provider.targets.pop((issued.context, issued.dry_run_plan.compose_name), None)
             self.fail("Needed data must prevent the provider effect")
 
         with patch.object(self.provider, "execute_apply", side_effect=protected):
@@ -268,6 +298,8 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
 
         def lost_reply(**kwargs: Any) -> dict[str, object]:
             kwargs["provider_effect_checkpoint"]("compose_destroy")
+            issued = kwargs["issued_plan"]
+            self.provider.targets.pop((issued.context, issued.dry_run_plan.compose_name), None)
             effects.append("destroy")
             self.native_interrupted = False
             raise ProviderMutationUnknownError("fixture lost destroy reply")
