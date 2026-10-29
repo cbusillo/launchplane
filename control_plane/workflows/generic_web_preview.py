@@ -52,6 +52,10 @@ from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
+from control_plane.preview_namespaces import (
+    effective_preview_app_name_prefix as effective_preview_app_name_prefix,
+    preview_product_operation_key,
+)
 from control_plane import runtime_platform_credentials
 from control_plane.dokploy import memory_capacity
 from control_plane.dokploy import api as dokploy_api
@@ -439,10 +443,6 @@ def _destroy_request_with_resolved_preview_slug(
     )
 
 
-def effective_preview_app_name_prefix(*, profile: LaunchplaneProductProfileRecord) -> str:
-    return profile.preview.app_name_prefix.strip() or f"{profile.product}-preview"
-
-
 def preview_application_name(
     *, app_name_prefix: str, preview_slug: str, app_name_suffix: str = ""
 ) -> str:
@@ -640,6 +640,7 @@ def _ensure_domain(
     preview_host: str,
     runtime_port: int,
     certificate_type: Literal["none", "letsencrypt"],
+    https: bool | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     raw_domains = dokploy_api.dokploy_request(
         host=host,
@@ -666,7 +667,7 @@ def _ensure_domain(
         "path": "/",
         "internalPath": "/",
         "port": runtime_port,
-        "https": certificate_type == "letsencrypt",
+        "https": certificate_type == "letsencrypt" if https is None else https,
         "applicationId": application_id,
         "certificateType": certificate_type,
         "customCertResolver": None,
@@ -1012,6 +1013,7 @@ def _enforce_preview_copied_runtime_key_safety(
     template_application: JsonObject,
     preview_slug: str,
     preview_environment: control_plane_runtime_environments.SiteRuntimeEnvironment | None = None,
+    check_credential_values: bool = False,
 ) -> None:
     template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
     overridden = (
@@ -1039,6 +1041,8 @@ def _enforce_preview_copied_runtime_key_safety(
         key
         for key, value in copied_values.items()
         if is_preview_copied_credential(key, value, template_bindings=template_bindings)
+        or check_credential_values
+        and runtime_platform_credentials.plain_setting_looks_like_credential("", value)
     )
     if not required_binding_keys:
         return
@@ -1079,7 +1083,7 @@ def _wait_for_preview_health(
     health_path: str,
     timeout_seconds: int,
     expected_runtime_identity: RuntimeIdentity | None = None,
-) -> None:
+) -> RuntimeIdentity | None:
     parsed = urlparse(preview_url.rstrip("/"))
     health_url = parsed._replace(path=health_path, params="", query="", fragment="").geturl()
     deadline = timeout_seconds
@@ -1101,32 +1105,32 @@ def _wait_for_preview_health(
             if 200 <= response.status < 400:
                 if not body.strip():
                     if expected_runtime_identity is None:
-                        return
+                        return None
                     last_detail = "health endpoint returned an empty response"
                 else:
                     try:
                         payload = json.loads(body)
                     except json.JSONDecodeError:
                         if expected_runtime_identity is None:
-                            return
+                            return None
                         last_detail = "health endpoint did not return parseable JSON"
                     else:
                         if not isinstance(payload, dict):
                             if expected_runtime_identity is None:
-                                return
+                                return None
                             last_detail = "health endpoint returned non-object JSON"
                         elif payload.get("ok") is False:
                             last_detail = "health endpoint reported ok=false"
                         elif expected_runtime_identity is None:
-                            return
+                            return None
                         else:
-                            status, detail, _observed = health_payload_runtime_identity_status(
+                            status, detail, observed = health_payload_runtime_identity_status(
                                 expected=expected_runtime_identity,
                                 payload=payload,
                                 json_parse_failed=False,
                             )
-                            if status == "match":
-                                return
+                            if status == "match" and observed is not None:
+                                return observed
                             if status == "mismatch":
                                 if _preview_runtime_identity_mismatch_is_converging(detail):
                                     last_detail = detail
@@ -1379,7 +1383,7 @@ def serialize_generic_web_product_operation(
     serialize = getattr(record_store, "serialize_preview_refresh", None)
     if callable(serialize):
         with serialize(
-            preview_id=f"product-retirement:{product}", dedicated=True, shared=not exclusive
+            preview_id=preview_product_operation_key(product), dedicated=True, shared=not exclusive
         ):
             yield
     else:

@@ -78,8 +78,11 @@ API clients alongside the service when deploying this contract change.
 
 When the stored product profile declares `preview.data_transport_mode="driver"`,
 the generic-web lifecycle route delegates refresh and destroy execution to the
-registered product-driver extension. This keeps product-specific database,
-secret, migration, seed, and cleanup behavior inside Launchplane. Missing driver
+registered shared capability. The `postgres` capability provides an isolated
+database and role, profile-declared generated secrets and application lifecycle
+commands for any generic-web product with a PostgreSQL testing template. Its
+configuration and the supported legacy transition are described in
+[driver development](driver-development.md). Missing driver
 extensions fail closed instead of falling back to generic environment copying.
 Driver-owned application commands must invoke executables already present in the
 immutable image instead of relying on package-runner download or discovery
@@ -99,6 +102,24 @@ both values into the expected runtime identity, requires the live health endpoin
 to echo them, and persists that observed identity on the same explicit generation.
 Product-local preview slugs are not substitutes for Launchplane's canonical
 preview and generation identities.
+
+PostgreSQL refresh and destroy use the same product-operation serialization as
+plain previews, rechecking the profile after acquiring it. A profile write cannot
+change resource declarations during a product operation; retained previews keep
+those declarations fixed between operations. This also applies to plain previews:
+clean them up before changing resource names, source or template. Inert refresh
+configuration failures preserve serving evidence. Destroy never creates a record
+for an unrecorded preview; an already destroyed record is an idempotent success.
+PostgreSQL destroy also accepts complete historical declarations for active or
+retiring products, including disabled previews, while refresh still requires an
+active canonical profile. Cleanup preserves the stored profile and retirement
+hash fence; retired products cannot execute cleanup.
+PostgreSQL environments use the same explicit template copy list, managed preview
+configuration and credential-safety checks as plain previews, with additional
+copied query-value checks limited to PostgreSQL. Generated database/application
+declarations take precedence over managed values and retired entries; removing a
+generator declaration is the supported way to change that ownership. Template connection identity and
+credential query overrides fail before provider effects.
 
 Because product callers pin reusable workflows while the service deploys
 independently, add any future destroy outcome to the `reusable-preview-feedback-status.yml` allowlist

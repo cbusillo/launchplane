@@ -296,6 +296,9 @@ class LaneProductConfigCommitOwnershipTests(unittest.IsolatedAsyncioTestCase):
                                     profile.model_copy(
                                         update={
                                             "product": "other-product",
+                                            "preview": profile.preview.model_copy(
+                                                update={"app_name_prefix": "other-product-preview"}
+                                            ),
                                             "lanes": tuple(
                                                 lane.model_copy(update=padding)
                                                 if scenario == "duplicate_lane"

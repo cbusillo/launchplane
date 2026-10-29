@@ -284,11 +284,12 @@ class LegacyGenericSiblingOwnershipTests(LegacyPreviewReconciliationFixture):
                 )
             }
         )
-        self.store.write_product_profile_record(self.profile)
-        self.assertEqual((await self.call("inspect")).status_code, 202)
-        with self.provider_inventory():
-            self.assertEqual((await self.call("inspect")).status_code, 409)
-        self.store.write_product_profile_record(original_profile)
+        with self.assertRaises(ValueError):
+            self.store.write_product_profile_record(self.profile)
+        with patch.object(self.store, "read_product_profile_record", return_value=self.profile):
+            self.assertEqual((await self.call("inspect")).status_code, 202)
+            with self.provider_inventory():
+                self.assertEqual((await self.call("inspect")).status_code, 409)
         sibling = self.store.read_preview_record(self.sibling_id)
         with patch.object(
             self.store,

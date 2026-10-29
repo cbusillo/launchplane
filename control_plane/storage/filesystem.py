@@ -1,3 +1,7 @@
+from control_plane.preview_namespaces import (
+    validate_preview_profile_writes,
+)
+
 import fcntl
 import hashlib
 import json
@@ -398,6 +402,12 @@ class FilesystemRecordStore:
             return self._write_model_locked(record_type, record_id, model)
 
     def _write_model_locked(self, record_type: str, record_id: str, model: BaseModel) -> Path:
+        if isinstance(model, LaunchplaneProductProfileRecord):
+            validate_preview_profile_writes(
+                profiles=self._list_product_profile_records_locked(),
+                replacements=(model,),
+                previews=self._list_models_locked(PreviewRecord, "launchplane_previews"),
+            )
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_path = tempfile.mkstemp(
@@ -472,7 +482,12 @@ class FilesystemRecordStore:
     ) -> RecordModel:
         record_path = self._record_path(record_type, record_id)
         payload = json.loads(record_path.read_text(encoding="utf-8"))
-        return model_type.model_validate(payload)
+        return model_type.model_validate(
+            payload,
+            context={"stored_product_profile": True}
+            if model_type is ProductRetirementRecord
+            else None,
+        )
 
     def _record_dir(self, record_type: str) -> Path:
         return self.state_dir / record_type
@@ -493,7 +508,14 @@ class FilesystemRecordStore:
         records: list[RecordModel] = []
         for record_path in sorted(record_dir.glob("*.json")):
             payload = json.loads(record_path.read_text(encoding="utf-8"))
-            records.append(model_type.model_validate(payload))
+            records.append(
+                model_type.model_validate(
+                    payload,
+                    context={"stored_product_profile": True}
+                    if model_type is ProductRetirementRecord
+                    else None,
+                )
+            )
         return tuple(records)
 
     def _product_authority_bundle_stage_root(self) -> Path:
@@ -542,6 +564,11 @@ class FilesystemRecordStore:
             return
         with self._product_authority_bundle_lock():
             profiles = self._list_product_profile_records_locked()
+            validate_preview_profile_writes(
+                profiles=profiles,
+                replacements=bundle.product_profiles,
+                previews=self._list_models_locked(PreviewRecord, "launchplane_previews"),
+            )
             require_absent_products(bundle.absent_product_ids, profiles)
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
