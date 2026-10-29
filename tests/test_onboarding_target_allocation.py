@@ -17,6 +17,7 @@ from control_plane.onboarding_target import onboarding_target_digests
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from tests.http_app_test_support import (
     _browser_mutation_headers,
@@ -379,7 +380,7 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
         for changes, status in (
             ({"resolved_target_id": self.production_id.target_id}, 400),
             ({"product": "unrelated-product"}, 400),
-            ({"generic_web": {**record_payload["generic_web"], "runtime_port": 8080}}, 409),
+            ({"generic_web": {**self.intent.model_dump(mode="json"), "runtime_port": 8080}}, 409),
         ):
             with self.subTest(changes=changes):
                 refused = await request(
@@ -495,7 +496,9 @@ class OnboardingTargetAllocationTests(_ApplicationStateVolumeFixture):
             with (
                 self.subTest(context=context),
                 patch.object(
-                    self.store, "write_new_product_onboarding_bundle", side_effect=conflicting_write
+                    PostgresRecordStore,
+                    "write_new_product_onboarding_bundle",
+                    side_effect=conflicting_write,
                 ),
             ):
                 refused = await request(
