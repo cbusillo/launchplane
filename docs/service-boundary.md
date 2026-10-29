@@ -4405,7 +4405,9 @@ A completed `already_deployed` no-op is clear when the recorded current and
 desired artifact ids, commit SHAs and immutable image digests all match and the
 plan is not held. It cites the artifact id without inventing a deploy operation.
 Missing or inconsistent provenance on a completed, unheld no-op stays unknown
-with `testing_provenance_incomplete`; a request that is not done stays unknown.
+with `testing_provenance_incomplete`. A request that is not done stays unknown
+with `reconcile_not_done`, even when its saved plan contains a previous successful,
+queued or failed deploy. Historical operation ids are not cited as current evidence.
 This cites saved reconciliation evidence, not a fresh provider observation;
 a later manual deployment requires reconciliation before this evidence is current.
 For Odoo, select `intent=provision|generation|testing-replacement` on the testing
