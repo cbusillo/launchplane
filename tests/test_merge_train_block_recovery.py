@@ -26,6 +26,7 @@ from control_plane.merge_train_controller_run_once import (
 )
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
 from control_plane.merge_train_github import (
+    MergeTrainBaseCheckObservation,
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubError,
@@ -376,6 +377,42 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
                 }
             )
         )
+        self.assertNotEqual(
+            self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+        )
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_same_head_gets_one_retest_after_failed_candidate_base_moves(self) -> None:
+        """A green exact new base releases only the controller's recorded hold once."""
+        self.current = self.current.model_copy(
+            update={"head_sha": self.old.head_sha, "base_sha": "d" * 40}
+        )
+        self.snapshot = self.snapshot.model_copy(
+            update={"base_sha": self.current.base_sha, "pull_requests": (self.current,)}
+        )
+        self.comments[0]["body"] = (
+            f"Review result: weighed\nHead: {self.current.head_sha}\n\nFindings addressed."
+        )
+        requirement = SimpleNamespace(name="ci-gate", app_id=self.writer_app_id)
+        self.client.read_candidate_check_failures = Mock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                conclusive=True,
+                attribution_requirements=(requirement,),
+            )
+        )
+        self.client.read_base_check_observation = Mock(  # type: ignore[method-assign]
+            return_value=MergeTrainBaseCheckObservation("pass")
+        )
+
+        result = self.advance(mutate=True)
+
+        self.assertEqual(result["reason_code"], "candidate_block_new_base_retest")
+        self.assertEqual(len(self.mutations), 1)
+        self.assertEqual(
+            self.client.read_base_check_observation.call_args.kwargs["candidate"].base_sha,
+            self.current.base_sha,
+        )
+        self.current = self.current.model_copy(update={"labels": (self.target.blocked_label,)})
         self.assertNotEqual(
             self.advance(mutate=True)["controller_action"], "recover_candidate_block"
         )

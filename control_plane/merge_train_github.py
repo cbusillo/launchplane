@@ -3037,6 +3037,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         mutate: bool,
         before_remove: Callable[[], None],
         setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
+        new_base_retest_evidence: Callable[[], object | None] | None = None,
     ) -> bool:
         from control_plane.merge_train_github_block_recovery import recover_candidate_block
 
@@ -3050,6 +3051,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             mutate=mutate,
             before_remove=before_remove,
             setup_failure_evidence=setup_failure_evidence,
+            new_base_retest_evidence=new_base_retest_evidence,
         )
 
     def update_pull_request_branch(

@@ -25,6 +25,12 @@ from control_plane.merge_train_setup_recovery_receipt import (
     receipt_id,
     SetupRecoveryReceipt,
 )
+from control_plane.merge_train_base_retest_receipt import (
+    BaseRetestReceipt,
+    BaseRetestRequiredCheck,
+    read_base_retest_receipt,
+    reserve_base_retest,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +51,7 @@ class CandidateBlockRecoveryClient(Protocol):
         mutate: bool,
         before_remove: Callable[[], None],
         setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
+        new_base_retest_evidence: Callable[[], BaseRetestReceipt | None] | None = None,
     ) -> bool: ...
 
 
@@ -193,6 +200,7 @@ def recover_candidate_block(
             source_app = targets[0].github_token.github_app
             legacy_writer_app_id = source_app.app_id if source_app is not None else None
         setup_failure_evidence = None
+        base_retest_evidence: BaseRetestReceipt | None = None
         reservation = None
         if current.head_sha == entry.head_sha:
             if (
@@ -201,6 +209,17 @@ def recover_candidate_block(
                 or current.mergeable != "mergeable"
             ):
                 continue
+            if snapshot.base_sha != failed.base_sha:
+                try:
+                    if (
+                        read_base_retest_receipt(
+                            store, snapshot.repository, entry.pull_request_number, entry.head_sha
+                        )
+                        is not None
+                    ):
+                        continue
+                except (OSError, ValueError, TypeError, KeyError):
+                    continue
             if (
                 failed.infrastructure_retry_of
                 or failed.check_retry_of
@@ -231,13 +250,38 @@ def recover_candidate_block(
             )
             return evidence
 
+        def load_base_retest_evidence() -> BaseRetestReceipt | None:
+            nonlocal base_retest_evidence
+            failures = client.read_candidate_check_failures(candidate=failed)  # type: ignore[attr-defined]
+            requirements = failures.attribution_requirements
+            if not failures.conclusive or not requirements:
+                return None
+            observation = client.read_base_check_observation(  # type: ignore[attr-defined]
+                candidate=failed.model_copy(update={"base_sha": snapshot.base_sha}),
+                attribution_requirements=requirements,
+            )
+            if observation.status != "pass":
+                return None
+            base_retest_evidence = BaseRetestReceipt(
+                failed_record_id=candidate.record_id,
+                failed_base_sha=failed.base_sha,
+                retest_base_sha=snapshot.base_sha,
+                required_checks=tuple(
+                    BaseRetestRequiredCheck(name=check.name, app_id=check.app_id)
+                    for check in requirements
+                ),
+            )
+            return base_retest_evidence
+
         result: dict[str, object] = {
             "repository": snapshot.repository,
             "base_branch": snapshot.base_branch,
             "mode": "recover_candidate_block" if mutate else "dry-run",
             "controller_action": "recover_candidate_block",
             "reason_code": (
-                "candidate_block_unrelated_setup_reviewed"
+                "candidate_block_new_base_retest"
+                if current.head_sha == entry.head_sha and snapshot.base_sha != failed.base_sha
+                else "candidate_block_unrelated_setup_reviewed"
                 if current.head_sha == entry.head_sha
                 else "candidate_block_new_head_reviewed"
             ),
@@ -273,6 +317,14 @@ def recover_candidate_block(
                         failed_record_id=candidate.record_id, evidence=setup_failure_evidence
                     )
                 )
+            if base_retest_evidence is not None:
+                reserve_base_retest(
+                    store=store,
+                    candidate=candidate,
+                    policy=policy,
+                    receipt=base_retest_evidence,
+                    recorded_at=recorded_at,
+                )
 
         if client.recover_candidate_block(
             candidate=candidate,
@@ -283,7 +335,14 @@ def recover_candidate_block(
             mutate=mutate,
             before_remove=checkpoint,
             setup_failure_evidence=(
-                load_setup_evidence if current.head_sha == entry.head_sha else None
+                load_setup_evidence
+                if current.head_sha == entry.head_sha and snapshot.base_sha == failed.base_sha
+                else None
+            ),
+            new_base_retest_evidence=(
+                load_base_retest_evidence
+                if current.head_sha == entry.head_sha and snapshot.base_sha != failed.base_sha
+                else None
             ),
         ):
             return result

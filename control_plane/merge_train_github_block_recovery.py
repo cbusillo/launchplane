@@ -259,6 +259,7 @@ def recover_candidate_block(
     mutate: bool,
     before_remove: Callable[[], None],
     setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
+    new_base_retest_evidence: Callable[[], object | None] | None = None,
 ) -> bool:
     from control_plane.merge_train_github import (
         GitHubMergeTrainSnapshotReader,
@@ -370,15 +371,18 @@ def recover_candidate_block(
         if not qualified() or (event := label_event()) is None:
             return False
         if expected_head_sha == candidate.candidate.entries[0].head_sha:
-            if setup_failure_evidence is None:
-                return False
-            accepted_evidence = setup_failure_evidence()
-            if accepted_evidence is None:
+            if setup_failure_evidence is not None:
+                accepted_evidence = setup_failure_evidence()
+                if accepted_evidence is None:
+                    return False
+            elif new_base_retest_evidence is None or new_base_retest_evidence() is None:
                 return False
         if not mutate:
             return True
         before_remove()
-        if label_event() != event or not qualified(recheck_setup=True):
+        if label_event() != event or not qualified(
+            recheck_setup=setup_failure_evidence is not None
+        ):
             return False
     except MergeTrainGitHubError as error:
         if error.rate_limited or error.status_code in {401, 403}:
@@ -394,7 +398,8 @@ def recover_candidate_block(
         return False
     except (OSError, ValueError, TypeError, KeyError) as error:
         _LOGGER.warning(
-            "Candidate block recovery proof unavailable; preserving hold",
+            "Candidate block recovery proof unavailable (%s); preserving hold",
+            error,
             extra={
                 "repository": repository,
                 "pull_request_number": number,
