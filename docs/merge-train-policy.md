@@ -1439,17 +1439,15 @@ landed member is blocked against that verified green base. The controller does
 not label both members as individually broken; feedback names the failing
 candidate checks and tests against the base used for that candidate.
 
-A controller-owned culprit hold also has one bounded unchanged-head escape when
-the protected base has moved since the failed candidate. Before removing its own
-recorded label, the controller re-reads the failed candidate's actual required
-identities and requires positive success for those same name/App identities on
-the exact new base commit. Optional leaf jobs that are absent on the base are
-not requirements and do not establish or defeat blame. Uncertain, pending,
-changed-policy, missing-required, manual or reapplied hold evidence preserves
-the label. The controller commits a receipt keyed by repository, pull request
-and unchanged head before removal, so another base move cannot spend a second
-retest. Recovery only returns the head to the ordinary current Ready, Client,
-candidate-tree and landing gates; it never authorizes landing by itself.
+A controller-owned culprit hold has one bounded unchanged-head escape after
+the protected base moves. Immediately before removing its own recorded label,
+the controller re-reads the exact new base SHA, the failed candidate's required
+check identities, their success on that base, the unchanged policy and the
+original label event. A crash or lost removal response may replay the same
+failed-record/base reservation, but a later failure or another base cannot
+spend it again. This path uses the existing current-head Ready admission; it
+does not require a new Ready handoff. Independent causal setup-failure recovery
+remains available on every base and retains its fresh-Ready proof.
 
 Before ordinary planning, failed-candidate reflow or a smaller isolation retest creates a candidate, the
 controller checks persisted failure history, including superseded records. The

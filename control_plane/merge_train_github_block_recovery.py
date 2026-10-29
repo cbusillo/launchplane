@@ -260,6 +260,7 @@ def recover_candidate_block(
     before_remove: Callable[[], None],
     setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
     new_base_retest_evidence: Callable[[], object | None] | None = None,
+    expected_base_sha: str | None = None,
 ) -> bool:
     from control_plane.merge_train_github import (
         GitHubMergeTrainSnapshotReader,
@@ -301,8 +302,9 @@ def recover_candidate_block(
         )
 
     accepted_evidence: MergeTrainSetupFailureRecovery | None = None
+    accepted_base_retest = False
 
-    def qualified(*, recheck_setup: bool = False) -> bool:
+    def qualified(*, recheck_setup: bool = False, recheck_base: bool = False) -> bool:
         pr = client.read_pull_request_snapshot(repository=repository, pull_request_number=number)
         reader = GitHubMergeTrainSnapshotReader(transport=client.transport)
         same_head = pr.head_sha == candidate.candidate.entries[0].head_sha
@@ -329,6 +331,7 @@ def recover_candidate_block(
             and pr.base_ref == policy.base_branch
             and pr.required_checks_status == "pass"
             and pr.mergeable == "mergeable"
+            and (expected_base_sha is None or pr.base_sha == expected_base_sha)
             and not pr.client_test_notes_error
             and pr.review_conversations is None
             and (
@@ -347,6 +350,12 @@ def recover_candidate_block(
         if not eligible:
             return False
         if same_head:
+            if recheck_base:
+                return (
+                    accepted_base_retest
+                    and new_base_retest_evidence is not None
+                    and new_base_retest_evidence() is not None
+                )
             if recheck_setup and accepted_evidence is None:
                 return False
             if not recheck_setup:
@@ -373,15 +382,16 @@ def recover_candidate_block(
         if expected_head_sha == candidate.candidate.entries[0].head_sha:
             if setup_failure_evidence is not None:
                 accepted_evidence = setup_failure_evidence()
-                if accepted_evidence is None:
-                    return False
-            elif new_base_retest_evidence is None or new_base_retest_evidence() is None:
+            if accepted_evidence is None and new_base_retest_evidence is not None:
+                accepted_base_retest = new_base_retest_evidence() is not None
+            if accepted_evidence is None and not accepted_base_retest:
                 return False
         if not mutate:
             return True
         before_remove()
         if label_event() != event or not qualified(
-            recheck_setup=setup_failure_evidence is not None
+            recheck_setup=accepted_evidence is not None,
+            recheck_base=accepted_base_retest,
         ):
             return False
     except MergeTrainGitHubError as error:
@@ -398,8 +408,7 @@ def recover_candidate_block(
         return False
     except (OSError, ValueError, TypeError, KeyError) as error:
         _LOGGER.warning(
-            "Candidate block recovery proof unavailable (%s); preserving hold",
-            error,
+            "Candidate block recovery proof unavailable; preserving hold",
             extra={
                 "repository": repository,
                 "pull_request_number": number,

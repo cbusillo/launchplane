@@ -294,6 +294,13 @@ def _feedback_message(
             "will observe it again without repeating the label write."
         )
     if controller_action == "recover_candidate_block":
+        if result.get("reason_code") == "candidate_block_new_base_retest":
+            return (
+                "Launchplane cleared its failed-candidate block after the failed checks "
+                "passed on the exact new base. The unchanged head returns to normal "
+                "admission with its existing current-head Ready handoff; the one automatic "
+                "base-retest budget is recorded."
+            )
         if _as_dict(result.get("details")).get("removal_observation"):
             return (
                 "Launchplane observed that the failed-candidate block is absent while "

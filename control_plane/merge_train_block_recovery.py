@@ -1,10 +1,8 @@
-"""Recover only recorded failed-candidate holds, before a fresh ready handoff."""
-
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
@@ -16,8 +14,16 @@ from control_plane.contracts.merge_train_policy import (
     MergeTrainRepositoryPolicy,
 )
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
+from control_plane.github_required_checks import CheckRequirement
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_batch_candidate import MergeTrainBatchCandidateRecordStore
+from control_plane.merge_train_base_retest_receipt import (
+    BaseRetestReceipt,
+    BaseRetestRequiredCheck,
+    read_base_retest_receipt,
+    reserve_base_retest,
+)
+from control_plane.merge_train_candidate_failures import CandidateCheckFailures
 from control_plane.merge_train_pr_feedback import MergeTrainPrFeedbackRecordStore
 from control_plane.merge_train_setup_recovery_receipt import (
     read_setup_recovery_receipt,
@@ -25,17 +31,25 @@ from control_plane.merge_train_setup_recovery_receipt import (
     receipt_id,
     SetupRecoveryReceipt,
 )
-from control_plane.merge_train_base_retest_receipt import (
-    BaseRetestReceipt,
-    BaseRetestRequiredCheck,
-    read_base_retest_receipt,
-    reserve_base_retest,
-)
+
+if TYPE_CHECKING:
+    from control_plane.merge_train_github import MergeTrainBaseCheckObservation
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class CandidateBlockRecoveryClient(Protocol):
+    def read_candidate_check_failures(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> CandidateCheckFailures: ...
+
+    def read_base_check_observation(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        attribution_requirements: tuple[CheckRequirement, ...],
+    ) -> MergeTrainBaseCheckObservation: ...
+
     def read_setup_failure_recovery(
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainSetupFailureRecovery | None: ...
@@ -52,6 +66,7 @@ class CandidateBlockRecoveryClient(Protocol):
         before_remove: Callable[[], None],
         setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
         new_base_retest_evidence: Callable[[], BaseRetestReceipt | None] | None = None,
+        expected_base_sha: str | None = None,
     ) -> bool: ...
 
 
@@ -94,6 +109,7 @@ def recover_candidate_block(
         repository=snapshot.repository, base_branch=snapshot.base_branch, status="superseded"
     )
     reservation_cache: dict[tuple[int, str], SetupRecoveryReceipt | None] = {}
+    base_retest_cache: dict[tuple[int, str], BaseRetestReceipt | None] = {}
 
     def reservation_for(number: int, head: str) -> SetupRecoveryReceipt | None:
         key = (number, head)
@@ -102,6 +118,14 @@ def recover_candidate_block(
                 store, snapshot.repository, number, head
             )
         return reservation_cache[key]
+
+    def base_retest_for(number: int, head: str) -> BaseRetestReceipt | None:
+        key = (number, head)
+        if key not in base_retest_cache:
+            base_retest_cache[key] = read_base_retest_receipt(
+                store, snapshot.repository, number, head
+            )
+        return base_retest_cache[key]
 
     recorded_policies: tuple[MergeTrainPolicyRecord, ...] | None = None
     explicit_batches = {
@@ -200,8 +224,12 @@ def recover_candidate_block(
             source_app = targets[0].github_token.github_app
             legacy_writer_app_id = source_app.app_id if source_app is not None else None
         setup_failure_evidence = None
-        base_retest_evidence: BaseRetestReceipt | None = None
         reservation = None
+        base_retest_receipt = None
+        new_base_retest_evidence: BaseRetestReceipt | None = None
+        base_retest_budget_available = not (
+            failed.infrastructure_retry_of or failed.check_retry_of or failed.batch_body_retry_of
+        )
         if current.head_sha == entry.head_sha:
             if (
                 current.required_checks_status != "pass"
@@ -209,29 +237,28 @@ def recover_candidate_block(
                 or current.mergeable != "mergeable"
             ):
                 continue
-            if snapshot.base_sha != failed.base_sha:
-                try:
-                    if (
-                        read_base_retest_receipt(
-                            store, snapshot.repository, entry.pull_request_number, entry.head_sha
-                        )
-                        is not None
-                    ):
-                        continue
-                except (OSError, ValueError, TypeError, KeyError):
-                    continue
-            if (
-                failed.infrastructure_retry_of
-                or failed.check_retry_of
-                or failed.batch_body_retry_of
-            ):
-                continue
             try:
                 reservation = reservation_for(entry.pull_request_number, entry.head_sha)
                 if reservation is not None and reservation.failed_record_id != candidate.record_id:
                     continue
+                base_retest_receipt = base_retest_for(entry.pull_request_number, entry.head_sha)
             except (OSError, ValueError, TypeError, KeyError):
                 continue
+
+        def base_retest_policy_is_current() -> bool:
+            policy_reader = getattr(store, "list_merge_train_policy_records", None)
+            if policy_reader is None or not callable(policy_reader):
+                return False
+            current_policy_records = tuple(policy_reader(status="active"))
+            return any(
+                record.policy_sha256 == failed.policy_sha256
+                and record.policy.find_repository_policy(
+                    repository=snapshot.repository,
+                    base_branch=snapshot.base_branch,
+                )
+                == policy
+                for record in current_policy_records
+            )
 
         def load_setup_evidence() -> MergeTrainSetupFailureRecovery | None:
             nonlocal setup_failure_evidence
@@ -245,24 +272,32 @@ def recover_candidate_block(
                 if reservation.evidence != evidence:
                     return None
             setup_failure_evidence = evidence
+            result["reason_code"] = "candidate_block_unrelated_setup_reviewed"
+            cast(dict[str, object], result["details"])["next_action"] = (
+                "Post a fresh checked gh-pr.py ready handoff for the current head."
+            )
             cast(dict[str, object], result["details"])["setup_failure_evidence"] = (
                 evidence.model_dump(mode="json")
             )
             return evidence
 
         def load_base_retest_evidence() -> BaseRetestReceipt | None:
-            nonlocal base_retest_evidence
-            failures = client.read_candidate_check_failures(candidate=failed)  # type: ignore[attr-defined]
+            nonlocal new_base_retest_evidence
+            if not base_retest_policy_is_current():
+                return None
+            failures = client.read_candidate_check_failures(candidate=failed)
             requirements = failures.attribution_requirements
             if not failures.conclusive or not requirements:
                 return None
-            observation = client.read_base_check_observation(  # type: ignore[attr-defined]
-                candidate=failed.model_copy(update={"base_sha": snapshot.base_sha}),
+            observation = client.read_base_check_observation(
+                candidate=failed.model_copy(
+                    update={"base_sha": snapshot.base_sha, "candidate_sha": snapshot.base_sha}
+                ),
                 attribution_requirements=requirements,
             )
             if observation.status != "pass":
                 return None
-            base_retest_evidence = BaseRetestReceipt(
+            evidence = BaseRetestReceipt(
                 failed_record_id=candidate.record_id,
                 failed_base_sha=failed.base_sha,
                 retest_base_sha=snapshot.base_sha,
@@ -271,7 +306,16 @@ def recover_candidate_block(
                     for check in requirements
                 ),
             )
-            return base_retest_evidence
+            if base_retest_receipt is not None and base_retest_receipt != evidence:
+                return None
+            if new_base_retest_evidence is not None and new_base_retest_evidence != evidence:
+                return None
+            new_base_retest_evidence = evidence
+            result["reason_code"] = "candidate_block_new_base_retest"
+            cast(dict[str, object], result["details"])["next_action"] = (
+                "Return the unchanged head to normal admission using its current Ready handoff."
+            )
+            return evidence
 
         result: dict[str, object] = {
             "repository": snapshot.repository,
@@ -279,9 +323,7 @@ def recover_candidate_block(
             "mode": "recover_candidate_block" if mutate else "dry-run",
             "controller_action": "recover_candidate_block",
             "reason_code": (
-                "candidate_block_new_base_retest"
-                if current.head_sha == entry.head_sha and snapshot.base_sha != failed.base_sha
-                else "candidate_block_unrelated_setup_reviewed"
+                "candidate_block_unrelated_setup_reviewed"
                 if current.head_sha == entry.head_sha
                 else "candidate_block_new_head_reviewed"
             ),
@@ -317,13 +359,17 @@ def recover_candidate_block(
                         failed_record_id=candidate.record_id, evidence=setup_failure_evidence
                     )
                 )
-            if base_retest_evidence is not None:
+            current_base_retest_evidence = new_base_retest_evidence
+            if current_base_retest_evidence is not None:
                 reserve_base_retest(
                     store=store,
                     candidate=candidate,
                     policy=policy,
-                    receipt=base_retest_evidence,
+                    receipt=current_base_retest_evidence,
                     recorded_at=recorded_at,
+                )
+                base_retest_cache[(entry.pull_request_number, entry.head_sha)] = (
+                    current_base_retest_evidence
                 )
 
         if client.recover_candidate_block(
@@ -336,11 +382,26 @@ def recover_candidate_block(
             before_remove=checkpoint,
             setup_failure_evidence=(
                 load_setup_evidence
-                if current.head_sha == entry.head_sha and snapshot.base_sha == failed.base_sha
+                if current.head_sha == entry.head_sha
+                and base_retest_budget_available
+                and (reservation is None or reservation.failed_record_id == candidate.record_id)
                 else None
             ),
             new_base_retest_evidence=(
                 load_base_retest_evidence
+                if current.head_sha == entry.head_sha
+                and snapshot.base_sha != failed.base_sha
+                and base_retest_budget_available
+                and (
+                    base_retest_receipt is None
+                    or base_retest_receipt.failed_record_id == candidate.record_id
+                    and base_retest_receipt.failed_base_sha == failed.base_sha
+                    and base_retest_receipt.retest_base_sha == snapshot.base_sha
+                )
+                else None
+            ),
+            expected_base_sha=(
+                snapshot.base_sha
                 if current.head_sha == entry.head_sha and snapshot.base_sha != failed.base_sha
                 else None
             ),

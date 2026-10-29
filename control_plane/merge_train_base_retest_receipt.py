@@ -1,8 +1,7 @@
-"""Durably bound, one-shot retest reservations for an unchanged blocked head."""
-
 from __future__ import annotations
 
 from hashlib import sha256
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -12,6 +11,7 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
     merge_train_pr_feedback_marker,
 )
+from control_plane.merge_train_pr_feedback import MergeTrainPrFeedbackRecordStore
 
 _SOURCE = "launchplane:base-retest-reservation:v1"
 _PREFIX = "<!-- launchplane-base-retest:v1 "
@@ -40,7 +40,7 @@ def read_base_retest_receipt(
     store: object, repository: str, number: int, head: str
 ) -> BaseRetestReceipt | None:
     reader = getattr(store, "read_merge_train_pr_feedback_record", None)
-    if not callable(reader):
+    if reader is None or not callable(reader):
         if store is None:
             return None
         raise ValueError("Base retest receipt storage is unavailable.")
@@ -72,12 +72,11 @@ def reserve_base_retest(
     receipt: BaseRetestReceipt,
     recorded_at: str,
 ) -> None:
+    feedback_store = cast(MergeTrainPrFeedbackRecordStore, store)
     entry = candidate.candidate.entries[0]
-    lock = getattr(store, "merge_train_feedback_delivery_lock", None)
-    writer = getattr(store, "write_merge_train_pr_feedback_record", None)
-    if not callable(lock) or not callable(writer):
-        raise ValueError("Base retest receipt storage is unavailable.")
-    with lock(repository=policy.repository, pull_request_number=entry.pull_request_number):
+    with feedback_store.merge_train_feedback_delivery_lock(
+        repository=policy.repository, pull_request_number=entry.pull_request_number
+    ):
         existing = read_base_retest_receipt(
             store, policy.repository, entry.pull_request_number, entry.head_sha
         )
@@ -85,7 +84,7 @@ def reserve_base_retest(
             if existing != receipt:
                 raise ValueError("Base retest budget is already reserved.")
             return
-        writer(
+        feedback_store.write_merge_train_pr_feedback_record(
             MergeTrainPrFeedbackRecord(
                 feedback_id=receipt_id(
                     policy.repository, entry.pull_request_number, entry.head_sha
