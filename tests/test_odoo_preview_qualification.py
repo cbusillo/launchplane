@@ -13,6 +13,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.odoo_testing_usage import MAX_CREDENTIAL_CANDIDATES, credential_digest
+from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 from control_plane.odoo_preview_apply_http import (
@@ -181,17 +182,13 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         self.preview_candidates = ["private-production-token"]
         response = await self.collect()
         self.assertEqual(response.status_code, 409, response.text)
-        self.assertIn("preview_production_credentials_shared", response.text)
+        self.assertIn("preview_production_credential_separation_unproven", response.text)
         spec = self.remote.call_args.kwargs["payload"]["preview_spec"]
         self.assertNotIn("private-production", str(spec))
 
     async def test_shared_metadata_does_not_count_as_a_production_credential(self) -> None:
         for production, preview in (
             ("postgresql://u:private-token@db/x?sslmode=require", "require"),
-            (
-                json.dumps({"private_key": "private-token", "token_uri": "https://auth.invalid"}),
-                "https://auth.invalid",
-            ),
             (
                 json.dumps(
                     {"items": [f"metadata-{index}" for index in range(MAX_CREDENTIAL_CANDIDATES)]}
@@ -205,12 +202,35 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                 response = await self.collect()
                 self.assertEqual(response.status_code, 202, response.text)
 
-    async def test_parameter_metadata_does_not_hide_short_actual_credentials(self) -> None:
+    async def test_ambiguous_public_url_purpose_refuses_without_weakening_bearer_url_protection(
+        self,
+    ) -> None:
+        credential = "https://auth.invalid/public-or-bearer-path"
+        for key in ("token_uri", "callback_secret_url"):
+            with self.subTest(key=key):
+                self.production["SERVICE_SECRET"] = json.dumps({key: credential})
+                self.preview_candidates = [credential]
+                response = await self.collect()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertIn(":" + key, response.text)
+                self.assertIsNone(
+                    self.store.read_disposable_lane_safety(
+                        self.profile.product, "cm", self.issued.preview_slug
+                    )
+                )
+
+    async def test_credential_shaped_scalars_and_strings_remain_protected(self) -> None:
         for key, value, status in (
-            ("auth_password_policy.minlength", "12", 202),
-            ("auth_password_policy.enabled", "True", 202),
+            ("auth_password_policy.minlength", "12", 409),
+            ("auth_password_policy.enabled", "True", 409),
             ("custom.api_token", "12", 409),
             ("custom.api_token", "short", 409),
+            ("custom.api_token", "True", 409),
+            ("custom.api_token", 12, 409),
+            ("custom.api_token.value", "12", 409),
+            ("mail.ui_enabled", True, 202),
+            ("auth_signup.reset_password", True, 409),
+            ("auth_signup.reset_password", "True", 409),
         ):
             with self.subTest(key=key, value=value):
                 self.production["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"] = base64.b64encode(
@@ -222,7 +242,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                         }
                     ).encode()
                 ).decode()
-                self.preview_candidates = [value]
+                self.preview_candidates = [str(value)]
                 response = await self.collect()
                 self.assertEqual(response.status_code, status, response.text)
 
@@ -266,6 +286,33 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         self.assertEqual(safety.usage, "in_use")
         self.assertTrue(safety.usage_evidence.startswith("service:staff-testing-hold:"), safety)
 
+    async def test_nested_bearer_url_is_protected_when_whole_payloads_differ(self) -> None:
+        credential = "https://hooks.invalid/private-path-token"
+        self.production["SERVICE_SECRET"] = json.dumps(
+            {"callback_secret_url": credential, "region": "production"}
+        )
+        self.preview_candidates = [credential]
+        response = await self.collect()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn(":callback_secret_url", response.text)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, "cm", self.issued.preview_slug
+            )
+        )
+
+    async def test_nested_credential_names_keep_their_parent_context(self) -> None:
+        self.production["SERVICE_SECRET"] = json.dumps({"api_token": {"value": 12}})
+        self.preview_candidates = ["12"]
+        response = await self.collect()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn(":api_token.value", response.text)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, "cm", self.issued.preview_slug
+            )
+        )
+
     async def test_other_integrations_and_encoded_provider_secrets_are_compared(self) -> None:
         secret = "private-extra-production-token"
         binding = SecretBinding(
@@ -299,7 +346,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         ):
             response = await self.collect()
         self.assertEqual(response.status_code, 409, response.text)
-        self.assertIn("preview_production_credentials_shared", response.text)
+        self.assertIn("preview_production_credential_separation_unproven", response.text)
         self.production["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"] = base64.b64encode(
             json.dumps(
                 {
@@ -311,7 +358,9 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         ).decode()
         response = await self.collect()
         self.assertEqual(response.status_code, 409, response.text)
-        self.assertIn("preview_production_credentials_shared:custom.api_token", response.text)
+        self.assertIn(
+            "preview_production_credential_separation_unproven:custom.api_token", response.text
+        )
 
     async def test_credential_inventory_overflow_refuses_without_publication(self) -> None:
         self.production.update(
@@ -382,6 +431,13 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                 self.assertNotIn("private-provider", response.text)
                 spec = self.remote.call_args.kwargs["payload"]["preview_spec"]
                 self.assertEqual(spec["runtime_identity"], self.identity.model_dump(mode="json"))
+                policy = json.loads(base64.b64decode(spec["integration_spec"]))
+                restore_only = {
+                    family.integration for family in INTEGRATION_FAMILIES if family.restore_only
+                }
+                self.assertTrue(
+                    restore_only.isdisjoint(family["integration"] for family in policy["families"])
+                )
                 self.assertNotIn("private-production", str(spec))
 
     async def test_missing_serving_generation_original_or_completion_refuses(self) -> None:

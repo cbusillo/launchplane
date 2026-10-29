@@ -282,11 +282,18 @@ def credential_candidates(values: dict[str, str]) -> set[tuple[str, str]]:
             if isinstance(setting, str) and isinstance(literal, dict):
                 pending.append((setting, literal.get("value")))
             else:
-                pending.extend(value.items())
+                pending.extend(
+                    (f"{name}.{key}" if name else key, item) for key, item in value.items()
+                )
             continue
         if isinstance(value, list):
             pending.extend((name, item) for item in value)
             continue
+        if isinstance(value, (bool, int, float)):
+            encoded_scalar = json.dumps(value)
+            if encoded_scalar != str(value):
+                pending.append((name, encoded_scalar))
+            value = str(value)
         if not isinstance(value, str) or not value or (name, value) in candidates:
             continue
         if len(value) > 1024 * 1024:
@@ -303,7 +310,7 @@ def credential_candidates(values: dict[str, str]) -> set[tuple[str, str]]:
         for encoded in (False, True):
             try:
                 pending.append(
-                    (name, json.loads(base64.b64decode(value, validate=True) if encoded else value))
+                    ("", json.loads(base64.b64decode(value, validate=True) if encoded else value))
                 )
             except (ValueError, UnicodeError):
                 continue

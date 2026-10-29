@@ -20,20 +20,26 @@ Collection reuses the testing usage reader for recent successful sign-ins and
 authenticated session files, and the shared copy-runtime probe for actual
 mounts, backing storage, network membership and ports. It checks the running
 web and runner identities, compares all container environments and configuration
-parameter values against current managed and provider production credentials, and runs
-the existing integration readback with no preview integration allowances.
+parameter values against current managed and provider production credentials,
+and runs the existing maintenance integration readback with no preview
+integration allowances.
 The host returns per-read salted digests of preview credential candidates to
 the service. Production values and digests stay inside the service. The same
 candidate reader handles URLs, JSON and encoded payloads on both sides. The
 comparison includes all configured production-context integrations, provider
 credentials, including literal and secret-backed configuration parameters.
-Production candidates retain whole managed secrets and credential-named fragments,
-so shared URL or JSON metadata is not treated as a shared credential. A collision
-names only the production key. Database parameters are read in a read-only
-transaction through the pinned database image; the production database is not
-inventoried. Preview parameters are compared only against known managed and
-provider production values. This does not establish that `database.secret` or
-other database-only production secrets have been rotated; sanitation proof
+Production candidates retain whole managed secrets and credential-named fragments
+from provider values, URLs, JSON and encoded payloads. Nested names retain their
+credential context, and scalar values include their text representations. Short,
+numeric or boolean-looking values and bearer URLs stay protected. A collision
+refuses with the production key whose credential separation is unproven. An
+untyped public endpoint under a credential-shaped field can conservatively refuse;
+its purpose must come from authoritative configuration, not its URL shape.
+Database parameters are read in a read-only transaction through the pinned
+database image; the production database is not inventoried. Preview parameters
+are compared only against known managed and provider production values. This
+does not establish that `database.secret`, VAPID keys or other database-only
+production secrets have been rotated; sanitation proof
 belongs to the sanitized-copy work. Other tables, such as user API keys, are
 outside this inventory. The isolation evidence explicitly names this managed
 and provider comparison scope. Credential digests,

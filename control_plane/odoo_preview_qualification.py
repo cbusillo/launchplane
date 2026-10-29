@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 import os
-from urllib.parse import urlsplit
 
 import click
 from pathlib import Path
@@ -153,21 +152,6 @@ class ProductionCredentialInventory:
     volumes: frozenset[str]
 
 
-def production_credential_fragment(key: str, value: str) -> bool:
-    name = key.rsplit(".", 1)[-1]
-    if not looks_like_credential(name, value):
-        return False
-    address = urlsplit(value)
-    return not (
-        name.upper().endswith(("_URI", "_URL"))
-        and address.scheme in {"http", "https"}
-        and address.hostname
-        and not address.password
-        and not address.query
-        and not address.fragment
-    )
-
-
 def production_credentials(
     store: PostgresRecordStore, *, product: str, root: Path
 ) -> ProductionCredentialInventory:
@@ -237,14 +221,9 @@ def production_credentials(
         candidates = {(key, value) for key, value in managed.items() if value}
         candidates.update(
             (key, value)
-            for key, value in current.items()
-            if value and looks_like_credential(key, value)
-        )
-        candidates.update(
-            (key, value)
             for values in (managed, current)
             for key, value in credential_candidates(values)
-            if production_credential_fragment(key, value)
+            if looks_like_credential(key, value)
         )
         if len(candidates) > MAX_CREDENTIAL_CANDIDATES:
             raise ValueError("credential_inventory_unavailable")
@@ -294,7 +273,7 @@ def collect_odoo_preview_qualification(
         if set(environment.values()) & credentials.volumes:
             raise PreviewQualificationMissing("preview_production_resources_shared")
         policy = integration_readback_policy(
-            instance_name="preview", policies=DokployTargetPolicies(), workflow_mode="restore"
+            instance_name="preview", policies=DokployTargetPolicies(), workflow_mode="maintenance"
         )
         checkpoint = "preview_usage_and_resources_unavailable"
         credential_nonce = os.urandom(32).hex()
@@ -324,7 +303,9 @@ def collect_odoo_preview_qualification(
             raise PreviewQualificationMissing("preview_qualification_missing:" + usage.reason_code)
         for key, value in sorted(credentials.candidates):
             if credential_digest(credential_nonce, value) in usage.credential_hashes:
-                raise PreviewQualificationMissing("preview_production_credentials_shared:" + key)
+                raise PreviewQualificationMissing(
+                    "preview_production_credential_separation_unproven:" + key
+                )
         checkpoint = "preview_qualification_authority_changed"
         assert_selection_current(store, authority.selection)
         if (
