@@ -187,7 +187,6 @@ def mint_runner_relabel_installation_token(
     write: bool,
     api_request: GitHubApiRequest = github_api_request,
 ) -> GitHubAppInstallationToken:
-    """Use only the explicitly accepted runner-purpose installation."""
     permissions = {"administration": "write" if write else "read", "metadata": "read"}
 
     def accepted_installation(app_id: int, observed_installation_id: int) -> None:

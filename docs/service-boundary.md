@@ -328,8 +328,8 @@ remaining domain and storage removal is tracked in #2437.
     signed-in immutable-ID administrator. It provisions no capability.
   - `POST /v1/runner-relabel/{policy_id}/reviews` reads a runner and saves an
     actor/policy-bound before/desired-label review, with no label mutation.
-  - `GET /v1/runner-relabel/{policy_id}/reviews/{review_id}` returns only that
-    actor's stored review and original-operation status, with no provider call.
+  - `GET /v1/runner-relabel/{policy_id}/reviews/{review_id}` returns a scope-authorized
+    stored review and original-operation status, with no provider call.
   - `POST /v1/runner-relabel/{policy_id}/operations` applies one exact reviewed
     label change under current own-identity scope and a durable global target
     fence; original-key reconcile is observation-only and terminal evidence

@@ -111,7 +111,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "GET",
         "/v1/runner-relabel/{policy_id}/policy",
-        "Read a service-owned exact-runner policy without provider effects.",
+        "Read a service-owned repository/host runner roster policy without provider effects.",
         ("service_api",),
         (),
         "none",
@@ -129,7 +129,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "GET",
         "/v1/runner-relabel/{policy_id}/reviews/{review_id}",
-        "Read the authenticated actor's own stored runner review and original operation receipt without provider calls.",
+        "Read a scope-authorized stored runner review and original operation receipt without provider calls.",
         ("service_api",),
         (),
         "none",
@@ -138,7 +138,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         "/v1/runner-relabel/{policy_id}/reviews",
-        "Review one exact existing runner label replacement under the authenticated actor and stored service policy; no runner mutation.",
+        "Review one approved roster runner label replacement under the authenticated actor and stored service policy; no runner mutation.",
         ("service_api",),
         ("dry-run",),
         "none",

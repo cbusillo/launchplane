@@ -1,5 +1,3 @@
-"""Native custody, exact effect and restart recovery against fictional runners."""
-
 from contextlib import nullcontext
 from collections.abc import Callable
 from copy import deepcopy
@@ -15,7 +13,11 @@ from control_plane.contracts.idempotency_record import (
     parse_launchplane_mutation_timestamp,
     format_launchplane_mutation_timestamp,
 )
-from control_plane.contracts.runner_relabel import RunnerRelabelPolicy, RunnerRelabelReviewRequest
+from control_plane.contracts.runner_relabel import (
+    RunnerRelabelPolicy,
+    RunnerRelabelReviewRequest,
+    RunnerRelabelRunner,
+)
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.runner_relabel import (
     ROUTE,
@@ -38,10 +40,13 @@ class RunnerTransport:
         self.unknown = False
         self.busy = False
         self.runner_name = "general-1"
+        self.runner_id = 7
+        self.put_paths: list[str] = []
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         if method == "PUT":
             self.puts += 1
+            self.put_paths.append(path)
             assert body is not None
             values = body["labels"]
             assert isinstance(values, list) and all(isinstance(value, str) for value in values)
@@ -52,7 +57,7 @@ class RunnerTransport:
             return {
                 "runners": [
                     {
-                        "id": 7,
+                        "id": self.runner_id,
                         "name": self.runner_name,
                         "status": "online",
                         "busy": self.busy,
@@ -81,10 +86,12 @@ class RunnerRelabelNativeTests(unittest.TestCase):
             context="fixture-context",
             repository="example/control",
             repository_id=101,
-            runner_id=7,
-            runner_name="general-1",
             host_name="build-1",
-            registration_root="/srv/runners/general-1",
+            runners=(
+                RunnerRelabelRunner(
+                    runner_id=7, runner_name="general-1", registration_root="/srv/runners/general-1"
+                ),
+            ),
             protected_runner_names=("operations-1",),
             protected_labels=("operations",),
             enabled=True,
@@ -114,6 +121,7 @@ class RunnerRelabelNativeTests(unittest.TestCase):
             "fixture",
             RunnerRelabelReviewRequest.model_validate(
                 {
+                    "runner_id": 7,
                     "desired_custom_labels": ["candidate", "general"],
                     "reason": "fixture candidate routing",
                     **changes,
@@ -218,6 +226,84 @@ class RunnerRelabelNativeTests(unittest.TestCase):
                 self.transport.runner_name = "general-1"
                 self.transport.automatic = ("self-hosted", "linux")
 
+    def test_roster_rejects_empty_duplicate_and_unapproved_targets(self) -> None:
+        roster = self.policy.model_dump(mode="json")
+        for field, value in (
+            ("runner_id", 8),
+            ("runner_name", "general-2"),
+            ("registration_root", "/srv/runners/general-2"),
+        ):
+            duplicate = {**roster["runners"][0], field: value}
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                RunnerRelabelPolicy.model_validate(
+                    {**roster, "runners": [*roster["runners"], duplicate]}
+                )
+        with self.assertRaises(ValueError):
+            RunnerRelabelPolicy.model_validate({**roster, "runners": []})
+        self.factory.reset_mock()
+        with self.assertRaises(ValueError):
+            self.review(runner_id=99)
+        self.factory.assert_not_called()
+
+    def test_review_selects_one_roster_entry_and_freezes_its_target(self) -> None:
+        roster = self.policy.model_dump(mode="json")
+        runner: dict[str, Any] = {
+            "runner_id": 8,
+            "runner_name": "general-2",
+            "registration_root": "/srv/runners/general-2",
+        }
+        roster["runners"].append(runner)
+        self.store.compare_and_write_runner_relabel_policy(
+            "fixture",
+            {
+                "policy": roster,
+                "actor": self.actor,
+                "reason": "reviewed host roster",
+                "expected_policy_sha256": self.saved["policy_sha256"],
+            },
+            expected_sha256=self.saved["policy_sha256"],
+        )
+        self.transport.runner_id = runner["runner_id"]
+        self.transport.runner_name = runner["runner_name"]
+        review = self.review(runner_id=runner["runner_id"])
+        self.assertEqual(review["runner"], runner)
+        self.assertEqual(self.run_change(review).status, "completed")
+        self.assertEqual(
+            self.transport.put_paths,
+            [f"/repos/{self.policy.repository}/actions/runners/{runner['runner_id']}/labels"],
+        )
+
+    def test_predispatch_refusal_settles_and_fresh_review_can_proceed(self) -> None:
+        review = self.review()
+        self.transport.busy = True
+        refused = self.run_change(review)
+        self.assertEqual(refused.response_status_code, 409)
+        self.assertEqual(refused.response_payload["result"]["status"], "refused_before_dispatch")
+        self.assertEqual(self.transport.puts, 0)
+        self.transport.busy = False
+        fresh = self.review()
+        self.assertEqual(self.run_change(fresh, key="fresh").status, "completed")
+        self.assertEqual(self.transport.puts, 1)
+
+    def test_historical_observation_uses_reviewed_policy_after_policy_change(self) -> None:
+        review = self.review()
+        self.transport.unknown = True
+        self.assertEqual(self.run_change(review).status, "reconcile_required")
+        current = load_policy(self.store, "fixture")
+        self.store.compare_and_write_runner_relabel_policy(
+            "fixture",
+            {
+                "policy": self.policy.model_copy(update={"enabled": False}).model_dump(mode="json"),
+                "actor": self.actor,
+                "reason": "disable future work",
+                "expected_policy_sha256": current["policy_sha256"],
+            },
+            expected_sha256=current["policy_sha256"],
+        )
+        self.transport.unknown = False
+        self.assertEqual(self.run_change(review, observe=True).status, "adopted")
+        self.assertEqual(self.transport.puts, 1)
+
     def test_custody_and_policy_cas_are_immutable(self) -> None:
         review = self.review()
         with self.assertRaises(ValueError):
@@ -320,24 +406,58 @@ class RunnerRelabelNativeTests(unittest.TestCase):
         from control_plane.contracts.runner_relabel import RunnerRelabelCapability
         from control_plane.github_app_identity import GitHubAppInstallationToken
 
-        capability = RunnerRelabelCapability(app_id=91, installation_id=92,
-            secret_context="fixture-runner-purpose", accepted=True)
+        capability = RunnerRelabelCapability(
+            app_id=91, installation_id=92, secret_context="fixture-runner-purpose", accepted=True
+        )
         policy = self.policy.model_copy(update={"capability": capability})
         current = load_policy(self.store, policy.policy_id)
-        self.store.compare_and_write_runner_relabel_policy(policy.policy_id, {
-            "policy": policy.model_dump(mode="json"), "actor": self.actor,
-            "reason": "fixture accepted capability", "expected_policy_sha256": current["policy_sha256"],
-        }, expected_sha256=current["policy_sha256"])
-        token = GitHubAppInstallationToken(token="synthetic-test-token", app_id=capability.app_id,
-            installation_id=capability.installation_id, repository_id=policy.repository_id,
-            repository=policy.repository, expires_at="fixture-unused")
+        self.store.compare_and_write_runner_relabel_policy(
+            policy.policy_id,
+            {
+                "policy": policy.model_dump(mode="json"),
+                "actor": self.actor,
+                "reason": "fixture accepted capability",
+                "expected_policy_sha256": current["policy_sha256"],
+            },
+            expected_sha256=current["policy_sha256"],
+        )
+        token = GitHubAppInstallationToken(
+            token="synthetic-test-token",
+            app_id=capability.app_id,
+            installation_id=capability.installation_id,
+            repository_id=policy.repository_id,
+            repository=policy.repository,
+            expires_at="fixture-unused",
+        )
         self.factory.side_effect = runner_transport
-        with patch("control_plane.runner_relabel.resolve_context_secret_value", return_value="synthetic-test-key"), patch("control_plane.runner_relabel.mint_runner_relabel_installation_token", return_value=token) as mint, patch("control_plane.runner_relabel.UrllibMergeTrainGitHubTransport", return_value=self.transport), patch("control_plane.runner_relabel.revoke_installation_token", side_effect=OSError("private provider revocation response")), self.assertLogs("control_plane.runner_relabel", level="WARNING") as logs:
+        with (
+            patch(
+                "control_plane.runner_relabel.resolve_context_secret_value",
+                return_value="synthetic-test-key",
+            ),
+            patch(
+                "control_plane.runner_relabel.mint_runner_relabel_installation_token",
+                return_value=token,
+            ) as mint,
+            patch(
+                "control_plane.runner_relabel.UrllibMergeTrainGitHubTransport",
+                return_value=self.transport,
+            ),
+            patch(
+                "control_plane.runner_relabel.revoke_installation_token",
+                side_effect=OSError("private provider revocation response"),
+            ),
+            self.assertLogs("control_plane.runner_relabel", level="WARNING") as logs,
+        ):
             review = self.review()
             self.assertEqual(self.run_change(review).status, "completed")
-            observation = RunnerRelabelAdapter(self.store, review, "observe-trace", "original").observe("unused", "", review["review_sha256"])
+            observation = RunnerRelabelAdapter(
+                self.store, review, "observe-trace", "original"
+            ).observe("unused", "", review["review_sha256"])
             self.assertEqual(observation.outcome, "present")
-        self.assertEqual([call.kwargs["write"] for call in mint.call_args_list], [False, True, False])
+        self.assertEqual(
+            [call.kwargs["write"] for call in mint.call_args_list], [False, True, False]
+        )
         self.assertNotIn("private provider revocation response", "\n".join(logs.output))
         self.assertEqual(self.transport.puts, 1)
 
@@ -356,8 +476,9 @@ class RunnerRelabelNativeTests(unittest.TestCase):
 
                 with patch.object(self.store, "write_runner_relabel_document", side_effect=fail):
                     if stage == "planned":
-                        with self.assertRaises(ValueError):
-                            self.run_change(review, key=stage)
+                        self.assertEqual(
+                            self.run_change(review, key=stage).response_status_code, 409
+                        )
                         self.assertEqual(self.transport.puts, 0)
                     else:
                         self.assertEqual(

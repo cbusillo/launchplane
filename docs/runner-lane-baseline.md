@@ -248,8 +248,9 @@ or prove the runner change requested in shiny-infra-ops#488. Existing
 register/retire workflow modes and their credentials stay supported until a
 deployed service covers every existing mode.
 
-The service policy records an exact repository numeric ID/name, runner ID/name,
-reviewed host and absolute registration root, protected runner names/labels,
+The service policy records an exact repository numeric ID/name, reviewed host,
+and a nonempty roster of unique runner IDs, names and absolute registration roots,
+plus protected runner names/labels,
 product/context authorization scope, and optional accepted runner-purpose
 capability metadata. The host/root binding is a reviewed service record, never
 an inferred runner-name host hint. No real fleet identities or App selection
@@ -265,23 +266,33 @@ Use these service routes in order:
    administrator's own saved candidate digest in `expected_plan_sha256`, and
    `expected_policy_sha256` matching the prior revision (empty only for creation).
    Applying authority is subject to the Director's access-grant stop boundary.
-2. `POST .../reviews` takes desired custom labels and a reason, reads the exact
+2. `POST .../reviews` takes one roster `runner_id`, desired custom labels and a reason, reads the exact
    runner using an Administration-read token, and stores a review containing
-   the original actor, policy revision digest and before/automatic labels.
+   the selected runner ID/name/root, original actor, policy revision digest and before/automatic labels.
    It performs no label mutation. All cookie-backed POSTs consume browser CSRF
    authority. A review digest is evidence, never an authorization grant.
 3. `POST .../operations` takes `review_id`, `expected_review_sha256`,
    `mode: apply` and a stable `Idempotency-Key`. It requires the same immutable
-   actor and current exact-scope `runner_relabel.apply` authority. Workflow and
+   actor and current authority. Director agents use standing permission under
+   [Q578](https://github.com/cbusillo/launchplane/issues/4119#issuecomment-6300535484):
+   exact reviewed runner and labels, a fresh prior-label check, protected-runner
+   exclusion and stored before-labels for undo. Other agents need exact-scope
+   `runner_relabel.apply` authority. Workflow and
    read-only identities cannot apply; a scoped agent is never converted to an
    admin. The operation retains immutable original intent and planned evidence,
    fences the repository ID/runner ID across actors and keys, rechecks policy
    and lease immediately before dispatch, attempts at most one PUT, then reads
    back independently. One review is bound permanently to one operation key.
-4. `GET .../reviews/{review_id}` returns the caller's own stored review and
+4. `GET .../reviews/{review_id}` returns a scope-authorized stored review and
    original operation receipt without provider calls or reservation changes.
    `mode: reconcile` on the operations route observes the original operation
-   with read-only provider capability. Desired labels plus exact identity and
+   with read-only provider capability. A different scope-authorized reader may
+   recover it; receipts preserve the original actor and separately name the
+   recovery actor. Historical observation uses the original policy snapshot.
+   A proved pre-dispatch refusal returns a durable 409: create a fresh review
+   and key. An abandoned empty-phase reservation settles only through adoption
+   of its exact original snapshot; a stale worker cannot checkpoint afterward.
+   Desired labels plus exact identity and
    automatic-label agreement can settle the fence; this proves the observed
    state, not attribution to a particular writer. Absent or ambiguous state
    stays unknown and never authorizes another PUT. `mode: recover-evidence`

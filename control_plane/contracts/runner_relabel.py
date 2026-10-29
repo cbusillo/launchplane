@@ -1,5 +1,3 @@
-"""Native exact-runner reviews and purpose-bound service authority."""
-
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -18,20 +16,10 @@ class RunnerRelabelCapability(RunnerRelabelModel):
     accepted: bool = False
 
 
-class RunnerRelabelPolicy(RunnerRelabelModel):
-    policy_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
-    product: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
-    context: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
-    repository: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-    repository_id: int = Field(gt=0)
+class RunnerRelabelRunner(RunnerRelabelModel):
     runner_id: int = Field(gt=0)
     runner_name: str = Field(pattern=r"^[a-z0-9][a-z0-9_.-]{0,127}$")
-    host_name: str = Field(pattern=r"^[a-z0-9][a-z0-9_.-]{0,127}$")
     registration_root: str = Field(min_length=1, max_length=512)
-    protected_runner_names: tuple[str, ...]
-    protected_labels: tuple[str, ...]
-    capability: RunnerRelabelCapability | None = None
-    enabled: bool = False
 
     @field_validator("registration_root")
     @classmethod
@@ -39,6 +27,28 @@ class RunnerRelabelPolicy(RunnerRelabelModel):
         if not value.startswith("/") or "/../" in f"{value}/" or "//" in value:
             raise ValueError("Runner root must be an exact absolute path.")
         return value.rstrip("/") or "/"
+
+
+class RunnerRelabelPolicy(RunnerRelabelModel):
+    policy_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
+    product: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
+    context: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
+    repository: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    repository_id: int = Field(gt=0)
+    host_name: str = Field(pattern=r"^[a-z0-9][a-z0-9_.-]{0,127}$")
+    runners: tuple[RunnerRelabelRunner, ...] = Field(min_length=1)
+    protected_runner_names: tuple[str, ...]
+    protected_labels: tuple[str, ...]
+    capability: RunnerRelabelCapability | None = None
+    enabled: bool = False
+
+    @model_validator(mode="after")
+    def unique_roster(self) -> "RunnerRelabelPolicy":
+        for field in ("runner_id", "runner_name", "registration_root"):
+            values = [getattr(runner, field) for runner in self.runners]
+            if len(set(values)) != len(values):
+                raise ValueError("Runner roster IDs, names and roots must be unique.")
+        return self
 
 
 class RunnerRelabelPolicyWrite(RunnerRelabelModel):
@@ -50,6 +60,7 @@ class RunnerRelabelPolicyWrite(RunnerRelabelModel):
 
 
 class RunnerRelabelReviewRequest(RunnerRelabelModel):
+    runner_id: int = Field(gt=0)
     desired_custom_labels: tuple[str, ...] = Field(max_length=100)
     reason: str = Field(min_length=1, max_length=1000)
     inverse_of_review_id: str = ""
@@ -117,6 +128,7 @@ class RunnerRelabelReview(RunnerRelabelModel):
     policy_id: str
     policy_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     policy: RunnerRelabelPolicy
+    runner: RunnerRelabelRunner
     actor: RunnerRelabelActor
     desired_custom_labels: tuple[str, ...]
     before_custom_labels: tuple[str, ...]
@@ -127,8 +139,11 @@ class RunnerRelabelReview(RunnerRelabelModel):
 
     @model_validator(mode="after")
     def digest_matches(self) -> "RunnerRelabelReview":
-        if self.policy_id != self.policy.policy_id or self.review_sha256 != canonical_json_sha256(
-            self.model_dump(mode="json", exclude={"review_sha256"})
+        if (
+            self.runner not in self.policy.runners
+            or self.policy_id != self.policy.policy_id
+            or self.review_sha256
+            != canonical_json_sha256(self.model_dump(mode="json", exclude={"review_sha256"}))
         ):
             raise ValueError("Runner review digest differs.")
         return self

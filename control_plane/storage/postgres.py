@@ -5533,7 +5533,6 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         reservation: LaunchplaneIdempotencyRecord | None = None,
     ) -> None:
-        """Insert immutable native custody; legacy audit ingestion cannot select it."""
         from control_plane.contracts.canonical_json import canonical_json_sha256
 
         payload = self._runner_relabel_document_payload(kind, payload)
@@ -5588,7 +5587,6 @@ class PostgresRecordStore(HumanSessionStore):
 
     @contextmanager
     def runner_relabel_policy_guard(self, policy_id: str) -> Iterator[Session]:
-        """Serialize policy CAS and the final checked provider dispatch."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             if self.database_dialect_name == "postgresql":

@@ -54,7 +54,7 @@
         "modes": [],
         "operation_id": "read_runner_relabel_policy",
         "path": "/v1/runner-relabel/{policy_id}/policy",
-        "purpose": "Read a service-owned exact-runner policy without provider effects.",
+        "purpose": "Read a service-owned repository/host runner roster policy without provider effects.",
         "response_statuses": [
           "202",
           "400",
@@ -94,7 +94,7 @@
           "expected_plan_sha256",
           "expected_policy_sha256"
         ],
-        "schema_fingerprint_sha256": "1c7f56c2fc69f1c531adce93c186519f415cbafbe536c71c4cf6b0dc49a73ef6",
+        "schema_fingerprint_sha256": "17338f601360d79aa9875e7451c7dd8f9e962c076e9bd91d82f2784f9e17c626",
         "supported_surfaces": [
           "service_api"
         ]
@@ -108,7 +108,7 @@
         "modes": [],
         "operation_id": "read_runner_relabel_review",
         "path": "/v1/runner-relabel/{policy_id}/reviews/{review_id}",
-        "purpose": "Read the authenticated actor's own stored runner review and original operation receipt without provider calls.",
+        "purpose": "Read a scope-authorized stored runner review and original operation receipt without provider calls.",
         "response_statuses": [
           "202",
           "400",
@@ -134,7 +134,7 @@
         ],
         "operation_id": "review_runner_relabel",
         "path": "/v1/runner-relabel/{policy_id}/reviews",
-        "purpose": "Review one exact existing runner label replacement under the authenticated actor and stored service policy; no runner mutation.",
+        "purpose": "Review one approved roster runner label replacement under the authenticated actor and stored service policy; no runner mutation.",
         "response_statuses": [
           "202",
           "400",
@@ -144,7 +144,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "1d5e721b2f4b00e11cf51d4cb05ff8eb85aa6c4142c14cc3dd4487bbe01e5e0b",
+        "schema_fingerprint_sha256": "2d8cb5f01672e32fad2b4da2622e80ba76f767758340f3d506f6f64d042bb0af",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1417,8 +1417,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "01f23d1c415e381e626c36f221552c93f17e00d1"
+    "source_commit_sha": "a6f690edeb93e5bee8763ba6df62aa76d5772a64"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "f345a4233aafee3278544dd65f31149ee5aa0818ab6f714b0960076854a4a141"
+  "semantic_digest_sha256": "a89dbd6537f5ed18c6854d475a733712c3c36660e013aa9ebc489e386c44a4c9"
 }

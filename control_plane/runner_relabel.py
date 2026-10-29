@@ -1,5 +1,3 @@
-"""Actor-owned native runner relabeling; no workflow or credential fallback."""
-
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -15,6 +13,7 @@ from control_plane.contracts.runner_lane_registration import (
 )
 from control_plane.contracts.runner_relabel import (
     RunnerRelabelPolicy,
+    RunnerRelabelRunner,
     RunnerRelabelReviewRequest,
     RunnerRelabelActor,
     RunnerRelabelPolicyRecord,
@@ -56,16 +55,18 @@ ROUTE = "/v1/runner-relabel/{policy_id}/operations"
 RUNNER_SECRET_INTEGRATION = "runner-relabel"
 RUNNER_SECRET_BINDING = "private_key"
 REFUSED_BEFORE_DISPATCH = "runner_relabel_refused_before_dispatch"
-REFUSED_BEFORE_DISPATCH_MESSAGE = "No runner label request was sent. Create a fresh review and operation key."
+REFUSED_BEFORE_DISPATCH_MESSAGE = (
+    "No runner label request was sent. Create a fresh review and operation key."
+)
 _LOGGER = logging.getLogger(__name__)
 
 
 class RunnerRelabelInactive(ValueError):
-    """A named service activation prerequisite is absent."""
+    pass
 
 
 class RunnerRelabelReadUnavailable(RunnerRelabelInactive):
-    """Provider evidence is unavailable, with no raw provider response exposed."""
+    pass
 
 
 def actor_identity(identity: LaunchplaneIdentity) -> dict[str, object]:
@@ -141,19 +142,23 @@ def runner_transport(
         try:
             revoke_installation_token(installation_token=token)
         except Exception as error:
-            _LOGGER.warning("Runner-purpose token revocation failed (%s); the short-lived token still expires.", type(error).__name__)
+            _LOGGER.warning(
+                "Runner-purpose token revocation failed (%s); the short-lived token still expires.",
+                type(error).__name__,
+            )
 
 
 def _request(
     policy: RunnerRelabelPolicy, review: dict[str, Any], *, mutate: bool
 ) -> RunnerLaneRegistrationRequest:
+    runner = RunnerRelabelRunner.model_validate(review["runner"])
     return RunnerLaneRegistrationRequest(
         operation="relabel",
         repository=policy.repository,
         host_name=policy.host_name,
-        lane_name=policy.runner_name,
-        registration_root=policy.registration_root,
-        expected_runner_id=policy.runner_id,
+        lane_name=runner.runner_name,
+        registration_root=runner.registration_root,
+        expected_runner_id=runner.runner_id,
         labels=tuple(review["desired_custom_labels"]),
         expected_custom_labels=tuple(review["before_custom_labels"]),
         mutate=mutate,
@@ -165,7 +170,7 @@ def _engine_policy(policy: RunnerRelabelPolicy) -> RunnerLaneRegistrationPolicy:
     return RunnerLaneRegistrationPolicy(
         allowed_repositories=(policy.repository,),
         approved_hosts=(policy.host_name,),
-        allowed_registration_roots=(policy.registration_root,),
+        allowed_registration_roots=tuple(runner.registration_root for runner in policy.runners),
     )
 
 
@@ -182,16 +187,24 @@ def create_review(
 
 
 def _create_review(
-    store: PostgresRecordStore, policy_id: str, body: RunnerRelabelReviewRequest,
+    store: PostgresRecordStore,
+    policy_id: str,
+    body: RunnerRelabelReviewRequest,
     actor: dict[str, object],
 ) -> dict[str, Any]:
     saved = load_policy(store, policy_id)
     policy = RunnerRelabelPolicy.model_validate(saved["policy"])
+    runner = next((item for item in policy.runners if item.runner_id == body.runner_id), None)
+    if runner is None:
+        raise ValueError("Runner is outside the approved roster.")
     if body.inverse_of_review_id:
         original = store.read_runner_relabel_document("review", body.inverse_of_review_id)
         if original is None or original["actor"] != actor or original["policy_id"] != policy_id:
             raise ValueError("Original inverse review is unavailable to this actor.")
-        if list(body.desired_custom_labels) != original["before_custom_labels"]:
+        if (
+            original["runner"] != runner.model_dump(mode="json")
+            or list(body.desired_custom_labels) != original["before_custom_labels"]
+        ):
             raise ValueError("Inverse labels must match the original before snapshot.")
         claim = store.read_runner_relabel_document("review-operation", body.inverse_of_review_id)
         if claim is None:
@@ -201,13 +214,14 @@ def _create_review(
         "policy_id": policy_id,
         "policy_sha256": saved["policy_sha256"],
         "policy": policy.model_dump(mode="json"),
+        "runner": runner.model_dump(mode="json"),
         "actor": actor,
         "desired_custom_labels": list(body.desired_custom_labels),
         "reason": body.reason,
         "inverse_of_review_id": body.inverse_of_review_id,
     }
     with runner_transport(store, policy, write=False) as transport:
-        path = f"/repos/{policy.repository}/actions/runners/{policy.runner_id}/labels"
+        path = f"/repos/{policy.repository}/actions/runners/{runner.runner_id}/labels"
         before = _labels(transport.request(method="GET", path=path))
         review["before_custom_labels"] = list(before.custom)
         review["automatic_labels"] = list(before.automatic)
@@ -244,8 +258,12 @@ class RunnerRelabelAdapter:
     def policy(self) -> RunnerRelabelPolicy:
         return RunnerRelabelPolicy.model_validate(self.review["policy"])
 
+    @property
+    def runner(self) -> RunnerRelabelRunner:
+        return RunnerRelabelRunner.model_validate(self.review["runner"])
+
     def target_key(self) -> str:
-        return f"github-runner:{self.policy.repository_id}:{self.policy.runner_id}"
+        return f"github-runner:{self.policy.repository_id}:{self.runner.runner_id}"
 
     def reconciliation_key(self) -> str:
         return str(self.review["review_sha256"])
@@ -257,33 +275,55 @@ class RunnerRelabelAdapter:
             result={
                 "actor": self.review["actor"],
                 "original_actor": self.review["actor"],
-                **({"recovery_actor": self.recovery_actor} if self.recovery_actor is not None else {}),
+                **(
+                    {"recovery_actor": self.recovery_actor}
+                    if self.recovery_actor is not None
+                    else {}
+                ),
                 "review_sha256": self.review["review_sha256"],
                 **result,
             },
         )
 
     def refusal(self) -> dict[str, object]:
-        payload = self.response({"status": "refused_before_dispatch", "write_attempted": False,
-            "error_code": REFUSED_BEFORE_DISPATCH, "error_message": REFUSED_BEFORE_DISPATCH_MESSAGE})
-        payload["error"] = {"code": REFUSED_BEFORE_DISPATCH, "message": REFUSED_BEFORE_DISPATCH_MESSAGE}
+        payload = self.response(
+            {
+                "status": "refused_before_dispatch",
+                "write_attempted": False,
+                "error_code": REFUSED_BEFORE_DISPATCH,
+                "error_message": REFUSED_BEFORE_DISPATCH_MESSAGE,
+            }
+        )
+        payload["error"] = {
+            "code": REFUSED_BEFORE_DISPATCH,
+            "message": REFUSED_BEFORE_DISPATCH_MESSAGE,
+        }
         return payload
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
         original = self.store.read_idempotency_record(
-            scope=actor_scope(self.review["actor"]), route_path=ROUTE.format(policy_id=self.policy.policy_id),
+            scope=actor_scope(self.review["actor"]),
+            route_path=ROUTE.format(policy_id=self.policy.policy_id),
             idempotency_key=self.operation_key,
         )
-        intent = {"review": self.review, "actor": self.review["actor"], "operation_key": self.operation_key}
-        if (original is not None and original.state == "reconcile_required"
-            and not original.provider_effect_phase and not original.provider_effect_started_at
+        intent = {
+            "review": self.review,
+            "actor": self.review["actor"],
+            "operation_key": self.operation_key,
+        }
+        if (
+            original is not None
+            and original.state == "reconcile_required"
+            and not original.provider_effect_phase
+            and not original.provider_effect_started_at
             and original.request_fingerprint == canonical_json_sha256(intent)
-            and self.store.read_original_mutation_intent(original) == intent):
-            # The framework adopts only the exact saved reservation/intent snapshot.
-            # A stale worker cannot checkpoint a reconcile_required reservation.
-            return ProviderObservation("present", response_status_code=409, response_payload=self.refusal())
+            and self.store.read_original_mutation_intent(original) == intent
+        ):
+            return ProviderObservation(
+                "present", response_status_code=409, response_payload=self.refusal()
+            )
         terminal = self.store.read_runner_relabel_document("terminal", provider_operation_key)
         if self.evidence_only:
             if (
@@ -304,17 +344,17 @@ class RunnerRelabelAdapter:
                     transport=transport
                 ).read_runner_lane_inventory(repository=self.policy.repository)
                 matches = [
-                    lane for lane in inventory.lanes if lane.github_id == self.policy.runner_id
+                    lane for lane in inventory.lanes if lane.github_id == self.runner.runner_id
                 ]
                 labels = _labels(
                     transport.request(
                         method="GET",
-                        path=f"/repos/{self.policy.repository}/actions/runners/{self.policy.runner_id}/labels",
+                        path=f"/repos/{self.policy.repository}/actions/runners/{self.runner.runner_id}/labels",
                     )
                 )
                 if (
                     len(matches) == 1
-                    and matches[0].name.lower() == self.policy.runner_name
+                    and matches[0].name.lower() == self.runner.runner_name
                     and labels.custom == tuple(self.review["desired_custom_labels"])
                     and labels.automatic == tuple(self.review["automatic_labels"])
                 ):
@@ -333,7 +373,7 @@ class RunnerRelabelAdapter:
         except (MergeTrainGitHubError, OSError) as error:
             raise RunnerRelabelReadUnavailable("runner_provider_read_unavailable") from error
         except ValueError:
-            pass  # Incomplete or changed identity/label evidence is never retry permission.
+            return ProviderObservation("unknown")
         return ProviderObservation("unknown")
 
     def apply(
@@ -346,6 +386,7 @@ class RunnerRelabelAdapter:
                 ValueError("Native evidence requires a fenced lease.")
             )
         policy = self.policy
+        runner = self.runner
         evidence_lease = lease
         store = self.store
         review = self.review
@@ -379,7 +420,7 @@ class RunnerRelabelAdapter:
                                 raise ValueError("Reviewed automatic runner labels changed.")
                             return result
                         expected_path = (
-                            f"/repos/{policy.repository}/actions/runners/{policy.runner_id}/labels"
+                            f"/repos/{policy.repository}/actions/runners/{runner.runner_id}/labels"
                         )
                         if path != expected_path or body != {
                             "labels": review["desired_custom_labels"]
@@ -440,12 +481,10 @@ class RunnerRelabelAdapter:
                 raise ProviderMutationUnknownError(
                     "Runner capability changed after dispatch."
                 ) from error
-            raise ProviderMutationRejectedError(error) from error
+            return ProviderMutationOutcome(409, self.refusal(), provider_effect_performed=False)
         except Exception as error:
             if dispatched:
                 raise ProviderMutationUnknownError(
                     "Runner outcome or evidence is uncertain."
                 ) from error
-            raise ProviderMutationRejectedError(
-                ValueError("Runner prerequisite is unavailable.")
-            ) from error
+            return ProviderMutationOutcome(409, self.refusal(), provider_effect_performed=False)

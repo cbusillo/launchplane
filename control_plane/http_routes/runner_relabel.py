@@ -1,5 +1,3 @@
-"""Native reviewed exact-runner operations under the caller's own identity."""
-
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 
@@ -28,7 +26,8 @@ from control_plane.provider_operations import (
 )
 from control_plane.runner_relabel import (
     ROUTE,
-    REFUSED_BEFORE_DISPATCH, REFUSED_BEFORE_DISPATCH_MESSAGE,
+    REFUSED_BEFORE_DISPATCH,
+    REFUSED_BEFORE_DISPATCH_MESSAGE,
     RunnerRelabelAdapter,
     RunnerRelabelInactive,
     actor_identity,
@@ -72,7 +71,7 @@ def register_runner_relabel_routes(
         policy: RunnerRelabelPolicy,
         action: str,
     ) -> None:
-        mutation = action in ("runner_relabel.apply", "runner_relabel.recover")
+        mutation = action == "runner_relabel.apply"
         if mutation and not (
             strict_admin(store, identity)
             or isinstance(identity, LocalOperatorIdentity | TerminalAgentIdentity)
@@ -83,7 +82,7 @@ def register_runner_relabel_routes(
             action=action,
             product=policy.product,
             context=policy.context,
-            inherit_agent_read_role=not mutation,
+            inherit_agent_read_role=True,
         ):
             raise PermissionError("Runner action is outside the caller's recorded scope.")
 
@@ -105,11 +104,17 @@ def register_runner_relabel_routes(
 
     def may_read_unscoped(store: PostgresRecordStore, identity: LaunchplaneIdentity) -> bool:
         return strict_admin(store, identity) or dependencies.authorization_allows(
-            identity=identity, action="runner_relabel.read", product="", context="",
+            identity=identity,
+            action="runner_relabel.read",
+            product="",
+            context="",
         )
 
     def policy_for_caller(
-        store: PostgresRecordStore, identity: LaunchplaneIdentity, policy_id: str, action: str,
+        store: PostgresRecordStore,
+        identity: LaunchplaneIdentity,
+        policy_id: str,
+        action: str,
     ) -> dict[str, Any]:
         saved = store.read_runner_relabel_policy(policy_id)
         if saved is None:
@@ -120,8 +125,11 @@ def register_runner_relabel_routes(
         return saved
 
     def review_for_caller(
-        store: PostgresRecordStore, identity: LaunchplaneIdentity, policy_id: str,
-        review_id: str, action: str,
+        store: PostgresRecordStore,
+        identity: LaunchplaneIdentity,
+        policy_id: str,
+        review_id: str,
+        action: str,
     ) -> dict[str, Any]:
         saved = store.read_runner_relabel_document("review", review_id)
         if saved is None or saved["policy_id"] != policy_id:
@@ -220,15 +228,21 @@ def register_runner_relabel_routes(
     ) -> AcceptedEvidenceResponse:
         trace = dependencies.next_trace_id()
         try:
-            if body.mode == "apply" and (isinstance(identity, GitHubActionsIdentity) or (
-                isinstance(identity, GitHubHumanIdentity) and identity.role != "admin"
-            )):
+            if body.mode == "apply" and (
+                isinstance(identity, GitHubActionsIdentity)
+                or (isinstance(identity, GitHubHumanIdentity) and identity.role != "admin")
+            ):
                 raise PermissionError(
                     "Workflow and read-only identities cannot mutate runner state."
                 )
             record_store = database(store)
-            saved = review_for_caller(record_store, identity, policy_id, body.review_id,
-                "runner_relabel.apply" if body.mode == "apply" else "runner_relabel.read")
+            saved = review_for_caller(
+                record_store,
+                identity,
+                policy_id,
+                body.review_id,
+                "runner_relabel.apply" if body.mode == "apply" else "runner_relabel.read",
+            )
             caller = actor_identity(identity)
             actor = saved["actor"]
             if (
@@ -324,7 +338,9 @@ def register_runner_relabel_routes(
         trace = dependencies.next_trace_id()
         try:
             active_store = database(store)
-            saved = review_for_caller(active_store, identity, policy_id, review_id, "runner_relabel.read")
+            saved = review_for_caller(
+                active_store, identity, policy_id, review_id, "runner_relabel.read"
+            )
             claim = active_store.read_runner_relabel_document("review-operation", review_id)
             operation = (
                 None
