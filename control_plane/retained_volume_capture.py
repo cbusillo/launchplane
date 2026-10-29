@@ -4,7 +4,7 @@ import hashlib
 import inspect
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.dokploy import native_copy_stream
@@ -12,6 +12,42 @@ from control_plane.testing_application_capabilities import single_local_swarm_no
 
 
 _SAFE_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")
+
+
+def _batched_docker_inspect(
+    kind: str,
+    identifiers: Sequence[str],
+    load: Callable[..., object],
+) -> dict[str, dict[str, object]]:
+    identity_key = "Id" if kind == "container" else "ID" if kind in {"service", "task"} else "Name"
+    expected = set(identifiers)
+    if len(expected) != len(identifiers):
+        raise ValueError("duplicate inspect request")
+    rows: dict[str, dict[str, object]] = {}
+    offset = 0
+    while offset < len(identifiers):
+        end = offset
+        size = 0
+        while end < len(identifiers) and end - offset < 128:
+            added = len(identifiers[end]) + 1
+            if end > offset and size + added > 32768:
+                break
+            size += added
+            end += 1
+        value = load("inspect", "--type", kind, *identifiers[offset:end])
+        if not isinstance(value, list):
+            raise ValueError("inspect unavailable")
+        for row in value:
+            if not isinstance(row, dict):
+                raise ValueError("inspect unavailable")
+            identifier = row.get(identity_key)
+            if not isinstance(identifier, str) or identifier not in expected or identifier in rows:
+                raise ValueError("inspect identity unavailable")
+            rows[identifier] = row
+        offset = end
+    if set(rows) != expected:
+        raise ValueError("inspect coverage unavailable")
+    return rows
 
 
 def retained_volume_identity(
@@ -122,8 +158,9 @@ def capture_retained_volumes(
 
 
 _RETAINED_VOLUME_CAPTURE_PROGRAM = (
-    "from collections.abc import Callable\nfrom typing import Any\nimport json\n"
+    "from collections.abc import Callable,Sequence\nfrom typing import Any\nimport json\n"
     + inspect.getsource(single_local_swarm_node)
+    + inspect.getsource(_batched_docker_inspect)
     + r"""
 import os,re,subprocess,sys,time
 from pathlib import Path
@@ -143,11 +180,20 @@ def docker(*args):
         raise ValueError('docker inventory unavailable')
     return result.stdout.decode('utf-8',errors='strict')
 
-def inspect(kind,identifier):
-    rows=json.loads(docker('inspect','--type',kind,identifier))
-    if not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict):
+def load(*arguments):
+    return json.loads(docker(*arguments))
+
+def inspect_many(kind,values):
+    return _batched_docker_inspect(kind,values,load)
+
+def inspect_one(kind,identifier):
+    return inspect_many(kind,[identifier])[identifier]
+
+def inspect_named_service(identifier):
+    value=load('inspect','--type','service',identifier)
+    if not isinstance(value,list) or len(value)!=1 or not isinstance(value[0],dict):
         raise ValueError('inspect unavailable')
-    return rows[0]
+    return value[0]
 
 def mounts(value,referenced):
     if not isinstance(value,list) or len(value)>10000:
@@ -172,31 +218,27 @@ def identifiers(*arguments):
 
 def capture():
     nodes=single_local_swarm_node(docker)
-    service=inspect('service',spec['application_name'])
+    service=inspect_named_service(spec['application_name'])
     if service.get('Spec',{}).get('Name')!=spec['application_name']:
         raise ValueError('service identity unavailable')
     referenced=set(spec['configured'])
     mounts(service.get('Spec',{}).get('TaskTemplate',{}).get('ContainerSpec',{}).get('Mounts',[]),referenced)
     task_ids=identifiers('service','ps','--no-trunc','--quiet',service['ID'])
-    task_rows={}
-    for task_id in task_ids:
-        task=inspect('task',task_id)
+    task_rows=inspect_many('task',task_ids)
+    for task_id,task in task_rows.items():
         if task.get('ServiceID')!=service['ID'] or task.get('NodeID') not in ('',nodes[0]['ID']):
             raise ValueError('task attribution unavailable')
         mounts(task.get('Spec',{}).get('ContainerSpec',{}).get('Mounts',[]),referenced)
-        task_rows[task_id]=task
-    container_ids=identifiers('ps','-aq','--no-trunc')
+    container_ids=identifiers('ps','-aq','--no-trunc','--filter','label=com.docker.swarm.service.id='+service['ID'])
     container_rows={}
-    for container_id in container_ids:
-        container=inspect('container',container_id)
-        if container.get('Id')!=container_id:
-            raise ValueError('container identity unavailable')
+    for container_id,container in inspect_many('container',container_ids).items():
         labels=container.get('Config',{}).get('Labels') or {}
         if not isinstance(labels,dict):
             raise ValueError('container attribution unavailable')
-        if labels.get('com.docker.swarm.service.id')==service['ID']:
-            mounts(container.get('Mounts',[]),referenced)
-            container_rows[container_id]=(labels.get('com.docker.swarm.service.id'),container.get('Mounts'))
+        if labels.get('com.docker.swarm.service.id')!=service['ID']:
+            raise ValueError('container attribution changed')
+        mounts(container.get('Mounts',[]),referenced)
+        container_rows[container_id]=(labels.get('com.docker.swarm.service.id'),container.get('Mounts'))
     engine=json.loads(docker('info','--format','{{json .ID}}'))
     root=Path(json.loads(docker('info','--format','{{json .DockerRootDir}}')))
     if not isinstance(engine,str) or not engine or not root.is_absolute() or root.is_symlink():
@@ -208,8 +250,7 @@ def capture():
     if not referenced.issubset(available):
         raise ValueError('volume inventory unavailable')
     volumes=[]
-    for name in sorted(referenced):
-        volume=inspect('volume',name)
+    for name,volume in inspect_many('volume',sorted(referenced)).items():
         if volume.get('Name')!=name or volume.get('Driver')!='local' or volume.get('Options') not in (None,{}) or not volume.get('CreatedAt'):
             raise ValueError('volume metadata unavailable')
         expected=parent/name/'_data'
@@ -217,31 +258,31 @@ def capture():
             raise ValueError('volume backing unavailable')
         stat=expected.stat()
         volumes.append({'volume':volume,'engine_id':engine,'backing_device':stat.st_dev,'backing_inode':stat.st_ino})
-    if single_local_swarm_node(docker)!=nodes or inspect('service',spec['application_name']).get('Spec')!=service.get('Spec'):
+    if single_local_swarm_node(docker)!=nodes or inspect_one('service',service['ID']).get('Spec')!=service.get('Spec'):
         raise ValueError('service inventory changed')
     if identifiers('service','ps','--no-trunc','--quiet',service['ID'])!=task_ids:
         raise ValueError('resource membership changed')
-    for task_id,task in task_rows.items():
-        current=inspect('task',task_id)
+    for task_id,current in inspect_many('task',task_ids).items():
+        task=task_rows[task_id]
         if any(current.get(key)!=task.get(key) for key in ('ServiceID','NodeID','Spec')):
             raise ValueError('task storage changed')
     current_containers={}
-    for container_id in identifiers('ps','-aq','--no-trunc'):
-        current=inspect('container',container_id)
-        if current.get('Id')!=container_id:
-            raise ValueError('container identity unavailable')
+    current_ids=identifiers('ps','-aq','--no-trunc','--filter','label=com.docker.swarm.service.id='+service['ID'])
+    for container_id,current in inspect_many('container',current_ids).items():
         labels=current.get('Config',{}).get('Labels') or {}
         if not isinstance(labels,dict):
             raise ValueError('container attribution unavailable')
-        if labels.get('com.docker.swarm.service.id')==service['ID']:
-            current_containers[container_id]=(labels.get('com.docker.swarm.service.id'),current.get('Mounts'))
+        if labels.get('com.docker.swarm.service.id')!=service['ID']:
+            raise ValueError('container attribution changed')
+        current_containers[container_id]=(labels.get('com.docker.swarm.service.id'),current.get('Mounts'))
     if current_containers!=container_rows:
         raise ValueError('container storage changed')
     if json.loads(docker('info','--format','{{json .ID}}'))!=engine:
         raise ValueError('engine identity changed')
+    current_volumes=inspect_many('volume',[row['volume']['Name'] for row in volumes])
     for row in volumes:
         volume=row['volume']
-        current=inspect('volume',volume['Name'])
+        current=current_volumes[volume['Name']]
         stat=Path(volume['Mountpoint']).stat()
         if current!=volume or (stat.st_dev,stat.st_ino)!=(row['backing_device'],row['backing_inode']):
             raise ValueError('volume identity changed')

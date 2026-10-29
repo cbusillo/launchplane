@@ -41,7 +41,10 @@ Before removal, fresh complete Dokploy inventory must exclude mount references.
 The fixed host program checks the captured identity under a host lock, inspects
 all containers, services, tasks and other volume backing paths, checks host
 mounts and actual directory emptiness, and repeats qualification before invoking
-exact-name `docker volume rm` without force or prune. It writes a durable host
+exact-name `docker volume rm` without force or prune. Inventory uses bounded
+batches; capture selects only the retired service's containers. Removal reserves
+its full timeout before writing a started receipt, so qualification-budget
+exhaustion leaves no started receipt. It writes a durable host
 receipt before dispatch and verifies same-engine absence afterward. Uncertain
 effects stay attached to the original operation for readback. No deployment,
 production disposition or live deletion is performed by this source delivery.

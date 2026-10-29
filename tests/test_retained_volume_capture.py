@@ -276,7 +276,7 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
         self.assertNotIn("retained_volume_inventory_complete", dumped)
         self.assertNotIn("mounts_sha256", dumped)
 
-    def test_actual_capture_program_observes_orphaned_owned_container_and_detects_drift(
+    def test_actual_capture_program_scopes_owned_containers_and_detects_storage_drift(
         self,
     ) -> None:
         for drift in (False, True):
@@ -316,9 +316,9 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                         value = ""
                     elif arguments[0] == "ps":
                         container_reads += 1
-                        value = "container1" + (
-                            "\nchanged" if drift and container_reads > 1 else ""
-                        )
+                        value = "container1"
+                        if "label=com.docker.swarm.service.id=service1" not in arguments:
+                            value += f"\nunrelated-{container_reads}"
                     elif arguments[:2] == ["volume", "ls"]:
                         value = "retained-volume"
                     elif arguments[0] == "info":
@@ -328,8 +328,13 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                     elif arguments[:3] == ["inspect", "--type", "service"]:
                         value = json.dumps([service])
                     elif arguments[:3] == ["inspect", "--type", "container"]:
+                        if any(identifier.startswith("unrelated-") for identifier in arguments[3:]):
+                            raise OSError("Unrelated container disappeared")
+                        current = container
+                        if drift and container_reads > 1:
+                            current = {**container, "Mounts": []}
                         value = json.dumps(
-                            [{**container, "State": {"Health": {"Log": [container_reads]}}}]
+                            [{**current, "State": {"Health": {"Log": [container_reads]}}}]
                         )
                     elif arguments[:3] == ["inspect", "--type", "volume"]:
                         value = json.dumps([volume])

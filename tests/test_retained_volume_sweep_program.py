@@ -19,6 +19,7 @@ from pathlib import Path
 state_path=Path(os.environ['FAKE_DOCKER_STATE'])
 state=json.loads(state_path.read_text())
 args=sys.argv[1:]
+state.setdefault('calls',[]).append(args);state_path.write_text(json.dumps(state))
 if state.get('fail') and args[:2] not in (['volume','rm'],):
     print('access denied',file=sys.stderr);raise SystemExit(1)
 root=state['root'];name=state['name']
@@ -28,34 +29,46 @@ if args[:2]==['info','--format']:
     print(json.dumps({'ID':state.get('engine','engine-one'),'DockerRootDir':root,'Swarm':{'LocalNodeState':'active','ControlAvailable':True}}))
 elif args[:3]==['ps','-aq','--no-trunc']:
     sys.stdout.write('\n'.join(state.get('containers',[])))
-elif args[0]=='inspect' and len(args)==2:
-    mounts=[]
-    if state.get('container_ref'):
-        mounts=[{'Type':'volume','Name':name,'Source':root+'/volumes/'+name+'/_data'}]
-    print(json.dumps([{'Id':args[1],'Mounts':mounts}]))
+elif args[:3]==['inspect','--type','container']:
+    rows=[]
+    for identifier in args[3:]:
+        mounts=[]
+        if state.get('container_ref'):
+            mounts=[{'Type':'volume','Name':name,'Source':root+'/volumes/'+name+'/_data'}]
+        if state.get('bind_ref'):
+            mounts=[{'Type':'bind','Source':root+'/volumes/'+name}]
+        rows.append({'Id':identifier,'Mounts':mounts})
+    if state.get('malformed_containers'):
+        rows=rows[:-1]
+    if state.get('duplicate_containers') and rows:
+        rows.append(rows[0])
+    print(json.dumps(rows))
 elif args[:3]==['service','ls','-q']:
     sys.stdout.write('\n'.join(state.get('services',[])))
-elif args[:2]==['service','inspect']:
+elif args[:3]==['inspect','--type','service']:
     mounts=[{'Type':'volume','Source':name}] if state.get('service_ref') else []
-    print(json.dumps([{'ID':args[2],'Spec':{'TaskTemplate':{'ContainerSpec':{'Mounts':mounts}}}}]))
+    print(json.dumps([{'ID':identifier,'Spec':{'TaskTemplate':{'ContainerSpec':{'Mounts':mounts}}}} for identifier in args[3:]]))
 elif args[:4]==['service','ps','-q','--no-trunc']:
-    print('task-one' if state.get('task') else '')
+    if state.get('task_per_service'):
+        print('\n'.join('task-'+service for service in args[4:]))
+    else:
+        print('task-one' if state.get('task') else '')
 elif args[:3]==['inspect','--type','task']:
     mounts=[{'Type':'volume','Source':name}] if state.get('task_ref') else []
-    print(json.dumps([{'ID':args[3],'ServiceID':'service-one','Spec':{'ContainerSpec':{'Mounts':mounts}}}]))
+    print(json.dumps([{'ID':identifier,'ServiceID':identifier.removeprefix('task-') if state.get('task_per_service') else 'service-one','NodeID':'','Spec':{'ContainerSpec':{'Mounts':mounts}}} for identifier in args[3:]]))
 elif args[:3]==['node','ls','-q']:
     print('node-one')
 elif args[:3]==['volume','ls','-q']:
     values=[] if state.get('removed') else [name]
+    values.extend(state.get('extra_volumes',[]))
     if state.get('alias'):
         values.append('alias')
     sys.stdout.write('\n'.join(values))
-elif args[:2]==['volume','inspect']:
-    target=args[2]
-    if target==name and state.get('removed'):
+elif args[:3]==['inspect','--type','volume']:
+    targets=args[3:]
+    if name in targets and state.get('removed'):
         print('not found',file=sys.stderr);raise SystemExit(1)
-    point=root+'/volumes/'+name+'/_data' if target=='alias' and state.get('alias') else None
-    print(json.dumps([volume(target,point)]))
+    print(json.dumps([volume(target,root+'/volumes/'+name+'/_data' if target=='alias' and state.get('alias') else None) for target in targets]))
 elif args[:2]==['volume','rm']:
     state['rm_args']=args
     if args!=['volume','rm',name]:
@@ -113,7 +126,11 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         )
 
     def run_program(
-        self, mode: str = "dry-run", identity: str | None = None, operation: str = "provider/key"
+        self,
+        mode: str = "dry-run",
+        identity: str | None = None,
+        operation: str = "provider/key",
+        exhaust_budget: bool = False,
     ) -> dict[str, object]:
         spec = {
             "mode": mode,
@@ -128,7 +145,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             "FAKE_DOCKER_STATE": str(self.state_path),
         }
         result = subprocess.run(
-            [sys.executable, "-c", self.fixture_program(), payload, "FRAME:"],
+            [sys.executable, "-c", self.fixture_program(exhaust_budget), payload, "FRAME:"],
             capture_output=True,
             text=True,
             timeout=15,
@@ -139,15 +156,20 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         self.assertNotIn(str(self.data), result.stdout)
         return cast(dict[str, object], json.loads(result.stdout.removeprefix("FRAME:"))["result"])
 
-    def fixture_program(self) -> str:
+    def fixture_program(self, exhaust_budget: bool = False) -> str:
         return (
-            "from pathlib import Path\nfrom unittest.mock import patch\n"
-            "read_text=Path.read_text\n"
+            "from pathlib import Path\nfrom unittest.mock import patch\nimport json,os\n"
+            "read_text=Path.read_text\nmount_reads=[0]\n"
             "def fixture_read(path,*args,**kwargs):\n"
             "    if path==Path('/proc/self/mountinfo'):\n"
+            "        mount_reads[0]+=1\n"
             "        return '1 0 8:1 / / rw - ext4 /dev/sda rw\\n'\n"
             "    return read_text(path,*args,**kwargs)\n"
-            "with patch.object(Path,'read_text',fixture_read):\n"
+            "def fixture_clock():\n"
+            f"    if {exhaust_budget!r} and mount_reads[0]>=2: return 1e9\n"
+            "    state=json.loads(read_text(Path(os.environ['FAKE_DOCKER_STATE'])))\n"
+            "    return float(len(state.get('calls',[])))\n"
+            "with patch.object(Path,'read_text',fixture_read), patch('time.monotonic',fixture_clock):\n"
             f"    exec({RETAINED_VOLUME_SWEEP_HOST_PROGRAM!r})\n"
         )
 
@@ -194,6 +216,55 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         self.state.update(containers=["stopped-one"], container_ref=True)
         self.write_state()
         self.assertEqual(self.run_program()["status"], "held")
+
+    def test_large_full_inventory_is_batched_and_complete_before_removal(self) -> None:
+        containers = [f"stopped-{index}" for index in range(300)]
+        services = [f"service-{index}" for index in range(200)]
+        extra_volumes = [f"other-{index}" for index in range(200)]
+        for name in extra_volumes:
+            (self.docker_root / "volumes" / name / "_data").mkdir(parents=True)
+        self.state.update(
+            containers=containers,
+            services=services,
+            task_per_service=True,
+            extra_volumes=extra_volumes,
+        )
+        self.write_state()
+        self.assertEqual(self.run_program("apply")["status"], "removed")
+        calls = json.loads(self.state_path.read_text())["calls"]
+        expected = {
+            "container": containers,
+            "service": services,
+            "task": ["task-" + service for service in services],
+            "volume": ["candidate", *extra_volumes],
+        }
+        for kind, identifiers in expected.items():
+            inspections = [call for call in calls if call[:3] == ["inspect", "--type", kind]]
+            inspected = [identifier for call in inspections for identifier in call[3:]]
+            self.assertEqual(set(inspected), set(identifiers))
+            self.assertLess(len(inspections), len(identifiers))
+        task_lists = [call for call in calls if call[:4] == ["service", "ps", "-q", "--no-trunc"]]
+        self.assertLess(len(task_lists), len(services))
+
+    def test_bind_ancestor_and_malformed_or_duplicate_batches_fail_closed(self) -> None:
+        self.state.update(containers=["stopped-one"], bind_ref=True)
+        self.write_state()
+        self.assertEqual(self.run_program()["status"], "held")
+        for field in ("malformed_containers", "duplicate_containers"):
+            self.state.pop("bind_ref", None)
+            self.state[field] = True
+            self.write_state()
+            self.assertEqual(self.run_program()["status"], "unknown")
+            self.state.pop(field)
+
+    def test_pre_dispatch_budget_exhaustion_has_no_receipt_or_rm(self) -> None:
+        self.assertEqual(self.run_program("apply", exhaust_budget=True)["status"], "held")
+        state = json.loads(self.state_path.read_text())
+        self.assertNotIn("rm_args", state)
+        receipts = list(
+            (self.home / ".local" / "state" / "launchplane-retained-volume-sweep").glob("*.json")
+        )
+        self.assertEqual(receipts, [])
 
     def test_service_and_task_references_are_held(self) -> None:
         for field in ("service_ref", "task_ref"):

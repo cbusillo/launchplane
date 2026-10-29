@@ -1,11 +1,12 @@
 import inspect
 
-from control_plane.retained_volume_capture import retained_volume_identity
+from control_plane.retained_volume_capture import _batched_docker_inspect, retained_volume_identity
 
 
 RETAINED_VOLUME_SWEEP_HOST_PROGRAM = (
-    "from collections.abc import Mapping\nimport hashlib,json\n"
+    "from collections.abc import Callable,Mapping,Sequence\nimport hashlib,json\n"
     + inspect.getsource(retained_volume_identity)
+    + inspect.getsource(_batched_docker_inspect)
     + r"""
 import base64,fcntl,hashlib,json,os,re,stat,subprocess,sys,time
 from pathlib import Path
@@ -72,11 +73,14 @@ def json_value(*arguments):
     except (ValueError,TypeError):
         raise Unknown() from None
 
+def inspect_many(kind,values):
+    try:
+        return _batched_docker_inspect(kind,values,json_value)
+    except ValueError:
+        raise Unknown() from None
+
 def one_volume(target):
-    value=json_value('volume','inspect',target)
-    if not isinstance(value,list) or len(value)!=1 or not isinstance(value[0],dict):
-        raise Unknown()
-    return value[0]
+    return inspect_many('volume',[target])[target]
 
 def engine():
     value=json_value('info','--format','{{json .}}')
@@ -154,44 +158,56 @@ def mount_reference(mount,backing):
         except (OSError,RuntimeError):
             raise Unknown() from None
 
+def groups(values):
+    for offset in range(0,len(values),128):
+        yield values[offset:offset+128]
+
 def inventory(backing,root):
     containers=identifiers('ps','-aq','--no-trunc')
-    for container_id in containers:
-        value=json_value('inspect',container_id)
-        if not isinstance(value,list) or len(value)!=1 or value[0].get('Id')!=container_id or not isinstance(value[0].get('Mounts'),list):
+    for container in inspect_many('container',containers).values():
+        mounts=container.get('Mounts')
+        if not isinstance(mounts,list):
             raise Unknown()
-        for mount in value[0]['Mounts']:
+        for mount in mounts:
             mount_reference(mount,backing)
     services=identifiers('service','ls','-q','--no-trunc')
-    for service_id in services:
-        value=json_value('service','inspect',service_id)
-        if not isinstance(value,list) or len(value)!=1 or value[0].get('ID')!=service_id:
-            raise Unknown()
+    service_rows=inspect_many('service',services)
+    for service in service_rows.values():
         try:
-            mounts=value[0]['Spec']['TaskTemplate']['ContainerSpec'].get('Mounts') or []
+            mounts=service['Spec']['TaskTemplate']['ContainerSpec'].get('Mounts') or []
         except (KeyError,TypeError):
             raise Unknown() from None
         if not isinstance(mounts,list):
             raise Unknown()
         for mount in mounts:
             mount_reference(mount,backing)
-        tasks=identifiers('service','ps','-q','--no-trunc',service_id)
-        for task_id in tasks:
-            task=json_value('inspect','--type','task',task_id)
-            if not isinstance(task,list) or len(task)!=1 or task[0].get('ID')!=task_id or task[0].get('ServiceID')!=service_id:
-                raise Unknown()
-            try:
-                task_mounts=task[0]['Spec']['ContainerSpec'].get('Mounts') or []
-            except (KeyError,TypeError):
-                raise Unknown() from None
-            if not isinstance(task_mounts,list):
-                raise Unknown()
-            for mount in task_mounts:
-                mount_reference(mount,backing)
+    task_ids=[]
+    for batch in groups(services):
+        task_ids.extend(identifiers('service','ps','-q','--no-trunc',*batch))
+        if len(task_ids)>10000:
+            raise Unknown()
+    if len(task_ids)!=len(set(task_ids)):
+        raise Unknown()
+    task_rows=inspect_many('task',task_ids)
     info=json_value('info','--format','{{json .}}')
     swarm=info.get('Swarm') if isinstance(info,dict) else None
     if not isinstance(swarm,dict):
         raise Unknown()
+    local_node=swarm.get('NodeID') or ''
+    if not isinstance(local_node,str):
+        raise Unknown()
+    for task in task_rows.values():
+        service_id=task.get('ServiceID')
+        if service_id not in service_rows or task.get('NodeID','') not in ('',local_node):
+            raise Unknown()
+        try:
+            task_mounts=task['Spec']['ContainerSpec'].get('Mounts') or []
+        except (KeyError,TypeError):
+            raise Unknown() from None
+        if not isinstance(task_mounts,list):
+            raise Unknown()
+        for mount in task_mounts:
+            mount_reference(mount,backing)
     state=swarm.get('LocalNodeState')
     if state=='active':
         if swarm.get('ControlAvailable') is not True:
@@ -204,12 +220,12 @@ def inventory(backing,root):
     volumes=identifiers('volume','ls','-q')
     if name not in volumes:
         raise Unknown()
-    for other in volumes:
+    volume_rows=inspect_many('volume',volumes)
+    for other,candidate in volume_rows.items():
         if other==name:
             continue
-        candidate=one_volume(other)
         point=candidate.get('Mountpoint')
-        if candidate.get('Name')!=other or not isinstance(point,str) or not point.startswith('/'):
+        if not isinstance(point,str) or not point.startswith('/'):
             raise Unknown()
         try:
             other_path=Path(point).resolve(strict=True)
@@ -331,8 +347,17 @@ try:
             raise Held()
         inventory(backing,root)
         empty(backing)
+        remaining=deadline-time.monotonic()
+        if remaining<10:
+            raise Held()
+        rm_timeout=10
         persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id})
-        result=docker('volume','rm',name,allow_failure=True)
+        try:
+            result=subprocess.run(['docker','volume','rm',name],capture_output=True,timeout=rm_timeout,check=False)
+        except (OSError,subprocess.SubprocessError):
+            raise Unknown() from None
+        if len(result.stdout)>8*1024*1024 or len(result.stderr)>1024*1024:
+            raise Unknown()
         if result.returncode==0 and absence(engine_id):
             emit('removed','removed')
         elif result.returncode!=0:
