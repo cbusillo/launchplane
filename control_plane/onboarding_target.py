@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.generic_web_onboarding import (
     GenericWebOnboardingIntent,
     generic_web_onboarding_plan_sha256,
@@ -11,6 +13,52 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 if TYPE_CHECKING:
     from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
+
+
+def require_recorded_onboarding_allocation(
+    store: PostgresRecordStore,
+    *,
+    intent: GenericWebOnboardingIntent,
+    allocation_id: str,
+    scope: str,
+    target: DokployTargetRecord,
+    target_id: str,
+) -> None:
+    from control_plane.application_state_volume import PLAN_ROUTE
+    from control_plane.application_state_volume_retention import read_state_volume_progress
+
+    plan = (
+        store.read_idempotency_record(
+            scope=scope, route_path=PLAN_ROUTE, idempotency_key=allocation_id
+        )
+        if allocation_id
+        else None
+    )
+    saved = plan.response_payload if plan is not None else {}
+    original = saved.get("request")
+    if (
+        plan is None
+        or plan.state != "completed"
+        or saved.get("ordinary") is not True
+        or not isinstance(original, dict)
+        or original.get("onboarding") != intent.model_dump(mode="json")
+        or target.context != intent.testing_context
+        or target.instance != "testing"
+        or target.project_name != saved.get("project_marker")
+        or target.target_name != saved.get("target_marker")
+        or target.source_git_ref != f"origin/{intent.default_branch}"
+        or target.healthcheck_path != intent.health_path
+    ):
+        raise ValueError(
+            "Native record apply requires its original actor's unchanged allocation plan."
+        )
+    phase = json.loads(read_state_volume_progress(store, scope, allocation_id) or "{}")
+    if (
+        not isinstance(phase, dict)
+        or phase.get("application") != target_id
+        or phase.get("application_verified") != "true"
+    ):
+        raise ValueError("Native record apply requires its verified allocated application.")
 
 
 def onboarding_target_digests(request: DokployTargetSetupEnvelope) -> dict[str, str]:
@@ -78,11 +126,16 @@ def validate_onboarding_target_request(request: DokployTargetSetupEnvelope) -> N
 
 
 def require_unallocated_onboarding_contexts(
-    store: PostgresRecordStore, intent: GenericWebOnboardingIntent
+    store: PostgresRecordStore,
+    intent: GenericWebOnboardingIntent,
+    *,
+    allocated_testing: bool = False,
 ) -> None:
     from control_plane.application_state_volume import require_no_held_state_volume
 
     require_no_held_state_volume(store, intent.preview_context)
+    if allocated_testing:
+        require_no_held_state_volume(store, intent.testing_context)
     contexts = {intent.testing_context, intent.preview_context}
     for profile in store.list_product_profile_records():
         owned = {lane.context for lane in profile.lanes} | set(profile.historical_contexts)
@@ -94,6 +147,11 @@ def require_unallocated_onboarding_contexts(
             )
     if any(
         record.context in contexts
+        and not (
+            allocated_testing
+            and record.context == intent.testing_context
+            and record.instance == "testing"
+        )
         for records in (
             store.list_dokploy_target_records(),
             store.list_dokploy_target_id_records(),
