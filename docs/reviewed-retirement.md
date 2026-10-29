@@ -82,6 +82,40 @@ context keys do not invalidate it. Older non-preview instance reviews also requi
 review before applying. The comparison stays with the original review in
 historical receipts and readback; it is not a fresh runtime observation.
 
+Global dry runs also return `consumer_inventory`, a bounded names-only observation
+of every stored runtime record, product lane and preview profile, target overlay,
+and matching runtime secret-binding metadata. Enumeration includes inactive
+profiles, undeclared contexts, historical lane names and global bindings. Preview
+profile matches describe explicit overrides only; they do not resolve the
+template. Matching runtime/secret requirements and preview key policies are
+listed separately, including omitted/copied/required/template URL/domain names.
+An unspecified requirement context applies to all product lanes; it is not
+evidence of a global plain-setting source. Declarations do not prove runtime
+consumption. Lane entries have null `selected_keys` because their effective values
+have not been evaluated. An empty list for a source means no selected name in
+that source, not an unused setting. Counts describe the complete enumerated
+tables; each displayed consumer and authority list is capped separately and
+reports truncation.
+Matching entries appear before unmatched entries. The page shows displayed and
+total counts, so even a list containing only matches cannot imply full coverage.
+
+The inventory also lists every saved reconciliation request and production
+recipient, including completed and failed records. These are potential authority
+consumers, not proof that a selected name occurs in their captured authority.
+Resolve a held record through its original operation; never replace its key or
+capture new authority to bypass drift. Retained operation payloads, preview
+generations, baked images, provider environments, managed-secret resolution and
+external CLI consumers remain explicitly unqualified. This is no complete-fleet
+runtime-consumption verdict.
+
+This observation is collected after the saved review, is outside its digest,
+and is neither atomic across tables nor revalidated by Apply. It is not saved in
+the review or repeated on Apply/readback. It changes none of their existing
+guards. Obtain current operational qualification independently before removal.
+The signed-in page displays this evidence on global reviews. Terminal clients
+that omit the additive field cannot claim inventory coverage; use the page or
+update the bounded client in its owning repository.
+
 The change and its completion receipt commit in one transaction. Retry an
 uncertain reply only with its original request and key. A confirmed replay
 returns the original result; it does not reapply. `mode: readback` uses the
@@ -186,7 +220,7 @@ uses the existing removal endpoint. Enter the product, exact stored scope,
 context/lane when applicable, selected names and reason. **Review removal** saves
 a fresh service review and shows the exact selected names, survivors, retirement
 intent and reader/rollback requirement. Changing any field invalidates that review.
-No stored values, secret bindings or rollback preimages are displayed.
+No stored values, secret values or rollback preimages are displayed.
 Non-preview instance reviews display the stored context fallback comparison alongside the
 selected keys. This evidence narrows the stored-value question without
 attesting runtime use or qualifying a removal by itself.
@@ -194,7 +228,8 @@ attesting runtime use or qualifying a removal by itself.
 Before confirming, qualify the actual runtime consumers and the effective value
 that would be inherited from broader scopes. A context removal can change every
 lane without a more specific override; a global removal can reach other products.
-The page does not discover or attest those dependencies. Follow the live-site and
+The global inventory identifies stored sources but does not attest actual
+consumption or effective values. Follow the live-site and
 Client boundaries in DIRECTION.md before approving the exact change.
 
 **Remove reviewed settings** uses the signed-in administrator's existing authority,

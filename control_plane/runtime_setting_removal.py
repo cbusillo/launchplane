@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.runtime_setting_inventory import SettingConsumerInventory
 
 
 def request_fingerprint(payload: object) -> str:
@@ -135,6 +136,7 @@ class RuntimeSettingRemovalPlan(BaseModel):
     replayed: bool | None = None
     instance_plain_setting_effects: list[InstancePlainSettingEffect] | None = None
     context_values_sha256: str | None = None
+    consumer_inventory: SettingConsumerInventory | None = None
 
 
 def removal_plan(

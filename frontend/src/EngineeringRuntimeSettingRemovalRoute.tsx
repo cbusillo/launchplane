@@ -163,6 +163,27 @@ function RemovalForm({ actorId, target, onBusy }: { actorId: number; target: Rem
         </li>)}</ul>
         <p>This compares stored plain settings only. Runtime use, preview templates, target overrides and secrets need separate qualification.</p>
       </section> : null}
+      {plan.consumer_inventory ? <section aria-label="Global setting consumer inventory">
+        <h4>Stored consumers across products</h4>
+        <p>{plan.consumer_inventory.runtime_record_count} runtime records, {plan.consumer_inventory.product_profile_count} product profiles,
+          {" "}{plan.consumer_inventory.target_record_count} target overlays and {plan.consumer_inventory.secret_binding_count} secret bindings were inspected.</p>
+        <p>This inventory is a separate observation, outside the saved removal digest. It does not verify runtime consumption or qualify a removal.</p>
+        <p>Showing {plan.consumer_inventory.consumers.length} of {plan.consumer_inventory.total_consumers} source entries,
+          {" "}{plan.consumer_inventory.authority_records.length} of {plan.consumer_inventory.authority_record_count} authority records. Matching names appear first.</p>
+        {plan.consumer_inventory.truncated || plan.consumer_inventory.authority_records_truncated
+          ? <p role="alert">The displayed inventory is incomplete. Narrow review through the owning records before proceeding.</p> : null}
+        <ul>{plan.consumer_inventory.consumers.map((consumer, index) => <li key={index}>
+          {consumer.kind}: {consumer.product || "No product attribution"} · {consumer.context || "Global or unspecified context"}{consumer.instance ? `/${consumer.instance}` : ""}
+          {consumer.scope ? ` (${consumer.scope})` : ""}: {consumer.selected_keys == null
+            ? "Selected names not evaluated for this entry" : consumer.selected_keys.join(", ") || "No selected names in this source"}
+        </li>)}</ul>
+        <h4>Saved authority records</h4>
+        <p>These records need review through their original operations. Their presence does not establish which selected names they captured.</p>
+        <ul>{plan.consumer_inventory.authority_records.map((record, index) => <li key={index}>
+          {record.kind}: {record.product} · {record.context || "Context unverified"}/{record.instance} · {record.state}
+        </li>)}</ul>
+        <p>Still unqualified: {plan.consumer_inventory.unqualified_populations.join(", ")}.</p>
+      </section> : null}
       {plan.requires_compatible_readers_and_rollback ? <p role="alert">Before applying, deploy compatible readers to every consumer and replica and retain a compatible rollback build. This review does not prove that qualification.</p> : null}
       <p>Review <code>{plan.review_id}</code></p>
       <label className="service-delivery-check"><input type="checkbox" checked={confirmed} disabled={locked} onChange={event => setConfirmed(event.target.checked)} />
