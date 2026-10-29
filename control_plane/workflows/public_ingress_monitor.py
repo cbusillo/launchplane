@@ -3290,6 +3290,7 @@ def _deployment_deferring_failure(
         or deployment.post_deploy_update.status == "fail"
         or deployment.destination_health.status == "fail"
         or deployment.destination_health.status == "pass"
+        and deployment.destination_health.verified
         and deployment.destination_health.runtime_identity_status == "match"
         or owners != [record.product]
         or identity is not None
@@ -3320,10 +3321,16 @@ def _deployment_deferring_failure(
         check_kind=record.check_kind,
         limit=50,
     )
+    try:
+        observation_times = {
+            item.record_id: _parse_utc_timestamp(item.observed_at) for item in previous
+        }
+    except ValueError:
+        return None
     if any(
         item.purpose == "probe"
         and item.status == "pass"
-        and started <= _parse_utc_timestamp(item.observed_at) <= observed
+        and started <= observation_times[item.record_id] <= observed
         and any(
             target.runtime_identity_status == "match"
             and target.observed_runtime_identity is not None
@@ -3341,7 +3348,7 @@ def _deployment_deferring_failure(
         and preceding_probe is None
         or preceding_probe is not None
         and preceding_probe.status == "fail"
-        and _parse_utc_timestamp(preceding_probe.observed_at) < started
+        and observation_times[preceding_probe.record_id] < started
     ):
         return None
     return deployment

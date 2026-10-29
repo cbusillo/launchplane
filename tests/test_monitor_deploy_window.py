@@ -107,7 +107,7 @@ class MonitorDeployWindowTests(unittest.TestCase):
             self.assertEqual(observation.failure_code, "http_error")
         self.assertEqual(self.store.list_outbox_delivery_records(), ())
 
-    def test_failed_completed_expired_foreign_and_future_deploys_do_not_hide_failure(self) -> None:
+    def test_failed_expired_foreign_and_future_deploys_do_not_hide_failure(self) -> None:
         cases: tuple[tuple[str, dict[str, str], dict[str, object], timedelta], ...] = (
             ("failed", {"status": "fail"}, {}, timedelta(seconds=24)),
             (
@@ -277,6 +277,23 @@ class MonitorDeployWindowTests(unittest.TestCase):
                     ),
                 }
             )
+        )
+        result = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + timedelta(seconds=24)).isoformat(),
+            http_get=lambda url, timeout: HttpObservation(503, url, 0),
+        )
+        self.assertEqual(result.open_incident_count, 1)
+
+    def test_unorderable_observation_history_keeps_normal_alerting(self) -> None:
+        self.store.write_deployment_record(self.completed)
+        healthy = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + timedelta(seconds=10)).isoformat(),
+            http_get=lambda url, timeout: HttpObservation(200, url, 0),
+        )
+        self.store.write_public_ingress_observation_record(
+            healthy.records[0].model_copy(update={"record_id": "undated", "observed_at": "unknown"})
         )
         result = run_public_ingress_monitor_once(
             record_store=self.store,

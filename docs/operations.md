@@ -1676,6 +1676,10 @@ configuration, dependency, delivery, fence and cadence failures are not deferred
 No deployment, merge-train or recovery admission gate is added; monitoring does
 not change a deployment or settle its effects. Unsupported deployment reads
 retain normal incident behavior.
+Lanes that never report matching identity retain the full original deferral
+bound; a passing response without identity does not shorten it. Unorderable
+stored observation history retains normal alerts instead of interrupting the
+monitor run.
 
 A long change-triggered run can still delay a subsequent scheduled slot; multiple
 probe waves can also exceed the publication budget. Those are scheduler latency
