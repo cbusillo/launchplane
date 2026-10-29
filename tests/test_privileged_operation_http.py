@@ -20,9 +20,6 @@ from control_plane.authz_candidate_preparation import (
     ADMINISTRATOR_PRODUCT_EVIDENCE_ENVIRONMENT_RULE_ID,
     ADMINISTRATOR_PRODUCT_EVIDENCE_READ_ACTIONS,
     ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID,
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
     _AGENT_PRODUCT_SETUP_RULE_SHAPES,
 )
 from control_plane.contracts.privileged_operation import (
@@ -675,7 +672,9 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                             response = await client.get(path)
                             self.assertEqual(response.status_code, 403, response.text)
 
-    async def test_closed_authorization_candidate_plans_once_and_replays(self) -> None:
+    async def test_retired_delivery_administration_candidate_is_refused_without_writes(
+        self,
+    ) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
@@ -683,50 +682,21 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             store.ensure_schema()
             policy = _policy()
             policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
-            app = self._app(
-                store=store,
-                policy=policy,
-                policy_record_reader=lambda: policy_record,
-            )
-            payload = {
-                "candidate_id": "ordinary-agent-delivery-administration",
-                "intent": "add",
-                "source_event_id": "ui:authorization-candidate:add:stable-retry",
-            }
+            app = self._app(store=store, policy=policy, policy_record_reader=lambda: policy_record)
             async with lifespan_client(app) as client:
-                first = await client.post(
-                    "/v1/privileged-operations/authorization-candidates/prepare",
-                    json=payload,
-                )
-                replay = await client.post(
-                    "/v1/privileged-operations/authorization-candidates/prepare",
-                    json=payload,
-                )
-                review = await client.get(
-                    f"/v1/privileged-operations/plans/{first.json()['operation_id']}/review"
-                )
-            operation_records = store.list_privileged_operation_records(limit=None)
-            operation_events = store.list_privileged_operation_event_records(
-                operation_id=first.json()["operation_id"], limit=None
-            )
-            active_policy_record = store.list_authz_policy_records(status="active", limit=2)[0]
+                for intent in ("add", "remove", "add"):
+                    response = await client.post(
+                        "/v1/privileged-operations/authorization-candidates/prepare",
+                        json={
+                            "candidate_id": "ordinary-agent-delivery-administration",
+                            "intent": intent,
+                            "source_event_id": "retired-administration-retry",
+                        },
+                    )
+                    self.assertEqual(response.status_code, 422, response.text)
+            self.assertEqual(store.list_privileged_operation_records(), ())
+            self.assertEqual(store.list_authz_policy_records(status="active"), (policy_record,))
             store.close()
-
-        self.assertEqual(first.status_code, 200)
-        self.assertEqual(first.json()["state"], "planned")
-        self.assertEqual(replay.json()["operation_id"], first.json()["operation_id"])
-        self.assertEqual(review.status_code, 200, review.text)
-        self.assertEqual(
-            len(operation_records),
-            1,
-        )
-        self.assertEqual(
-            len(operation_events),
-            1,
-        )
-        self.assertEqual(operation_records[0].status, "planned")
-        self.assertEqual(review.json()["review"]["operation_id"], operation_records[0].operation_id)
-        self.assertEqual(policy_record, active_policy_record)
 
     async def test_retired_terminal_enrollment_candidate_cannot_create_a_plan(self) -> None:
         with TemporaryDirectory() as directory:
@@ -798,48 +768,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(prepared.status_code, 200, prepared.text)
         self.assertEqual(review.status_code, 200, review.text)
-
-    async def test_closed_authorization_candidate_active_is_noop(self) -> None:
-        policy_payload = _policy().model_dump(mode="json")
-        policy_payload["github_humans"].append(
-            {
-                "managed_set_id": ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
-                "managed_rule_id": ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
-                "github_ids": [123],
-                "roles": ["admin"],
-                "products": ["launchplane"],
-                "contexts": ["launchplane"],
-                "actions": list(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS),
-            }
-        )
-        policy = LaunchplaneAuthzPolicy.model_validate(policy_payload)
-        with TemporaryDirectory() as directory:
-            store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
-            )
-            store.ensure_schema()
-            policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
-            app = self._app(
-                store=store,
-                policy=policy,
-                policy_record_reader=lambda: policy_record,
-            )
-            async with lifespan_client(app) as client:
-                response = await client.post(
-                    "/v1/privileged-operations/authorization-candidates/prepare",
-                    json={
-                        "candidate_id": "ordinary-agent-delivery-administration",
-                        "intent": "add",
-                        "source_event_id": "already-active",
-                    },
-                )
-            records = store.list_privileged_operation_records(limit=None)
-            store.close()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["state"], "already_satisfied")
-        self.assertNotIn("operation_id", response.json())
-        self.assertEqual(records, ())
 
     async def _prepare_agent_product_setup(
         self,
@@ -1528,7 +1456,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         candidates = (
-            "ordinary-agent-delivery-administration",
+            "agent-policy-proposer",
             "administrator-product-evidence-read",
         )
         for first_candidate, second_candidate in (candidates, tuple(reversed(candidates))):
@@ -1543,6 +1471,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                     store=store,
                     policy=policy,
                     policy_record_reader=lambda: policy_record,
+                    configured_local_operator_identity=_SETUP_IDENTITY,
                 )
                 source_event_id = "cross-candidate-replay-conflict"
                 async with lifespan_client(app) as client:
@@ -1571,196 +1500,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 conflict.json()["detail"]["code"], "privileged_operation_plan_conflict"
             )
             self.assertEqual(len(records), 1)
-
-    async def test_closed_authorization_candidate_rejects_replay_for_other_recipient(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as directory:
-            store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
-            )
-            store.ensure_schema()
-            policy = _policy()
-            policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
-            app = self._app(
-                store=store,
-                policy=policy,
-                policy_record_reader=lambda: policy_record,
-            )
-            source_event_id = "candidate-recipient-conflict"
-            generic_payload = {
-                "descriptor_id": "managed-authz-policy-set",
-                "source_event_id": source_event_id,
-                "request": {
-                    "managed_set_id": (ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID),
-                    "desired_policy": {
-                        "schema_version": 2,
-                        "github_humans": [
-                            {
-                                "managed_set_id": (
-                                    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID
-                                ),
-                                "managed_rule_id": (
-                                    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID
-                                ),
-                                "github_ids": [456],
-                                "roles": ["admin"],
-                                "products": ["launchplane"],
-                                "contexts": ["launchplane"],
-                                "actions": list(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS),
-                            }
-                        ],
-                    },
-                    "schema_migration": "reject",
-                    "reason": "Prepare bounded ordinary-agent delivery administration.",
-                    "related_issue": "#2369",
-                },
-            }
-            async with lifespan_client(app) as client:
-                generic_plan = await client.post(
-                    "/v1/privileged-operations/plans",
-                    json=generic_payload,
-                )
-                self.assertEqual(generic_plan.status_code, 200, generic_plan.text)
-                generic_review = await client.get(
-                    "/v1/privileged-operations/plans/"
-                    f"{generic_plan.json()['record']['operation_id']}/review"
-                )
-                response = await client.post(
-                    "/v1/privileged-operations/authorization-candidates/prepare",
-                    json={
-                        "candidate_id": "ordinary-agent-delivery-administration",
-                        "intent": "add",
-                        "source_event_id": source_event_id,
-                    },
-                )
-            operation_records = store.list_privileged_operation_records(limit=None)
-            store.close()
-
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(generic_review.status_code, 200, generic_review.text)
-        self.assertEqual(
-            generic_review.json()["review"]["title"],
-            "Managed authorization policy review",
-        )
-        self.assertEqual(
-            response.json()["detail"]["code"],
-            "privileged_operation_plan_conflict",
-        )
-        self.assertEqual(len(operation_records), 1)
-        planned_request = operation_records[0].request
-        assert isinstance(planned_request, ManagedAuthzPolicySetProposalInput)
-        planned_rule = planned_request.desired_policy.github_humans[0]
-        self.assertEqual(planned_rule.github_ids, (456,))
-
-    async def test_closed_authorization_candidate_removal_requires_stopped_activation(
-        self,
-    ) -> None:
-        policy_payload = _policy().model_dump(mode="json")
-        policy_payload["github_humans"].append(
-            {
-                "managed_set_id": (ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID),
-                "managed_rule_id": (ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID),
-                "github_ids": [123],
-                "roles": ["admin"],
-                "products": ["launchplane"],
-                "contexts": ["launchplane"],
-                "actions": list(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS),
-            }
-        )
-        policy = LaunchplaneAuthzPolicy.model_validate(policy_payload)
-        with TemporaryDirectory() as directory:
-            store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
-            )
-            store.ensure_schema()
-            policy_record = store.seed_authz_policy_if_absent(_policy_record(policy))
-            activation = _activation_record(
-                operation_id="privileged-operation-" + "a" * 32,
-                installed_at="2026-09-12T12:00:00Z",
-                expires_at="2026-09-13T12:00:00Z",
-            )
-            seed_activation_history(
-                store,
-                activation,
-                _activation_event(
-                    activation,
-                    action="installed",
-                    source_operation_id=activation.source_setup_operation_id,
-                ),
-            )
-            app = self._app(
-                store=store,
-                policy=policy,
-                policy_record_reader=lambda: policy_record,
-            )
-            source_event_id = "candidate-removal-after-stop"
-            async with lifespan_client(app) as client:
-                blocked = await client.post(
-                    "/v1/privileged-operations/authorization-candidates/prepare",
-                    json={
-                        "candidate_id": "ordinary-agent-delivery-administration",
-                        "intent": "remove",
-                        "source_event_id": source_event_id,
-                    },
-                )
-                revoked = type(activation).model_validate(
-                    {
-                        **activation.model_dump(mode="json"),
-                        "desired_state": "revoked",
-                        "effective_state": "revoked",
-                        "revision": activation.revision + 1,
-                        "updated_at": "2026-09-12T12:05:00Z",
-                        "revoked_at": "2026-09-12T12:05:00Z",
-                        "activation_sha256": "",
-                    }
-                )
-                seed_activation_history(
-                    store,
-                    revoked,
-                    _activation_event(
-                        revoked,
-                        action="revoked",
-                        source_operation_id="privileged-operation-" + "b" * 32,
-                        previous=activation,
-                    ),
-                )
-                removal = await client.post(
-                    "/v1/privileged-operations/authorization-candidates/prepare",
-                    json={
-                        "candidate_id": "ordinary-agent-delivery-administration",
-                        "intent": "remove",
-                        "source_event_id": source_event_id,
-                    },
-                )
-                opposite_intent = await client.post(
-                    "/v1/privileged-operations/authorization-candidates/prepare",
-                    json={
-                        "candidate_id": "ordinary-agent-delivery-administration",
-                        "intent": "add",
-                        "source_event_id": source_event_id,
-                    },
-                )
-            operation_records = store.list_privileged_operation_records(limit=None)
-            store.close()
-
-        self.assertEqual(blocked.status_code, 409, blocked.text)
-        self.assertEqual(
-            blocked.json()["detail"]["code"],
-            "authorization_candidate_activation_current",
-        )
-        self.assertIn("Stop the current agent delivery setup", blocked.text)
-        self.assertEqual(removal.status_code, 200, removal.text)
-        self.assertEqual(removal.json()["state"], "planned")
-        self.assertEqual(len(operation_records), 1)
-        removal_request = operation_records[0].request
-        assert isinstance(removal_request, ManagedAuthzPolicySetProposalInput)
-        self.assertEqual(removal_request.desired_policy.github_humans, ())
-        self.assertEqual(opposite_intent.status_code, 409, opposite_intent.text)
-        self.assertEqual(
-            opposite_intent.json()["detail"]["code"],
-            "privileged_operation_plan_conflict",
-        )
 
     async def test_closed_authorization_candidate_requires_runtime_propose(self) -> None:
         runtime_payload = _policy().model_dump(mode="json")
@@ -1794,36 +1533,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             source_event_id="candidate-strict-admin-denied",
         )
 
-    async def test_product_evidence_candidate_requires_runtime_and_fresh_db_authority(self) -> None:
-        runtime_denied_payload = _policy().model_dump(mode="json")
-        runtime_denied_payload["github_humans"][1]["actions"].remove(
-            AUTHZ_POLICY_OPERATION_PROPOSE_ACTION
-        )
-        persisted_denied_payload = _policy().model_dump(mode="json")
-        persisted_denied_payload["github_humans"][1]["actions"].remove(
-            AUTHZ_POLICY_OPERATION_PROPOSE_ACTION
-        )
-        cases = (
-            (
-                LaunchplaneAuthzPolicy.model_validate(runtime_denied_payload),
-                _policy(),
-                "product-evidence-runtime-propose-denied",
-            ),
-            (
-                _policy(),
-                LaunchplaneAuthzPolicy.model_validate(persisted_denied_payload),
-                "product-evidence-db-propose-denied",
-            ),
-        )
-        for runtime_policy, persisted_policy, source_event_id in cases:
-            with self.subTest(source_event_id=source_event_id):
-                await self._assert_candidate_denied_without_writes(
-                    runtime_policy=runtime_policy,
-                    persisted_policy=persisted_policy,
-                    source_event_id=source_event_id,
-                    candidate_id="administrator-product-evidence-read",
-                )
-
     async def test_closed_authorization_candidate_rejects_caller_policy_or_identity_fields(
         self,
     ) -> None:
@@ -1846,7 +1555,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                     policy_record_reader=lambda: policy_record,
                 )
                 payload = {
-                    "candidate_id": "ordinary-agent-delivery-administration",
+                    "candidate_id": "administrator-product-evidence-read",
                     "intent": "add",
                     "source_event_id": f"candidate-extra-{field}",
                     field: value,
@@ -1893,7 +1602,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         runtime_policy: LaunchplaneAuthzPolicy,
         persisted_policy: LaunchplaneAuthzPolicy,
         source_event_id: str,
-        candidate_id: str = "ordinary-agent-delivery-administration",
     ) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
@@ -1910,7 +1618,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 response = await client.post(
                     "/v1/privileged-operations/authorization-candidates/prepare",
                     json={
-                        "candidate_id": candidate_id,
+                        "candidate_id": "administrator-product-evidence-read",
                         "intent": "add",
                         "source_event_id": source_event_id,
                     },

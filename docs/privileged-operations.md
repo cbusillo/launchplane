@@ -9,12 +9,10 @@ plane work that cannot safely be delegated through static administrator
 credentials. The boundary is separate from Client Acceptance, Agent Write
 Intents, workflow authorization, and ordinary admin mutations.
 
-The Access policy workbench includes closed candidate preparation for Agent
-delivery administration, administrator product-evidence reads, and agent
-product setup. Its add and remove controls derive the signed-in administrator,
+The Access policy workbench includes closed candidate preparation for
+administrator product-evidence reads and agent product setup. Its add and remove controls derive the signed-in administrator,
 principal, and policy inputs on the server and create a standard managed
 authorization plan for review. They do not approve or apply it. See
-[Preparing Agent Delivery Administration](authorization-authority.md#preparing-agent-delivery-administration),
 [Preparing Administrator Product Evidence Access](authorization-authority.md#preparing-administrator-product-evidence-access),
 and [Preparing Agent Product Setup](authorization-authority.md#preparing-agent-product-setup)
 for eligibility, collision, removal, and production-activation boundaries.
