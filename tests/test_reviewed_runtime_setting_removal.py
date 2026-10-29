@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.product_reconcile import ProductReconcileTarget
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -26,7 +27,7 @@ from control_plane.service_auth import (
     TerminalAgentIdentity,
     LaunchplaneAuthzPolicy,
 )
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import PostgresRecordStore, LaunchplaneProductionRecipientRow
 from tests.test_authz_administration_read import (
     _record,
     _database_app,
@@ -659,6 +660,78 @@ class RuntimeRemovalTests(unittest.TestCase):
 
 
 class RuntimeRemovalHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_inventory_row_is_not_reported_as_a_stale_removal_review(self) -> None:
+        with _database_app(policy(), director_agent=True) as (store, _, app):
+            store.write_runtime_environment_record(runtime())
+            with patch.object(
+                store,
+                "global_setting_consumer_inventory",
+                side_effect=ValueError("invalid inventory row"),
+            ):
+                async with lifespan_client(app) as client:
+                    with self.assertRaisesRegex(ValueError, "invalid inventory row"):
+                        await client.post(
+                            ROUTE,
+                            json=request().model_dump(mode="json"),
+                            headers={"Authorization": "Bearer reader-token"},
+                        )
+
+    async def test_global_review_inventories_orphan_records_only_after_authorization(self) -> None:
+        with _database_app(policy(), director_agent=True) as (store, _, app):
+            records = (
+                runtime(),
+                runtime(scope="instance", context="historical", instance="retained"),
+            )
+            for record in records:
+                store.write_runtime_environment_record(record)
+            store.request_product_reconcile(
+                ProductReconcileTarget(product="unknown-product", target_kind="testing"),
+                requested_at=runtime().updated_at,
+            )
+            with store._session_factory() as session:
+                session.add(
+                    LaunchplaneProductionRecipientRow(
+                        product="retained-product",
+                        context="old-context",
+                        payload={
+                            "phase": "prepared",
+                            "authority_snapshot": {"runtime": "private-captured-value"},
+                        },
+                    )
+                )
+                session.commit()
+            headers = {"Authorization": "Bearer reader-token"}
+            async with lifespan_client(app) as client:
+                with patch.object(
+                    store,
+                    "global_setting_consumer_inventory",
+                    wraps=store.global_setting_consumer_inventory,
+                ) as inventory_read:
+                    denied = await client.post(
+                        ROUTE,
+                        json=request().model_dump(mode="json"),
+                        headers={"Authorization": "Bearer admin-token"},
+                    )
+                    self.assertEqual(denied.status_code, 403)
+                    inventory_read.assert_not_called()
+                    dry = await client.post(
+                        ROUTE, json=request().model_dump(mode="json"), headers=headers
+                    )
+                    self.assertEqual(dry.status_code, 200, dry.text)
+                    inventory_read.assert_called_once()
+                inventory = dry.json()["result"]["consumer_inventory"]
+                self.assertEqual(inventory["runtime_record_count"], len(records))
+                self.assertTrue(any(c["context"] == "historical" for c in inventory["consumers"]))
+                self.assertEqual(
+                    {c["product"] for c in inventory["authority_records"]},
+                    {"unknown-product", "retained-product"},
+                )
+                self.assertNotIn("private-captured-value", dry.text)
+                for record in records:
+                    for value in record.env.values():
+                        self.assertNotIn(str(value), dry.text)
+                self.assertEqual(store.list_runtime_environment_records(), records)
+
     async def test_director_operator_removes_reviewed_preview_key_and_replays_receipt(self) -> None:
         with _database_app(preview_policy(), director_agent=True) as (store, _, app):
             before, body = preview_removal(store)

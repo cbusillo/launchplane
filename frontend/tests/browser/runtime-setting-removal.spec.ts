@@ -28,6 +28,16 @@ async function setup(page: Page, outcome = "ok", admin = true) {
       unprintable_survivor_count: 0, retirement_intent_count: 2, record_deleted: false,
       requires_compatible_readers_and_rollback: outcome === "retirement-only",
       instance_plain_setting_effects: body.keys.map((key: string) => ({ key, source_after: "context", effect: "changed" })),
+      ...(outcome === "global-inventory" && body.mode === "dry-run" ? { consumer_inventory: {
+        runtime_record_count: 5, product_profile_count: 2, target_record_count: 3, secret_binding_count: 4,
+        total_consumers: 20, truncated: true, authority_record_count: 2, authority_records_truncated: false,
+        runtime_consumption_verified: false, unqualified_populations: ["baked_images", "retained_operation_authority"],
+        consumers: [
+          { kind: "lane", product: "retired-product", context: "orphan-context", instance: "historical" },
+          { kind: "secret_binding", product: "", context: "", instance: "", selected_keys: body.keys },
+        ],
+        authority_records: [{ kind: "production_recipient", product: "retained-product", context: "old-context", instance: "prod", state: "prepared" }],
+      } } : {}),
       plan_sha256: digest, review_id: `runtime-removal-${digest}`, applied: body.mode === "apply",
       ...(body.mode === "readback" ? { readback_matches: !outcome.endsWith("mismatch") } : {}),
     } } });
@@ -172,6 +182,26 @@ test("retirement-only review discloses reader and rollback qualification before 
   await page.goto("/ui/engineering/runtime-setting-removal");
   await review(page);
   await expect(page.getByRole("alert")).toContainText("compatible readers to every consumer");
+});
+
+test("global review shows orphan consumers, authority records and incomplete coverage", { tag: "@responsive" }, async ({ page }) => {
+  const { requests, errors } = await setup(page, "global-inventory");
+  await page.goto("/ui/engineering/runtime-setting-removal");
+  await page.getByLabel("Product", { exact: true }).fill("launchplane");
+  await page.getByLabel("Stored scope").selectOption("global");
+  await page.getByRole("button", { name: "Select record", exact: true }).click();
+  await page.getByLabel("Setting names").fill("OBSOLETE_INPUT");
+  await page.getByLabel("Removal reason").fill("Qualify the global record.");
+  await page.getByRole("button", { name: "Review removal", exact: true }).click();
+  const inventory = page.getByLabel("Global setting consumer inventory");
+  await expect(inventory).toContainText("orphan-context");
+  await expect(inventory).toContainText("historical");
+  await expect(inventory).toContainText("retained-product");
+  await expect(inventory).toContainText("OBSOLETE_INPUT");
+  await expect(inventory.getByRole("alert")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(requests.map(request => request.body.mode)).toEqual(["dry-run"]);
+  expect(errors).toEqual([]);
 });
 
 
