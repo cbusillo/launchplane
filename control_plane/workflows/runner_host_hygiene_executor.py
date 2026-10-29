@@ -2870,13 +2870,6 @@ def _audit_route_payload(audit: RunnerHostHygieneApplyAuditRecord) -> dict[str, 
     }
 
 
-def _required_env(env: Mapping[str, str], name: str) -> str:
-    value = env.get(name, "").strip()
-    if not value:
-        raise click.ClickException(f"Missing required env var: {name}")
-    return value
-
-
 def _require_remote_success(
     result: RemoteCommandResult, *, evidence_name: str
 ) -> RemoteCommandResult:

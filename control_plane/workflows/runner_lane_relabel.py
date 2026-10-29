@@ -51,35 +51,6 @@ def _expected_labels(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted(normalized))
 
 
-def deliver_terminal_audit(
-    packet: dict[str, object], audit_poster: AuditPoster
-) -> dict[str, object]:
-    """Deliver only the retained evidence, never repeat the label mutation."""
-    audit = RunnerLaneRegistrationAuditRecord.model_validate(packet.get("terminal_audit"))
-    key = f"runner-lane-relabel:{audit.audit_record_key}:terminal"
-    if (
-        audit.request.operation != "relabel"
-        or audit.status == "planned"
-        or not audit.request.mutate
-        or packet.get("terminal_idempotency_key") != key
-    ):
-        raise ValueError("retained terminal relabel audit/key is invalid")
-    receipt = audit_poster(audit, key)
-    records = receipt.get("records")
-    if (
-        receipt.get("status") != "accepted"
-        or not isinstance(records, dict)
-        or records.get("runner_lane_registration_audit_record_key") != audit.audit_record_key
-    ):
-        raise ValueError("service did not confirm the retained audit")
-    return {
-        "status": "audit_delivered",
-        "write_attempted": False,
-        "audit_record_key": audit.audit_record_key,
-        "audit_status": audit.status,
-    }
-
-
 def execute_relabel(
     *,
     request: RunnerLaneRegistrationRequest,

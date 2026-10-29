@@ -313,7 +313,9 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
             self.assertTrue(_same_planned_observation(planned=planned, current=current))
 
     def test_legacy_observation_dump_keeps_its_original_digest_shape(self) -> None:
-        dumped = _observation_for_capture().model_dump(mode="json")
+        from tests.test_product_retirement import _observation
+
+        dumped = _observation().model_dump(mode="json")
         self.assertNotIn("retained_volumes", dumped)
         self.assertNotIn("retained_volume_inventory_complete", dumped)
         self.assertNotIn("mounts_sha256", dumped)
@@ -416,12 +418,6 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                         frame["result"]["volumes"][0]["engine_identity_sha256"],
                         retained_volume_engine_identity("engine1"),
                     )
-
-
-def _observation_for_capture() -> ProductRetirementProviderObservation:
-    from tests.test_product_retirement import _observation
-
-    return _observation()
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from control_plane.contracts.runner_lane_registration import (
     plan_runner_lane_registration,
     plan_runner_lane_retirement,
 )
-from control_plane.workflows.runner_lane_relabel import execute_relabel, deliver_terminal_audit
+from control_plane.workflows.runner_lane_relabel import execute_relabel
 
 
 def inventory(
@@ -260,12 +260,7 @@ class RunnerRelabelTests(unittest.TestCase):
         self.assertEqual(result["status"], "audit_delivery_pending")
         self.assertEqual(result["mutation_status"], "completed")
         self.assertIsInstance(result["terminal_audit"], dict)
-        before = list(self.transport.calls)
-        receipt = deliver_terminal_audit(result, self.audit)
-        self.assertEqual(receipt["status"], "audit_delivered")
-        self.assertEqual(self.transport.calls, before)
-        with self.assertRaises(ValueError):
-            deliver_terminal_audit({**result, "terminal_idempotency_key": "other"}, self.audit)
+        self.assertEqual(sum(call[0] == "PUT" for call in self.transport.calls), 1)
 
     def test_operations_lane_is_preserved(self) -> None:
         with self.assertRaises(ValueError):
