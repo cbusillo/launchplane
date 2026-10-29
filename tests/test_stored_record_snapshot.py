@@ -31,6 +31,34 @@ from tests.test_postgres_store import _inventory_record, _merge_train_run_record
 
 
 class StoredRecordSnapshotTests(unittest.TestCase):
+    def test_retired_postgres_transport_survives_raw_row_snapshot_and_storage_read(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneProductProfileRow
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        profile = _driver_profile()
+        self.store.write_product_profile_record(profile)
+        legacy = profile.model_dump(mode="json")
+        legacy["preview"]["transport_extension"] = "verireel-postgres"
+        for key in ("generated_secret_env", "preview_url_env_keys", "preview_domain_env_keys"):
+            legacy["preview"].pop(key, None)
+        with self.store._engine.begin() as connection:
+            connection.execute(
+                update(LaunchplaneProductProfileRow)
+                .where(LaunchplaneProductProfileRow.product == profile.product)
+                .values(payload=legacy)
+            )
+        snapshot = self.store.export_stored_record_snapshot()
+        scrubbed = snapshot.tables["launchplane_product_profiles"][0]["payload"]
+        self.assertEqual(
+            scrubbed["preview"]["transport_extension"], legacy["preview"]["transport_extension"]
+        )
+        restored = self.store._read_product_profile_payload(scrubbed)
+        self.assertEqual(
+            restored.preview.generated_secret_env, profile.preview.generated_secret_env
+        )
+        self.assertEqual(restored.preview.transport_extension, profile.preview.transport_extension)
+        self.assertEqual(self.store.read_product_profile_record(profile.product), profile)
+
     def setUp(self) -> None:
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

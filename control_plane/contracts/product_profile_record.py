@@ -4,6 +4,7 @@ import json
 import re
 from typing import Annotated, Literal, get_args
 
+from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.postgres_preview import (
     PreviewSecretEncoding,
@@ -426,7 +427,10 @@ class ProductPreviewProfile(BaseModel):
     transport_extension: Literal["", "postgres"] = Field(
         default="",
         exclude_if=lambda value: not value,
-        json_schema_extra={"x-launchplane-optional-response": True},
+        json_schema_extra={
+            "x-launchplane-optional-response": True,
+            **snapshot_protocol("verireel-postgres"),
+        },
     )
     transport_database_prefix: str = Field(
         default="",
@@ -442,8 +446,10 @@ class ProductPreviewProfile(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_postgres_transport(cls, value: object) -> object:
-        return migrate_legacy_postgres_preview(value)
+    def _migrate_postgres_transport(cls, value: object, info: ValidationInfo) -> object:
+        if info.context and info.context.get("stored_product_profile"):
+            return migrate_legacy_postgres_preview(value)
+        return value
 
     historical_transport: dict[str, str] = Field(
         default_factory=dict,
@@ -537,9 +543,15 @@ class ProductPreviewProfile(BaseModel):
             raise ValueError("preview transport database prefix requires a transport extension")
         if self.generated_secret_env and self.transport_extension != "postgres":
             raise ValueError("generated preview secrets require PostgreSQL transport")
+        if self.transport_extension == "postgres" and self.template_instance != "testing":
+            raise ValueError("PostgreSQL previews require a testing template lane")
         reserved_keys = {"DATABASE_URL", *self.preview_url_env_keys, *self.preview_domain_env_keys}
         for key in self.generated_secret_env:
-            if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or key.startswith("LAUNCHPLANE_"):
+            if (
+                not re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
+                or key.startswith("LAUNCHPLANE_")
+                or key in PLATFORM_CREDENTIAL_KEYS
+            ):
                 raise ValueError("generated preview secret requires an application environment key")
             if key in reserved_keys:
                 raise ValueError("generated preview secret conflicts with a managed preview key")

@@ -54,7 +54,24 @@ def _driver_profile(
                 app_name_suffix="-app" if declared_transport else "",
                 template_instance="testing",
                 data_transport_mode="driver",
-                transport_extension="verireel-postgres" if declared_transport else "",
+                transport_extension="postgres" if declared_transport else "",
+                generated_secret_env={
+                    "BETTER_AUTH_SECRET": "urlsafe",
+                    "VERIREEL_SECRETS_MASTER_KEY": "base64",
+                    "VERIREEL_CRON_SECRET": "urlsafe",
+                    "VERIREEL_SMOKE_MAINTENANCE_SECRET": "urlsafe",
+                }
+                if declared_transport
+                else {},
+                preview_url_env_keys=("VERIREEL_APP_URL", "BETTER_AUTH_URL")
+                if declared_transport
+                else (),
+                preview_domain_env_keys=(
+                    "DOKPLOY_PREVIEW_DOMAIN",
+                    "NEXT_PUBLIC_DOKPLOY_PREVIEW_DOMAIN",
+                )
+                if declared_transport
+                else (),
                 transport_database_prefix="verireel_preview_" if declared_transport else "",
             )
         ),

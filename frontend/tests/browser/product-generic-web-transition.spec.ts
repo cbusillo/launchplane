@@ -47,7 +47,7 @@ async function arrange(page: import("@playwright/test").Page, failure: "none" | 
   const definition = { lanes: [
     { context: "atlas", instance: "testing", extensions: { verification_extension: "verireel-testing", maintenance: [], schedules: [] } },
     { context: "atlas", instance: "prod", extensions: { maintenance: [{ name: "migrate", command: "node /app/migrate.js", timeout_seconds: 300 }], schedules: [{ name: "recover", command: "node /app/recover.js", timeout_seconds: 300, cron_expression: "*/10 * * * *", enabled: true }] } },
-  ], preview: { data_transport_mode: "driver", transport_extension: "verireel-postgres", transport_database_prefix: "atlas", app_name_suffix: "-app" } };
+  ], preview: { data_transport_mode: "driver", transport_extension: "postgres", transport_database_prefix: "atlas", app_name_suffix: "-app" } };
   await panel.getByLabel("Lane and preview declarations").fill(JSON.stringify(definition, null, 2));
   await panel.getByLabel("Change reason").fill("Review declared lifecycle before testing qualification.");
   return { panel, requests };

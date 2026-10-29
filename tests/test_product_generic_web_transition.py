@@ -65,7 +65,7 @@ def draft(record: LaunchplaneProductProfileRecord) -> dict[str, object]:
         ],
         "preview": {
             "data_transport_mode": "driver",
-            "transport_extension": "verireel-postgres",
+            "transport_extension": "postgres",
             "transport_database_prefix": "example_site",
             "app_name_suffix": "-app",
         },

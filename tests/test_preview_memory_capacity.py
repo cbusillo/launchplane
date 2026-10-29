@@ -264,7 +264,7 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
 
     def test_verireel_refuses_before_database_bootstrap(self) -> None:
         from control_plane.workflows.postgres_preview import execute_postgres_preview_refresh
-        from tests.test_postgres_preview import _template_target, _refresh_request
+        from tests.test_postgres_preview import _template_target, _refresh_request, _preview_store
         from tests.test_generic_web_preview_extensions import _driver_profile
 
         with (
@@ -300,6 +300,7 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
         ):
             with self.assertRaises(memory_capacity.PreviewMemoryCapacityRefused):
                 execute_postgres_preview_refresh(
+                    record_store=_preview_store(),
                     profile=_driver_profile(),
                     control_plane_root=Path("."),
                     request=_refresh_request(),

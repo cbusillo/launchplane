@@ -119,15 +119,18 @@ driver is `generic-web`, declaring its isolated database namespace through
 namespace and runtime product identity come from the profile, as do its port,
 health path, URL environment keys and generated secrets. The testing template
 must expose a PostgreSQL `DATABASE_URL` and its image must provide Node and `pg`
-for database administration. `preview.generated_secret_env` maps application
+for database administration. Its health endpoint must return `ok: true` and
+the injected runtime identity. Choose application and database prefixes unique
+to the product; provisioning and cleanup refuse conflicting saved namespaces. `preview.generated_secret_env` maps application
 environment keys to `urlsafe` or `base64`; values are generated for each preview
 and retained on refresh, never copied from testing. Other template credentials
 are removed. `preview_url_env_keys` and `preview_domain_env_keys` replace the
 product-specific URL rewriting. Maintenance and schedules remain profile-owned.
 This uses the existing isolated PostgreSQL preparation and cleanup rather than
 the plain preview path. Stored `verireel-postgres` declarations convert to these
-fields when parsed, preserving their prefixes and generated-secret encodings;
-subsequent profile writes use `postgres`. New products declare their own keys
+fields only on storage reads, preserving their prefixes and generated-secret encodings;
+subsequent profile writes use `postgres`. New profile and transition inputs
+reject the retired name. New products declare their own keys
 and prefixes through the product profile or reviewed generic-web transition.
 Historical deployment
 and backup records and retired instance-scoped policy grants remain readable;
@@ -476,10 +479,7 @@ deployment receipt.
 
 For declared preview transport, `preview.app_name_suffix` is part of the resource
 name used by creation, inventory and destruction. Existing VeriReel applications
-use `-app`; record that suffix explicitly when switching its profile. The named
-`verireel-postgres` transport retains VeriReel's Prisma, seed and environment
-interfaces while its template lane, product identity and resource prefixes come
-from the profile. It does not imply compatibility with other applications.
+use `-app`; record that suffix explicitly when switching its profile.
 
 A reservation keeps its original lifecycle declaration. Changing a declaration
 requires a new operation after exact recovery of the previous attempt; refusal

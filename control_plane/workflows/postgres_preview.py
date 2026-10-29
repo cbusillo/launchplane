@@ -4,11 +4,12 @@ from typing import cast
 
 import base64
 import json
+import hashlib
 import secrets
 import shlex
 import time
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, unquote, urlparse
 from urllib.request import Request, urlopen
@@ -195,6 +196,34 @@ class _DatabaseParts(BaseModel):
     password: str
 
 
+class _PreviewNamespaceStore(Protocol):
+    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+
+def _require_unique_preview_namespaces(
+    record_store: object | None, profile: LaunchplaneProductProfileRecord
+) -> None:
+    if not callable(getattr(record_store, "list_product_profile_records", None)):
+        raise PostgresPreviewRefreshConfigError(
+            "Preview namespace ownership requires product profile inventory."
+        )
+    profiles = cast(_PreviewNamespaceStore, record_store).list_product_profile_records()
+    if not any(other.product == profile.product for other in profiles):
+        raise PostgresPreviewRefreshConfigError(
+            "Preview namespace ownership requires the stored product profile."
+        )
+    for other in profiles:
+        if other.product == profile.product:
+            continue
+        if (
+            other.preview.app_name_prefix == profile.preview.app_name_prefix
+            or other.preview.transport_database_prefix == profile.preview.transport_database_prefix
+        ):
+            raise PostgresPreviewRefreshConfigError(
+                "Preview namespace belongs to another product; choose unique application and database prefixes."
+            )
+
+
 def _preview_app_name(preview_slug: str, prefix: str) -> str:
     return f"{prefix}-{preview_slug}"
 
@@ -205,7 +234,10 @@ def _preview_application_name(preview_slug: str, prefix: str, suffix: str = "") 
 
 def _preview_database_identifiers(preview_slug: str, prefix: str) -> tuple[str, str]:
     normalized_slug = preview_slug.strip().lower().replace("-", "_")
-    identifier = f"{prefix}{normalized_slug}"[:63]
+    identifier = f"{prefix}{normalized_slug}"
+    if len(identifier.encode()) > 63:
+        suffix = hashlib.sha256(identifier.encode()).hexdigest()[:12]
+        identifier = f"{identifier.encode()[:50].decode(errors='ignore')}_{suffix}"
     return identifier, identifier
 
 
@@ -389,12 +421,8 @@ def _render_postgres_preview_env(
     runtime_identity: RuntimeIdentity,
 ) -> str:
     generated_keys = frozenset({"DATABASE_URL", *profile.preview.generated_secret_env})
-    omitted = {
-        *profile.preview.omitted_env_keys,
-        *_template_runtime_secret_keys(template_env_map, generated_keys),
-    }
+    omitted = _template_runtime_secret_keys(template_env_map, generated_keys)
     updates = {key: value for key, value in template_env_map.items() if key not in omitted}
-    updates.update(profile.preview.override_env)
     for key, encoding in profile.preview.generated_secret_env.items():
         updates[key] = _resolve_preview_secret(
             existing_env_map=existing_env_map,
@@ -1022,6 +1050,7 @@ def execute_postgres_preview_refresh(
     record_store: object | None = None,
     profile: LaunchplaneProductProfileRecord,
 ) -> PostgresPreviewRefreshResult:
+    _require_unique_preview_namespaces(record_store, profile)
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     except click.ClickException as exc:
@@ -1117,14 +1146,17 @@ def execute_postgres_preview_refresh(
         preview_generation_id=preview_generation_id,
         product=profile.product,
     )
-    env_text = _render_postgres_preview_env(
-        profile=profile,
-        template_env_map=template_env_map,
-        existing_env_map=existing_env_map,
-        database_parts=database_parts,
-        preview_url=preview_url,
-        runtime_identity=expected_runtime_identity,
-    )
+    try:
+        env_text = _render_postgres_preview_env(
+            profile=profile,
+            template_env_map=template_env_map,
+            existing_env_map=existing_env_map,
+            database_parts=database_parts,
+            preview_url=preview_url,
+            runtime_identity=expected_runtime_identity,
+        )
+    except runtime_platform_credentials.PlatformCredentialRefusedError as error:
+        raise PostgresPreviewRefreshConfigError(error.message) from error
 
     try:
         admin_database_url = _build_admin_database_url(template_database_url)
@@ -1299,6 +1331,7 @@ def execute_postgres_preview_destroy(
     record_store: object | None = None,
     profile: LaunchplaneProductProfileRecord,
 ) -> PostgresPreviewDestroyResult:
+    _require_unique_preview_namespaces(record_store, profile)
     host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     template_target, template_application = _template_application_payload(
         control_plane_root=control_plane_root,

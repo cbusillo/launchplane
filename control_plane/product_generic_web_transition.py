@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.contracts.postgres_preview import (
     PreviewSecretEncoding,
-    migrate_legacy_postgres_preview,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -41,11 +40,6 @@ class GenericWebPreviewDeclaration(BaseModel):
     preview_domain_env_keys: tuple[str, ...] = ()
     app_name_suffix: str = ""
     generic_web_extensions: GenericWebLaneExtensions | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_postgres_transport(cls, value: object) -> object:
-        return migrate_legacy_postgres_preview(value)
 
 
 class ProductGenericWebTransitionRequest(BaseModel):
