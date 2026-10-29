@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.retained_volume_sweep import RETAINED_VOLUME_SWEEP_ROUTE
 from control_plane.contracts.integration_attestation import INTEGRATION_ATTESTATION_ROUTE
 from control_plane.contracts.release_request import RELEASE_REQUEST_ROUTE
 from control_plane.testing_retry import TESTING_RETRY_ROUTE
@@ -349,6 +350,15 @@ OPERATION_SPECS = (
         ("dry-run", "apply", "reconcile"),
         "apply",
         ("reviewed_plan_digest", "current_artifact_identity", "release_lane_exclusion"),
+    ),
+    OperationSpec(
+        "POST",
+        RETAINED_VOLUME_SWEEP_ROUTE,
+        "Inspect, apply, or read back one reviewed retained-volume retirement sweep without exposing provider bindings.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256", "retirement_record_id", "minimum_age_seconds"),
     ),
     OperationSpec(
         "GET",
