@@ -227,8 +227,6 @@ def apply_generic_web_preview_driver_destroy(
 def _uses_postgres_transport(
     profile: LaunchplaneProductProfileRecord, *, for_destroy: bool = False
 ) -> bool:
-    return profile.driver_id in (
-        {"generic-web", "verireel"} if for_destroy else {"generic-web"}
-    ) and profile.preview.transport_extension in (
+    return profile.driver_id == "generic-web" and profile.preview.transport_extension in (
         POSTGRES_PREVIEW_TRANSPORTS if for_destroy else {"postgres"}
     )

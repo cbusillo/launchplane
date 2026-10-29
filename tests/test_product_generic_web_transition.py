@@ -113,6 +113,18 @@ class GenericWebTransitionTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             build_generic_web_transition_plan(before, request)
+        incomplete = {
+            key: getattr(_driver_profile().preview, key)
+            for key in GenericWebPreviewDeclaration.model_fields
+            if key != "copied_env_keys"
+        }
+        with self.assertRaises(ValueError):
+            build_generic_web_transition_plan(
+                before,
+                request.model_copy(
+                    update={"preview": GenericWebPreviewDeclaration.model_validate(incomplete)}
+                ),
+            )
         request = request.model_copy(
             update={
                 "preview": GenericWebPreviewDeclaration.model_validate(
@@ -417,6 +429,7 @@ class GenericWebTransitionHttpTests(unittest.IsolatedAsyncioTestCase):
                     "data_transport_mode": "driver",
                     "transport_extension": "postgres",
                     "transport_database_prefix": before.preview.transport_database_prefix,
+                    "copied_env_keys": [],
                     "app_name_suffix": before.preview.app_name_suffix,
                     "generated_secret_env": {},
                     "preview_url_env_keys": [],

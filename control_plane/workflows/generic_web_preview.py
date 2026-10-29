@@ -1040,6 +1040,7 @@ def _enforce_preview_copied_runtime_key_safety(
         key
         for key, value in copied_values.items()
         if is_preview_copied_credential(key, value, template_bindings=template_bindings)
+        or runtime_platform_credentials.plain_setting_looks_like_credential("", value)
     )
     if not required_binding_keys:
         return

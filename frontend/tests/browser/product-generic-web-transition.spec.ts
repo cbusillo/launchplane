@@ -49,7 +49,7 @@ async function arrange(page: import("@playwright/test").Page, failure: "none" | 
   const definition = { lanes: [
     { context: "atlas", instance: "testing", extensions: { verification_extension: "verireel-testing", maintenance: [], schedules: [] } },
     { context: "atlas", instance: "prod", extensions: { maintenance: [{ name: "migrate", command: "node /app/migrate.js", timeout_seconds: 300 }], schedules: [{ name: "recover", command: "node /app/recover.js", timeout_seconds: 300, cron_expression: "*/10 * * * *", enabled: true }] } },
-  ], preview: { data_transport_mode: "driver", transport_extension: "postgres", transport_database_prefix: "atlas", app_name_suffix: "-app" } };
+  ], preview: { data_transport_mode: "driver", transport_extension: "postgres", transport_database_prefix: "atlas", copied_env_keys: ["PUBLIC_MODE"], app_name_suffix: "-app" } };
   await panel.getByLabel("Lane and preview declarations").fill(JSON.stringify(definition, null, 2));
   await panel.getByLabel("Change reason").fill("Review declared lifecycle before testing qualification.");
   return { panel, requests };
@@ -61,6 +61,7 @@ test("shared-web review, draft invalidation, apply and exact readback", { tag: "
   const apply = panel.getByRole("button", { name: "Apply shared-web profile" });
   await expect(apply).toBeEnabled();
   await expect(panel.locator(".product-owner-plan")).toContainText("verireel-testing");
+  await expect(panel.locator(".product-owner-plan")).toContainText("Copied template keys: PUBLIC_MODE");
   await expect(panel.locator(".product-owner-plan")).toContainText("port 3000, health /api/health, certificate none, HTTPS from certificate → port 8081, health /ready, certificate letsencrypt, HTTPS from preview URL");
   await panel.getByLabel("Change reason").fill("Revised review.");
   await expect(apply).toBeDisabled();

@@ -114,6 +114,10 @@ PostgreSQL destroy also accepts complete historical declarations for active or
 retiring products, including disabled previews, while refresh still requires an
 active canonical profile. Cleanup preserves the stored profile and retirement
 hash fence; retired products cannot execute cleanup.
+PostgreSQL environments use the same explicit template copy list, managed preview
+configuration and credential-safety checks as plain previews, followed by their
+generated database/application credentials. Template connection identity and
+credential query overrides fail before provider effects.
 
 Because product callers pin reusable workflows while the service deploys
 independently, add any future destroy outcome to the `reusable-preview-feedback-status.yml` allowlist

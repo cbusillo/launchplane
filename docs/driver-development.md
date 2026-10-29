@@ -122,17 +122,28 @@ must expose a PostgreSQL `DATABASE_URL` and its image must provide Node and `pg`
 for database administration. Application database URLs retain the template's
 scheme and connection options, replacing only credentials and the database name;
 see [PostgreSQL connection URIs](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING-URIS).
+Query parameters that override connection identity or contain credentials are
+refused before effects. Put connection identity in the URI authority/path and
+credentials in the managed testing template instead.
 The shared preview health contract requires the observed runtime identity to
 match and rejects an explicit `ok: false`. Choose application and database prefixes unique
 to the product; storage checks the prospective profile set and provisioning and
 cleanup refuse overlapping rendered namespaces, including default prefixes and
 slug prefixes. Clean up retained previews before changing their resource names,
 source, template or transport. Disabling previews leaves cleanup available.
-`preview.generated_secret_env` maps application
+Environment rendering uses the plain-preview model: only `copied_env_keys` are
+inherited from testing, declared required keys must exist, and managed preview
+runtime settings, secrets and retired keys apply before generated credentials.
+Use managed preview records for overrides; unlisted template values are absent.
+Copied credentials use the shared runtime key-safety gate, including credentials
+inside URL query parameters. Declare the copy list explicitly when transitioning
+a historical PostgreSQL profile. `preview.generated_secret_env` maps application
 environment keys to `urlsafe` or `base64`; values are generated for each preview
-and retained on refresh, never copied from testing. Other template credentials
-are removed. `preview_url_env_keys` and `preview_domain_env_keys` replace the
+and retained on refresh, never copied from testing. `preview_url_env_keys` and
+`preview_domain_env_keys` replace the
 product-specific URL rewriting. Maintenance and schedules remain profile-owned.
+Domain keys receive the full preview hostname, as with plain previews; a product
+needing a static base domain declares that value in managed preview settings.
 This uses the existing isolated PostgreSQL preparation and cleanup rather than
 the plain preview path. Stored `verireel-postgres` declarations remain unchanged
 when read, including profiles embedded in retirement records and their hash
@@ -142,7 +153,7 @@ retiring or previews are disabled. Use `/v1/drivers/generic-web/preview-destroy`
 through the existing authorized agent route. Retired products remain refused;
 cleanup does not rewrite the profile or its retirement hash fence.
 Before preview refresh or other profile edits, apply a reviewed generic-web transition from the product's
-Shared web driver panel. Declare `postgres`, `generated_secret_env`,
+Shared web driver panel. Declare `postgres`, `copied_env_keys`, `generated_secret_env`,
 `preview_url_env_keys` and `preview_domain_env_keys` explicitly from the product's
 runtime contract. Empty collections mean the product requires none; Launchplane
 does not infer product keys. Keep existing resource prefixes and slug/template

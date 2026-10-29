@@ -17,10 +17,8 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane.runtime_platform_credentials import looks_like_credential
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
-    runtime_identity_env,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.preview_namespaces import POSTGRES_PREVIEW_TRANSPORTS
@@ -37,6 +35,9 @@ from control_plane.workflows.generic_web_application_lifecycle import (
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 from control_plane.workflows.generic_web_preview import (
     _wait_for_preview_health as _wait_for_preview_health,
+    _render_preview_env_text,
+    _enforce_preview_copied_runtime_key_safety,
+    GenericWebPreviewProfileStore,
     _configure_application,
     _ensure_domain,
     _delete_application,
@@ -320,14 +321,8 @@ def _resolve_preview_url_for_destroy(
     )
 
 
-def _preview_domain_from_url(preview_url: str) -> str:
-    host = _preview_url_host(preview_url)
-    if "." not in host:
-        raise ValueError("Preview URL hostname must include a preview domain suffix.")
-    return host.split(".", 1)[1]
-
-
 def _parse_database_url(database_url: str) -> _DatabaseParts:
+    _validate_database_url_query(database_url)
     parsed = urlparse(database_url.strip())
     if parsed.scheme not in {"postgres", "postgresql"}:
         raise PostgresPreviewRefreshConfigError(
@@ -357,20 +352,25 @@ def _parse_database_url(database_url: str) -> _DatabaseParts:
     )
 
 
-def _template_runtime_secret_keys(
-    template_env_map: dict[str, str],
-    generated_keys: frozenset[str] = frozenset({"DATABASE_URL"}),
-) -> tuple[str, ...]:
-    required_keys: list[str] = []
-    for key, value in template_env_map.items():
-        normalized_key = key.strip()
-        if not normalized_key or not str(value).strip():
-            continue
-        if normalized_key in generated_keys:
-            continue
-        if looks_like_credential(normalized_key, str(value)):
-            required_keys.append(normalized_key)
-    return tuple(dict.fromkeys(required_keys))
+def _validate_database_url_query(database_url: str) -> None:
+    identity_keys = {
+        "user",
+        "password",
+        "dbname",
+        "host",
+        "hostaddr",
+        "port",
+        "passfile",
+        "service",
+    }
+    for key, value in parse_qsl(urlparse(database_url).query, keep_blank_values=True):
+        if (
+            key.lower() in identity_keys
+            or runtime_platform_credentials.plain_setting_looks_like_credential(key, value)
+        ):
+            raise PostgresPreviewRefreshConfigError(
+                "PostgreSQL URL query cannot override connection identity or carry credentials; use the URI authority/path and managed template credentials."
+            )
 
 
 def _build_admin_database_url(database_url: str) -> str:
@@ -389,6 +389,7 @@ def _build_admin_database_url(database_url: str) -> str:
 def _build_preview_database_url(
     *, template_database_url: str, database_name: str, role_name: str, password: str
 ) -> str:
+    _validate_database_url_query(template_database_url)
     parsed = urlparse(template_database_url)
     authority = parsed.netloc.rpartition("@")[2]
     userinfo = f"{quote(role_name, safe='')}:{quote(password, safe='')}"
@@ -431,10 +432,18 @@ def _render_postgres_preview_env(
     database_parts: _DatabaseParts,
     preview_url: str,
     runtime_identity: RuntimeIdentity,
+    preview_environment: control_plane_runtime_environments.SiteRuntimeEnvironment,
 ) -> str:
-    generated_keys = frozenset({"DATABASE_URL", *profile.preview.generated_secret_env})
-    omitted = _template_runtime_secret_keys(template_env_map, generated_keys)
-    updates = {key: value for key, value in template_env_map.items() if key not in omitted}
+    env_text = _render_preview_env_text(
+        profile=profile,
+        template_application={
+            "env": dokploy_api.render_dokploy_env_text_with_overrides("", updates=template_env_map)
+        },
+        preview_url=preview_url,
+        runtime_identity=runtime_identity,
+        preview_environment=preview_environment,
+    )
+    updates = dokploy_api.parse_dokploy_env_text(env_text)
     for key, encoding in profile.preview.generated_secret_env.items():
         updates[key] = _resolve_preview_secret(
             existing_env_map=existing_env_map,
@@ -448,11 +457,6 @@ def _render_postgres_preview_env(
         role_name=database_parts.username,
         password=database_parts.password,
     )
-    for key in profile.preview.preview_url_env_keys:
-        updates[key] = preview_url
-    for key in profile.preview.preview_domain_env_keys:
-        updates[key] = _preview_domain_from_url(preview_url)
-    updates.update(runtime_identity_env(runtime_identity))
     runtime_platform_credentials.refuse_platform_credentials(
         updates, target=f"{profile.product} preview", source="preview environment settings"
     )
@@ -510,7 +514,7 @@ def _declared_template_options(
     profile: LaunchplaneProductProfileRecord, *, for_destroy: bool = False
 ) -> dict[str, str]:
     if (
-        profile.driver_id not in ({"generic-web", "verireel"} if for_destroy else {"generic-web"})
+        profile.driver_id != "generic-web"
         or profile.preview.transport_extension
         not in (POSTGRES_PREVIEW_TRANSPORTS if for_destroy else {"postgres"})
         or not profile.preview.transport_database_prefix
@@ -1033,6 +1037,34 @@ def execute_postgres_preview_refresh(
         preview_generation_id=preview_generation_id,
         product=profile.product,
     )
+    required_keys = (*profile.preview.required_template_env_keys, *profile.preview.copied_env_keys)
+    if any(not template_env_map.get(key, "").strip() for key in required_keys):
+        raise PostgresPreviewRefreshConfigError(
+            "PostgreSQL testing template is missing declared required/copied environment keys."
+        )
+    try:
+        preview_environment = (
+            control_plane_runtime_environments.resolve_preview_runtime_environment_from_store(
+                record_store=cast(
+                    control_plane_runtime_environments.SiteRuntimeEnvironmentStore, record_store
+                ),
+                context_name=profile.preview.context,
+                template_values={},
+            )
+        )
+        template_lane = next(
+            lane for lane in profile.lanes if lane.instance == profile.preview.template_instance
+        )
+        _enforce_preview_copied_runtime_key_safety(
+            record_store=cast(GenericWebPreviewProfileStore, record_store),
+            profile=profile,
+            template_lane=template_lane,
+            template_application=template_application,
+            preview_slug=request.preview_slug,
+            preview_environment=preview_environment,
+        )
+    except click.ClickException as error:
+        raise PostgresPreviewRefreshConfigError(str(error)) from error
     try:
         env_text = _render_postgres_preview_env(
             profile=profile,
@@ -1041,6 +1073,7 @@ def execute_postgres_preview_refresh(
             database_parts=database_parts,
             preview_url=preview_url,
             runtime_identity=expected_runtime_identity,
+            preview_environment=preview_environment,
         )
     except runtime_platform_credentials.PlatformCredentialRefusedError as error:
         raise PostgresPreviewRefreshConfigError(error.message) from error

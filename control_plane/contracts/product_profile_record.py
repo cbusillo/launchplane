@@ -548,6 +548,12 @@ class ProductPreviewProfile(BaseModel):
             "verireel-postgres",
         }:
             raise ValueError("generated preview secrets require PostgreSQL transport")
+        if self.transport_extension == "postgres" and set(self.copied_env_keys).intersection(
+            {"DATABASE_URL", *self.generated_secret_env}
+        ):
+            raise ValueError(
+                "PostgreSQL previews generate database and declared application credentials; remove those keys from copied_env_keys."
+            )
         if self.transport_extension == "postgres" and self.template_instance != "testing":
             raise ValueError("PostgreSQL previews require a testing template lane")
         for key in (*self.preview_url_env_keys, *self.preview_domain_env_keys):

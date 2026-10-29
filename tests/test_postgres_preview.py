@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 import click
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 
 from control_plane import dokploy as control_plane_dokploy
@@ -31,17 +32,25 @@ from control_plane.workflows.postgres_preview import _resolve_preview_secret
 from control_plane.workflows.postgres_preview import _resolve_preview_url
 from control_plane.workflows.postgres_preview import _run_application_command
 from control_plane.workflows.postgres_preview import _run_application_command_with_retries
-from control_plane.workflows.postgres_preview import _template_runtime_secret_keys
 from control_plane.workflows.postgres_preview import execute_postgres_preview_destroy
 from control_plane.workflows.postgres_preview import execute_postgres_preview_refresh
 from control_plane.workflows.preview_resource_destroy import PreviewResourceDestroyResult
 from tests.test_generic_web_preview_extensions import _driver_profile
 
 
-def _preview_store(profile: object = None) -> object:
+def _preview_store(
+    profile: object = None, runtime_records: tuple[RuntimeEnvironmentRecord, ...] = ()
+) -> object:
     return SimpleNamespace(
         list_product_profile_records=lambda: (profile or _driver_profile(),),
         list_preview_records=lambda: (),
+        list_runtime_environment_records=lambda **kwargs: tuple(
+            record
+            for record in runtime_records
+            if (not kwargs.get("context_name") or record.context == kwargs["context_name"])
+            and (not kwargs.get("instance_name") or record.instance == kwargs["instance_name"])
+        ),
+        list_secret_records=lambda **kwargs: (),
     )
 
 
@@ -97,6 +106,95 @@ class PostgresPreviewDriverTests(unittest.TestCase):
                     self.assertEqual(parsed["user"], "preview_role")
                     self.assertEqual(parsed["password"], "secret@:/?%")
                     self.assertEqual(parsed["dbname"], "preview_name")
+
+    def test_template_url_identity_queries_and_copied_query_credentials_refuse_before_effects(
+        self,
+    ) -> None:
+        cases: list[tuple[str, tuple[str, ...], str]] = [
+            (f"postgresql://admin:fixture@db.invalid/testing?{key}=template-secret", (), "")
+            for key in (
+                "user",
+                "password",
+                "sslpassword",
+                "passfile",
+                "service",
+                "dbname",
+                "host",
+                "hostaddr",
+                "port",
+                "sslkey",
+                "USER",
+                "h%6fst",
+            )
+        ]
+        cases.extend(
+            [
+                (
+                    "postgresql://admin:fixture@db.invalid/testing",
+                    ("PUBLIC_ENDPOINT",),
+                    "PUBLIC_ENDPOINT=https://service.invalid/?token=template-secret",
+                ),
+                ("postgresql://admin:fixture@db.invalid/testing", ("MISSING_SETTING",), ""),
+            ]
+        )
+        for url, copied, extra in cases:
+            for operation in ("refresh", "destroy") if not copied else ("refresh",):
+                profile = _driver_profile().model_copy(
+                    update={
+                        "preview": _driver_profile().preview.model_copy(
+                            update={"copied_env_keys": copied}
+                        )
+                    }
+                )
+                with (
+                    self.subTest(url=url, operation=operation),
+                    patch(
+                        "control_plane.workflows.postgres_preview.dokploy_source.read_dokploy_config",
+                        return_value=("provider", "fixture"),
+                    ),
+                    patch(
+                        "control_plane.workflows.postgres_preview._template_application_payload",
+                        return_value=(_template_target(), {"env": f"DATABASE_URL={url}\n{extra}"}),
+                    ),
+                    patch(
+                        "control_plane.workflows.postgres_preview._resolve_preview_url",
+                        return_value="https://preview.example.test",
+                    ),
+                    patch(
+                        "control_plane.workflows.postgres_preview._resolve_preview_url_for_destroy",
+                        return_value="https://preview.example.test",
+                    ),
+                    patch(
+                        "control_plane.workflows.postgres_preview._find_application_by_name",
+                        return_value=None,
+                    ),
+                    patch(
+                        "control_plane.workflows.postgres_preview._run_application_command"
+                    ) as effect,
+                    self.assertRaises(PostgresPreviewRefreshConfigError) as error,
+                ):
+                    if operation == "refresh":
+                        execute_postgres_preview_refresh(
+                            record_store=_preview_store(profile),
+                            control_plane_root=Path("."),
+                            profile=profile,
+                            request=_refresh_request(),
+                        )
+                    else:
+                        execute_postgres_preview_destroy(
+                            record_store=_preview_store(profile),
+                            control_plane_root=Path("."),
+                            profile=profile,
+                            request=PostgresPreviewDestroyRequest(
+                                context=profile.preview.context,
+                                anchor_repo="verireel",
+                                anchor_pr_number=71,
+                                preview_slug="pr-71",
+                                destroy_reason="closed",
+                            ),
+                        )
+                effect.assert_not_called()
+                self.assertNotIn("template-secret", str(error.exception))
 
     def test_long_database_names_remain_distinct_and_within_postgres_limit(self) -> None:
         prefix = "sample_product_preview_database_"
@@ -183,6 +281,9 @@ class PostgresPreviewDriverTests(unittest.TestCase):
                 ProductPreviewProfile.model_validate(
                     {**payload, "generated_secret_env": {key: "urlsafe"}}
                 )
+        for key in ("DATABASE_URL", *payload["generated_secret_env"]):
+            with self.subTest(copied=key), self.assertRaises(ValueError):
+                ProductPreviewProfile.model_validate({**payload, "copied_env_keys": [key]})
 
     def test_stored_legacy_production_template_refuses_cleanup_before_provider_effects(
         self,
@@ -707,38 +808,6 @@ class PostgresPreviewDriverTests(unittest.TestCase):
             context_name="verireel-testing",
         )
 
-    def test_template_runtime_secret_keys_skip_rewritten_database_url(self) -> None:
-        self.assertEqual(
-            _template_runtime_secret_keys(
-                {
-                    "DATABASE_URL": "postgresql://user:pass@db.example/verireel_testing",
-                    "BETTER_AUTH_SECRET": "auth-secret",
-                    "VERIREEL_SECRETS_MASTER_KEY": "master-key",
-                    "VERIREEL_CRON_SECRET": "cron-secret",
-                    "VERIREEL_SMOKE_MAINTENANCE_SECRET": "smoke-secret",
-                    "NEXT_PUBLIC_SITE_URL": "https://testing.example",
-                },
-                frozenset({"DATABASE_URL", *_driver_profile().preview.generated_secret_env}),
-            ),
-            (),
-        )
-
-    def test_template_credentials_are_found_by_name_or_embedded_password(self) -> None:
-        self.assertEqual(
-            _template_runtime_secret_keys(
-                {
-                    "POSTGRES_PASSWORD": "pg",
-                    "PGPASSWORD": "pg",
-                    "STRIPE_APIKEY": "sk",
-                    "REDIS_URL": "redis://default:redis-pass@redis.example:6379",
-                    "S3_ENDPOINT": "https://s3.example",
-                    "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY": "pk_test",
-                    "APP_MODE": "testing",
-                }
-            ),
-            ("POSTGRES_PASSWORD", "PGPASSWORD", "STRIPE_APIKEY", "REDIS_URL"),
-        )
-
     def test_resolve_preview_secret_rotates_copied_template_values(self) -> None:
         self.assertEqual(
             _resolve_preview_secret(
@@ -952,9 +1021,23 @@ class PostgresPreviewDriverTests(unittest.TestCase):
                         },
                         "preview_url_env_keys": ("PUBLIC_APP_URL",),
                         "preview_domain_env_keys": ("PUBLIC_DOMAIN",),
+                        "copied_env_keys": (
+                            "NEXT_PUBLIC_SUPPORT_EMAIL",
+                            "UNLISTED_MODE",
+                        ),
+                        "omitted_env_keys": ("OUTBOUND_URL",),
                     }
                 ),
             }
+        )
+        runtime_record = RuntimeEnvironmentRecord(
+            schema_version=2,
+            scope="instance",
+            context=profile.preview.context,
+            instance="preview",
+            env={"NEXT_PUBLIC_SUPPORT_EMAIL": "preview-support@example.com", "APP_MODE": "preview"},
+            retired_provider_keys=("UNLISTED_MODE",),
+            updated_at=profile.updated_at,
         )
         captured_env: dict[str, str] = {}
         template_master_key = base64.b64encode(b"template-master-key").decode("ascii")
@@ -982,6 +1065,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
                             f"ENCRYPTION_KEY={template_master_key}\n"
                             "POSTGRES_PASSWORD=template-postgres-password\n"
                             "NEXT_PUBLIC_SUPPORT_EMAIL=support@example.com\n"
+                            "UNLISTED_MODE=testing\nOUTBOUND_URL=https://testing.example/webhook\n"
                         ),
                     },
                 ),
@@ -1018,7 +1102,7 @@ class PostgresPreviewDriverTests(unittest.TestCase):
             ) as health,
         ):
             result = execute_postgres_preview_refresh(
-                record_store=_preview_store(profile),
+                record_store=_preview_store(profile, (runtime_record,)),
                 profile=profile,
                 control_plane_root=Path(temporary_directory_name),
                 request=_refresh_request(),
@@ -1047,7 +1131,13 @@ class PostgresPreviewDriverTests(unittest.TestCase):
         self.assertEqual(result.runtime_identity.product, profile.product)
         self.assertNotIn("POSTGRES_PASSWORD", captured_env)
         self.assertNotIn("template-postgres-password", "\n".join(captured_env.values()))
-        self.assertEqual(captured_env["NEXT_PUBLIC_SUPPORT_EMAIL"], "support@example.com")
+        self.assertEqual(captured_env["NEXT_PUBLIC_SUPPORT_EMAIL"], "preview-support@example.com")
+        self.assertEqual(captured_env["APP_MODE"], "preview")
+        self.assertNotIn("UNLISTED_MODE", captured_env)
+        self.assertNotIn("OUTBOUND_URL", captured_env)
+        self.assertEqual(
+            captured_env["PUBLIC_DOMAIN"], urlparse(_refresh_request().preview_url).netloc
+        )
         self.assertEqual(domain.call_args.kwargs["runtime_port"], profile.runtime_port)
         self.assertEqual(health.call_args.kwargs["health_path"], profile.health_path)
         self.assertEqual(captured_env["PUBLIC_APP_URL"], _refresh_request().preview_url)

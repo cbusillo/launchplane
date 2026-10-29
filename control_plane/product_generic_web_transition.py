@@ -34,6 +34,9 @@ class GenericWebPreviewDeclaration(BaseModel):
     data_transport_mode: Literal["none", "driver"]
     transport_extension: Literal["", "postgres"] = ""
     transport_database_prefix: str = ""
+    copied_env_keys: tuple[str, ...] = ()
+    required_template_env_keys: tuple[str, ...] = ()
+    omitted_env_keys: tuple[str, ...] = ()
     generated_secret_env: dict[str, PreviewSecretEncoding] = Field(default_factory=dict)
     preview_url_env_keys: tuple[str, ...] = ()
     preview_domain_env_keys: tuple[str, ...] = ()
@@ -127,12 +130,15 @@ def build_generic_web_transition_plan(
     if profile.preview.transport_extension not in {"", "postgres"} and (
         request.preview is None
         or request.preview.transport_extension != "postgres"
-        or not {"generated_secret_env", "preview_url_env_keys", "preview_domain_env_keys"}.issubset(
-            request.preview.model_fields_set
-        )
+        or not {
+            "copied_env_keys",
+            "generated_secret_env",
+            "preview_url_env_keys",
+            "preview_domain_env_keys",
+        }.issubset(request.preview.model_fields_set)
     ):
         raise ValueError(
-            "Declare postgres transport, generated_secret_env, preview_url_env_keys and preview_domain_env_keys from the product runtime contract before transitioning a legacy preview profile. Use empty collections only when the product requires none."
+            "Declare postgres transport, copied_env_keys, generated_secret_env, preview_url_env_keys and preview_domain_env_keys from the product runtime contract before transitioning a legacy preview profile. Use empty collections only when the product requires none."
         )
     preview = profile.preview
     if request.preview is not None:

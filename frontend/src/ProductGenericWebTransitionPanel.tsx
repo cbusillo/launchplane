@@ -25,6 +25,9 @@ function previewDeclarations(preview: Declarations["preview"] | LaunchplaneProdu
       preview_url_env_keys: preview.preview_url_env_keys ?? [],
       preview_domain_env_keys: preview.preview_domain_env_keys ?? [],
     }),
+    copied_env_keys: preview.copied_env_keys ?? [],
+    required_template_env_keys: preview.required_template_env_keys ?? [],
+    omitted_env_keys: preview.omitted_env_keys ?? [],
     transport_database_prefix: preview.transport_database_prefix ?? "",
     app_name_suffix: preview.app_name_suffix ?? "",
   };
@@ -202,6 +205,7 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
         {lane.extensions.schedules?.map(schedule => <p key={schedule.name}>{schedule.name}: <code>{schedule.command}</code> · {schedule.cron_expression} · {schedule.enabled ? "enabled" : "disabled"}</p>)}
       </div>)}<p>Preview transport: {review.request.preview?.transport_extension || review.request.preview?.data_transport_mode}; application suffix: {review.request.preview?.app_name_suffix || "none"}</p>
       <p>Preview endpoint: {review.endpointBefore ?? "not reported"} → {review.endpointAfter ?? "not reported"}</p>
+      <p>Copied template keys: {review.request.preview?.copied_env_keys?.join(", ") || "none"}</p>
       <p>Generated preview secrets: {Object.entries(review.request.preview?.generated_secret_env ?? {}).map(([key, encoding]) => `${key} (${encoding})`).join(", ") || "none"}</p>
       <p>Preview URL keys: {review.request.preview?.preview_url_env_keys?.join(", ") || "none"}; domain keys: {review.request.preview?.preview_domain_env_keys?.join(", ") || "none"}</p>
     </div> : null}
