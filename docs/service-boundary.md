@@ -2448,6 +2448,19 @@ manifest writes require `product_onboarding.apply`, all for product/context
 `launchplane`. The route requires DB-backed storage and returns only sanitized
 `provider_target*` summaries.
 
+The record route also accepts a signed-in admin through the shared
+origin, Fetch Metadata and rotating CSRF checks. The same plan digest,
+idempotency and atomic bundle rules apply. This path writes product records
+without creating preview/testing caller grants or reconciling policy.
+
+The current-source onboarding worker applies only target and product records.
+The wrapper still pins its earlier grant-bearing revision and retains the
+matching planner; source deletion does not change that execution. Native
+replacement must cover target creation, original-key recovery/readback and
+reviewed custody retention before the wrapper retires. Browser target setup
+currently permits reviewed domain repair only. Existing caller-rule retirement
+and independent absence readback remain available.
+
 The manual `Product Onboarding` workflow is the supported conventional caller.
 It resolves numeric GitHub repository and repository owner ids with a narrowly scoped
 GitHub App token, plans `create-application` through

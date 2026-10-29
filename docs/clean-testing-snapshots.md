@@ -86,6 +86,11 @@ reports `copy_failure_exit_status` from its failed child command.
 The host forwards these markers without forwarding the child's output or
 traceback. The stage identifies the first failure before rollback or cleanup;
 it does not prove the underlying application cause or authorize another copy.
+`module_update` covers witness reads, restored-database preparation and its
+module/install/hook work; it does not prove that an Odoo subprocess failed.
+Failed preview and fresh-testing copy commands now retain the captured output
+privately and report only `copy_failure_evidence_id`; see
+[private copy failure evidence](host-program-package.md#private-copy-failure-evidence).
 Provider completion and these diagnostics do not settle custody or establish a
 usable preview.
 

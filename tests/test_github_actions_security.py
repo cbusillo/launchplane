@@ -155,7 +155,7 @@ APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
     "cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml": (
         ActionClassification(
             "First-party same-repository",
-            "protected generic-web target, record, and authorization apply",
+            "protected generic-web target and record apply",
         )
     ),
     "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml": (

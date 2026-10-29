@@ -71,7 +71,7 @@ def command(arguments, *, stdin=None, diagnose_failure=False):
         stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
         if diagnose_failure:
-            emit_copy_command_failure(result)
+            emit_copy_command_failure(result, spec)
         raise RuntimeError('Clean snapshot preview operation failed')
     return result.stdout
 

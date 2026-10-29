@@ -113,6 +113,22 @@ workflow, and the workflow-identity grants that let product repos call them.
 They are still in the code until #2606 (open) deletes them; nothing new may
 use them.
 
+## Retained artifact source attribution
+
+`GET /v1/artifacts/protected` includes optional `manifest_provenance` on entries
+with a stored manifest: schema version, source commit, image, base-image/build-tool
+provenance, addon sources/selectors and the source-build receipt when recorded.
+It omits arbitrary build-flag values and package inventories. This is neither an
+installed-module inventory nor proof that a setting is unused. Compare its image
+with the retained record and runtime evidence before attributing consumers;
+floating or incomplete legacy refs remain unqualified.
+
+An absent projection means no stored manifest was found. Preview manifests are
+normally not persisted in the release store; recover their exact verified build
+evidence separately. Protection, warnings, authorization and rollback selection
+are unchanged. An installed client that omits the additive field needs a bounded
+projection in its owning repository before it can display this evidence.
+
 ## Not covered here
 
 Event handling (which GitHub events start a verification, and the catch-up

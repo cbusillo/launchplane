@@ -181,6 +181,8 @@ def _normalized(request: "DokployTargetSetupEnvelope") -> dict[str, Any]:
             "expected_plan_sha256",
             "retain_state_volume_allocation",
             "expected_state_volume_custody_sha256",
+            "reviewed_onboarding_plan_sha256",
+            "reviewed_target_request_sha256",
         },
     )
 
@@ -442,12 +444,20 @@ class ApplicationStateVolumeAdapter:
     ) -> "ApplicationStateVolumeAdapter":
         validate_ordinary_allocation_request(request)
         if not operation_key:
-            raise ValueError("Allocation recovery requires the original operation key.")
+            raise ValueError(
+                "New-product allocation planning and recovery require an Idempotency-Key."
+                if request.onboarding is not None
+                else "Allocation recovery requires the original operation key."
+            )
         plan_id = ordinary_allocation_id(scope, operation_key)
         plan = store.read_idempotency_record(
             scope=scope, route_path=PLAN_ROUTE, idempotency_key=plan_id
         )
         if plan is None:
+            if request.onboarding is not None and request.mode != "dry-run":
+                raise ValueError(
+                    "New-product allocation requires its saved dry-run and original key."
+                )
             if request.mode == "readback" or request.retain_allocation:
                 legacy = store.read_idempotency_record(
                     scope=scope, route_path=ROUTE, idempotency_key=operation_key
@@ -560,12 +570,20 @@ class ApplicationStateVolumeAdapter:
             result.pop("state_volume")
             result.pop("state_volume_plan_id")
             result["allocation_id"] = self.intent["plan_id"]
+        if self.request.onboarding is not None:
+            from control_plane.onboarding_target import onboarding_target_digests
+
+            result.update(onboarding_target_digests(self.request))
         return result
 
     def checkpoint(self, *, read_provider_source: bool = True) -> None:
         from control_plane.dokploy_target_setup_http import require_empty_testing_target_creation
         from control_plane.application_state_volume_retention import require_state_volume_owner
 
+        if self.request.onboarding is not None:
+            from control_plane.onboarding_target import require_unallocated_onboarding_contexts
+
+            require_unallocated_onboarding_contexts(self.store, self.request.onboarding)
         if (
             self.request.state_volume_path
             or self.first_testing_setup
