@@ -6481,6 +6481,8 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.provider.applied, [("destroy", 5)])
 
     def test_reopened_pr_retains_unknown_source_fence_after_exhausted_destroy(self) -> None:
+        from control_plane.preview_source import require_source_free_preview_history
+
         self.write_preview()
         self.github.pull_request["state"] = "closed"
         with patch.object(self.provider, "build_inputs", side_effect=ValueError("refused")):
@@ -6493,7 +6495,12 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.github.pull_request["state"] = "open"
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)
-        refused = self.run_once()
+        with patch(
+            "control_plane.odoo_preview_apply_execution.require_source_free_preview_history",
+            wraps=require_source_free_preview_history,
+        ) as source_guard:
+            refused = self.run_once()
+        source_guard.assert_called_once()
         self.assertEqual(refused.state, "failed")
         self.assertEqual(refused.last_plan["last_failed_error_code"], "preview_provenance_refused")
         self.assertFalse(self.provider.applied)

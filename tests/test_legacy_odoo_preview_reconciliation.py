@@ -1223,6 +1223,7 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         self,
     ) -> None:
         from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+        from control_plane.preview_source import require_source_free_preview_history
         from tests.test_product_reconcile import FakePreviewProvider
 
         original = self.historical_generation().model_copy(update={"runtime_identity": None})
@@ -1250,9 +1251,14 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         newer = self.prepared_operation(fake, "newer-active-refresh", datetime.now(timezone.utc))
         with (
             patch.object(newer.adapter, "capture_schedule_binding"),
+            patch(
+                "control_plane.odoo_preview_apply_execution.require_source_free_preview_history",
+                wraps=require_source_free_preview_history,
+            ) as source_guard,
             self.assertRaises(OdooPreviewPlanProvenanceError),
         ):
             newer.run(self.store)
+        source_guard.assert_called_once()
         self.assertFalse(fake.applied)
         self.assertEqual(
             self.store.read_preview_record(self.preview.preview_id).serving_generation_id,
