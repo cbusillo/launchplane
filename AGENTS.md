@@ -94,7 +94,7 @@ Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product 
 - Changes to agent instructions, execution guidance, approval or safety rules,
   credential handling, or destructive helpers need review by another model
   before delivery. Use the `model-review` skill and its finding-disposition
-  rules; record the provider/model and how findings were handled in the PR.
+  rules.
 - Add targeted tests whenever contract or storage behavior changes.
 - Follow the shared [Tests rule](https://github.com/cbusillo/codex-skills/blob/main/instructions/global.md#tests)
   and [testing style](docs/style/testing.md).
