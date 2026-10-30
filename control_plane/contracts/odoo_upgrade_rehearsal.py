@@ -26,6 +26,7 @@ ODOO_UPGRADE_REHEARSAL_PREFLIGHT_ROUTE = ODOO_UPGRADE_REHEARSAL_ROUTE + "/prefli
 REHEARSAL_RELEASED_RESERVATION_HEADERS = {"X-Launchplane-Mutation-Reservation": "released"}
 INCOMPLETE_REHEARSAL_TARGET_SUFFIX = ":incomplete-retirement"
 REHEARSAL_PUBLIC_FAILURE_MESSAGES = {
+    "rehearsal_artifact_unavailable": "No rehearsal copy action started. Resources are retained. Refresh the selected artifact from current odoo-devkit and qualify migration-purpose copy support before a new rehearsal.",
     "rehearsal_storage_capacity_insufficient": "No rehearsal action started. Requalify storage capacity and review a new operation key.",
     "rehearsal_rebuild_precheck_refused": "FINAL restoration has not started. Rebuild resources and evidence are retained. Requalify the prerequisite and review a new rebuild operation key.",
     "rehearsal_rebuild_capacity_insufficient": "FINAL restoration has not started. Prepared rebuild resources are retained. Requalify storage capacity and review a new rebuild operation key.",
@@ -530,6 +531,7 @@ class RehearsalHostResult(BaseModel):
     ) = None
     refusal_code: Literal[
         "",
+        "rehearsal_artifact_unavailable",
         "rehearsal_storage_capacity_insufficient",
         "rehearsal_rebuild_capacity_insufficient",
         "rehearsal_rebuild_precheck_refused",

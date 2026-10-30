@@ -3409,8 +3409,11 @@ settings. This preserves Shopify/eBay business identity, history, import cursors
 and pending export intent while the artifact disconnects executable work and
 removes copied credentials. Independent SQL readback and connection isolation
 still gate registry startup. An artifact without migration-purpose settings or
-isolated-copy readback refuses before restore; refresh the selected artifact
-from current `odoo-devkit` and qualify it before starting a new rehearsal.
+isolated-copy readback returns `rehearsal_artifact_unavailable` before capture
+or copy restoration, with resources retained. The public refusal instructs the
+operator to refresh the selected artifact from current `odoo-devkit` and qualify
+it before starting a new rehearsal. The runner checks support again before
+restore.
 Ordinary testing and preview copies retain their development-store reset path.
 Filestore working copies use `cp --reflink=auto` with full-copy fallback where
 reflinks are unsupported; PostgreSQL `CREATE DATABASE ... TEMPLATE` remains a
