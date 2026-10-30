@@ -26,6 +26,8 @@ pass the shared secret redactor unchanged; invalid rows are omitted.
 `findings_omitted` counts both invalid rows and rows beyond the cap. Counts and
 refusal still cover every fixable HIGH/CRITICAL occurrence, including omitted
 rows. Paths, URLs, descriptions, raw reports and provider stderr stay private.
+Other advisory identifiers or package/version syntax are omitted with the same
+count; this bounded diagnostic does not promise every package ecosystem.
 
 The existing product reconcile-request reader exposes `last_plan.artifact_scan`.
 Read `GET /v1/product-profiles/{product}/reconcile-requests` under the existing
@@ -77,7 +79,9 @@ scans its immutable digest, even while activation is disabled. Missing build
 or registry evidence returns unavailable. It queues no reconcile, records no
 artifact or deployment, and changes no profile. Allow up to five minutes for
 the bounded scan and read its image reference, counts and status before
-activation; no credential value leaves the service.
+activation. The qualification response includes the same bounded `findings`
+and `findings_omitted` for that testing candidate; no credential value leaves
+the service.
 
 For private GHCR images, the service supports an exact context-scoped managed
 secret integration `ghcr_artifact_read` in its own `launchplane` context, with
