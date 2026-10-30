@@ -27,10 +27,7 @@ from control_plane.contracts.odoo_prod_promotion_operation import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import (
-    ArtifactIdentityReference,
-    BackupGateEvidence,
     DeploymentEvidence,
-    PromotionRecord,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
@@ -41,6 +38,10 @@ from control_plane.dokploy.traefik_cutover import TraefikRouteTarget, route_payl
 from control_plane.odoo_cutover_plan import cutover_record_id, resolve_profile_cutover_plan
 from control_plane.odoo_cutover_storage import DeploymentCutoverStore
 from control_plane.workflows.odoo_cutover import execute_odoo_cutover, rollback_compatible_cutover
+from control_plane.workflows.odoo_prod_promotion import (
+    OdooProdPromotionRequest,
+    _build_promotion_record,
+)
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.test_dokploy import _write_dokploy_managed_secrets
 from tests.test_odoo_cutover_website_settings import snapshot
@@ -658,27 +659,18 @@ class InstalledOdooCutoverTests(unittest.TestCase):
             )
         gate = self.backup_fixture.require(self.store)
         self.store.write_promotion_record(
-            PromotionRecord(
+            _build_promotion_record(
                 record_id="promotion-cutover-" + cutover_record_id(plan),
-                context="example-product",
-                from_instance="testing",
-                to_instance="prod",
-                artifact_identity=ArtifactIdentityReference(artifact_id=candidate.artifact_id),
-                backup_record_id="backup-example",
-                backup_gate=BackupGateEvidence(
-                    required=True,
-                    status="pass",
-                    evidence={
-                        **gate.evidence,
-                        "infrastructure_backup_record_id": "backup-example",
-                        "admission_checked_at": datetime.now(UTC).isoformat(),
-                    },
+                request=OdooProdPromotionRequest(
+                    context="example-product",
+                    artifact_id=candidate.artifact_id,
+                    backup_record_id="backup-example",
+                    infrastructure_backup_record_id="backup-example",
                 ),
-                deploy=DeploymentEvidence(
-                    target_type="compose",
-                    target_name=self.new_project,
-                    deploy_mode="atomic-two-slot",
-                ),
+                deployment_record=None,
+                deployment_status="pending",
+                backup_gate=self.store.read_backup_gate_record("backup-example"),
+                infrastructure_backup=gate,
             )
         )
         return plan
