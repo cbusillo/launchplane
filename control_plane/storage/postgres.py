@@ -10034,16 +10034,10 @@ class PostgresRecordStore(HumanSessionStore):
         original = aliased(LaunchplaneIdempotencyRow)
         original_filters = (
             (
-                or_(
-                    original.payload["response_payload"]["original_intent"]["issued_plan"][
-                        "plan_request"
-                    ]["pr_number"].as_integer()
-                    == number,
-                    original.payload["response_payload"]["original_intent"]["fixture_binding"][
-                        "anchor_pr_number"
-                    ].as_integer()
-                    == number,
-                ),
+                original.payload["response_payload"]["original_intent"]["issued_plan"][
+                    "plan_request"
+                ]["pr_number"].as_integer()
+                == number,
             )
             if number is not None
             else ()

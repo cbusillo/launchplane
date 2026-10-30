@@ -123,7 +123,10 @@ class PreviewFixtureAdapter:
         return connection
 
     def capture_binding(self) -> PreviewFixtureBinding:
-        connection = self.connect()
+        self.binding = self.runtime_binding(self.connect())
+        return self.binding
+
+    def runtime_binding(self, connection: reads.OdooRuntimeConnection) -> PreviewFixtureBinding:
         target = api.fetch_dokploy_target_payload(
             host=connection.host,
             token=connection.token,
@@ -137,7 +140,7 @@ class PreviewFixtureAdapter:
             compose_name=connection.app_name,
             target_payload=target,
         )
-        self.binding = PreviewFixtureBinding.model_validate(
+        return PreviewFixtureBinding.model_validate(
             {
                 "identity": connection.selection.identity,
                 "target_id": connection.evidence.target_id,
@@ -153,7 +156,6 @@ class PreviewFixtureAdapter:
                 ).anchor_pr_number,
             }
         )
-        return self.binding
 
     def original_intent(self, retained: dict[str, object] | None = None) -> dict[str, object]:
         if retained:
@@ -167,14 +169,15 @@ class PreviewFixtureAdapter:
                 product=self.product,
                 maintenance=self.request,
                 fixture_binding=binding,
-                writer_schedule_app_name=fixture_schedule_app_name(
-                    fixture_schedule_script(binding, fixture=self.request.fixture, mode="apply")
-                ),
             )
         return intent.model_dump(mode="json")
 
     def invoke(
-        self, mode: str, lease: ProviderOperationLease | None = None
+        self,
+        mode: str,
+        lease: ProviderOperationLease | None = None,
+        *,
+        expected_fixture_sha256: str = "",
     ) -> PreviewFixtureReceipt:
         connection = self.connect(mutation=mode == "apply")
         binding = self.binding or self.capture_binding()
@@ -182,16 +185,19 @@ class PreviewFixtureAdapter:
         if (
             binding.identity != selection.identity
             or binding.target_id != connection.evidence.target_id
-            or binding.container_id != connection.evidence.container_id
+            or mode != "readback"
+            and binding.container_id != connection.evidence.container_id
             or binding.database != connection.credentials["ODOO_DB_NAME"]
             or binding.app_name != connection.app_name
         ):
             raise ValueError("Fixture runtime differs from its retained binding.")
+        if mode == "readback":
+            binding = self.runtime_binding(connection)
 
         def checkpoint(phase: str) -> None:
             self.selection(mutation=mode == "apply")
             reads.assert_selection_current(self.store, selection)
-            if lease is not None:
+            if lease is not None and phase == post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER:
                 lease.checkpoint_effect(phase)
 
         evidence = run_fixture_schedule(
@@ -201,6 +207,7 @@ class PreviewFixtureAdapter:
             mode=mode,
             fixture=self.request.fixture,
             before_provider_mutation=checkpoint,
+            expected_fixture_sha256=expected_fixture_sha256,
         )
         encoded = evidence.get(PREVIEW_FIXTURE_RESULT_MARKER, "")
         if not encoded or len(encoded) > 65536:
@@ -251,14 +258,14 @@ class PreviewFixtureAdapter:
             ) from error
         effect = FixtureEffectLease(lease)
         try:
-            receipt = self.invoke("apply", effect)
+            receipt = self.invoke("apply", effect, expected_fixture_sha256=planned.fixture_sha256)
         except Exception as error:
             if not effect.started:
                 raise ProviderMutationRejectedError(
                     ValueError("Fixture dispatch did not begin.")
                 ) from error
             raise ProviderMutationUnknownError("Fixture outcome is unverified.") from error
-        if receipt.fixture_sha256 != planned.fixture_sha256:
+        if receipt.committed and receipt.fixture_sha256 != planned.fixture_sha256:
             raise ProviderMutationUnknownError(
                 "Applied fixture differs from its review; reconcile the original operation."
             )
@@ -277,13 +284,19 @@ class PreviewFixtureAdapter:
         except (ValueError, OSError, RuntimeError, KeyError, click.ClickException):
             return ProviderObservation("unknown")
         if not receipt.records:
-            return ProviderObservation("unknown")
+            return (
+                ProviderObservation("unknown")
+                if provider_effect_phase
+                else ProviderObservation("absent", retry_safe=True)
+            )
         return ProviderObservation(
             "present", response_payload=self.response(receipt, recovered=True)
         )
 
 
-def fixture_schedule_script(binding: PreviewFixtureBinding, *, fixture: str, mode: str) -> str:
+def fixture_schedule_script(
+    binding: PreviewFixtureBinding, *, fixture: str, mode: str, expected_fixture_sha256: str = ""
+) -> str:
     spec: dict[str, object] = {
         "identity": binding.identity.model_dump(mode="json"),
         "fixture": fixture,
@@ -291,6 +304,7 @@ def fixture_schedule_script(binding: PreviewFixtureBinding, *, fixture: str, mod
         "container_id": binding.container_id,
         "app_name": binding.app_name,
         "database": binding.database,
+        "expected_fixture_sha256": expected_fixture_sha256,
     }
     return host_schedule("preview_fixture", spec)
 
@@ -308,8 +322,11 @@ def run_fixture_schedule(
     fixture: str,
     before_provider_mutation: Callable[[str], None] | None = None,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    expected_fixture_sha256: str = "",
 ) -> dict[str, str]:
-    script = fixture_schedule_script(binding, fixture=fixture, mode=mode)
+    script = fixture_schedule_script(
+        binding, fixture=fixture, mode=mode, expected_fixture_sha256=expected_fixture_sha256
+    )
     schedule_app_name = fixture_schedule_app_name(script)
     schedule_name = "Launchplane " + schedule_app_name
     return post_deploy.run_manual_data_schedule(

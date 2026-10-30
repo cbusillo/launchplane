@@ -24,7 +24,9 @@ is unchanged.
 
 The image ships `/opt/project/addons/launchplane_preview_fixture.py`. The fixed
 host program executes it inside the exact selected web container, passing only
-`identity`, native `database`, `fixture` and `mode` as JSON stdin. The product
+`identity`, native `database`, `fixture`, `mode` and `expected_fixture_sha256` as
+JSON stdin. The internal expected digest is empty for inert modes and carries
+the reviewed definition digest for apply; it is not a public request field. The product
 checks native database host, preview instance, database name and runtime identity
 before opening a database. Only the ephemeral `deployed_at` field may be ignored
 when comparing identities.
@@ -42,6 +44,9 @@ native workflow file lock or untouched-sample qualification. It reports what the
 transaction wrote; later scanning, backorders, edits and deletions do not change
 that fact. Empty readback means the witness was not observed. It does not prove
 that an interrupted writer cannot still commit.
+Readback may use a replacement web container only within the same verified
+generation, runtime identity, native database and exclusively owned target.
+Apply and cancellation retain their exact original container binding.
 
 Return exactly one bounded JSON object on stdout: `identity`, `fixture`,
 `fixture_sha256`, `mode`, `committed`, `verified` and `records`. Records contain
@@ -70,7 +75,7 @@ job. Each provider execution retains its own history.
 
 ## Review, apply and recover
 
-Use `scripts/preview-fixture.py` with the installed catalog operator transport.
+Use `scripts/preview-fixture.py` with the installed catalog transport.
 Payload and review files stay private and outside the repository. Start with the
 maintenance envelope above, `mode: dry-run`, and no reviewed digest:
 
@@ -92,10 +97,16 @@ target/generation/container binding, effect checkpoint and bounded receipt.
 Repeating an identical completed request/key replays its result. After a lost
 response, repeat that original request and key: verified historical commit
 evidence adopts the result without another write. Empty or unavailable readback
-keeps the reservation held. Never replace a key to bypass it. Explicit product
+after a trigger keeps the reservation held. Empty witness evidence with no
+recorded trigger checkpoint permits the original operation to retry its current
+preflight. Never replace a key to bypass it. Explicit product
 rejections settle without claiming a data commit. Pre-dispatch refusals release
 fresh reservations. Read-only modes use service and provider execution evidence
 rather than synthetic idempotency records.
+Disabled schedule setup runs the existing guards but does not checkpoint a data
+effect; the fixture checkpoint is immediately before schedule trigger. A valid
+empty uncommitted apply receipt definitively rejects the write, including a
+definition mismatch detected before commit.
 
 If the original writer or native lock cannot be recovered, existing guarded
 preview destruction can cancel the fixture by discarding its isolated resources.

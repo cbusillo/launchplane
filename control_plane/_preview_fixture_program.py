@@ -37,7 +37,10 @@ def checked_container(spec, *, require_running):
 def run_fixture(spec):
     checked_container(spec, require_running=True)
     expected = spec['identity']
-    request = {key: spec[key] for key in ('identity', 'database', 'fixture', 'mode')}
+    digest = spec['expected_fixture_sha256']
+    if not isinstance(digest, str) or (not re.fullmatch('[a-f0-9]{64}', digest) if spec['mode'] == 'apply' else digest != ''):
+        raise ValueError('Fixture review digest unavailable')
+    request = {key: spec[key] for key in ('identity', 'database', 'fixture', 'mode', 'expected_fixture_sha256')}
     child = subprocess.Popen(
         ['docker', 'exec', '-i', spec['container_id'], 'python3', '/opt/project/addons/launchplane_preview_fixture.py'],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)

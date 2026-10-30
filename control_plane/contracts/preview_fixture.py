@@ -90,7 +90,6 @@ class PreviewFixtureIntent(BaseModel):
     product: str = Field(min_length=1)
     maintenance: PreviewFixtureRequest
     fixture_binding: PreviewFixtureBinding
-    writer_schedule_app_name: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_binding(self) -> "PreviewFixtureIntent":

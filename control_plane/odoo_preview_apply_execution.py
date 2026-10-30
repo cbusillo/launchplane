@@ -711,19 +711,7 @@ class OdooPreviewApplyOperation:
             if check is None:
                 return DurableProviderOperationResult("in_progress", None, 409, {})
             check()
-            if isinstance(retained_intent.get("fixture_cancellation"), dict):
-                if (
-                    self.adapter._issued_plan.operation != "destroy"
-                    or not self.adapter._issued_plan.dry_run_plan.delete_volumes
-                    or self.adapter._pre_mutation_guard is None
-                ):
-                    raise ValueError(
-                        "Fixture cancellation requires a guarded destructive preview destroy."
-                    )
-                self.adapter.fixture_cancellation = PreviewFixtureIntent.model_validate(
-                    retained_intent["fixture_cancellation"]
-                )
-            elif existing is None and allow_mutation:
+            if existing is None and allow_mutation:
                 self.adapter.capture_fixture_cancellation()
             if (
                 (self.disposable_cleanup or self.adapter.fixture_cancellation is not None)
@@ -796,6 +784,25 @@ class OdooPreviewApplyOperation:
         from control_plane.storage.postgres import PostgresRecordStore
 
         postgres = cast(PostgresRecordStore, store)
+        existing = postgres.read_idempotency_record(
+            scope=self.reservation_scope,
+            route_path=self.route_path,
+            idempotency_key=self.idempotency_key,
+        )
+        retained_intent = postgres.read_original_mutation_intent(existing) if existing else {}
+        if isinstance(retained_intent.get("fixture_cancellation"), dict):
+            if (
+                self.adapter._issued_plan.operation != "destroy"
+                or not self.adapter._issued_plan.dry_run_plan.delete_volumes
+                or allow_mutation
+                and self.adapter._pre_mutation_guard is None
+            ):
+                raise ValueError(
+                    "Fixture cancellation requires a guarded destructive preview destroy."
+                )
+            self.adapter.fixture_cancellation = PreviewFixtureIntent.model_validate(
+                retained_intent["fixture_cancellation"]
+            )
         with ExitStack() as locks:
             if not postgres.preview_refresh_is_excluded(preview_id=logical_id):
                 locks.enter_context(

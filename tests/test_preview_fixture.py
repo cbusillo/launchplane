@@ -33,11 +33,16 @@ from control_plane.preview_fixture import (
     run_fixture_schedule,
 )
 from control_plane._preview_fixture_program import PREVIEW_FIXTURE_RESULT_MARKER
-from control_plane.dokploy.post_deploy import OdooPostDeployReadbackFailure
+from control_plane.dokploy.post_deploy import (
+    OdooPostDeployReadbackFailure,
+    ODOO_POST_DEPLOY_SCHEDULE_UPSERT,
+    ODOO_POST_DEPLOY_SCHEDULE_TRIGGER,
+)
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
     ProviderOperationLease,
     ProviderMutationRejectedError,
+    ProviderMutationOutcome,
     run_durable_provider_operation,
 )
 from control_plane.storage.postgres import PostgresRecordStore
@@ -114,6 +119,274 @@ def fixture_binding() -> PreviewFixtureBinding:
 
 
 class PreviewFixtureTests(unittest.TestCase):
+    def test_setup_failure_releases_but_trigger_uncertainty_keeps_fixture_custody(self) -> None:
+        for failure in ("setup", "trigger", "crash"):
+            with self.subTest(failure=failure), TemporaryDirectory() as directory:
+                store = PostgresRecordStore(
+                    database_url="sqlite+pysqlite:///" + str(Path(directory) / "state.db")
+                )
+                store.ensure_schema()
+                self.addCleanup(store.close)
+                binding = fixture_binding()
+                planned = fixture_receipt("dry-run")
+                adapter = PreviewFixtureAdapter(
+                    store,
+                    Path(directory),
+                    "example-product",
+                    fixture_request(
+                        mode="apply", reviewed_plan_sha256=fixture_plan_sha256(planned)
+                    ),
+                    "trace",
+                    binding,
+                )
+                connection = Mock(
+                    selection=Mock(identity=binding.identity),
+                    evidence=Mock(target_id=binding.target_id, container_id=binding.container_id),
+                    credentials={"ODOO_DB_NAME": binding.database},
+                    app_name=binding.app_name,
+                )
+
+                attempts = {"apply": 0}
+
+                def schedule(**kwargs: object) -> dict[str, str]:
+                    mode = str(kwargs["mode"])
+                    if mode == "apply":
+                        attempts["apply"] += 1
+                        if failure == "crash" and attempts["apply"] == 1:
+                            raise KeyboardInterrupt
+                        self.assertEqual(kwargs["expected_fixture_sha256"], planned.fixture_sha256)
+                        callback = cast(Callable[[str], None], kwargs["before_provider_mutation"])
+                        callback(ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
+                        if failure in {"trigger", "crash"}:
+                            callback(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+                        if failure != "crash":
+                            raise OSError("provider unavailable")
+                    receipt = fixture_receipt(
+                        mode,
+                        records=[]
+                        if mode == "readback"
+                        else planned.model_dump(mode="json")["records"],
+                    )
+                    return {PREVIEW_FIXTURE_RESULT_MARKER: receipt.model_dump_json().encode().hex()}
+
+                with (
+                    patch.object(PreviewFixtureAdapter, "connect", return_value=connection),
+                    patch.object(PreviewFixtureAdapter, "runtime_binding", return_value=binding),
+                    patch.object(
+                        PreviewFixtureAdapter, "selection", return_value=connection.selection
+                    ) as qualification,
+                    patch("control_plane.preview_fixture.reads.assert_selection_current"),
+                    patch(
+                        "control_plane.preview_fixture.run_fixture_schedule", side_effect=schedule
+                    ),
+                ):
+
+                    def run() -> DurableProviderOperationResult:
+                        return run_durable_provider_operation(
+                            store=store,
+                            scope="fixture",
+                            route_path="/v1/drivers/odoo/app-maintenance",
+                            idempotency_key="sample",
+                            request_fingerprint="sample",
+                            lease_owner="worker",
+                            response_trace_id="trace",
+                            adapter=adapter,
+                        )
+
+                    if failure == "setup":
+                        with self.assertRaises(ValueError):
+                            run()
+                    elif failure == "crash":
+                        with self.assertRaises(KeyboardInterrupt):
+                            run()
+                        before = store.read_idempotency_record(
+                            scope="fixture",
+                            route_path="/v1/drivers/odoo/app-maintenance",
+                            idempotency_key="sample",
+                        )
+                        assert before is not None
+                        self.assertFalse(before.provider_effect_phase)
+                        self.assertEqual(run().status, "completed")
+                        self.assertEqual(attempts["apply"], 2)
+                    else:
+                        self.assertEqual(run().status, "reconcile_required")
+                        self.assertEqual(run().status, "reconcile_required")
+                        self.assertEqual(attempts["apply"], 1)
+                held = store.read_idempotency_record(
+                    scope="fixture",
+                    route_path="/v1/drivers/odoo/app-maintenance",
+                    idempotency_key="sample",
+                )
+                self.assertEqual(held is not None, failure != "setup")
+                if held is not None:
+                    self.assertEqual(
+                        held.state, "completed" if failure == "crash" else "reconcile_required"
+                    )
+                self.assertEqual(qualification.call_count, 1 if failure == "setup" else 2)
+
+    def test_historical_readback_reconnects_only_within_original_runtime_and_database(self) -> None:
+        binding = fixture_binding()
+        for change, allowed in (
+            ("container", True),
+            ("generation", False),
+            ("database", False),
+            ("target", False),
+        ):
+            with self.subTest(change=change):
+                current = binding.model_copy(update={"container_id": "e" * 64})
+                identity = (
+                    current.identity.model_copy(
+                        update={"preview_generation_id": "different-generation"}
+                    )
+                    if change == "generation"
+                    else current.identity
+                )
+                connection = Mock(
+                    selection=Mock(identity=identity),
+                    evidence=Mock(
+                        target_id="another-target" if change == "target" else current.target_id,
+                        container_id=current.container_id,
+                    ),
+                    credentials={
+                        "ODOO_DB_NAME": "another-db" if change == "database" else current.database
+                    },
+                    app_name=current.app_name,
+                )
+                adapter = PreviewFixtureAdapter(
+                    Mock(), Path("."), "example-product", fixture_request(), "trace", binding
+                )
+                evidence = {
+                    PREVIEW_FIXTURE_RESULT_MARKER: fixture_receipt("readback")
+                    .model_dump_json()
+                    .encode()
+                    .hex()
+                }
+                with (
+                    patch.object(PreviewFixtureAdapter, "connect", return_value=connection),
+                    patch.object(PreviewFixtureAdapter, "runtime_binding", return_value=current),
+                    patch("control_plane.preview_fixture.reads.assert_selection_current"),
+                    patch(
+                        "control_plane.preview_fixture.run_fixture_schedule", return_value=evidence
+                    ) as schedule,
+                ):
+                    if allowed:
+                        self.assertTrue(adapter.invoke("readback").records)
+                        self.assertEqual(
+                            schedule.call_args.kwargs["binding"].container_id, current.container_id
+                        )
+                    else:
+                        with self.assertRaises(ValueError):
+                            adapter.invoke("readback")
+                        schedule.assert_not_called()
+                    with self.assertRaises(ValueError):
+                        adapter.invoke(
+                            "apply",
+                            Mock(),
+                            expected_fixture_sha256=fixture_receipt("apply").fixture_sha256,
+                        )
+                self.assertIs(adapter.binding, binding)
+
+    def test_completed_and_rejected_fixtures_do_not_enter_source_free_refresh_history(self) -> None:
+        from control_plane.preview_source import (
+            PreviewSourceDecision,
+            require_source_free_preview_history,
+        )
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url="sqlite+pysqlite:///" + str(Path(directory) / "state.db")
+            )
+            store.ensure_schema()
+            self.addCleanup(store.close)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            old_request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+            old_plan = _issued_plan(old_request)
+            assert old_plan.plan_provenance is not None
+            source_key = old_plan.plan_provenance.plan_id
+            operation = prepare_odoo_preview_apply_operation(
+                control_plane_root=Path(directory),
+                record_store=store,
+                profile=profile,
+                apply_request=old_request,
+                issued_plan=old_plan,
+                reservation_scope="source",
+                idempotency_key=source_key,
+                request_fingerprint="original",
+                trace_id="source",
+            )
+            operation.adapter.source_decision = PreviewSourceDecision(
+                source="none", fishbowl_import=False
+            )
+            provider = Mock()
+            provider.reconciliation_key.return_value = operation.adapter.reconciliation_key()
+            provider.target_key.return_value = operation.adapter.target_key()
+            provider.apply.return_value = ProviderMutationOutcome(
+                202, {"result": {"compose_id": "compose-example"}}, provider_effect_performed=False
+            )
+            original = run_durable_provider_operation(
+                store=store,
+                scope="source",
+                route_path=operation.route_path,
+                idempotency_key=source_key,
+                request_fingerprint="original",
+                lease_owner="source",
+                response_trace_id="source",
+                adapter=provider,
+                original_intent=operation.adapter.original_intent(),
+            )
+            self.assertEqual(original.status, "completed")
+            payload = _refresh_payload()
+            cast(dict[str, object], cast(dict[str, object], payload["apply"])["dry_run_plan"])[
+                "compose_ref"
+            ] = "compose-example"
+            refresh = _issued_plan(OdooPreviewApplyEnvelope.model_validate(payload))
+            identity = fixture_identity().model_copy(
+                update={
+                    "product": profile.product,
+                    "context": profile.preview.context,
+                    "instance": refresh.dry_run_plan.compose_name,
+                }
+            )
+            fixture = fixture_request(mode="apply", reviewed_plan_sha256="c" * 64).model_copy(
+                update={"context": identity.context, "instance": identity.instance}
+            )
+            intent = PreviewFixtureIntent(
+                product=profile.product,
+                maintenance=fixture,
+                fixture_binding=fixture_binding().model_copy(update={"identity": identity}),
+            )
+            for status in (202, 409):
+                provider.apply.return_value = ProviderMutationOutcome(
+                    status,
+                    {"result": {"receipt": {"committed": status == 202}}},
+                    provider_effect_performed=False,
+                )
+                outcome = run_durable_provider_operation(
+                    store=store,
+                    scope="fixture",
+                    route_path="/v1/drivers/odoo/app-maintenance",
+                    idempotency_key=str(status),
+                    request_fingerprint=str(status),
+                    lease_owner="fixture",
+                    response_trace_id="fixture",
+                    adapter=provider,
+                    original_intent=intent.model_dump(mode="json"),
+                )
+                self.assertEqual(outcome.status, "completed")
+                require_source_free_preview_history(
+                    store, profile=profile, issued_plan=refresh, operation_record_id="next-refresh"
+                )
+                self.assertEqual(
+                    len(
+                        store.list_odoo_preview_originals(
+                            product=profile.product, number=refresh.plan_request.pr_number
+                        )
+                    ),
+                    1,
+                )
+
     def test_schedules_reuse_exact_invocations_and_isolate_every_script_path(self) -> None:
         binding = fixture_binding()
         cases = [
@@ -163,7 +436,7 @@ class PreviewFixtureTests(unittest.TestCase):
             fixture_schedule_app_name(script), fixture_schedule_app_name(script + " ")
         )
 
-    def test_original_intent_retains_the_writer_path_before_dispatch(self) -> None:
+    def test_original_intent_recovers_its_original_binding_without_provider_access(self) -> None:
         adapter = PreviewFixtureAdapter(
             Mock(),
             Path("."),
@@ -174,12 +447,6 @@ class PreviewFixtureTests(unittest.TestCase):
         binding = fixture_binding()
         with patch.object(PreviewFixtureAdapter, "capture_binding", return_value=binding):
             intent = adapter.original_intent()
-        self.assertEqual(
-            intent["writer_schedule_app_name"],
-            fixture_schedule_app_name(
-                fixture_schedule_script(binding, fixture=adapter.request.fixture, mode="apply")
-            ),
-        )
         with patch.object(
             PreviewFixtureAdapter, "capture_binding", side_effect=ValueError("runtime unavailable")
         ):
@@ -242,7 +509,7 @@ class PreviewFixtureTests(unittest.TestCase):
                 side_effect=[
                     fixture_receipt("readback", records=[]),
                     dry_run,
-                    fixture_receipt("apply", committed=False, records=[]),
+                    fixture_receipt("apply", committed=False, records=[], fixture_sha256="f" * 64),
                 ],
             ),
         ):
@@ -386,6 +653,7 @@ class PreviewFixtureTests(unittest.TestCase):
                 _adapter: PreviewFixtureAdapter,
                 mode: str,
                 lease: ProviderOperationLease | None = None,
+                **_kwargs: object,
             ) -> PreviewFixtureReceipt:
                 calls.append(mode)
                 if mode == "apply":
@@ -452,6 +720,7 @@ class PreviewFixtureTests(unittest.TestCase):
                 _adapter: PreviewFixtureAdapter,
                 mode: str,
                 lease: ProviderOperationLease | None = None,
+                **_kwargs: object,
             ) -> PreviewFixtureReceipt:
                 calls.append(mode)
                 if mode == "apply":
@@ -536,7 +805,7 @@ class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
                 planned = fixture_receipt("dry-run")
 
                 def invoke_fixture(
-                    mode: str, lease: ProviderOperationLease | None = None
+                    mode: str, lease: ProviderOperationLease | None = None, **_kwargs: object
                 ) -> PreviewFixtureReceipt:
                     if lease is not None:
                         lease.checkpoint_effect("fixture_started")
@@ -631,7 +900,11 @@ class PreviewFixtureClientTests(unittest.TestCase):
 class PreviewFixtureHostTests(unittest.TestCase):
     @contextmanager
     def host(
-        self, receipt: dict[str, object], *, stable: bool = False
+        self,
+        receipt: dict[str, object],
+        *,
+        stable: bool = False,
+        expected_fixture_sha256: str | None = None,
     ) -> Iterator[subprocess.CompletedProcess[str]]:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -666,6 +939,9 @@ class PreviewFixtureHostTests(unittest.TestCase):
                 "mode": "apply",
                 "container_id": "container-example",
                 "app_name": "sample-app",
+                "expected_fixture_sha256": fixture_receipt("apply").fixture_sha256
+                if expected_fixture_sha256 is None
+                else expected_fixture_sha256,
             }
             yield subprocess.run(
                 [
@@ -691,6 +967,13 @@ class PreviewFixtureHostTests(unittest.TestCase):
         self,
     ) -> None:
         good = fixture_receipt("apply").model_dump(mode="json")
+        for digest in ("", "invalid", "a" * 63):
+            with (
+                self.subTest(digest=digest),
+                self.host(good, expected_fixture_sha256=digest) as result,
+            ):
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(PREVIEW_FIXTURE_RESULT_MARKER + "=", result.stdout)
         with self.host(good) as result:
             self.assertEqual(result.returncode, 0, result.stderr)
             encoded = next(
@@ -868,7 +1151,14 @@ class PreviewFixtureCancellationHostTests(unittest.TestCase):
 
 class PreviewFixtureDestroyTests(unittest.TestCase):
     def test_only_guarded_destroy_takes_custody_and_requires_old_container_absence(self) -> None:
-        for scenario in ("refresh", "preflight", "container_unknown", "orphan", "success"):
+        for scenario in (
+            "refresh",
+            "preflight",
+            "container_unknown",
+            "orphan",
+            "observation",
+            "success",
+        ):
             with self.subTest(scenario=scenario), TemporaryDirectory() as directory:
                 store = PostgresRecordStore(
                     database_url="sqlite+pysqlite:///" + str(Path(directory) / "state.db")
@@ -910,7 +1200,6 @@ class PreviewFixtureDestroyTests(unittest.TestCase):
                     product=profile.product,
                     maintenance=maintenance,
                     fixture_binding=binding,
-                    writer_schedule_app_name="original-writer-schedule",
                 )
                 clock = {"now": "2026-10-30T12:00:00Z"}
                 refusal = {"active": scenario == "preflight"}
@@ -934,7 +1223,7 @@ class PreviewFixtureDestroyTests(unittest.TestCase):
                 def fixture_container(**kwargs: object) -> None:
                     if scenario == "container_unknown":
                         raise ValueError("Docker unavailable")
-                    if scenario != "orphan":
+                    if scenario not in {"orphan", "observation"}:
                         return
                     if kwargs.get("cancel"):
                         callback = cast(Callable[[str], None], kwargs["before_provider_mutation"])
@@ -993,6 +1282,15 @@ class PreviewFixtureDestroyTests(unittest.TestCase):
                         original_intent=original.model_dump(mode="json"),
                     )
                     assert stale.record is not None
+                    from control_plane.preview_reservation_recovery import (
+                        classify_preview_reservation,
+                    )
+
+                    classified = classify_preview_reservation(
+                        stale.record, profile=profile, store=store
+                    )
+                    self.assertTrue(classified["original_binding_available"])
+                    self.assertEqual(classified["action"], maintenance.intent)
                     store.mark_mutation_reconcile_required(
                         reservation=stale.record, reconciliation_key=stale.record.reconciliation_key
                     )
@@ -1003,28 +1301,53 @@ class PreviewFixtureDestroyTests(unittest.TestCase):
                         stale.record.record_id,
                     )
                     clock["now"] = "2026-10-30T13:00:00Z"
-                    if scenario == "orphan":
+                    if scenario in {"orphan", "observation"}:
                         with self.assertRaises(RuntimeError):
                             operation.run(store)
                         self.assertTrue(orphan["running"])
-                        with (
-                            patch(
-                                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
-                                return_value=("https://provider.invalid", "fixture-token"),
-                            ),
-                            patch(
-                                "control_plane.workflows.odoo_preview_runtime._compose_exists_by_id",
-                                return_value=False,
-                            ),
-                            patch(
-                                "control_plane.workflows.odoo_preview_runtime._destroyed_preview_absence_verified",
-                                return_value=True,
-                            ),
-                        ):
-                            result = operation.run(store)
-                        self.assertEqual(result.status, "completed")
-                        self.assertFalse(orphan["running"])
-                        self.assertEqual(absence.call_count, 4)
+                        if scenario == "observation":
+                            from control_plane.preview_reservation_recovery import (
+                                recover_held_preview,
+                            )
+
+                            orphan["running"] = False
+                            clock["now"] = "2026-10-30T14:00:00Z"
+                            store.write_product_profile_record(profile)
+                            held = store.read_idempotency_record(
+                                scope="destroyer",
+                                route_path=operation.route_path,
+                                idempotency_key=plan_id,
+                            )
+                            assert held is not None
+                            recovered = recover_held_preview(
+                                store=store,
+                                reservation=held,
+                                profile=profile,
+                                root=Path(directory),
+                                observe=Mock(return_value=("present", {"status": "pass"}, False)),
+                                quiescence=Mock(return_value=True),
+                            )
+                            self.assertEqual(recovered["settlement"], "adopted")
+                            self.assertEqual(absence.call_count, 2)
+                        else:
+                            with (
+                                patch(
+                                    "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                                    return_value=("https://provider.invalid", "fixture-token"),
+                                ),
+                                patch(
+                                    "control_plane.workflows.odoo_preview_runtime._compose_exists_by_id",
+                                    return_value=False,
+                                ),
+                                patch(
+                                    "control_plane.workflows.odoo_preview_runtime._destroyed_preview_absence_verified",
+                                    return_value=True,
+                                ),
+                            ):
+                                result = operation.run(store)
+                            self.assertEqual(result.status, "completed")
+                            self.assertFalse(orphan["running"])
+                            self.assertEqual(absence.call_count, 4)
                     else:
                         result = operation.run(store)
                         self.assertEqual(
@@ -1047,7 +1370,8 @@ class PreviewFixtureDestroyTests(unittest.TestCase):
                         product=profile.product
                     )
                     self.assertEqual(
-                        len(held_reservations), 0 if scenario in {"success", "orphan"} else 1
+                        len(held_reservations),
+                        0 if scenario in {"success", "orphan", "observation"} else 1,
                     )
                     if scenario == "preflight":
                         refusal["active"] = False
