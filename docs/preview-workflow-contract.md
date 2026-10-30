@@ -214,10 +214,10 @@ not prove that database-backed views were upgraded.
 An Odoo preview driver failure after a provider effect retains its original
 reconciliation fence. Before converting that result to an unknown provider
 outcome, execution logs the original operation and trace with validated schedule
-and job identifiers and closed copy/readback failure markers. It omits raw driver
+and job identifiers and closed copy/readback failure markers returned by the driver.
+It omits raw driver
 results, error messages and unknown marker values. This diagnostic does not
-authorize another effect or settle the original. Deployment, listener and health
-checks do not prove authenticated Client sign-in.
+authorize another effect or settle the original.
 
 When the preview template instance has a deploy-enabled website-bootstrap
 record, refresh also renders a preview-scoped copy of that website intent,
