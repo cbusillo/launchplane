@@ -188,7 +188,9 @@ class PreviewFixtureTests(unittest.TestCase):
             self.assertEqual(second.status, "adopted")
             self.assertEqual(third.status, "replayed")
             self.assertEqual(calls, ["dry-run", "apply", "readback"])
-            recovered = PreviewFixtureReceipt.model_validate(cast(dict[str, object], second.response_payload["result"])["receipt"])
+            recovered = PreviewFixtureReceipt.model_validate(
+                cast(dict[str, object], second.response_payload["result"])["receipt"]
+            )
             self.assertEqual(recovered.records, planned.records)
 
 
@@ -235,7 +237,9 @@ class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 planned = fixture_receipt("dry-run")
 
-                def invoke_fixture(mode: str, lease: ProviderOperationLease | None = None) -> PreviewFixtureReceipt:
+                def invoke_fixture(
+                    mode: str, lease: ProviderOperationLease | None = None
+                ) -> PreviewFixtureReceipt:
                     if lease is not None:
                         lease.checkpoint_effect("fixture_started")
                     return fixture_receipt(mode)
