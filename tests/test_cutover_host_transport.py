@@ -107,6 +107,7 @@ class CutoverHostTransportTests(unittest.TestCase):
             return_value=subprocess.CompletedProcess(argv, 0, stdout="native-result\n", stderr="")
         )
         guard = Mock()
+        transport = self.transport(guard)
 
         def remote(**kwargs: object) -> None:
             dispatch, receive = kwargs["dispatch_guard"], kwargs["receive"]
@@ -119,10 +120,14 @@ class CutoverHostTransportTests(unittest.TestCase):
             dispatch(send)
 
         with patch("control_plane.dokploy.cutover_transport._read_remote", side_effect=remote):
-            self.assertEqual(self.transport(guard)(argv, stdin), "native-result\n")
+            self.assertEqual(transport(argv, stdin), "native-result\n")
         guard.assert_called_once()
         child.assert_called_once_with(
-            list(argv), input=stdin, text=True, capture_output=True, timeout=600
+            list(argv),
+            input=stdin,
+            text=True,
+            capture_output=True,
+            timeout=transport.timeout_seconds,
         )
 
     def test_oversize_payload_refuses_before_any_remote_dispatch(self) -> None:
