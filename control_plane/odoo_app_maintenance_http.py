@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.preview_fixture import PreviewFixtureRequest
 from control_plane.drivers.dispatch import (
     _ProductRouteEnvelope,
     _validate_driver_envelope_product,
@@ -33,7 +35,9 @@ class OdooAppMaintenanceRouteDependencyError(OdooRouteDependencyError):
 
 class OdooAppMaintenanceEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    maintenance: OdooAppMaintenanceRequest
+    maintenance: Annotated[
+        OdooAppMaintenanceRequest | PreviewFixtureRequest, Field(discriminator="action")
+    ]
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooAppMaintenanceEnvelope":
@@ -67,6 +71,8 @@ def execute_odoo_app_maintenance_result(
     record_store: object,
     request: OdooAppMaintenanceEnvelope,
 ) -> tuple[dict[str, object], dict[str, object]]:
+    if not isinstance(request.maintenance, OdooAppMaintenanceRequest):
+        raise ValueError("Preview fixtures require the durable preview operation path.")
     driver_result = execute_odoo_app_maintenance(
         control_plane_root=control_plane_root,
         record_store=record_store,

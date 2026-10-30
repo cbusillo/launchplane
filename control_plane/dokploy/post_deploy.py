@@ -266,6 +266,7 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
         "clean_snapshot_database_sha256",
         "clean_snapshot_filestore_sha256",
         "clean_preview_snapshot_id",
+        "preview_fixture_result",
     }
     | READBACK_FAILURE_MARKERS
     | INTEGRATION_READBACK_NAME_LIST_MARKERS
@@ -440,7 +441,12 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
         )
     if readback_marker_is_safe(key, value) or copy_failure_marker_is_safe(key, value):
         return True
-    if key in {"rehearsal_result", "rehearsal_child_failure", "recipient_recovery_retained"}:
+    if key in {
+        "rehearsal_result",
+        "rehearsal_child_failure",
+        "recipient_recovery_retained",
+        "preview_fixture_result",
+    }:
         return bool(
             re.fullmatch(
                 r"(?:[a-f0-9]{2}){1," + str(NATIVE_OPERATION_RESULT_MAX_BYTES) + "}", value

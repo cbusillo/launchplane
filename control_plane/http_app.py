@@ -7453,6 +7453,109 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
+        from control_plane.contracts.preview_fixture import PreviewFixtureRequest
+
+        if isinstance(maintenance_request.maintenance, PreviewFixtureRequest):
+            from control_plane.preview_fixture import PreviewFixtureAdapter
+            from control_plane.contracts.preview_execution import preview_execution_lock_name
+            from control_plane.http_routes.support import run_in_worker_thread
+
+            fixture = maintenance_request.maintenance
+            if not resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="odoo_preview_apply.execute"
+                if fixture.mode == "apply"
+                else "operations.read",
+                product=maintenance_request.product,
+                context=fixture.context,
+                target=AuthorizationTarget(scope="preview")
+                if fixture.mode == "apply"
+                else AuthorizationTarget(scope="instance", instances=(fixture.instance,)),
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The caller cannot apply a fixture to this product preview.",
+                )
+            fixture_store = require_provider_operation_store(
+                record_store=record_store, trace_id=trace_id
+            )
+            key = idempotency_key.strip()
+            if fixture.mode == "apply" and (not key or len(key) > 200):
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="idempotency_key_required",
+                    message="Fixture apply requires a bounded Idempotency-Key.",
+                )
+            adapter = PreviewFixtureAdapter(
+                fixture_store,
+                resolved_control_plane_root,
+                maintenance_request.product,
+                fixture,
+                trace_id,
+            )
+
+            def execute_fixture() -> AcceptedEvidenceResponse:
+                with fixture_store.testing_replacement_execution_lock(
+                    preview_execution_lock_name(adapter.target_key())
+                ) as check:
+                    if check is None:
+                        raise _launchplane_http_error(
+                            status_code=409,
+                            trace_id=trace_id,
+                            code="preview_busy",
+                            message="Another operation holds this preview.",
+                        )
+                    check()
+                    if fixture.mode != "apply":
+                        if fixture.mode == "dry-run":
+                            receipt, digest = adapter.plan()
+                        else:
+                            receipt, digest = adapter.invoke("readback"), ""
+                        return accepted_evidence_response(
+                            trace_id=trace_id,
+                            records={"preview_id": fixture.preview_id},
+                            result={
+                                "receipt": receipt.model_dump(mode="json"),
+                                "plan_sha256": digest,
+                            },
+                        )
+                    result = run_durable_provider_operation(
+                        store=fixture_store,
+                        scope=idempotency_scope(identity),
+                        route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                        idempotency_key=key,
+                        request_fingerprint=idempotency_request_fingerprint(
+                            route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                            payload=raw_payload,
+                        ),
+                        lease_owner=trace_id,
+                        response_trace_id=trace_id,
+                        adapter=adapter,
+                        original_intent={
+                            "product": maintenance_request.product,
+                            "maintenance": fixture.model_dump(mode="json"),
+                        },
+                    )
+                    return provider_mutation_http_response(
+                        result=result,
+                        trace_id=trace_id,
+                        route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                        in_progress_message="The original fixture operation is running.",
+                        reconcile_message="Read back the original fixture operation before retrying.",
+                    )
+
+            try:
+                return await run_in_worker_thread(execute_fixture)
+            except (ValueError, FileNotFoundError, click.ClickException) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="preview_fixture_unavailable",
+                    message="The fixture or its preview evidence is unavailable; inspect the original operation.",
+                ) from error
         try:
             product_profile = resolve_odoo_app_maintenance_product_route(
                 record_store=record_store,
