@@ -497,6 +497,11 @@ delay without charging another deployment attempt. Missing, ended, foreign or un
 held. A failing candidate health probe can be switched back after retained-slot
 private readiness; positive foreign identity still refuses rollback.
 
+The cutover transport compresses command envelopes within its existing wire
+bound. Decoded commands and output share a bounded buffer; incomplete or trailing
+compressed input refuses before execution. Native argv, stdin and sealed
+maintenance payloads retain their original bytes and authority.
+
 The installed qualification uses isolated representative Odoo 20 data and the
 shipped web/scheduler commands. It must prove real scheduled ticks without HTTP,
 physical drain, coherent capture/restore, browser readiness, persisted prepared
