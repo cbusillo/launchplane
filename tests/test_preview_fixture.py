@@ -1,5 +1,5 @@
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 import io
 import os
@@ -64,8 +64,8 @@ from control_plane.odoo_preview_apply_http import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.test_odoo_preview_apply_execution import _refresh_payload, _issued_plan
-from control_plane.service_auth import LaunchplaneAuthzPolicy
-from tests.support.auth import StubVerifier, identity
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
+from tests.support.auth import StubVerifier, identity, scoped_agent_transport
 from tests.support.http import request
 
 
@@ -795,14 +795,23 @@ class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         caller = identity()
-        for action, mode, expected in (
-            ("odoo_app_maintenance.execute", "apply", 403),
-            ("odoo_preview_apply.execute", "apply", 202),
-            ("operations.read", "apply", 403),
-            ("operations.read", "dry-run", 403),
-            ("odoo_preview_apply.execute", "dry-run", 202),
+        for principal, action, mode, expected in (
+            ("workflow", "odoo_app_maintenance.execute", "apply", 403),
+            ("workflow", "odoo_preview_apply.execute", "apply", 202),
+            ("workflow", "operations.read", "apply", 403),
+            ("workflow", "operations.read", "dry-run", 403),
+            ("workflow", "odoo_preview_apply.execute", "dry-run", 202),
+            ("director", "", "apply", 202),
+            ("director", "", "dry-run", 202),
+            ("director", "", "readback", 202),
+            ("scoped", "", "apply", 403),
+            ("scoped", "", "dry-run", 403),
         ):
-            with self.subTest(action=action, mode=mode), TemporaryDirectory() as directory:
+            with (
+                self.subTest(principal=principal, action=action, mode=mode),
+                TemporaryDirectory() as directory,
+                scoped_agent_transport() if principal == "scoped" else nullcontext(),
+            ):
                 store = PostgresRecordStore(
                     database_url="sqlite+pysqlite:///" + str(Path(directory) / "state.db")
                 )
@@ -823,7 +832,9 @@ class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
                                 else ["example-pr-42"],
                                 "actions": [action],
                             }
-                        ],
+                        ]
+                        if action
+                        else [],
                     }
                 )
                 app = create_launchplane_fastapi_app(
@@ -831,6 +842,11 @@ class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
                     authz_policy=policy,
                     record_store_factory=lambda: store,
                     control_plane_root_path=Path(directory),
+                    bearer_identity_config=BearerIdentityConfig(
+                        local_operator_token="operator-example",
+                        local_operator_subject="director-example",
+                        local_operator_token_label="operator-example",
+                    ),
                 )
                 planned = fixture_receipt("dry-run")
 
@@ -866,7 +882,9 @@ class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
                         "POST",
                         "/v1/drivers/odoo/app-maintenance",
                         headers={
-                            "Authorization": "Bearer valid-token",
+                            "Authorization": "Bearer valid-token"
+                            if principal == "workflow"
+                            else "Bearer operator-example",
                             "Idempotency-Key": "fixture-example",
                         },
                         payload={
@@ -882,6 +900,10 @@ class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, expected, response.text)
                 if expected == 403 or mode == "dry-run":
                     invoke.assert_not_called()
+                elif mode == "apply":
+                    self.assertEqual(
+                        [call.args[0] for call in invoke.call_args_list].count("apply"), 1
+                    )
 
 
 class PreviewFixtureClientTests(unittest.TestCase):

@@ -14,11 +14,12 @@ resource-sharing protections. Read-only modes do not require refresh eligibility
 The fixture shares the preview's execution mutex and durable lifecycle
 reservation: an uncertain writer also fences refresh and idle operations.
 
-Execution uses the existing `odoo_preview_apply.execute` permission for that
-product's preview context. The Director's authenticated agent may also plan and
-read back with standing `operations.read` authority. Dashboard read access cannot
-execute product code. No grant or credential is created. Stable-lane maintenance
-is unchanged.
+The authenticated Director agent uses the existing standing preview authority
+described in [disposable-lane engineering](authorization-authority.md#disposable-lane-engineering).
+Other callers need `odoo_preview_apply.execute` for that product's preview
+context. Dashboard read access cannot execute product code. Every apply still
+qualifies the exact current preview and its mutation protections. No grant or
+credential is created. Stable-lane maintenance is unchanged.
 
 ## Product contract
 
