@@ -9,6 +9,7 @@ import zlib
 from collections.abc import Callable
 import unittest
 from unittest.mock import Mock, patch
+from typing import cast
 
 from control_plane.dokploy import cutover_transport
 from control_plane.dokploy.cutover_transport import CutoverHostTransport
@@ -72,7 +73,8 @@ class CutoverHostTransportTests(unittest.TestCase):
                 transport(("docker", "stop", "fixture"), None)
         sent.assert_not_called()
 
-    def host_frames(self, payload: object, child: Mock) -> list[dict[str, object]]:
+    @staticmethod
+    def host_frames(payload: object, child: Mock) -> list[dict[str, object]]:
         output = io.StringIO()
         with (
             patch(
@@ -110,8 +112,8 @@ class CutoverHostTransportTests(unittest.TestCase):
         transport = self.transport(guard)
 
         def remote(**kwargs: object) -> None:
-            dispatch, receive = kwargs["dispatch_guard"], kwargs["receive"]
-            assert callable(dispatch) and callable(receive)
+            dispatch = cast(Callable[[Callable[[], None]], None], kwargs["dispatch_guard"])
+            receive = cast(Callable[[dict[str, object]], None], kwargs["receive"])
 
             def send() -> None:
                 for frame in self.host_frames(kwargs["payload"], child):
