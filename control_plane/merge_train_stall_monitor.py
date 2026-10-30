@@ -222,9 +222,7 @@ def _issue_body(record: MergeTrainStallRecord) -> str:
     lines = [STALL_ISSUE_MARKER, "The merge train needs the Supervisor's attention.", ""]
     for base, observation in sorted(record.observations.items()):
         if observation.reasons:
-            lines.append(
-                f"- Base `{base}`: {', '.join(observation.reasons)}; unchanged since {observation.progress_since}."
-            )
+            lines.append(f"- Base `{base}`: {', '.join(observation.reasons)}.")
             lines.extend(
                 f"  - Ready change `{key}` since {since}."
                 for key, since in sorted(observation.ready_since.items())
