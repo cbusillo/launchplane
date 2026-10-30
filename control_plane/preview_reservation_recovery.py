@@ -15,10 +15,12 @@ from control_plane.contracts.idempotency_record import (
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.preview_execution import (
+    odoo_preview_reconciliation_key,
     odoo_preview_destroy_issued_at,
     odoo_preview_target_key,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.preview_fixture import PreviewFixtureIntent
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.odoo_preview_apply_http import (
@@ -112,6 +114,7 @@ def classify_preview_reservation(
         raise ValueError("Preview classification requires database storage.")
     retained_intent = store.read_original_mutation_intent(reservation)
     available = False
+    fixture_available = False
     action = "unavailable"
     number = 0
     try:
@@ -120,7 +123,26 @@ def classify_preview_reservation(
         action = intent.issued_plan.operation
         number = intent.issued_plan.plan_request.pr_number
     except ValueError:
-        pass
+        try:
+            fixture = PreviewFixtureIntent.model_validate(retained_intent)
+        except ValueError:
+            fixture = None
+        if (
+            fixture is not None
+            and fixture.product == profile.product
+            and fixture.maintenance.context == profile.preview.context
+            and reservation.reconciliation_key
+            == odoo_preview_reconciliation_key(
+                context=fixture.maintenance.context, compose_name=fixture.maintenance.instance
+            )
+            and reservation.provider_target_key
+            == odoo_preview_target_key(
+                context=fixture.maintenance.context, compose_name=fixture.maintenance.instance
+            )
+        ):
+            available = fixture_available = True
+            action = "preview-fixture"
+            number = fixture.fixture_binding.anchor_pr_number
     # Current target attribution can stop new planning; it cannot restore the
     # missing original action, plan, attempt or schedule binding for settlement.
     target_number = 0
@@ -156,7 +178,11 @@ def classify_preview_reservation(
         "pull_request_number": number,
         "target_pull_request_number": target_number,
         "classification": "original_available" if available else "original_evidence_unavailable",
-        "next_action": "observe_original" if available else "retain_fence_missing_original_proof",
+        "next_action": "read_fixture_or_destroy"
+        if fixture_available
+        else "observe_original"
+        if available
+        else "retain_fence_missing_original_proof",
     }
 
 

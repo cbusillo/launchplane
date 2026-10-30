@@ -7453,6 +7453,120 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
+        from control_plane.contracts.preview_fixture import PreviewFixtureRequest
+
+        if isinstance(maintenance_request.maintenance, PreviewFixtureRequest):
+            from control_plane.preview_fixture import PreviewFixtureAdapter
+            from control_plane.contracts.preview_execution import preview_execution_lock_name
+            from control_plane.http_routes.support import run_in_worker_thread
+
+            fixture = maintenance_request.maintenance
+            fixture_allowed = resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="odoo_preview_apply.execute",
+                product=maintenance_request.product,
+                context=fixture.context,
+                target=AuthorizationTarget(scope="preview"),
+            )
+            if fixture.mode != "apply" and director_agent_identity(identity):
+                fixture_allowed = fixture_allowed or resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action="operations.read",
+                    product=maintenance_request.product,
+                    context=fixture.context,
+                    target=AuthorizationTarget(scope="instance", instances=(fixture.instance,)),
+                )
+            if not fixture_allowed:
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The caller cannot apply a fixture to this product preview.",
+                )
+            fixture_store = require_provider_operation_store(
+                record_store=record_store, trace_id=trace_id
+            )
+            key = idempotency_key.strip()
+            if fixture.mode == "apply" and (not key or len(key) > 200):
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="idempotency_key_required",
+                    message="Fixture apply requires a bounded Idempotency-Key.",
+                )
+            adapter = PreviewFixtureAdapter(
+                fixture_store,
+                resolved_control_plane_root,
+                maintenance_request.product,
+                fixture,
+                trace_id,
+            )
+
+            def execute_fixture() -> AcceptedEvidenceResponse:
+                with fixture_store.testing_replacement_execution_lock(
+                    preview_execution_lock_name(adapter.target_key())
+                ) as check:
+                    if check is None:
+                        raise _launchplane_http_error(
+                            status_code=409,
+                            trace_id=trace_id,
+                            code="preview_busy",
+                            message="Another operation holds this preview.",
+                        )
+                    check()
+                    if fixture.mode != "apply":
+                        if fixture.mode == "dry-run":
+                            receipt, digest = adapter.plan()
+                        else:
+                            receipt, digest = adapter.invoke("readback"), ""
+                        observed_response = accepted_evidence_response(
+                            trace_id=trace_id,
+                            records={"preview_id": fixture.preview_id},
+                            result={
+                                "receipt": receipt.model_dump(mode="json"),
+                                "plan_sha256": digest,
+                            },
+                        )
+                        return observed_response
+                    existing = fixture_store.read_idempotency_record(
+                        scope=idempotency_scope(identity),
+                        route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                        idempotency_key=key,
+                    )
+                    retained_intent = (
+                        fixture_store.read_original_mutation_intent(existing) if existing else None
+                    )
+                    result = run_durable_provider_operation(
+                        store=fixture_store,
+                        scope=idempotency_scope(identity),
+                        route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                        idempotency_key=key,
+                        request_fingerprint=idempotency_request_fingerprint(
+                            route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                            payload=raw_payload,
+                        ),
+                        lease_owner=trace_id,
+                        response_trace_id=trace_id,
+                        adapter=adapter,
+                        original_intent=adapter.original_intent(retained_intent),
+                    )
+                    return provider_mutation_http_response(
+                        result=result,
+                        trace_id=trace_id,
+                        route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                        in_progress_message="The original fixture operation is running.",
+                        reconcile_message="Read back the original fixture operation before retrying.",
+                    )
+
+            try:
+                return await run_in_worker_thread(execute_fixture)
+            except (ValueError, FileNotFoundError, click.ClickException) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="preview_fixture_unavailable",
+                    message="The fixture or its preview evidence is unavailable; inspect the original operation.",
+                ) from error
         try:
             product_profile = resolve_odoo_app_maintenance_product_route(
                 record_store=record_store,

@@ -134,6 +134,9 @@ class ProviderTargetSupersession:
     quiescence_check: Callable[[LaunchplaneIdempotencyRecord], bool] = field(
         default=lambda _reservation: False
     )
+    retain_effect_custody: Callable[[LaunchplaneIdempotencyRecord], bool] = field(
+        default=lambda _reservation: False
+    )
 
 
 class ProviderOperationLease(Protocol):
@@ -276,6 +279,7 @@ class DurableProviderOperationStore(Protocol):
         provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, object] | None = None,
         expected_original_intent: dict[str, object] | None = None,
+        retain_effect_custody: bool = False,
     ) -> MutationReconciliationSupersessionResult: ...
 
     def release_reserved_mutation(
@@ -580,6 +584,7 @@ def run_durable_provider_operation(
             minimum_expired_seconds=target_supersession.minimum_expired_seconds,
             reconciliation_key=reconciliation_key,
             provider_target_key=provider_target_key,
+            retain_effect_custody=target_supersession.retain_effect_custody(reservation),
             **supersession_arguments,
         )
         if supersession.status == "acquired" and supersession.record is not None:
