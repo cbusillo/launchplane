@@ -1179,6 +1179,100 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             ),
         )
 
+    def test_cutover_preparation_expiry_preserves_original_admission(self) -> None:
+        from control_plane.contracts.backup_gate_record import BackupGateRecord
+        from control_plane.contracts.deployment_record import DeploymentRecord
+        from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooCutoverRecord
+        from control_plane.odoo_cutover_plan import cutover_record_id
+        from control_plane.workflows.odoo_prod_backup_gate import BACKUP_GATE_SOURCE
+        from control_plane.workflows.odoo_prod_promotion import _build_promotion_record
+        from tests.test_odoo_cutover import IsolatedCutoverProvider
+
+        store = self.capture()
+        admitted = self.require(store)
+        captured = store.list_verireel_prod_backup_gate_operation_records()[0]
+        assert captured.binding is not None and captured.result is not None
+        prepared_at = datetime.fromisoformat(
+            captured.result.evidence["snapshot_finished_at"].replace("Z", "+00:00")
+        ) + timedelta(seconds=captured.binding.policy.fast_snapshot.max_evidence_age_seconds + 1)
+        provider = IsolatedCutoverProvider(self.root / "delayed-cutover")
+        self.addCleanup(provider.engine.dispose)
+        slots = {}
+        for name in ("old", "new"):
+            slot = getattr(provider.cutover, name)
+            slots[name] = slot.model_copy(
+                update={
+                    "binding": slot.binding.model_copy(
+                        update={"product_id": "example-product", "environment_id": "prod"}
+                    ),
+                    "runtime_identity": slot.runtime_identity.model_copy(
+                        update={
+                            "product": "example-product",
+                            "context": "example-product",
+                            "instance": "prod",
+                        }
+                    ),
+                }
+            )
+        plan = OdooCutoverPlan.model_validate(
+            provider.cutover.model_copy(update=slots).model_dump()
+        )
+        record_id = cutover_record_id(plan)
+        recovery = OdooCutoverRecord(
+            record_id=record_id, plan=plan, began_at=prepared_at, updated_at=prepared_at
+        )
+        logical = BackupGateRecord(
+            record_id="logical-cutover",
+            context="example-product",
+            instance="prod",
+            source=BACKUP_GATE_SOURCE,
+            created_at=datetime.now(UTC).isoformat(),
+            status="pass",
+            evidence={"fixture": "logical"},
+        )
+        promotion = _build_promotion_record(
+            record_id="promotion-cutover-" + record_id,
+            request=OdooProdPromotionRequest(
+                context="example-product",
+                artifact_id=plan.candidate.artifact_id,
+                backup_record_id=logical.record_id,
+                infrastructure_backup_record_id=captured.backup_record_id,
+            ),
+            deployment_record=None,
+            deployment_status="pending",
+            backup_gate=logical,
+            infrastructure_backup=admitted,
+        )
+        with patch(
+            "control_plane.workflows.production_promotion_backup.datetime", wraps=datetime
+        ) as clock:
+            clock.now.return_value = prepared_at
+            with self.assertRaises(click.ClickException):
+                self.require(store)
+            store.write_promotion_record(promotion)
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id=plan.new.runtime_identity.deployment_record_id,
+                    context="example-product",
+                    instance="prod",
+                    runtime_identity=plan.new.runtime_identity,
+                    source_git_ref=plan.candidate.source_commit,
+                    deploy=promotion.deploy,
+                    odoo_cutover=recovery,
+                )
+            )
+            continued = require_production_promotion_backup(
+                record_store=store,
+                product="example-product",
+                context="example-product",
+                instance="prod",
+                promotion_action=ODOO_PROMOTION_BACKUP_ACTION,
+                backup_record_id=captured.backup_record_id,
+                active_promotion_record_id=promotion.record_id,
+                cutover_recovery=recovery,
+            )
+        self.assertEqual(continued, admitted)
+
     def test_worker_capture_binds_exact_policy_and_operation(self) -> None:
         store = self.capture()
         evidence = self.require(store)
