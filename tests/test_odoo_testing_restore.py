@@ -1488,6 +1488,14 @@ class TestingCopyBoundaryTests(unittest.TestCase):
     def test_rehearsal_upgrade_keeps_the_sql_and_post_hook_boundaries(self) -> None:
         self.boundary_case("normal", instance="rehearsal", phase="resume")
 
+    def test_rehearsal_refuses_artifacts_without_migration_settings_or_readback_before_restore(
+        self,
+    ) -> None:
+        for fault in ("unsupported-purpose", "unsupported-readback"):
+            for sanitize_only in (True, False):
+                with self.subTest(fault=fault, sanitize_only=sanitize_only):
+                    self.boundary_case(fault, instance="rehearsal", sanitize_only=sanitize_only)
+
     def test_partial_initial_restore_drops_only_its_new_copy(self) -> None:
         self.boundary_case("restore-partial")
 
@@ -1721,7 +1729,13 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                         raise RuntimeError("partial initial restore")
 
                 def prepare_credentials_before_registry(self, **_: object) -> None:
+                    self_test.assertEqual(
+                        self.local.copy_purpose, "migration" if instance == "rehearsal" else None
+                    )
                     connection.execute("UPDATE res_users SET password=NULL")
+
+                def verify_isolated_copy_before_registry(self, *, database_connection: Any) -> None:
+                    pass
 
                 def _resolve_filestore_owner(self) -> str:
                     return "fixture-owner"
@@ -1757,12 +1771,18 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     events.append("drop-fresh")
 
             artifact: Any = ModuleType("run_odoo_data_workflows")
+            self_test = self
             artifact.LocalServerSettings = lambda: SimpleNamespace(
                 host="database",
                 db_name="fresh",
                 platform_instance=instance,
                 db_conn=Connection(connection, writer=True),
+                copy_purpose=None
+                if fault == "unsupported-purpose"
+                else os.environ.get("ODOO_COPY_PURPOSE"),
             )
+            if fault == "unsupported-readback":
+                delattr(NativeRunner, "verify_isolated_copy_before_registry")
             artifact.OdooDataWorkflowRunner = NativeRunner
             (Path(directory) / "fixture.dump").write_bytes(b"fixture verified dump")
             output = io.StringIO()
@@ -1815,6 +1835,22 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 ),
                 redirect_stdout(output),
             ):
+                if fault.startswith("unsupported-"):
+                    with self.assertRaisesRegex(SystemExit, "refresh.*qualif"):
+                        exec(
+                            compile(
+                                rehearsal_copy_runner(sanitize_source_only=sanitize_only),
+                                "<copy-runner>",
+                                "exec",
+                            ),
+                            {},
+                        )
+                    self.assertFalse(events)
+                    self.assertEqual(
+                        connection.execute("SELECT password FROM res_users").fetchone()[0],
+                        "encoded-production-password",
+                    )
+                    return
                 if fault == "normal":
                     program = (
                         rehearsal_copy_runner(sanitize_source_only=sanitize_only)

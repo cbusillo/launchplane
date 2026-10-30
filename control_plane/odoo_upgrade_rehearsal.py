@@ -511,6 +511,7 @@ def rehearsal_host_spec(
                     "ODOO_MASTER_PASSWORD": "${ODOO_MASTER_PASSWORD:?missing}",
                     "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": "${LAUNCHPLANE_RUNTIME_IDENTITY_JSON:?missing}",
                     "ODOO_VERSION": "${ODOO_VERSION:?missing}",
+                    "ODOO_COPY_PURPOSE": "migration",
                 }
             )
         payload["services"]["pre-switch-web"] = {

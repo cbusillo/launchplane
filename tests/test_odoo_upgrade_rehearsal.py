@@ -941,6 +941,7 @@ class RehearsalScenario(unittest.TestCase):
             database_user: str = Field(alias="ODOO_DB_USER")
             database_password: SecretStr = Field(alias="ODOO_DB_PASSWORD")
             platform_instance: str = Field(alias="PLATFORM_INSTANCE")
+            copy_purpose: str = Field(alias="ODOO_COPY_PURPOSE")
             filestore_path: Path = Field(alias="ODOO_FILESTORE_PATH")
 
         spec = rehearsal_host_spec(
@@ -987,6 +988,7 @@ class RehearsalScenario(unittest.TestCase):
                     self.assertIn(settings.database_host, services)
                     self.assertEqual(settings.database_name, database)
                     self.assertEqual(settings.platform_instance, supplied["PLATFORM_INSTANCE"])
+                    self.assertEqual(settings.copy_purpose, "migration")
                     data_mount = next(
                         volume.split(":")[1]
                         for volume in service["volumes"]
