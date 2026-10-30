@@ -13,10 +13,17 @@ from __future__ import annotations
 from contextlib import ExitStack, contextmanager
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+import json
+import logging
 from pathlib import Path
 from typing import Any, cast
 
 import click
+from control_plane.copy_readback_diagnostics import (
+    copy_failure_marker_is_safe,
+    readback_marker_is_safe,
+)
+from control_plane.dokploy.post_deploy import _bounded_dokploy_evidence_id
 from control_plane.lane_movement import LaneMovementRefused
 from control_plane.preview_source import PreviewSourceDecision, require_source_free_preview_history
 
@@ -77,6 +84,27 @@ OdooPreviewPreMutationGuard = Callable[[], None]
 
 def _string_value(value: Any) -> str:
     return str(value)
+
+
+def _log_failed_preview_evidence(
+    driver_result: dict[str, object], *, operation_id: str, trace_id: str
+) -> None:
+    evidence = driver_result.get("module_install_update_evidence")
+    diagnostics: dict[str, str] = {}
+    if isinstance(evidence, dict):
+        for key, value in evidence.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
+            if copy_failure_marker_is_safe(key, value) or readback_marker_is_safe(key, value):
+                diagnostics[key] = value
+            elif key in {"schedule_id", "schedule_deployment_key", "schedule_deployment_id"}:
+                identifier = _bounded_dokploy_evidence_id(value)
+                if identifier:
+                    diagnostics[key] = identifier
+    logging.getLogger(__name__).warning(
+        "%s",
+        json.dumps({"operation_id": operation_id, "trace_id": trace_id, "evidence": diagnostics}),
+    )
 
 
 class OdooPreviewProviderMutationAdapter:
@@ -509,9 +537,11 @@ class OdooPreviewProviderMutationAdapter:
         provider_effect_attempted = driver_result.pop("provider_effect_attempted", False) is True
         driver_status = _string_value(driver_result.get("status", "")).strip()
         if driver_status == "fail" and provider_effect_attempted:
+            _log_failed_preview_evidence(
+                driver_result, operation_id=self._deployment_record_id, trace_id=self._trace_id
+            )
             raise ProviderMutationUnknownError(
-                _string_value(driver_result.get("error_message", "")).strip()
-                or "Odoo preview provider outcome requires reconciliation."
+                "Odoo preview provider outcome requires reconciliation."
             )
         response_status_code = 202
         records: dict[str, object] = {}

@@ -211,6 +211,14 @@ false, or unavailable schedule-log evidence fails the refresh. A terminal
 provider deployment alone remains an unknown recovery outcome because it does
 not prove that database-backed views were upgraded.
 
+An Odoo preview driver failure after a provider effect retains its original
+reconciliation fence. Before converting that result to an unknown provider
+outcome, execution logs the original operation and trace with validated schedule
+and job identifiers and closed copy/readback failure markers. It omits raw driver
+results, error messages and unknown marker values. This diagnostic does not
+authorize another effect or settle the original. Deployment, listener and health
+checks do not prove authenticated Client sign-in.
+
 When the preview template instance has a deploy-enabled website-bootstrap
 record, refresh also renders a preview-scoped copy of that website intent,
 replaces its canonical URL with the exact preview URL, and passes it through the
