@@ -3411,7 +3411,7 @@ removes copied credentials. Independent SQL readback and connection isolation
 still gate registry startup. An artifact without migration-purpose settings or
 isolated-copy readback returns `rehearsal_artifact_unavailable` before capture
 or copy restoration, with resources retained. The public refusal instructs the
-operator to refresh the selected artifact from current `odoo-devkit` and qualify
+caller to refresh the selected artifact from current `odoo-devkit` and qualify
 it before starting a new rehearsal. The runner checks support again before
 restore.
 Ordinary testing and preview copies retain their development-store reset path.
