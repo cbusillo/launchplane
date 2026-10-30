@@ -18,10 +18,24 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.child_process_errors import redact_untrusted_text
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 
 _IMAGE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 _MAX_REPORT_BYTES = 32 * 1024 * 1024
+MAX_SCAN_FINDINGS = 50
+_FINDING_FIELDS = {
+    "vulnerability_id": (
+        "VulnerabilityID",
+        r"(?:CVE-[0-9]{4}-[0-9]{4,19}|GHSA-[a-z0-9]{4}(?:-[a-z0-9]{4}){2})",
+    ),
+    "package_name": ("PkgName", r"(?:@[a-zA-Z0-9._-]+/)?[a-zA-Z0-9][a-zA-Z0-9.+_-]*"),
+    "installed_version": ("InstalledVersion", r"[a-zA-Z0-9][a-zA-Z0-9.+:~_-]*"),
+    "fixed_version": (
+        "FixedVersion",
+        r"[a-zA-Z0-9][a-zA-Z0-9.+:~_-]*(?:, ?[a-zA-Z0-9][a-zA-Z0-9.+:~_-]*)*",
+    ),
+}
 SCAN_RESULT_TTL_SECONDS = 30 * 60
 SCAN_UNAVAILABLE_TTL_SECONDS = 60
 GHCR_ARTIFACT_READ_INTEGRATION = "ghcr_artifact_read"
@@ -36,6 +50,16 @@ class RegistryReadCredentials:
     password: str = field(repr=False)
 
 
+class ArtifactScanFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    vulnerability_id: str
+    package_name: str
+    installed_version: str
+    fixed_version: str
+    severity: Literal["HIGH", "CRITICAL"]
+
+
 class ArtifactScanResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -45,6 +69,8 @@ class ArtifactScanResult(BaseModel):
     scanned_at: str
     high: int = Field(default=0, ge=0)
     critical: int = Field(default=0, ge=0)
+    findings: tuple[ArtifactScanFinding, ...] = ()
+    findings_omitted: int = Field(default=0, ge=0)
 
 
 _RESULTS: OrderedDict[tuple[str, str], tuple[float, ArtifactScanResult]] = OrderedDict()
@@ -187,7 +213,6 @@ def _scan_artifact(
 
     Trivy gets a clean working directory and explicit options, rather than product
     config, ignore files, plugins, a Docker socket or the host's registry login.
-    Only vulnerability counts leave this boundary; provider errors stay private.
     """
     now = datetime.now(UTC).isoformat()
 
@@ -281,6 +306,7 @@ def artifact_scan_from_report(
 ) -> ArtifactScanResult:
     """Require package inventory and the requested image, even for a clean report."""
     high = critical = 0
+    findings: list[ArtifactScanFinding] = []
     if not isinstance(report, dict) or report.get("SchemaVersion") != 2:
         raise ValueError("Invalid artifact scan report.")
     if (
@@ -309,6 +335,10 @@ def artifact_scan_from_report(
             if finding.get("FixedVersion"):
                 high += severity == "HIGH"
                 critical += severity == "CRITICAL"
+                if severity in {"HIGH", "CRITICAL"} and len(findings) < MAX_SCAN_FINDINGS:
+                    diagnostic = _scan_finding(finding)
+                    if diagnostic is not None:
+                        findings.append(diagnostic)
     return ArtifactScanResult(
         image_reference=image_reference,
         status="fail" if high or critical else "pass",
@@ -316,4 +346,21 @@ def artifact_scan_from_report(
         scanned_at=scanned_at,
         high=high,
         critical=critical,
+        findings=tuple(findings),
+        findings_omitted=high + critical - len(findings),
     )
+
+
+def _scan_finding(finding: dict[str, object]) -> ArtifactScanFinding | None:
+    fields: dict[str, str] = {}
+    for key, (source, pattern) in _FINDING_FIELDS.items():
+        value = finding.get(source)
+        if (
+            not isinstance(value, str)
+            or len(value) > 160
+            or re.fullmatch(pattern, value) is None
+            or redact_untrusted_text(value, fallback="") != value
+        ):
+            return None
+        fields[key] = value
+    return ArtifactScanFinding.model_validate({**fields, "severity": finding["Severity"]})

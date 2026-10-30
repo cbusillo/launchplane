@@ -145,16 +145,26 @@ class ArtifactRetentionHttpTests(IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()["retention"]["candidates"], [1])
                 planner.assert_called_once()
-                from control_plane.artifact_scan import ArtifactScanResult
+                from control_plane.artifact_scan import ArtifactScanFinding, ArtifactScanResult
+
+                finding = ArtifactScanFinding(
+                    vulnerability_id="CVE-2026-12345",
+                    package_name="libssl3",
+                    installed_version="3.0.1",
+                    fixed_version="3.0.2",
+                    severity="HIGH",
+                )
 
                 with patch(
                     "control_plane.http_routes.products.qualify_product_artifact"
                 ) as scanner:
                     scanner.return_value = ArtifactScanResult(
                         image_reference=IMAGE,
-                        status="pass",
-                        reason="clean",
+                        status="fail",
+                        reason="fixable_vulnerabilities",
                         scanned_at=NOW.isoformat(),
+                        high=1,
+                        findings=(finding,),
                     )
                     qualified = await get(
                         app,
@@ -162,7 +172,11 @@ class ArtifactRetentionHttpTests(IsolatedAsyncioTestCase):
                         headers={"Authorization": "Bearer local-operator-token"},
                     )
                     self.assertEqual(qualified.status_code, 200)
-                    self.assertEqual(qualified.json()["scan"]["status"], "pass")
+                    self.assertEqual(qualified.json()["scan"]["status"], "fail")
+                    self.assertEqual(qualified.json()["scan"]["image_reference"], IMAGE)
+                    self.assertEqual(
+                        qualified.json()["scan"]["findings"], [finding.model_dump(mode="json")]
+                    )
                     scanner.assert_called_once_with(store, product="verireel")
                 planner.reset_mock()
                 anonymous = await get(app, "/v1/artifacts/retention?product=verireel")
