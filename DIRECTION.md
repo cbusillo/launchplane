@@ -131,3 +131,8 @@ fits this file.
   Live product's promotion happens without one.
 - `Retired machinery deleted` proves the retired designs above are gone from
   the code; ends if a deletion breaks a live product.
+- `Director questions in Launchplane` proves the Director sees, answers and
+  finds every question and decision in Launchplane, while agents keep writing
+  them through the catalog's question record unchanged; ends if a question
+  still has to be asked or found somewhere else, or Launchplane needs more
+  upkeep for questions than the catalog's own store did.
