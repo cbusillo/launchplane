@@ -806,8 +806,8 @@ def observe(spec, root, receipt, lock_held=False):
     return
 
 
-def copy_artifact_supported(containers):
-    return docker('exec',containers['script-runner'][0],'python3','-c',"import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import LocalServerSettings as S, OdooDataWorkflowRunner as R;print('true' if 'copy_purpose' in getattr(S,'model_fields',{}) and all(callable(getattr(R,k,None)) for k in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name','verify_isolated_copy_before_registry')) else 'false')").strip()==b'true'
+def migration_copy_supported(containers):
+    return docker('exec',containers['script-runner'][0],'python3','-c',"import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import LocalServerSettings as S, OdooDataWorkflowRunner as R;print('true' if 'copy_purpose' in getattr(S,'model_fields',{}) and callable(getattr(R,'verify_isolated_copy_before_registry',None)) else 'false')").strip()==b'true'
 
 
 def prepare_runtime(spec,root,database):
@@ -993,13 +993,14 @@ def main():
                 except RebuildPrecheckRefused:
                     emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
                     return
-                if not copy_artifact_supported(containers):
-                    emit_refusal(spec,root,'rehearsal_artifact_unavailable')
-                    return
                 try:
-                    capacity=rehearsal_storage_capacity(spec,root,containers,'rebuild-final')
+                    supported=migration_copy_supported(containers)
+                    capacity=supported and rehearsal_storage_capacity(spec,root,containers,'rebuild-final')
                 except Exception:
                     emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
+                    return
+                if not supported:
+                    emit_refusal(spec,root,'rehearsal_artifact_unavailable')
                     return
                 if not capacity:
                     emit_refusal(spec,root,'rehearsal_rebuild_capacity_insufficient')
@@ -1019,7 +1020,7 @@ def main():
                     business_validation_precheck(spec,containers)
                 if action=='verify':
                     require_passing_business_validation(record)
-                if action in {'execute','simulate-final'} and not copy_artifact_supported(containers):
+                if action in {'execute','simulate-final'} and not migration_copy_supported(containers):
                     code='rehearsal_artifact_unavailable'
                 elif action in {'execute','simulate-final','verify'} and not rehearsal_storage_capacity(
                     spec,root,containers,action):

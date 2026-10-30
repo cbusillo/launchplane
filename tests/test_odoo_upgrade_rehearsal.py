@@ -2630,11 +2630,14 @@ class RehearsalHostSafetyTests(unittest.TestCase):
 
         artifact = ModuleType("run_odoo_data_workflows")
         settings = SimpleNamespace(model_fields={"copy_purpose": object()})
-        runner = Mock()
+        runner = SimpleNamespace(verify_isolated_copy_before_registry=Mock())
         setattr(artifact, "LocalServerSettings", settings)
         setattr(artifact, "OdooDataWorkflowRunner", runner)
+        unavailable = False
 
         def docker(*arguments: str, **kwargs: Any) -> bytes:
+            if unavailable:
+                raise RuntimeError("Artifact runtime is unavailable")
             output = io.StringIO()
             with (
                 patch.dict(sys.modules, {artifact.__name__: artifact}),
@@ -2648,7 +2651,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
         )
         self.host["docker"] = docker
-        self.assertTrue(self.host["copy_artifact_supported"](containers))
+        self.assertTrue(self.host["migration_copy_supported"](containers))
         self.host["current"] = Mock(return_value=(self.fixture.database, "fixture-image"))
         self.host["prepared_rebuild_runtime"] = Mock(return_value=containers)
         self.host["inspection"] = Mock(return_value=containers)
@@ -2662,8 +2665,9 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             ("simulate-final", "upgraded"),
             ("rebuild-final", "retired"),
         ):
-            for missing in ("purpose", "readback"):
+            for missing in ("purpose", "readback", "unavailable"):
                 with self.subTest(action=action, missing=missing):
+                    unavailable = missing == "unavailable"
                     settings.model_fields = (
                         {} if missing == "purpose" else {"copy_purpose": object()}
                     )
@@ -2675,11 +2679,27 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                     spec["attempt_sha256"] = hashlib.sha256((action + missing).encode()).hexdigest()
                     result = self.run_host(spec)
                     self.assertFalse(result["completed"])
-                    self.assertEqual(
-                        result["refusal_code"], RehearsalPrerequisite.ARTIFACT_UNAVAILABLE
-                    )
+                    if unavailable:
+                        from control_plane.contracts.odoo_upgrade_rehearsal import (
+                            REHEARSAL_PUBLIC_FAILURE_MESSAGES,
+                        )
+
+                        self.assertIn(result["refusal_code"], REHEARSAL_PUBLIC_FAILURE_MESSAGES)
+                        self.assertNotEqual(
+                            result["refusal_code"], RehearsalPrerequisite.ARTIFACT_UNAVAILABLE
+                        )
+                    else:
+                        self.assertEqual(
+                            result["refusal_code"], RehearsalPrerequisite.ARTIFACT_UNAVAILABLE
+                        )
+                    self.assertEqual(result["copies"], spec["record"]["copies"])
                     self.assertFalse((root / "raw-source").exists())
-                    self.assertFalse((root / "execute.started").exists())
+                    marker = (
+                        self.host["rehearsal_effect_marker"](action, spec["attempt_sha256"])
+                        if action == "rebuild-final"
+                        else action + ".started"
+                    )
+                    self.assertFalse((root / marker).exists())
                     spec["mode"] = "observe"
                     self.assertEqual(self.run_host(spec), result)
                     spec["mode"] = "apply"
