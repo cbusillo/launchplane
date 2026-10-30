@@ -43,6 +43,19 @@ def _time(seconds: int) -> str:
 
 
 class StallObservationTests(TestCase):
+    def test_idle_time_never_counts_toward_new_work_stalling(self) -> None:
+        old = self.observe(MergeTrainStallObservation(), 0)
+        idle = self.observe(old, STALL_SECONDS * 2, ready=(), busy=False)
+        self.assertFalse(idle.reasons)
+        for ready in ((), ("7:head",)):
+            with self.subTest(ready=ready):
+                started = self.observe(idle, STALL_SECONDS * 4, ready=ready)
+                self.assertFalse(started.reasons)
+                before = self.observe(started, STALL_SECONDS * 5 - 1, ready=ready)
+                self.assertFalse(before.reasons)
+                stalled = self.observe(before, STALL_SECONDS * 5, ready=ready)
+                self.assertIn("controller_unchanged", stalled.reasons)
+
     def test_stalled_check_recovery_names_the_controller_wait(self) -> None:
         first = self.observe(MergeTrainStallObservation(), 0)
         stalled = self.observe(first, STALL_SECONDS, wait_reason="candidate_checks_disagree")
@@ -258,21 +271,22 @@ class StallMonitorTests(TestCase):
             client.target_setting_gaps.return_value = ()
             client.observe_batch_candidate_checks.side_effect = None
             client.observe_batch_candidate_checks.return_value = failed
-            run_stall_monitor_pass(
-                store=store,
-                root=root,
-                now=lambda: _time(300),
-                reporter_factory=lambda **_: reporter,
-            )
-            self.assertFalse(reporter.publish.call_args.kwargs["stalled"])
+            for seconds in (300, STALL_SECONDS):
+                run_stall_monitor_pass(
+                    store=store,
+                    root=root,
+                    now=lambda: _time(seconds),
+                    reporter_factory=lambda **_: reporter,
+                )
+                self.assertEqual(
+                    reporter.publish.call_args.kwargs["stalled"], seconds == STALL_SECONDS
+                )
+            self.assertIn("controller_unchanged", reporter.publish.call_args.args[1])
 
-    def test_unresolved_alias_is_observed_without_a_current_lease_or_queue(self) -> None:
+    def test_empty_repository_ignores_leases_but_reports_unresolved_aliases(self) -> None:
         snapshot = (
             _FakeExpandedMergeTrainSnapshotReader(transport=object())
-            .read_merge_train_snapshot(
-                repository="example/repo",
-                base_branch="main",
-            )
+            .read_merge_train_snapshot(repository="example/repo", base_branch="main")
             .model_copy(update={"pull_requests": ()})
         )
         policy = _policy_record(
@@ -312,6 +326,38 @@ class StallMonitorTests(TestCase):
                     "active_record_id": "retained-provider-effect",
                 }
             )
+            state = alias.model_copy(
+                update={
+                    "repository": snapshot.repository,
+                    "controller_key": alias.controller_key.lower(),
+                    "active_record_id": "",
+                }
+            )
+            for seconds, owner, expires in (
+                (0, "", 0),
+                (STALL_SECONDS * 2, "controller", STALL_SECONDS * 3),
+                (STALL_SECONDS * 4, "controller", STALL_SECONDS * 3),
+                (STALL_SECONDS * 5, "controller", STALL_SECONDS * 3),
+                (STALL_SECONDS * 6, "", 0),
+            ):
+                with self.subTest(seconds=seconds, owner=owner):
+                    state.status = "running" if owner else "idle"
+                    state.lease_owner = owner
+                    state.lease_acquired_at = _time(0) if owner else ""
+                    state.heartbeat_at = _time(0) if owner else ""
+                    state.lease_expires_at = _time(expires) if owner else ""
+                    store.write_merge_train_controller_state_record(state)
+                    run_stall_monitor_pass(
+                        store=store,
+                        root=Path(directory),
+                        now=lambda: _time(seconds),
+                        reporter_factory=lambda **_: reporter,
+                    )
+                    observation = store.read_merge_train_stall_record(
+                        snapshot.repository
+                    ).observations["main"]
+                    self.assertFalse(observation.reasons)
+                    reporter.publish.assert_not_called()
             path = store._write_model(
                 "launchplane_merge_train_controller_states",
                 _merge_train_controller_storage_id(alias.controller_key),
@@ -321,7 +367,7 @@ class StallMonitorTests(TestCase):
             run_stall_monitor_pass(
                 store=store,
                 root=Path(directory),
-                now=lambda: _time(0),
+                now=lambda: _time(STALL_SECONDS * 6),
                 reporter_factory=lambda **_: reporter,
             )
             record = store.read_merge_train_stall_record(snapshot.repository)

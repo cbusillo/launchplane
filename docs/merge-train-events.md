@@ -125,8 +125,11 @@ controller leases and heartbeat updates; restarting the worker preserves them.
 An unchanged controller phase with work for at least thirty minutes, or an
 eligible change with no progress for that interval, raises an incident. A new
 queue arrival does not reset an older change's wait. Progress by a candidate
-resets its participating changes' waits. An expired held lease has no live lease
-heartbeat and is reported after a second consecutive observation; the monitor does not
+resets its participating changes' waits. Idle observations clear the controller
+clock; a held lease alone is not work. New work starts a fresh thirty-minute
+clock even when the completed controller state is unchanged. An expired held
+lease with queued, blocked or candidate work has no live lease heartbeat and
+is reported after a second consecutive observation; the monitor does not
 inspect a process on another host. A failed candidate whose exact-head checks
 have passed on rerun is similarly confirmed on the next pass if recovery has
 not yet cleared it. This gives normal lease renewal/recovery a pass to settle.

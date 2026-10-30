@@ -73,6 +73,8 @@ def observe_stall(
 ) -> MergeTrainStallObservation:
     changed = progress_key != previous.progress_key
     since = now if changed or not previous.progress_since else previous.progress_since
+    if not busy:
+        since = ""
     ready_since = {key: previous.ready_since.get(key, now) for key in ready}
     blocked_since = {key: previous.blocked_since.get(key, now) for key in blocked}
     reasons: list[str] = ["target_not_ready"] if setting_gaps else []
@@ -220,9 +222,7 @@ def _issue_body(record: MergeTrainStallRecord) -> str:
     lines = [STALL_ISSUE_MARKER, "The merge train needs the Supervisor's attention.", ""]
     for base, observation in sorted(record.observations.items()):
         if observation.reasons:
-            lines.append(
-                f"- Base `{base}`: {', '.join(observation.reasons)}; unchanged since {observation.progress_since}."
-            )
+            lines.append(f"- Base `{base}`: {', '.join(observation.reasons)}.")
             lines.extend(
                 f"  - Ready change `{key}` since {since}."
                 for key, since in sorted(observation.ready_since.items())
@@ -384,10 +384,10 @@ def run_stall_monitor_pass(
                         progress_key=progress_key,
                         ready=() if release_held else ready,
                         blocked=() if release_held else blocked,
-                        busy=not release_held
-                        and bool(ready or current or (state and state.lease_owner)),
+                        busy=not release_held and bool(ready or current),
                         orphaned_lease=bool(
-                            state
+                            (ready or blocked or current)
+                            and state
                             and state.lease_owner
                             and _age(observed_at, state.lease_expires_at) >= 0
                         ),
