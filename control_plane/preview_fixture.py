@@ -34,7 +34,9 @@ from control_plane.provider_operations import (
     provider_operation_response_payload,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane._preview_fixture_program import PREVIEW_FIXTURE_RESULT_MARKER
+from control_plane._preview_fixture_program import (
+    PREVIEW_FIXTURE_RESULT_MARKER as PREVIEW_FIXTURE_RESULT_MARKER,
+)
 
 
 @dataclass
@@ -123,8 +125,9 @@ class PreviewFixtureAdapter:
         return connection
 
     def capture_binding(self) -> PreviewFixtureBinding:
-        self.binding = self.runtime_binding(self.connect())
-        return self.binding
+        binding = self.runtime_binding(self.connect())
+        self.binding = binding
+        return binding
 
     def runtime_binding(self, connection: reads.OdooRuntimeConnection) -> PreviewFixtureBinding:
         target = api.fetch_dokploy_target_payload(
@@ -133,6 +136,7 @@ class PreviewFixtureAdapter:
             target_type="compose",
             target_id=connection.evidence.target_id,
         )
+        # noinspection PyProtectedMember
         kind, lookup, _project, server = post_deploy._resolve_dokploy_schedule_runtime(
             host=connection.host,
             token=connection.token,
@@ -241,6 +245,7 @@ class PreviewFixtureAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        del provider_operation_key
         try:
             historical = self.invoke("readback")
             if fixture_plan_sha256(historical) != self.request.reviewed_plan_sha256:
@@ -274,6 +279,7 @@ class PreviewFixtureAdapter:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
+        del provider_operation_key
         if reconciliation_key != self.reconciliation_key():
             return ProviderObservation("unknown")
         if not provider_effect_phase:

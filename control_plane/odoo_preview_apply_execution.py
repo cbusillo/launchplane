@@ -191,6 +191,16 @@ class OdooPreviewProviderMutationAdapter:
                     raise ValueError("Multiple held fixture cancellation intents are unavailable.")
                 self.fixture_cancellation = intent
 
+    def restore_fixture_cancellation(self, retained: object, *, allow_mutation: bool) -> None:
+        if (
+            self._issued_plan.operation != "destroy"
+            or not self._issued_plan.dry_run_plan.delete_volumes
+            or allow_mutation
+            and self._pre_mutation_guard is None
+        ):
+            raise ValueError("Fixture cancellation requires a guarded destructive preview destroy.")
+        self.fixture_cancellation = PreviewFixtureIntent.model_validate(retained)
+
     def capture_schedule_binding(self) -> None:
         from control_plane.dokploy import post_deploy, source
 
@@ -803,17 +813,8 @@ class OdooPreviewApplyOperation:
         )
         retained_intent = postgres.read_original_mutation_intent(existing) if existing else {}
         if "fixture_cancellation" in retained_intent:
-            if (
-                self.adapter._issued_plan.operation != "destroy"
-                or not self.adapter._issued_plan.dry_run_plan.delete_volumes
-                or allow_mutation
-                and self.adapter._pre_mutation_guard is None
-            ):
-                raise ValueError(
-                    "Fixture cancellation requires a guarded destructive preview destroy."
-                )
-            self.adapter.fixture_cancellation = PreviewFixtureIntent.model_validate(
-                retained_intent["fixture_cancellation"]
+            self.adapter.restore_fixture_cancellation(
+                retained_intent["fixture_cancellation"], allow_mutation=allow_mutation
             )
         with ExitStack() as locks:
             if not postgres.preview_refresh_is_excluded(preview_id=logical_id):

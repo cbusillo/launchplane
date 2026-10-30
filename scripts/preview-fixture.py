@@ -15,6 +15,7 @@ def main() -> int:
     )
     parser.add_argument("mode", choices=("dry-run", "apply", "readback"))
     parser.add_argument("--operator-helper", type=Path, required=True)
+    # noinspection DuplicatedCode
     parser.add_argument("--payload-file", type=Path, required=True)
     parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--idempotency-key", default="")
@@ -51,12 +52,12 @@ def main() -> int:
     )
     helper = args.operator_helper.resolve(strict=True)
     if helper.name != "launchplane-write-action.py":
-        parser.error("Select the installed Launchplane operator transport.")
+        parser.error("Select the installed Launchplane transport.")
     transport = runpy.run_path(str(helper), run_name="preview_fixture_transport")
     settings = transport["resolve_settings"](args)
     transport["validate_service_url"](settings["service_url"])
     if not settings["token"]:
-        parser.error("The existing operator credential is unavailable.")
+        parser.error("The existing Launchplane credential is unavailable.")
     try:
         response = transport["request_launchplane"](
             service_url=settings["service_url"],

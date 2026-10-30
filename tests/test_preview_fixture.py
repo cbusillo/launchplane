@@ -30,6 +30,7 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity, RUNTIME_ID
 from control_plane.host_package import host_package
 from control_plane.odoo_app_maintenance_http import OdooAppMaintenanceEnvelope
 from control_plane.preview_fixture import (
+    PREVIEW_FIXTURE_RESULT_MARKER,
     FixtureContainerStillRunning,
     PreviewFixtureAdapter,
     fixture_plan_sha256,
@@ -37,13 +38,13 @@ from control_plane.preview_fixture import (
     fixture_schedule_script,
     run_fixture_schedule,
 )
-from control_plane._preview_fixture_program import PREVIEW_FIXTURE_RESULT_MARKER
 from control_plane.dokploy.post_deploy import (
     OdooPostDeployReadbackFailure,
     ODOO_POST_DEPLOY_SCHEDULE_UPSERT,
     ODOO_POST_DEPLOY_SCHEDULE_TRIGGER,
 )
 from control_plane.provider_operations import (
+    DurableProviderMutationAdapter,
     DurableProviderOperationResult,
     ProviderOperationLease,
     ProviderMutationRejectedError,
@@ -177,7 +178,8 @@ class PreviewFixtureTests(unittest.TestCase):
                 attempts = {"apply": 0}
 
                 def schedule(**kwargs: object) -> dict[str, str]:
-                    mode = str(kwargs["mode"])
+                    mode = kwargs["mode"]
+                    assert isinstance(mode, str)
                     if mode == "apply":
                         attempts["apply"] += 1
                         if failure == "crash" and attempts["apply"] == 1:
@@ -262,7 +264,7 @@ class PreviewFixtureTests(unittest.TestCase):
         ):
             with self.subTest(change=change):
                 current = binding.model_copy(update={"container_id": "e" * 64})
-                identity = (
+                selected_identity = (
                     current.identity.model_copy(
                         update={"preview_generation_id": "different-generation"}
                     )
@@ -270,7 +272,7 @@ class PreviewFixtureTests(unittest.TestCase):
                     else current.identity
                 )
                 connection = Mock(
-                    selection=Mock(identity=identity),
+                    selection=Mock(identity=selected_identity),
                     evidence=Mock(
                         target_id="another-target" if change == "target" else current.target_id,
                         container_id=current.container_id,
@@ -361,7 +363,7 @@ class PreviewFixtureTests(unittest.TestCase):
                 request_fingerprint="original",
                 lease_owner="source",
                 response_trace_id="source",
-                adapter=provider,
+                adapter=cast(DurableProviderMutationAdapter, provider),
                 original_intent=operation.adapter.original_intent(),
             )
             self.assertEqual(original.status, "completed")
@@ -370,7 +372,7 @@ class PreviewFixtureTests(unittest.TestCase):
                 "compose_ref"
             ] = "compose-example"
             refresh = _issued_plan(OdooPreviewApplyEnvelope.model_validate(payload))
-            identity = fixture_identity().model_copy(
+            fixture_runtime = fixture_identity().model_copy(
                 update={
                     "product": profile.product,
                     "context": profile.preview.context,
@@ -378,12 +380,12 @@ class PreviewFixtureTests(unittest.TestCase):
                 }
             )
             fixture = fixture_request(mode="apply", reviewed_plan_sha256="c" * 64).model_copy(
-                update={"context": identity.context, "instance": identity.instance}
+                update={"context": fixture_runtime.context, "instance": fixture_runtime.instance}
             )
             intent = PreviewFixtureIntent(
                 product=profile.product,
                 maintenance=fixture,
-                fixture_binding=fixture_binding().model_copy(update={"identity": identity}),
+                fixture_binding=fixture_binding().model_copy(update={"identity": fixture_runtime}),
             )
             for status in (202, 409):
                 provider.apply.return_value = ProviderMutationOutcome(
@@ -399,7 +401,7 @@ class PreviewFixtureTests(unittest.TestCase):
                     request_fingerprint=str(status),
                     lease_owner="fixture",
                     response_trace_id="fixture",
-                    adapter=provider,
+                    adapter=cast(DurableProviderMutationAdapter, provider),
                     original_intent=intent.model_dump(mode="json"),
                 )
                 self.assertEqual(outcome.status, "completed")
@@ -515,7 +517,7 @@ class PreviewFixtureTests(unittest.TestCase):
                 PreviewFixtureAdapter, "plan", side_effect=ValueError("sample was used")
             ) as plan,
         ):
-            outcome = adapter.apply("original", Mock())
+            outcome = adapter.apply("original", cast(ProviderOperationLease, Mock()))
         self.assertTrue(outcome.durable)
         self.assertFalse(outcome.provider_effect_performed)
         invoke.assert_called_once_with("readback")
@@ -541,7 +543,7 @@ class PreviewFixtureTests(unittest.TestCase):
                 ],
             ),
         ):
-            outcome = adapter.apply("original", Mock())
+            outcome = adapter.apply("original", cast(ProviderOperationLease, Mock()))
         self.assertEqual(outcome.response_status_code, 409)
         self.assertTrue(outcome.durable)
         result = cast(dict[str, object], outcome.response_payload["result"])
@@ -600,7 +602,7 @@ class PreviewFixtureTests(unittest.TestCase):
             PreviewFixtureAdapter, "invoke", return_value=fixture_receipt("dry-run")
         ) as invoke:
             with self.assertRaises(ProviderMutationRejectedError):
-                adapter.apply("original", Mock())
+                adapter.apply("original", cast(ProviderOperationLease, Mock()))
         self.assertEqual([call.args[0] for call in invoke.call_args_list], ["readback"])
 
     def test_preflight_provider_failures_release_the_target_without_dispatch(self) -> None:
@@ -833,15 +835,17 @@ class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
                 planned = fixture_receipt("dry-run")
 
                 def invoke_fixture(
-                    mode: str, lease: ProviderOperationLease | None = None, **_kwargs: object
+                    fixture_mode: str,
+                    lease: ProviderOperationLease | None = None,
+                    **_kwargs: object,
                 ) -> PreviewFixtureReceipt:
                     if lease is not None:
                         lease.checkpoint_effect("fixture_started")
                     return fixture_receipt(
-                        mode,
+                        fixture_mode,
                         records=[]
-                        if mode == "readback"
-                        else fixture_receipt(mode).model_dump(mode="json")["records"],
+                        if fixture_mode == "readback"
+                        else fixture_receipt(fixture_mode).model_dump(mode="json")["records"],
                     )
 
                 with (
@@ -944,8 +948,10 @@ class PreviewFixtureHostTests(unittest.TestCase):
                 "print(os.environ['FIXTURE_INSPECT'] if sys.argv[1]=='inspect' else os.environ['FIXTURE_REPLY'])\n"
             )
             docker.chmod(0o700)
-            identity = fixture_identity().model_dump(mode="json")
-            observed = dict(identity, environment_kind="stable") if stable else identity
+            expected_identity = fixture_identity().model_dump(mode="json")
+            observed = (
+                dict(expected_identity, environment_kind="stable") if stable else expected_identity
+            )
             config = {
                 "State": {"Running": True},
                 "Config": {
@@ -957,11 +963,11 @@ class PreviewFixtureHostTests(unittest.TestCase):
                         RUNTIME_IDENTITY_ENV_KEY + "=" + json.dumps(observed),
                         "ODOO_DB_NAME=sample",
                     ],
-                    "Image": identity["image_reference"],
+                    "Image": expected_identity["image_reference"],
                 },
             }
             spec = {
-                "identity": identity,
+                "identity": expected_identity,
                 "database": "sample",
                 "fixture": "sample-parts",
                 "mode": "apply",
@@ -987,7 +993,6 @@ class PreviewFixtureHostTests(unittest.TestCase):
                 },
                 text=True,
                 capture_output=True,
-                check=False,
                 timeout=15,
             )
 
@@ -1083,7 +1088,6 @@ class PreviewFixtureCancellationHostTests(unittest.TestCase):
                         },
                         text=True,
                         capture_output=True,
-                        check=False,
                         timeout=15,
                     )
                     self.assertEqual(result.returncode == 0, not drift, result.stderr)
@@ -1161,7 +1165,6 @@ class PreviewFixtureCancellationHostTests(unittest.TestCase):
                     },
                     text=True,
                     capture_output=True,
-                    check=False,
                     timeout=15,
                 )
                 self.assertEqual(result.returncode == 0, permitted is not None, result.stderr)
@@ -1279,14 +1282,16 @@ class PreviewFixtureCarrierTests(unittest.TestCase):
         checkpoint = self.store.checkpoint_mutation_provider_effect(
             reservation=reserved.record, effect_phase=SUPERSEDED_PROVIDER_EFFECT_PHASE
         )
-        assert checkpoint.record is not None
+        checkpointed = checkpoint.record
+        assert checkpointed is not None
         held = self.store.mark_mutation_reconcile_required(
-            reservation=checkpoint.record,
-            reconciliation_key=checkpoint.record.reconciliation_key,
+            reservation=checkpointed,
+            reconciliation_key=checkpointed.reconciliation_key,
         )
-        assert held.record is not None
+        held_record = held.record
+        assert held_record is not None
         self.now = "2026-10-30T13:00:00Z"
-        return held.record
+        return held_record
 
     def carrier_intent(self) -> dict[str, object]:
         return {
@@ -1446,12 +1451,12 @@ class PreviewFixtureDestroyTests(unittest.TestCase):
                 orphan = {"running": True, "first": True}
 
                 def guard() -> None:
-                    held = store.read_idempotency_record(
+                    current_reservation = store.read_idempotency_record(
                         scope="destroyer",
                         route_path="/v1/drivers/odoo/preview-apply",
                         idempotency_key=plan_id,
                     )
-                    if refusal["active"] and held is not None:
+                    if refusal["active"] and current_reservation is not None:
                         raise ValueError("custody changed")
 
                 def execute(**kwargs: object) -> dict[str, object]:
