@@ -9351,7 +9351,15 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
         self.assertFalse(self.provider.applied)
 
     def test_unavailable_and_vulnerable_scans_hold_before_testing_or_preview_effects(self) -> None:
-        from control_plane.artifact_scan import ArtifactScanResult
+        from control_plane.artifact_scan import ArtifactScanFinding, ArtifactScanResult
+
+        finding = ArtifactScanFinding(
+            vulnerability_id="CVE-2026-12345",
+            package_name="libssl3",
+            installed_version="3.0.1",
+            fixed_version="3.0.2",
+            severity="HIGH",
+        )
 
         for target in ("testing", "preview"):
             for status in ("fail", "unavailable"):
@@ -9361,6 +9369,8 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
                         status=cast(Any, status),
                         reason="fixture",
                         scanned_at="2026-10-16T12:00:00Z",
+                        high=1 if status == "fail" else 0,
+                        findings=(finding,) if status == "fail" else (),
                     )
                     commit = PR_HEAD if target == "preview" else DEPLOYABLE
                     self.github.add_run(
@@ -9372,6 +9382,11 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
                     plan = self.reconcile()
                     self.assertTrue(plan["held"])
                     self.assertEqual(plan["action"], "wait")
+                    scan = cast(dict[str, object], plan["artifact_scan"])
+                    self.assertEqual(
+                        scan["findings"],
+                        [finding.model_dump(mode="json")] if status == "fail" else [],
+                    )
                     self.assertEqual(
                         self.artifact_scanner.call_args.args,
                         (f"{IMAGE_REPOSITORY}@{_digest(commit)}",),

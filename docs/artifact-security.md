@@ -18,10 +18,26 @@ Each run has an isolated directory, explicit empty config/ignore files, and no
 host registry login, Docker socket, product configuration, plugins or inherited
 `TRIVY_*` environment. A missing binary, timeout, inaccessible private image,
 invalid report, missing package inventory or wrong image is unavailable, never
-clean. Only bounded counts, the image reference, timestamp and reason enter the
-reconcile plan; provider stderr and report contents do not.
+clean. Counts, the image reference, timestamp, reason and up to 50 fixable
+HIGH/CRITICAL findings enter the reconcile plan. Each finding contains only
+`vulnerability_id` (CVE or GHSA), `package_name`, `installed_version`,
+`fixed_version` and `severity`. Fields have bounded package/version syntax and
+pass the shared secret redactor unchanged; invalid rows are omitted.
+`findings_omitted` counts both invalid rows and rows beyond the cap. Counts and
+refusal still cover every fixable HIGH/CRITICAL occurrence, including omitted
+rows. Paths, URLs, descriptions, raw reports and provider stderr stay private.
 
 The existing product reconcile-request reader exposes `last_plan.artifact_scan`.
+Read `GET /v1/product-profiles/{product}/reconcile-requests` under the existing
+product read authority, and select the request by its `target_key` and PR
+number. Match its `head_sha` and `desired_image_digest` to the verified held
+build before using `artifact_scan.findings`; testing's scan qualification does
+not select a preview image. The installed catalog reader is
+`launchplane-write-action.py reconcile-requests-read --product
+<product> --target-key <product>:preview:<PR>`.
+Older saved scans have no findings; the existing reconciliation sweep produces
+the diagnostic on its next scan after this service version is installed. This
+read does not request reconciliation or change a lane.
 A refused scan sets `action=wait`, `held=true`, and
 `reason=artifact_scan_refused` before deploy effects. The normal sweep retries;
 fixing the image and publishing its next build also requests reconciliation.

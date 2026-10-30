@@ -14,6 +14,7 @@ from control_plane.artifact_scan import (
     SCAN_RESULT_TTL_SECONDS,
     SCAN_UNAVAILABLE_TTL_SECONDS,
     GHCR_ARTIFACT_READ_INTEGRATION,
+    MAX_SCAN_FINDINGS,
     _RESULTS,
     artifact_scan_from_report,
     scan_artifact,
@@ -63,6 +64,64 @@ class ArtifactScanTests(TestCase):
                 mutate(payload)
                 with self.assertRaises(ValueError):
                     artifact_scan_from_report(IMAGE, payload, scanned_at=NOW)
+
+    def test_fixable_diagnostics_keep_only_package_facts_without_changing_the_gate(self) -> None:
+        finding = {
+            "VulnerabilityID": "CVE-2026-12345",
+            "PkgName": "libssl3",
+            "InstalledVersion": "3.0.1-1+deb12u1",
+            "FixedVersion": "3.0.2-1+deb12u2",
+            "Severity": "HIGH",
+            "PkgPath": "/private/customer/file",
+            "Description": "provider raw output",
+            "PrimaryURL": "https://admin:password@example.invalid/report",
+        }
+        vulnerable = report()
+        vulnerable["Results"][0]["Vulnerabilities"] = [
+            finding,
+            {**finding, "Severity": "CRITICAL", "FixedVersion": ""},
+            {**finding, "Severity": "MEDIUM"},
+            {**finding, "PkgName": "ghp_abcdefghijklmnopqrstuvwxyz0123456789"},
+            {**finding, "InstalledVersion": "/private/customer/version"},
+            {**finding, "FixedVersion": "https://example.invalid/fix"},
+            {**finding, "VulnerabilityID": {"raw": "provider output"}},
+        ]
+        result = artifact_scan_from_report(IMAGE, vulnerable, scanned_at=NOW)
+        self.assertEqual((result.status, result.high, result.critical), ("fail", 5, 0))
+        self.assertEqual(result.image_reference, IMAGE)
+        self.assertEqual(result.scanned_at, NOW)
+        self.assertEqual(result.findings_omitted, 4)
+        self.assertEqual(
+            result.model_dump(mode="json")["findings"],
+            [
+                {
+                    "vulnerability_id": finding["VulnerabilityID"],
+                    "package_name": finding["PkgName"],
+                    "installed_version": finding["InstalledVersion"],
+                    "fixed_version": finding["FixedVersion"],
+                    "severity": finding["Severity"],
+                }
+            ],
+        )
+
+    def test_diagnostic_clipping_does_not_clip_counts_or_skip_later_invalid_results(self) -> None:
+        finding = {
+            "VulnerabilityID": "GHSA-abcd-1234-efgh",
+            "PkgName": "@example/package",
+            "InstalledVersion": "1.0.0",
+            "FixedVersion": "1.0.1, 2.0.1",
+            "Severity": "CRITICAL",
+        }
+        vulnerable = report()
+        vulnerable["Results"][0]["Vulnerabilities"] = [finding] * (MAX_SCAN_FINDINGS + 3)
+        result = artifact_scan_from_report(IMAGE, vulnerable, scanned_at=NOW)
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(len(result.findings), MAX_SCAN_FINDINGS)
+        self.assertEqual(result.critical, MAX_SCAN_FINDINGS + 3)
+        self.assertEqual(result.findings_omitted, 3)
+        vulnerable["Results"][0]["Vulnerabilities"].append({"Severity": "invalid"})
+        with self.assertRaises(ValueError):
+            artifact_scan_from_report(IMAGE, vulnerable, scanned_at=NOW)
 
     def test_subprocess_scans_digest_without_host_or_product_policy(self) -> None:
         def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
