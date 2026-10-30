@@ -15,7 +15,12 @@ from unittest.mock import Mock, patch
 from pydantic import ValidationError
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    SUPERSEDED_PROVIDER_EFFECT_PHASE,
+)
 from control_plane.contracts.preview_fixture import (
+    PREVIEW_FIXTURE_CANCEL_PHASE,
     PreviewFixtureBinding,
     PreviewFixtureIntent,
     PreviewFixtureReceipt,
@@ -47,8 +52,14 @@ from control_plane.provider_operations import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
-from control_plane.odoo_preview_apply_http import OdooPreviewApplyEnvelope
+from control_plane.odoo_preview_apply_execution import (
+    OdooPreviewApplyOperation,
+    prepare_odoo_preview_apply_operation,
+)
+from control_plane.odoo_preview_apply_http import (
+    OdooPreviewApplyEnvelope,
+    issue_odoo_preview_apply_plan,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.test_odoo_preview_apply_execution import _refresh_payload, _issued_plan
@@ -119,6 +130,23 @@ def fixture_binding() -> PreviewFixtureBinding:
 
 
 class PreviewFixtureTests(unittest.TestCase):
+    def test_unavailable_readback_does_not_block_recovery_before_trigger(self) -> None:
+        adapter = PreviewFixtureAdapter(
+            Mock(), Path("."), "example-product", fixture_request(), "trace"
+        )
+        with patch.object(
+            PreviewFixtureAdapter, "invoke", side_effect=ValueError("container unavailable")
+        ) as invoke:
+            observation = adapter.observe("original", "", adapter.reconciliation_key())
+            self.assertEqual(observation.outcome, "absent")
+            self.assertTrue(observation.retry_safe)
+            invoke.assert_not_called()
+            triggered = adapter.observe(
+                "original", ODOO_POST_DEPLOY_SCHEDULE_TRIGGER, adapter.reconciliation_key()
+            )
+            self.assertEqual(triggered.outcome, "unknown")
+            invoke.assert_called_once_with("readback")
+
     def test_setup_failure_releases_but_trigger_uncertainty_keeps_fixture_custody(self) -> None:
         for failure in ("setup", "trigger", "crash"):
             with self.subTest(failure=failure), TemporaryDirectory() as directory:
@@ -1147,6 +1175,218 @@ class PreviewFixtureCancellationHostTests(unittest.TestCase):
                         if line.startswith(PREVIEW_FIXTURE_RESULT_MARKER + "=")
                     )
                     self.assertEqual(json.loads(bytes.fromhex(encoded))["stopped"], permitted)
+
+
+class PreviewFixtureCarrierTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(TemporaryDirectory()))
+        self.store = PostgresRecordStore(
+            database_url="sqlite+pysqlite:///" + str(self.root / "state.db")
+        )
+        self.addCleanup(self.store.close)
+        self.store.ensure_schema()
+        self.now = "2026-10-30T12:00:00Z"
+        self.enterContext(
+            patch.object(
+                self.store, "_database_mutation_timestamp", side_effect=lambda _session: self.now
+            )
+        )
+        self.profile = LaunchplaneProductProfileRecord.model_validate(
+            _odoo_preview_profile_payload()
+        )
+        self.execute = Mock(return_value={"status": "pass", "provider_effect_attempted": True})
+        self.quiescence = Mock(return_value=True)
+        self.observe = Mock(return_value=("present", {"status": "pass"}, False))
+        self.cancellation = self.enterContext(
+            patch("control_plane.preview_fixture.require_fixture_container_cancelled")
+        )
+        for name in ("capture_source_decision", "capture_schedule_binding"):
+            self.enterContext(
+                patch(
+                    "control_plane.odoo_preview_apply_execution."
+                    f"OdooPreviewProviderMutationAdapter.{name}"
+                )
+            )
+        self.enterContext(
+            patch("control_plane.odoo_preview_apply_execution.require_source_free_preview_history")
+        )
+        self.enterContext(
+            patch(
+                "control_plane.odoo_preview_apply_execution.apply_odoo_preview_lifecycle_evidence",
+                return_value={"lifecycle_evidence_status": "applied"},
+            )
+        )
+        first = self.operation("first-destroy")
+        runtime = fixture_identity().model_copy(
+            update={
+                "product": self.profile.product,
+                "context": self.profile.preview.context,
+                "instance": first.adapter._issued_plan.dry_run_plan.compose_name,
+            }
+        )
+        self.fixture = PreviewFixtureIntent(
+            product=self.profile.product,
+            maintenance=fixture_request(mode="apply", reviewed_plan_sha256="c" * 64).model_copy(
+                update={"context": runtime.context, "instance": runtime.instance}
+            ),
+            fixture_binding=fixture_binding().model_copy(update={"identity": runtime}),
+        )
+
+    def operation(
+        self,
+        key: str,
+        *,
+        action: str = "destroy",
+        delete_volumes: bool = True,
+        disposable_cleanup: bool = False,
+    ) -> OdooPreviewApplyOperation:
+        payload = _refresh_payload()
+        plan = cast(dict[str, object], cast(dict[str, object], payload["apply"])["dry_run_plan"])
+        plan.update(operation=action, compose_ref="compose-example", delete_volumes=delete_volumes)
+        envelope = OdooPreviewApplyEnvelope.model_validate(payload)
+        issued = issue_odoo_preview_apply_plan(result=_issued_plan(envelope), plan_id=key)
+        return prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=envelope,
+            issued_plan=issued,
+            reservation_scope="destroyer",
+            idempotency_key=key,
+            request_fingerprint=key,
+            trace_id=key,
+            execute_apply=self.execute,
+            observe_apply=self.observe,
+            supersession_is_quiescent=self.quiescence,
+            pre_mutation_guard=lambda: None,
+            qualify_existing_preview=True,
+            disposable_cleanup=disposable_cleanup,
+        )
+
+    def hold_carrier(self, intent: dict[str, object]) -> LaunchplaneIdempotencyRecord:
+        operation = self.operation("first-destroy")
+        reserved = self.store.reserve_mutation(
+            scope=operation.reservation_scope,
+            route_path=operation.route_path,
+            idempotency_key=operation.idempotency_key,
+            request_fingerprint=operation.request_fingerprint,
+            lease_owner="original",
+            reconciliation_key=operation.adapter.reconciliation_key(),
+            provider_target_key=operation.adapter.target_key(),
+            original_intent=intent,
+        )
+        assert reserved.record is not None
+        checkpoint = self.store.checkpoint_mutation_provider_effect(
+            reservation=reserved.record, effect_phase=SUPERSEDED_PROVIDER_EFFECT_PHASE
+        )
+        assert checkpoint.record is not None
+        held = self.store.mark_mutation_reconcile_required(
+            reservation=checkpoint.record,
+            reconciliation_key=checkpoint.record.reconciliation_key,
+        )
+        assert held.record is not None
+        self.now = "2026-10-30T13:00:00Z"
+        return held.record
+
+    def carrier_intent(self) -> dict[str, object]:
+        return {
+            **self.operation("first-destroy").adapter.original_intent(),
+            "fixture_cancellation": self.fixture.model_dump(mode="json"),
+        }
+
+    def test_different_key_destroy_chain_keeps_original_fixture_until_cancellation(self) -> None:
+        original = self.hold_carrier(self.carrier_intent())
+        second = self.operation("second-destroy")
+        self.quiescence.return_value = False
+        self.assertEqual(second.run(self.store).status, "target_busy")
+        self.assertEqual(self.store.read_idempotency_record_by_id(original.record_id), original)
+        self.cancellation.assert_not_called()
+        self.quiescence.return_value = True
+        self.cancellation.side_effect = ValueError("container unavailable")
+        self.assertEqual(second.run(self.store).status, "reconcile_required")
+        held = self.store.list_held_odoo_preview_reservations(product=self.profile.product)
+        self.assertEqual(len(held), 1)
+        self.assertEqual(held[0].idempotency_key, second.idempotency_key)
+        self.assertEqual(held[0].provider_effect_phase, SUPERSEDED_PROVIDER_EFFECT_PHASE)
+        self.assertTrue(held[0].provider_effect_started_at)
+        self.assertEqual(
+            self.store.read_original_mutation_intent(held[0])["fixture_cancellation"],
+            self.fixture.model_dump(mode="json"),
+        )
+        completed = self.store.read_idempotency_record_by_id(original.record_id)
+        assert completed is not None
+        self.assertEqual(completed.state, "completed")
+        self.execute.assert_not_called()
+        self.now = "2026-10-30T14:00:00Z"
+        self.cancellation.side_effect = None
+        self.assertEqual(self.operation("third-destroy").run(self.store).status, "completed")
+        self.assertFalse(
+            self.store.list_held_odoo_preview_reservations(product=self.profile.product)
+        )
+        for call in self.cancellation.call_args_list:
+            self.assertEqual(call.kwargs["intent"], self.fixture)
+        self.assertFalse(self.cancellation.call_args_list[-1].kwargs.get("cancel", False))
+
+    def test_carrier_refuses_refresh_and_volume_preserving_cleanup(self) -> None:
+        original = self.hold_carrier(self.carrier_intent())
+        for action, delete_volumes, disposable in (
+            ("refresh", True, False),
+            ("destroy", False, False),
+            ("destroy", False, True),
+        ):
+            with self.subTest(action=action, disposable=disposable):
+                operation = self.operation(
+                    "replacement",
+                    action=action,
+                    delete_volumes=delete_volumes,
+                    disposable_cleanup=disposable,
+                )
+                self.assertEqual(operation.run(self.store).status, "target_busy")
+                self.assertEqual(
+                    self.store.read_idempotency_record_by_id(original.record_id), original
+                )
+        self.quiescence.assert_not_called()
+        self.cancellation.assert_not_called()
+        self.execute.assert_not_called()
+
+    def test_malformed_carrier_cannot_be_replaced_or_observed_as_complete(self) -> None:
+        original = self.hold_carrier(self.carrier_intent())
+        for custody in (None, {"fixture_binding": None}):
+            with self.subTest(custody=custody):
+                intent = {**self.carrier_intent(), "fixture_cancellation": custody}
+                with patch.object(self.store, "read_original_mutation_intent", return_value=intent):
+                    for key in ("first-destroy", "replacement"):
+                        with self.assertRaises(ValueError):
+                            self.operation(key).run(
+                                self.store, allow_mutation=key != "first-destroy"
+                            )
+                    self.assertEqual(
+                        self.store.read_idempotency_record_by_id(original.record_id), original
+                    )
+        self.observe.assert_not_called()
+        self.cancellation.assert_not_called()
+
+    def test_missing_carrier_custody_never_observes_or_supersedes_known_effect(self) -> None:
+        original = self.hold_carrier(self.operation("first-destroy").adapter.original_intent())
+        for phase in (SUPERSEDED_PROVIDER_EFFECT_PHASE, PREVIEW_FIXTURE_CANCEL_PHASE):
+            with self.subTest(phase=phase):
+                observation = self.operation("first-destroy").adapter.observe("original", phase, "")
+                self.assertEqual(observation.outcome, "unknown")
+        for disposable in (False, True):
+            with self.subTest(disposable=disposable):
+                replacement = self.operation("replacement", disposable_cleanup=disposable)
+                self.assertEqual(replacement.run(self.store).status, "target_busy")
+        self.assertEqual(self.store.read_idempotency_record_by_id(original.record_id), original)
+        self.observe.assert_not_called()
+        self.quiescence.assert_not_called()
+
+    def test_missing_carrier_original_cannot_enter_disposable_cleanup(self) -> None:
+        original = self.hold_carrier({})
+        replacement = self.operation("replacement", disposable_cleanup=True)
+        self.assertEqual(replacement.run(self.store).status, "target_busy")
+        self.assertEqual(self.store.read_idempotency_record_by_id(original.record_id), original)
+        self.quiescence.assert_not_called()
+        self.cancellation.assert_not_called()
 
 
 class PreviewFixtureDestroyTests(unittest.TestCase):

@@ -276,6 +276,8 @@ class PreviewFixtureAdapter:
     ) -> ProviderObservation:
         if reconciliation_key != self.reconciliation_key():
             return ProviderObservation("unknown")
+        if not provider_effect_phase:
+            return ProviderObservation("absent", retry_safe=True)
         try:
             receipt = self.invoke("readback")
             digest = fixture_plan_sha256(receipt)
@@ -284,11 +286,7 @@ class PreviewFixtureAdapter:
         except (ValueError, OSError, RuntimeError, KeyError, click.ClickException):
             return ProviderObservation("unknown")
         if not receipt.records:
-            return (
-                ProviderObservation("unknown")
-                if provider_effect_phase
-                else ProviderObservation("absent", retry_safe=True)
-            )
+            return ProviderObservation("unknown")
         return ProviderObservation(
             "present", response_payload=self.response(receipt, recovered=True)
         )

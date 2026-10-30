@@ -97,9 +97,9 @@ target/generation/container binding, effect checkpoint and bounded receipt.
 Repeating an identical completed request/key replays its result. After a lost
 response, repeat that original request and key: verified historical commit
 evidence adopts the result without another write. Empty or unavailable readback
-after a trigger keeps the reservation held. Empty witness evidence with no
-recorded trigger checkpoint permits the original operation to retry its current
-preflight. Never replace a key to bypass it. Explicit product
+after a trigger keeps the reservation held. No recorded trigger checkpoint
+permits the original operation to retry its current preflight, even when native
+readback is unavailable. Never replace a key to bypass it. Explicit product
 rejections settle without claiming a data commit. Pre-dispatch refusals release
 fresh reservations. Read-only modes use service and provider execution evidence
 rather than synthetic idempotency records.
@@ -113,7 +113,10 @@ preview destruction can cancel the fixture by discarding its isolated resources.
 Refresh cannot supersede it. Ownership, in-use, only-copy and disposable-resource
 checks still apply, with volumes included in destruction. The expired fixture
 reservation transfers atomically to destroy, retaining the unresolved-effect
-fence through every failure. Cancellation does not claim the fixture never wrote.
+fence through every failure. A replacement destroy retains the same original
+fixture intent and first verifies the preceding destroy is quiescent. Refresh
+and volume-preserving destroy cannot replace a cancellation. Missing or malformed
+cancellation custody keeps the fence. Cancellation does not claim the fixture never wrote.
 Destroy settles only after ordinary cleanup evidence and independent observation
 that the exact original container is stopped or absent. Destroy apply checkpoints
 and stops a surviving exact original container after checking its identity and
