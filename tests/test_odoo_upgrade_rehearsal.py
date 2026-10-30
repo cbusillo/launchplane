@@ -2635,7 +2635,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         setattr(artifact, "OdooDataWorkflowRunner", runner)
         unavailable = False
 
-        def docker(*arguments: str, **kwargs: Any) -> bytes:
+        def docker(*arguments: str) -> bytes:
             if unavailable:
                 raise RuntimeError("Artifact runtime is unavailable")
             output = io.StringIO()
