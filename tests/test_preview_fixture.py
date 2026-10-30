@@ -363,7 +363,7 @@ class PreviewFixtureTests(unittest.TestCase):
                 request_fingerprint="original",
                 lease_owner="source",
                 response_trace_id="source",
-                adapter=cast(DurableProviderMutationAdapter, provider),
+                adapter=cast(DurableProviderMutationAdapter, cast(object, provider)),
                 original_intent=operation.adapter.original_intent(),
             )
             self.assertEqual(original.status, "completed")
@@ -401,7 +401,7 @@ class PreviewFixtureTests(unittest.TestCase):
                     request_fingerprint=str(status),
                     lease_owner="fixture",
                     response_trace_id="fixture",
-                    adapter=cast(DurableProviderMutationAdapter, provider),
+                    adapter=cast(DurableProviderMutationAdapter, cast(object, provider)),
                     original_intent=intent.model_dump(mode="json"),
                 )
                 self.assertEqual(outcome.status, "completed")
@@ -517,7 +517,7 @@ class PreviewFixtureTests(unittest.TestCase):
                 PreviewFixtureAdapter, "plan", side_effect=ValueError("sample was used")
             ) as plan,
         ):
-            outcome = adapter.apply("original", cast(ProviderOperationLease, Mock()))
+            outcome = adapter.apply("original", cast(ProviderOperationLease, cast(object, Mock())))
         self.assertTrue(outcome.durable)
         self.assertFalse(outcome.provider_effect_performed)
         invoke.assert_called_once_with("readback")
@@ -543,7 +543,7 @@ class PreviewFixtureTests(unittest.TestCase):
                 ],
             ),
         ):
-            outcome = adapter.apply("original", cast(ProviderOperationLease, Mock()))
+            outcome = adapter.apply("original", cast(ProviderOperationLease, cast(object, Mock())))
         self.assertEqual(outcome.response_status_code, 409)
         self.assertTrue(outcome.durable)
         result = cast(dict[str, object], outcome.response_payload["result"])
@@ -602,7 +602,7 @@ class PreviewFixtureTests(unittest.TestCase):
             PreviewFixtureAdapter, "invoke", return_value=fixture_receipt("dry-run")
         ) as invoke:
             with self.assertRaises(ProviderMutationRejectedError):
-                adapter.apply("original", cast(ProviderOperationLease, Mock()))
+                adapter.apply("original", cast(ProviderOperationLease, cast(object, Mock())))
         self.assertEqual([call.args[0] for call in invoke.call_args_list], ["readback"])
 
     def test_preflight_provider_failures_release_the_target_without_dispatch(self) -> None:

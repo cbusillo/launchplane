@@ -9,19 +9,24 @@ from control_plane.contracts.preview_fixture import PreviewFixtureRequest, Previ
 from control_plane.odoo_app_maintenance_http import ODOO_APP_MAINTENANCE_ROUTE
 
 
-def main() -> int:
+# noinspection DuplicatedCode
+def fixture_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Apply an image-owned fixture to an exact preview."
     )
     parser.add_argument("mode", choices=("dry-run", "apply", "readback"))
     parser.add_argument("--operator-helper", type=Path, required=True)
-    # noinspection DuplicatedCode
     parser.add_argument("--payload-file", type=Path, required=True)
     parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--idempotency-key", default="")
     parser.add_argument("--reviewed-dry-run", action="store_true")
     for name in ("config", "env-config", "url"):
         parser.add_argument("--" + name)
+    return parser
+
+
+def main() -> int:
+    parser = fixture_parser()
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     if args.mode != "readback" and args.evidence_file is None:
