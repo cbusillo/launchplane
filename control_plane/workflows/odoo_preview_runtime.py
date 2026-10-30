@@ -1313,6 +1313,7 @@ def execute_odoo_preview_dokploy_apply(
             provider_lease_check=provider_lease_check,
         )
     return _execute_refresh(
+        record_store=record_store,
         database_url=database_url,
         host=host,
         token=token,
@@ -1777,6 +1778,7 @@ def _preview_refresh_environment_values(
 
 def _execute_refresh(
     *,
+    record_store: object | None = None,
     host: str,
     token: str,
     request: OdooPreviewDokployApplyRequest,
@@ -1831,6 +1833,7 @@ def _execute_refresh(
         )
         source_server_id = str(target_payload.get("serverId") or "").strip()
         compose_id, created_compose = _resolve_or_create_compose(
+            record_store=record_store,
             database_url=database_url,
             host=host,
             token=token,
@@ -2273,6 +2276,7 @@ def _execute_destroy(
 
 def _resolve_or_create_compose(
     *,
+    record_store: object | None = None,
     host: str,
     token: str,
     plan: OdooPreviewDokployDryRunPlan,
@@ -2305,20 +2309,23 @@ def _resolve_or_create_compose(
         host=host, token=token, server_id=server_id, database_url=database_url
     )
     provider_effect_checkpoint("compose_create")
-    created = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/compose.create",
-        method="POST",
-        payload={
-            "name": plan.compose_name,
-            "appName": plan.compose_name,
-            "description": f"Launchplane Odoo preview {plan.preview_slug}",
-            "environmentId": plan.environment_id,
-            "serverId": server_id,
-            "composeType": "docker-compose",
-        },
-    )
+    from control_plane.production_recipient_retirement_names import provider_name_guard
+
+    with provider_name_guard(record_store, plan.compose_name):
+        created = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/compose.create",
+            method="POST",
+            payload={
+                "name": plan.compose_name,
+                "appName": plan.compose_name,
+                "description": f"Launchplane Odoo preview {plan.preview_slug}",
+                "environmentId": plan.environment_id,
+                "serverId": server_id,
+                "composeType": "docker-compose",
+            },
+        )
     created_compose = dokploy_api.as_json_object(created)
     compose_id = str((created_compose or {}).get("composeId") or "").strip()
     if not compose_id:

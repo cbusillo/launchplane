@@ -5,7 +5,7 @@ import json
 
 import click
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from control_plane.retained_volume_sweep_program import RETAINED_VOLUME_SWEEP_HOST_PROGRAM
 from control_plane.contracts.product_retirement import ProductRetirementRecord
@@ -31,23 +31,31 @@ from control_plane.storage.postgres import PostgresRecordStore
 SweepStatus = Literal["eligible", "held", "removed", "absent", "unknown"]
 
 
-def _strings(value: object) -> set[str]:
+def _strings(value: object, *, parse_environments: bool = False) -> set[str]:
     if isinstance(value, str):
         return {value}
     if isinstance(value, Mapping):
-        return set().union(*(_strings(item) for item in value.values()))
+        result = set().union(
+            *(_strings(item, parse_environments=parse_environments) for item in value.values())
+        )
+        if parse_environments and isinstance(value.get("env"), str):
+            result.update(api.parse_dokploy_env_text(value["env"]).values())
+        return result
     if isinstance(value, (list, tuple)):
         collection: list[object] | tuple[object, ...] = value
-        return set().union(*(_strings(item) for item in collection))
+        return set().union(
+            *(_strings(item, parse_environments=parse_environments) for item in collection)
+        )
     return set()
 
 
-def _volume_referenced(name: str, payload: object) -> bool:
+def _volume_referenced(name: str, payload: object, *, exact: bool = False) -> bool:
     return any(
         value == name
-        or name.startswith((value + "-", value + "_"))
+        or not exact
+        and name.startswith((value + "-", value + "_"))
         or name in value.replace(":", "/").split("/")
-        for value in _strings(payload)
+        for value in _strings(payload, parse_environments=exact)
         if value
     )
 
@@ -76,14 +84,72 @@ def _custody_clear(
     )
 
 
-def _inventory_clear(root: Path, binding: RetainedVolumeBinding) -> bool:
+def compose_volume_names(
+    document: dict[str, Any], payload: dict[str, Any], allowed_keys: set[str] | None = None
+) -> tuple[str, ...]:
+    import re
+    from control_plane.dokploy.environment import require_unique_compose_inputs
+    from control_plane.testing_activation_compose import interpolate
+
+    volumes = document.get("volumes", {})
+    if not isinstance(volumes, dict):
+        raise ValueError("Compose volume inventory is unavailable.")
+    names = []
+    for alias, definition in volumes.items():
+        if not isinstance(alias, str) or not isinstance(definition, dict | type(None)):
+            raise ValueError("Compose volume definition is unavailable.")
+        declared = definition or {}
+        actual = declared.get("name")
+        if actual is None:
+            project = document.get("name") or payload.get("appName")
+            actual = (
+                alias
+                if declared.get("external")
+                else str(project) + "_" + alias
+                if isinstance(project, str) and project
+                else None
+            )
+        if not isinstance(actual, str):
+            raise ValueError("Compose volume identity is unavailable.")
+        if "$" in actual:
+            match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)}", actual)
+            if match is None or allowed_keys is not None and match[1] not in allowed_keys:
+                raise ValueError("Compose volume identity uses an unreviewed input.")
+            environment = require_unique_compose_inputs(str(payload.get("env") or ""), (match[1],))
+            actual = interpolate(actual, environment)
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", actual) is None:
+            raise ValueError("Compose volume identity is unsupported.")
+        names.append(actual)
+    return tuple(names)
+
+
+def _environment_referenced(name: str, owner: Mapping[str, object]) -> bool:
+    raw = owner.get("env")
+    if raw is not None and not isinstance(raw, str):
+        return True
+    return _volume_referenced(name, {"env": raw}, exact=True)
+
+
+def _inventory_clear(
+    root: Path, binding: RetainedVolumeBinding, *, ignored_compose_id: str = "", exact: bool = False
+) -> bool:
     host, token = source.read_dokploy_config(control_plane_root=root)
     for project in api.fetch_dokploy_projects(host=host, token=token):
+        if exact and (
+            not isinstance(project.get("env"), str)
+            or _environment_referenced(binding.volume_name, project)
+        ):
+            return False
         environments = project.get("environments")
         if not isinstance(environments, list):
             return False
         for environment in environments:
             if not isinstance(environment, dict):
+                return False
+            if exact and (
+                not isinstance(environment.get("env"), str)
+                or _environment_referenced(binding.volume_name, environment)
+            ):
                 return False
             for kind, (target_type, identifier) in TARGET_COLLECTIONS.items():
                 targets = environment.get(kind)
@@ -94,6 +160,8 @@ def _inventory_clear(root: Path, binding: RetainedVolumeBinding) -> bool:
                         return False
                     target_id = target[identifier]
                     assert isinstance(target_id, str)
+                    if target_type == "compose" and target_id == ignored_compose_id:
+                        continue
                     if target_type in {"application", "compose"}:
                         payload = api.fetch_dokploy_target_payload(
                             host=host, token=token, target_type=target_type, target_id=target_id
@@ -113,9 +181,11 @@ def _inventory_clear(root: Path, binding: RetainedVolumeBinding) -> bool:
                         ):
                             return False
                         payload = database_payload
+                    if exact and _environment_referenced(binding.volume_name, payload):
+                        return False
                     mounts = payload.get("mounts")
                     if not isinstance(mounts, list) or _volume_referenced(
-                        binding.volume_name, payload
+                        binding.volume_name, payload, exact=exact
                     ):
                         return False
                     if target_type == "compose":
@@ -124,31 +194,15 @@ def _inventory_clear(root: Path, binding: RetainedVolumeBinding) -> bool:
                                 host=host, token=token, compose_id=target_id
                             )
                         )
-                        volumes = document.get("volumes", {})
-                        if not isinstance(volumes, dict):
+                        try:
+                            names = compose_volume_names(
+                                document, payload if exact else {**payload, "env": ""}
+                            )
+                        except ValueError:
                             return False
-                        for name, definition in volumes.items():
-                            if not isinstance(name, str) or not isinstance(
-                                definition, dict | type(None)
-                            ):
-                                return False
-                            declared = definition or {}
-                            actual = declared.get("name")
-                            if actual is None:
-                                if declared.get("external"):
-                                    actual = name
-                                else:
-                                    prefix = document.get("name") or payload.get("appName")
-                                    if not isinstance(prefix, str) or not prefix:
-                                        return False
-                                    actual = prefix + "_" + name
-                            if (
-                                not isinstance(actual, str)
-                                or "${" in actual
-                                or actual == binding.volume_name
-                            ):
-                                return False
-                        if _volume_referenced(binding.volume_name, document):
+                        if binding.volume_name in names or _volume_referenced(
+                            binding.volume_name, document, exact=exact
+                        ):
                             return False
 
     return True
@@ -160,6 +214,8 @@ def _host_result(
     mode: str,
     operation_key: str,
     lease: ProviderOperationLease | None = None,
+    *,
+    retirement: dict[str, object] | None = None,
 ) -> tuple[SweepStatus, str]:
     host, token = source.read_dokploy_config(control_plane_root=root)
     frames: list[dict[str, object]] = []
@@ -181,6 +237,7 @@ def _host_result(
             "identity": binding.volume_identity_sha256,
             "engine_identity": binding.engine_identity_sha256,
             "operation": operation_key,
+            **({"retirement": retirement} if retirement else {}),
         },
         receive=frames.append,
         timeout_seconds=120,

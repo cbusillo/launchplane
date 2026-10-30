@@ -595,6 +595,7 @@ def _ensure_application(
     app_name: str,
     description: str,
     template_application: JsonObject,
+    record_store: object | None = None,
 ) -> JsonObject:
     existing = _find_application_by_name(host=host, token=token, application_name=application_name)
     if existing is not None:
@@ -619,13 +620,16 @@ def _ensure_application(
     }
     if server_id:
         application_payload["serverId"] = server_id
-    created = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/application.create",
-        method="POST",
-        payload=application_payload,
-    )
+    from control_plane.production_recipient_retirement_names import provider_name_guard
+
+    with provider_name_guard(record_store, app_name):
+        created = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/application.create",
+            method="POST",
+            payload=application_payload,
+        )
     created_application = dokploy_api.as_json_object(created)
     created_application_id = str((created_application or {}).get("applicationId") or "").strip()
     if not created_application_id:
@@ -1102,6 +1106,7 @@ def execute_postgres_preview_refresh(
             app_name=app_name,
             description=f"Preview environment for {request.preview_slug}",
             template_application=template_application,
+            record_store=record_store,
         )
         application_id = str(application.get("applicationId") or "").strip()
         if existing_snapshot is None:

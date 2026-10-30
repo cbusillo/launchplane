@@ -131,6 +131,18 @@ def parse_dokploy_env_text(raw_env_text: str) -> dict[str, str]:
     return _provider_environment(raw_env_text)[0]
 
 
+def require_unique_compose_inputs(raw_env_text: str, keys: Iterable[str]) -> dict[str, str]:
+    selected = set(keys)
+    normalized = raw_env_text.replace("\r\n", "\n").replace("\r", "\n")
+    counts = [match[1] for match in _LINE.finditer(normalized)]
+    values = parse_dokploy_env_text(raw_env_text)
+    if any(
+        counts.count(key) != 1 or not values.get(key) for key in selected
+    ) or compose_unqualified_keys(raw_env_text, selected):
+        raise ValueError("Compose resource inputs are missing, duplicated or unqualified.")
+    return {key: values[key] for key in selected}
+
+
 def compose_unqualified_keys(raw_env_text: str, keys: Iterable[str]) -> list[str]:
     """Names whose legacy transport cannot establish literal Compose delivery.
 
