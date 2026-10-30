@@ -749,9 +749,18 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     body["serverId"] = str(old["serverId"])
             checkpoint(phase)
             record = self.save(record, phase=phase)
-            result = api.dokploy_request(
-                host=host, token=token, path=path, method="POST", payload=cast(api.JsonObject, body)
-            )
+            from control_plane.production_recipient_retirement_names import provider_name_guard
+
+            with provider_name_guard(
+                self.store, record.namespace if phase == "create_application" else ""
+            ):
+                result = api.dokploy_request(
+                    host=host,
+                    token=token,
+                    path=path,
+                    method="POST",
+                    payload=cast(api.JsonObject, body),
+                )
             if isinstance(result, dict) and isinstance(result.get("project"), dict):
                 result = result["project"]
             identity = {

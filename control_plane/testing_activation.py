@@ -1573,13 +1573,20 @@ class TestingActivationAdapter:
                             body["serverId"] = str(old["serverId"])
                     checkpoint(phase)
                     record = self.save(record, phase=phase)
-                    response = api.dokploy_request(
-                        host=host,
-                        token=token,
-                        path=path,
-                        method="POST",
-                        payload=cast(api.JsonObject, body),
+                    from control_plane.production_recipient_retirement_names import (
+                        provider_name_guard,
                     )
+
+                    with provider_name_guard(
+                        self.store, record.namespace if phase == "create_compose" else ""
+                    ):
+                        response = api.dokploy_request(
+                            host=host,
+                            token=token,
+                            path=path,
+                            method="POST",
+                            payload=cast(api.JsonObject, body),
+                        )
                     # Current Dokploy returns {project, environment}; older
                     # supported servers returned the project directly.
                     if (

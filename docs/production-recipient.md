@@ -5,8 +5,8 @@ title: Fresh production recipients
 A fresh-state generic-web production move must keep the current serving binding
 and recipient recoverable. Preparing another Compose target does not authorize
 bootstrapping it, changing the production binding, repointing consumers or
-retiring either recipient. This API implements the preparation boundary. It exposes no bootstrap, cutover,
-rollback or retirement operation. It also provides purpose-bound upstream qualification
+retiring either recipient. The service separates preparation, accepted-release cutover,
+scoped inverse and reviewed old-resource retirement. It also provides purpose-bound upstream qualification
 and an isolated cold-data recovery verifier. [#3699](https://github.com/cbusillo/launchplane/issues/3699)
 tracks the complete source capability; preparation alone does not clear Gate A.
 
@@ -619,3 +619,80 @@ timestamps do not change custody; mutation callers retain their strict guards. T
 universal invoice history nor unique-ID/parent reconciliation, accepted bootstrap,
 post-cutover elapsed time, recovery eligibility or exclusive old-resource custody.
 Those remain the retirement and source-data validation gates' responsibilities.
+
+## Retiring the old placement
+
+`POST /v1/products/{product}/production-recipient/retirement` reviews and retires
+only the retained old Compose and qualified exclusive named volumes. Use
+`scripts/prepare-production-recipient.py --retirement` with `dry-run`, reviewed
+`apply`, original-key `readback` and historical `receipt`, using the installed
+admin transport. The request binds the preparation and publication digests,
+a published recovery generation and an existing fresh backup record. It accepts
+no resource name, endpoint, SQL, supplied proof or credential. Apply requires
+existing `product_retirement.apply` authority on the production lane and the
+original preparer's actor and scope. Terminal-agent production writes remain
+refused. This source capability grants no live retirement authorization.
+
+The observation window begins at the exact successful current publication and
+lasts at least 24 hours. Fresh post-window health, successful incremental sync,
+actual reads by every reviewed consumer, populated isolated restored-data proof
+and current destination protection must qualify. Every irreversible dispatch
+rechecks current authority and references. Recovery freshness is never renewed
+by replay, and retirement never automatically captures again. A newly reviewed
+capture remains a separately authorized operation with its normal write pause.
+An original-key continuation can supply newly qualified recovery and protection
+record IDs without changing its resource plan. A later change to the published
+lane's owned authority refuses eligibility; this operation does not adopt a new
+publication or reinterpret evidence from a different runtime.
+
+The reviewed plan binds the provider definition, host engine, old containers,
+volume backing identities and ownership. All current provider target categories,
+managed lane settings, previews and recovery custody protect referenced resources,
+including stopped testing mounts. Unknown inventories refuse. Old writer activity,
+shared project networks or paths, schedules, backups, routing, bind or anonymous
+storage and changed ownership cannot qualify the corresponding destructive step.
+Populated storage is allowed only through this retirement's bound, expiring
+permission; ordinary prelaunch kept-volume cleanup still requires emptiness.
+The host permission uses its observed boot identity and monotonic deadline, so
+a wall-clock offset cannot extend freshness or carry permission across a reboot.
+The earliest recovery, sync, consumer or protection expiry bounds that permission.
+
+Before provider dispatch, a leased compare-and-write records `fallback_ended_at`
+and enters `retiring_old`. Old-target inverse, writer resume and release recovery
+then refuse. The retained provider name and identity stay reserved permanently;
+supported target creation/adoption requires a new name. The active replacement,
+its monitors and backup policies continue, and retirement does not
+block later Client releases.
+Target creation and retirement admission share a short database exclusion;
+requested names that can generate the retired project name are reserved too.
+When an omitted provider name could reuse retained custody, creation accepts an
+independent explicit `app_name` through the existing target-creation interface.
+
+Dokploy metadata deletion uses `deleteVolumes=false`. Neither an acknowledgement
+nor a missing provider record proves host cleanup. Host inventory must separately
+prove the old project has no containers, on its recorded engine, before exact
+volume removal. Late provider cleanup remains confined to the permanently reserved
+old project; it cannot delete volumes through this request. Volume removals use
+immutable backing identities and the existing fixed kept-volume program. A
+missing original host receipt is fenced under the removal lock so a delayed
+unstarted dispatch cannot run after reconciliation reports no effect.
+
+Unknown effects retain the original operation and key. Repeating that key first
+observes its recorded steps; only positively settled steps permit continuation
+with fresh evidence, and completed deletion is never dispatched again. A changed
+publication, unreadable host or uncertain volume effect remains held. Readback
+reports retained custody without claiming fresh eligibility. A completed operation
+can report protected volumes as `held`; it does not claim those volumes were
+removed. Recovery archives, execution tombstones, writer witnesses, shared backups
+and testing resources remain in custody.
+If changed or unreadable original authority prevents continuation after a step,
+retain the original key, manifest, reservation and observed effects. Record the
+exact authority and stopped step on the owning issue. Diagnose through supported
+service reads and plans. If readable original authority cannot be restored through
+its supported procedure, escalate to the Director for the operational decision or
+scope service-owned reconciliation as separate source work. A receipt, a newer
+release or an authorization response does not authorize replaying a dispatched
+delete, recapturing recovery or rewriting custody.
+An original volume attempt positively fenced before dispatch can continue as a
+new recorded step under the same service operation. A volume protected by a real
+reference remains `held`; a transient no-effect attempt does not mark it retired.

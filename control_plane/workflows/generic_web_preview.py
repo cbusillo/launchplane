@@ -537,13 +537,16 @@ def _ensure_application(
     memory_capacity.require_preview_host_memory_capacity(
         host=host, token=token, server_id=server_id, record_store=record_store
     )
-    created = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/application.create",
-        method="POST",
-        payload=application_payload,
-    )
+    from control_plane.production_recipient_retirement_names import provider_name_guard
+
+    with provider_name_guard(record_store, app_name):
+        created = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/application.create",
+            method="POST",
+            payload=application_payload,
+        )
     created_application = dokploy_api.as_json_object(created)
     created_application_id = str((created_application or {}).get("applicationId") or "").strip()
     if not created_application_id:

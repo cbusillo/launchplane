@@ -433,6 +433,10 @@ def writer_action(
     binding: str | None = None,
     server_id: str | None = None,
 ) -> None:
+    if old and action == "resume":
+        from control_plane.production_recipient_retirement import require_before_retirement
+
+        require_before_retirement(record)
     host, token = source.read_dokploy_config(control_plane_root=root)
     target_id = record.retained_target_id.target_id if old else record.target_id
     payload = api.fetch_dokploy_target_payload(
@@ -883,6 +887,12 @@ class RecipientCutoverAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        from control_plane.production_recipient_retirement import require_before_retirement
+
+        try:
+            require_before_retirement(self.record)
+        except ValueError as error:
+            raise ProviderMutationRejectedError(error) from error
         if self.record.phase in {"reverting", "inverse_published"}:
             raise ProviderMutationRejectedError(
                 ValueError("Finish the original inverse before another forward operation.")
