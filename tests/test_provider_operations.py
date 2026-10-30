@@ -675,6 +675,82 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             self.assertEqual(stored_stale.response_status_code, 409)
             self.assertEqual(stored_stale.response_payload, {"status": "superseded"})
 
+    def test_destroy_retains_superseded_effect_custody_on_every_pre_effect_failure(self) -> None:
+        for failure in ("rejected", "exception", "nondurable"):
+            with self.subTest(failure=failure), TemporaryDirectory() as directory:
+                fixture = _StoreFixture(directory)
+                self.addCleanup(fixture.store.close)
+                adapter = _FakeAdapter()
+                clock = {"now": "2026-07-30T15:00:00Z"}
+                with patch.object(
+                    fixture.store,
+                    "_database_mutation_timestamp",
+                    side_effect=lambda _session: clock["now"],
+                ):
+                    original = fixture.store.reserve_mutation(
+                        scope=_SCOPE,
+                        route_path=_ROUTE,
+                        idempotency_key="uncertain-fixture",
+                        request_fingerprint="fixture",
+                        lease_owner="old",
+                        lease_seconds=60,
+                        reconciliation_key=_RECONCILIATION_KEY,
+                        provider_target_key=adapter.target_key(),
+                    )
+                    assert original.record is not None
+                    fixture.store.mark_mutation_reconcile_required(
+                        reservation=original.record,
+                        reconciliation_key=_RECONCILIATION_KEY,
+                    )
+                    clock["now"] = "2026-07-30T15:17:00Z"
+                    supersession = ProviderTargetSupersession(
+                        response_status_code=409,
+                        quiescence_check=lambda _reservation: True,
+                        retain_effect_custody=lambda _reservation: True,
+                    )
+                    if failure == "nondurable":
+                        replacement = ProviderMutationOutcome(
+                            409, {}, durable=False, provider_effect_performed=False
+                        )
+                        mocked = patch.object(adapter, "apply", return_value=replacement)
+                    else:
+                        error = (
+                            ProviderMutationRejectedError(ValueError("refused"))
+                            if failure == "rejected"
+                            else RuntimeError("unavailable")
+                        )
+                        mocked = patch.object(adapter, "apply", side_effect=error)
+                    with mocked:
+                        if failure == "exception":
+                            with self.assertRaises(RuntimeError):
+                                fixture.run(
+                                    adapter,
+                                    idempotency_key="destroy",
+                                    target_supersession=supersession,
+                                )
+                        else:
+                            result = fixture.run(
+                                adapter, idempotency_key="destroy", target_supersession=supersession
+                            )
+                            self.assertEqual(result.status, "reconcile_required")
+                    held = fixture.store.read_idempotency_record(
+                        scope=_SCOPE, route_path=_ROUTE, idempotency_key="destroy"
+                    )
+                    assert held is not None
+                    self.assertEqual(held.state, "reconcile_required")
+                    self.assertTrue(held.provider_effect_started_at)
+                    third = fixture.store.reserve_mutation(
+                        scope=_SCOPE,
+                        route_path=_ROUTE,
+                        idempotency_key="refresh",
+                        request_fingerprint="refresh",
+                        lease_owner="new",
+                        lease_seconds=60,
+                        reconciliation_key=_RECONCILIATION_KEY,
+                        provider_target_key=adapter.target_key(),
+                    )
+                    self.assertEqual(third.status, "target_busy")
+
     def test_destroy_does_not_supersede_reconciled_target_with_active_lease(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = _StoreFixture(directory)

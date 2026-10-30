@@ -1,73 +1,78 @@
 # Preview data fixtures
 
 A product ships its fixture definitions and Odoo business logic in its own
-artifact. Launchplane's existing `POST /v1/drivers/odoo/app-maintenance`
-operation accepts `maintenance.action: preview-fixture` and
-`maintenance.intent: preview-fixture`. Stable lanes, including testing and
-production, are refused. This does not install an addon or accept caller code,
-SQL, credentials, commands, paths or business values.
+artifact. The existing `POST /v1/drivers/odoo/app-maintenance` accepts
+`maintenance.action: preview-fixture` and `maintenance.intent: preview-fixture`.
+Testing and production are refused. Callers cannot supply code, SQL,
+credentials, commands, paths or business values.
 
-The request names the product, context, instance, preview ID, serving generation
-ID and fixture name, with a concrete reason. Resolve these from current service
-records. The service verifies the product's active Odoo preview profile, serving
-generation, immutable artifact/runtime identity and actual running container.
-It reuses the preview's target ownership, disposable-resource protections and
-execution lock. A protected use, only copy or known production resource sharing
-refuses the operation. Source changes use the product's ordinary build and
-preview delivery; an old image cannot run a fixture it does not contain.
+The request names the product, context, instance, preview ID, serving generation,
+fixture and reason. Launchplane verifies the active Odoo preview profile,
+artifact/runtime identity, exact container and exclusive resource ownership.
+Mutation retains the existing disposable-lane, in-use, only-copy and production
+resource-sharing protections. Read-only modes do not require refresh eligibility.
+The fixture shares the preview's execution mutex and durable lifecycle
+reservation: an uncertain writer also fences refresh and idle operations.
 
-Execution uses the existing `odoo_preview_apply.execute` permission on that
-product's preview context. The Director's authenticated agent may also plan
-and read back with its standing `operations.read` authority. Ordinary dashboard
-read access cannot execute product code. No grant or credential is created. The existing
-maintenance/post-deploy action remains unchanged for stable lanes.
+Execution uses the existing `odoo_preview_apply.execute` permission for that
+product's preview context. The Director's authenticated agent may also plan and
+read back with standing `operations.read` authority. Dashboard read access cannot
+execute product code. No grant or credential is created. Stable-lane maintenance
+is unchanged.
 
 ## Product contract
 
-The image ships `/opt/project/addons/launchplane_preview_fixture.py`. The existing
-host package runs this fixed entrypoint in the exact checked web container. Its
-stdin is a JSON object containing the service-selected `identity`, `database`,
-`fixture` and `mode`. The product checks the native Odoo database host, preview
-instance, database name and runtime identity before opening a database. It must
-refuse stable/testing/prod instances itself as well. No request may choose a
-connection or bypass native configuration.
+The image ships `/opt/project/addons/launchplane_preview_fixture.py`. The fixed
+host program executes it inside the exact selected web container, passing only
+`identity`, native `database`, `fixture` and `mode` as JSON stdin. The product
+checks native database host, preview instance, database name and runtime identity
+before opening a database. Only the ephemeral `deployed_at` field may be ignored
+when comparing identities.
 
-The product owns its named fixture and a deterministic `fixture_sha256` of that
-definition. Hold the existing native data-workflow lock through execution,
-commit and fresh-cursor readback. Use read-only database transactions for
-`dry-run` and `readback`. Apply is transactional: search its stable fixture
-identifiers first, reuse only exact matching records, and refuse conflicting or
-partially edited records without overwriting them. Persist the created/reused
-record identities with the same commit. A repeat, including a different request
-key or an earlier matching UI-created sample, must reuse the matching result.
+The product owns the fixture and its deterministic `fixture_sha256`. `dry-run`
+qualifies current matching data in a read-only transaction. First apply holds the
+existing native global data-workflow lock, refuses conflicting data, reuses exact
+matches, and creates the sample and a historical commit witness in one transaction.
+Validate the complete wire receipt before commit, then verify the witness through
+a fresh cursor. An existing witness makes apply a no-op without recreating,
+resetting or overwriting records someone has subsequently used or deleted.
 
-Return exactly one JSON object on stdout, with no logging or exception prose:
-`identity`, `fixture`, `fixture_sha256`, `mode`, `committed`, `verified` and
-`records`. `records` contains `{model, id, disposition}` entries;
-disposition is `created` or `reused`. Include all written roots, derived records
-and fixture-journal records relevant to the fixture. The same original record
-dispositions must be available through readback after a lost response.
-An optional bounded `reference` may identify a newly generated synthetic
-record, such as the sample receipt's actual transfer reference. Never include
-copied business references or free text.
-`committed` is true only for apply; `verified` must be true. Apply and readback
-require unique record references. Apply requires a nonempty list. A readback
-under the native workflow lock returns an empty list only when the fixture's
-transactional journal proves it has not committed. No customer, supplier, price,
-copied business values or credential appears in this receipt.
+`readback` reads the historical witness in a read-only transaction without the
+native workflow file lock or untouched-sample qualification. It reports what the
+transaction wrote; later scanning, backorders, edits and deletions do not change
+that fact. Empty readback means the witness was not observed. It does not prove
+that an interrupted writer cannot still commit.
 
-The host drains stderr without retaining it, bounds stdout to 32 KiB and
-observation to three minutes, validates the receipt's shape before emitting a
-hex result into provider evidence, and never prints arbitrary product output.
-The service validates the full typed receipt and all supplied identities again.
-A timeout stops the observer; it does not prove the in-container writer stopped.
+Return exactly one bounded JSON object on stdout: `identity`, `fixture`,
+`fixture_sha256`, `mode`, `committed`, `verified` and `records`. Records contain
+unique `{model, id, disposition}` identities, with disposition `created` or
+`reused`, including relevant derived and witness records. Preserve original
+historical identities and dispositions through recovery. Optional bounded
+`reference` identifies a generated synthetic record, such as the actual sample
+receipt number. Ordinary generated sequence letters and spaces are allowed;
+copied business references and private prose are not.
+
+Successful apply has `committed: true` and nonempty records. An expected semantic
+refusal rolls back before returning an explicit apply rejection with
+`committed: false`, `verified: true` and empty records. Other modes never claim a
+commit. Unexpected errors, timeouts and malformed or missing receipts remain
+unknown. Receipts contain no customer, supplier, price, credential or copied
+business data.
+
+The host discards stderr, bounds stdout to 32 KiB and observation to three
+minutes, then validates the receipt before emitting hex evidence. The service
+validates the typed receipt and selected identities again. Stopping the observer
+does not prove the in-container writer stopped. Disabled manual schedule names
+and script paths derive from the complete immutable host invocation. Identical
+invocations reuse them; a changed mode, fixture, container, generation or host
+package gets a different path, so updating a schedule cannot retarget a queued
+job. Each provider execution retains its own history.
 
 ## Review, apply and recover
 
-Use the repository's `scripts/preview-fixture.py` client with the installed
-catalog operator transport. Payload and evidence files stay private, outside the
-repository. The payload is the maintenance envelope with the fields above;
-omit `reviewed_plan_sha256` and use `mode: dry-run` initially.
+Use `scripts/preview-fixture.py` with the installed catalog operator transport.
+Payload and review files stay private and outside the repository. Start with the
+maintenance envelope above, `mode: dry-run`, and no reviewed digest:
 
 ```sh
 uv run python scripts/preview-fixture.py dry-run \
@@ -75,29 +80,33 @@ uv run python scripts/preview-fixture.py dry-run \
   --payload-file /private/fixture.json --evidence-file /private/review.json
 ```
 
-The dry run writes only its provider execution evidence and saves the review
-privately. Inspect the selected identity and fixture digest. Record references
-describe current matching data; the review binds the definition and artifact,
-not a snapshot of database contents. Apply rechecks exact record semantics.
-Apply with the same arguments, `apply`, `--reviewed-dry-run`, and a stable
-`--idempotency-key`. The service repeats the inert preflight and compares its
-digest with the review before dispatching a write. No product fixture can be
-substituted after review without changing the digest.
+Inspect the selected identity, fixture digest and current qualification. The
+review binds the definition and artifact. Apply uses the same arguments, `apply`,
+`--reviewed-dry-run` and a stable `--idempotency-key`. Valid historical evidence is
+adopted before current-sample qualification; otherwise the service repeats the
+dry run before dispatch. Initial delivery follows apply with a separate dry run
+to verify the actual untouched sample.
 
-The existing durable provider runner records the actor, original request,
-reason, target, effect checkpoint and bounded receipt. Repeating the identical
-apply/key replays a completed receipt. An uncertain outcome retains its original
-reservation and blocks another target mutation. Repeat that original request
-and key to reconcile through product readback. Verified commit evidence adopts
-the existing result. Verified absence permits the original idempotent operation
-to retry after its current preflight. The native workflow lock, atomic journal
-and exact-match reuse must keep even a delayed original writer from creating
-duplicates. An unavailable or conflicting readback keeps the operation unknown.
-Do not replace the key to get around it. Preflight failure releases a reservation
-without claiming a data effect; all modes retain actor-scoped audit evidence.
+The durable operation retains actor scope, original intent, reason, exact
+target/generation/container binding, effect checkpoint and bounded receipt.
+Repeating an identical completed request/key replays its result. After a lost
+response, repeat that original request and key: verified historical commit
+evidence adopts the result without another write. Empty or unavailable readback
+keeps the reservation held. Never replace a key to bypass it. Explicit product
+rejections settle without claiming a data commit. Pre-dispatch refusals release
+fresh reservations. Read-only modes use service and provider execution evidence
+rather than synthetic idempotency records.
 
-The separate `readback` client mode invokes the same fixed product read-only
-path against the exact generation. It verifies current records rather than
-replaying an old response. The bounded synthetic reference can supply the actual
-generated receipt number for the Client's sample instructions. Coordinate with the
-preview's operator before an append while someone is testing it.
+If the original writer or native lock cannot be recovered, existing guarded
+preview destruction can cancel the fixture by discarding its isolated resources.
+Refresh cannot supersede it. Ownership, in-use, only-copy and disposable-resource
+checks still apply, with volumes included in destruction. The expired fixture
+reservation transfers atomically to destroy, retaining the unresolved-effect
+fence through every failure. Cancellation does not claim the fixture never wrote.
+Destroy settles only after ordinary cleanup evidence and independent observation
+that the exact original container is stopped or absent. Destroy apply checkpoints
+and stops a surviving exact original container after checking its identity and
+the existing mutation guards. This also recovers a provider deletion that left
+an orphan. Observation remains inert: verified live-container evidence may request
+an original-key destroy retry while retaining the checkpoint. Missing Docker
+evidence keeps the fence. A stale native lock file is never deleted as a substitute.

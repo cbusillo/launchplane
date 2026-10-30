@@ -7527,18 +7527,15 @@ def create_launchplane_fastapi_app(
                                 "plan_sha256": digest,
                             },
                         )
-                        store_apply_idempotency(
-                            record_store=fixture_store,
-                            identity=identity,
-                            route_path=_ODOO_APP_MAINTENANCE_ROUTE,
-                            idempotency_key="preview-fixture-observation:" + trace_id,
-                            request_fingerprint_value=idempotency_request_fingerprint(
-                                route_path=_ODOO_APP_MAINTENANCE_ROUTE, payload=raw_payload
-                            ),
-                            trace_id=trace_id,
-                            response=observed_response,
-                        )
                         return observed_response
+                    existing = fixture_store.read_idempotency_record(
+                        scope=idempotency_scope(identity),
+                        route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                        idempotency_key=key,
+                    )
+                    retained_intent = (
+                        fixture_store.read_original_mutation_intent(existing) if existing else None
+                    )
                     result = run_durable_provider_operation(
                         store=fixture_store,
                         scope=idempotency_scope(identity),
@@ -7551,10 +7548,7 @@ def create_launchplane_fastapi_app(
                         lease_owner=trace_id,
                         response_trace_id=trace_id,
                         adapter=adapter,
-                        original_intent={
-                            "product": maintenance_request.product,
-                            "maintenance": fixture.model_dump(mode="json"),
-                        },
+                        original_intent=adapter.original_intent(retained_intent),
                     )
                     return provider_mutation_http_response(
                         result=result,

@@ -8,6 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.text_fields import require_text
 
 
+SUPERSEDED_PROVIDER_EFFECT_PHASE = "superseded_effect"
+
+
 LaunchplaneMutationReservationState = Literal[
     "running",
     "completed",

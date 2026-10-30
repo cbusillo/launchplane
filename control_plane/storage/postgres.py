@@ -268,6 +268,7 @@ from control_plane.contracts.every_code_feedback_resume import (
 )
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
 from control_plane.contracts.idempotency_record import (
+    SUPERSEDED_PROVIDER_EFFECT_PHASE,
     LaunchplaneIdempotencyRecord,
     build_launchplane_mutation_reservation,
     build_launchplane_mutation_reservation_id,
@@ -10033,10 +10034,16 @@ class PostgresRecordStore(HumanSessionStore):
         original = aliased(LaunchplaneIdempotencyRow)
         original_filters = (
             (
-                original.payload["response_payload"]["original_intent"]["issued_plan"][
-                    "plan_request"
-                ]["pr_number"].as_integer()
-                == number,
+                or_(
+                    original.payload["response_payload"]["original_intent"]["issued_plan"][
+                        "plan_request"
+                    ]["pr_number"].as_integer()
+                    == number,
+                    original.payload["response_payload"]["original_intent"]["fixture_binding"][
+                        "anchor_pr_number"
+                    ].as_integer()
+                    == number,
+                ),
             )
             if number is not None
             else ()
@@ -10051,6 +10058,20 @@ class PostgresRecordStore(HumanSessionStore):
                 original.payload["response_payload"]["original_intent"]["product"].as_string()
                 == product,
                 *original_filters,
+            )
+            .exists()
+        )
+        retained_fixture = (
+            select(original.record_id)
+            .where(
+                original.scope == LaunchplaneIdempotencyRow.scope,
+                original.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                original.idempotency_key == LaunchplaneIdempotencyRow.record_id,
+                original.request_fingerprint == LaunchplaneIdempotencyRow.request_fingerprint,
+                original.payload["response_payload"]["original_intent"]["maintenance"][
+                    "intent"
+                ].as_string()
+                == "preview-fixture",
             )
             .exists()
         )
@@ -10080,7 +10101,13 @@ class PostgresRecordStore(HumanSessionStore):
             model_type=LaunchplaneIdempotencyRecord,
             orm_model=LaunchplaneIdempotencyRow,
             filters=(
-                LaunchplaneIdempotencyRow.route_path == ODOO_PREVIEW_APPLY_ROUTE,
+                or_(
+                    LaunchplaneIdempotencyRow.route_path == ODOO_PREVIEW_APPLY_ROUTE,
+                    and_(
+                        LaunchplaneIdempotencyRow.route_path == "/v1/drivers/odoo/app-maintenance",
+                        retained_fixture,
+                    ),
+                ),
                 True if include_completed else states,
                 product_scope,
             ),
@@ -11263,6 +11290,7 @@ class PostgresRecordStore(HumanSessionStore):
         provider_target_origin: ProviderTargetOrigin | None = None,
         original_intent: dict[str, Any] | None = None,
         expected_original_intent: dict[str, Any] | None = None,
+        retain_effect_custody: bool = False,
     ) -> MutationReconciliationSupersessionResult:
         normalized_response_trace_id = response_trace_id.strip()
         normalized_reconciliation_key = reconciliation_key.strip()
@@ -11381,6 +11409,12 @@ class PostgresRecordStore(HumanSessionStore):
                     reconciliation_key=normalized_reconciliation_key,
                     provider_target_key=normalized_provider_target_key,
                 )
+                if retain_effect_custody:
+                    replacement = self._updated_idempotency_record(
+                        replacement,
+                        provider_effect_phase=SUPERSEDED_PROVIDER_EFFECT_PHASE,
+                        provider_effect_started_at=observed_at,
+                    )
                 self._sync_idempotency_row(row, superseded_record)
                 session.add(self._idempotency_row(replacement))
                 session.flush()
