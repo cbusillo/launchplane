@@ -1,3 +1,4 @@
+from control_plane._preview_fixture_program import PREVIEW_FIXTURE_RESULT_MARKER
 from control_plane.host_package_runtime import (
     HOST_PACKAGE_VERSION_MARKER,
     HOST_PROGRAM_VERSION_MARKER,
@@ -266,7 +267,7 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
         "clean_snapshot_database_sha256",
         "clean_snapshot_filestore_sha256",
         "clean_preview_snapshot_id",
-        "preview_fixture_result",
+        PREVIEW_FIXTURE_RESULT_MARKER,
     }
     | READBACK_FAILURE_MARKERS
     | INTEGRATION_READBACK_NAME_LIST_MARKERS
@@ -445,7 +446,7 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
         "rehearsal_result",
         "rehearsal_child_failure",
         "recipient_recovery_retained",
-        "preview_fixture_result",
+        PREVIEW_FIXTURE_RESULT_MARKER,
     }:
         return bool(
             re.fullmatch(

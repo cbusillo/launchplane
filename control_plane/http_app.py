@@ -7461,17 +7461,22 @@ def create_launchplane_fastapi_app(
             from control_plane.http_routes.support import run_in_worker_thread
 
             fixture = maintenance_request.maintenance
-            if not resolved_authz_policy_runtime.allows(
+            fixture_allowed = resolved_authz_policy_runtime.allows(
                 identity=identity,
-                action="odoo_preview_apply.execute"
-                if fixture.mode == "apply"
-                else "operations.read",
+                action="odoo_preview_apply.execute",
                 product=maintenance_request.product,
                 context=fixture.context,
-                target=AuthorizationTarget(scope="preview")
-                if fixture.mode == "apply"
-                else AuthorizationTarget(scope="instance", instances=(fixture.instance,)),
-            ):
+                target=AuthorizationTarget(scope="preview"),
+            )
+            if fixture.mode != "apply" and director_agent_identity(identity):
+                fixture_allowed = fixture_allowed or resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action="operations.read",
+                    product=maintenance_request.product,
+                    context=fixture.context,
+                    target=AuthorizationTarget(scope="instance", instances=(fixture.instance,)),
+                )
+            if not fixture_allowed:
                 raise _launchplane_http_error(
                     status_code=403,
                     trace_id=trace_id,
@@ -7514,7 +7519,7 @@ def create_launchplane_fastapi_app(
                             receipt, digest = adapter.plan()
                         else:
                             receipt, digest = adapter.invoke("readback"), ""
-                        return accepted_evidence_response(
+                        observed_response = accepted_evidence_response(
                             trace_id=trace_id,
                             records={"preview_id": fixture.preview_id},
                             result={
@@ -7522,6 +7527,18 @@ def create_launchplane_fastapi_app(
                                 "plan_sha256": digest,
                             },
                         )
+                        store_apply_idempotency(
+                            record_store=fixture_store,
+                            identity=identity,
+                            route_path=_ODOO_APP_MAINTENANCE_ROUTE,
+                            idempotency_key="preview-fixture-observation:" + trace_id,
+                            request_fingerprint_value=idempotency_request_fingerprint(
+                                route_path=_ODOO_APP_MAINTENANCE_ROUTE, payload=raw_payload
+                            ),
+                            trace_id=trace_id,
+                            response=observed_response,
+                        )
+                        return observed_response
                     result = run_durable_provider_operation(
                         store=fixture_store,
                         scope=idempotency_scope(identity),

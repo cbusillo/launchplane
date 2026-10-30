@@ -16,14 +16,18 @@ def main() -> int:
     parser.add_argument("mode", choices=("dry-run", "apply", "readback"))
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--payload-file", type=Path, required=True)
-    parser.add_argument("--evidence-file", type=Path, required=True)
+    parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--idempotency-key", default="")
     parser.add_argument("--reviewed-dry-run", action="store_true")
     for name in ("config", "env-config", "url"):
         parser.add_argument("--" + name)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
+    if args.mode != "readback" and args.evidence_file is None:
+        parser.error("Dry-run and apply require a saved review file.")
     for path in (args.payload_file, args.evidence_file):
+        if path is None:
+            continue
         if path.is_symlink() or path.resolve().is_relative_to(root):
             parser.error("Use private payload/evidence files outside the repository.")
     payload = json.loads(args.payload_file.read_text())
@@ -74,7 +78,7 @@ def main() -> int:
             operation="preview-fixture", request={"mode": args.mode}, exc=error
         )
         return 1
-    except (ValueError, OSError, urllib.error.URLError):
+    except (KeyError, TypeError, ValueError, OSError, urllib.error.URLError):
         print(
             json.dumps(
                 {

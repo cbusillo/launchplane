@@ -34,6 +34,9 @@ class FixtureRecord(BaseModel):
     model: str = Field(pattern=r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$", max_length=128)
     id: int = Field(strict=True, ge=1)
     disposition: Literal["created", "reused"]
+    reference: str = Field(
+        default="", pattern=r"^(|[A-Z0-9][A-Z0-9/._-]{0,79})$", exclude_if=lambda value: value == ""
+    )
 
 
 class PreviewFixtureReceipt(BaseModel):
@@ -56,6 +59,6 @@ class PreviewFixtureReceipt(BaseModel):
             raise ValueError("Fixture record identities must be unique.")
         if self.committed != (self.mode == "apply"):
             raise ValueError("Fixture commit evidence disagrees with its mode.")
-        if self.mode != "dry-run" and not self.records:
+        if self.mode == "apply" and not self.records:
             raise ValueError("Applied fixtures require record readback.")
         return self

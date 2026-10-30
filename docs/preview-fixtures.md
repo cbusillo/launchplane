@@ -16,9 +16,10 @@ execution lock. A protected use, only copy or known production resource sharing
 refuses the operation. Source changes use the product's ordinary build and
 preview delivery; an old image cannot run a fixture it does not contain.
 
-`apply` uses the existing `odoo_preview_apply.execute` permission on that
-product's preview context. `dry-run` and `readback` use `operations.read` on
-the selected instance. No grant or credential is created. The existing
+Execution uses the existing `odoo_preview_apply.execute` permission on that
+product's preview context. The Director's authenticated agent may also plan
+and read back with its standing `operations.read` authority. Ordinary dashboard
+read access cannot execute product code. No grant or credential is created. The existing
 maintenance/post-deploy action remains unchanged for stable lanes.
 
 ## Product contract
@@ -42,13 +43,18 @@ key or an earlier matching UI-created sample, must reuse the matching result.
 
 Return exactly one JSON object on stdout, with no logging or exception prose:
 `identity`, `fixture`, `fixture_sha256`, `mode`, `committed`, `verified` and
-`records`. `records` contains only `{model, id, disposition}` entries;
+`records`. `records` contains `{model, id, disposition}` entries;
 disposition is `created` or `reused`. Include all written roots, derived records
 and fixture-journal records relevant to the fixture. The same original record
 dispositions must be available through readback after a lost response.
+An optional bounded `reference` may identify a newly generated synthetic
+record, such as the sample receipt's actual transfer reference. Never include
+copied business references or free text.
 `committed` is true only for apply; `verified` must be true. Apply and readback
-require nonempty, unique record references. No customer, supplier, price,
-receipt reference, copied business values or credential appears in this receipt.
+require unique record references. Apply requires a nonempty list. A readback
+under the native workflow lock returns an empty list only when the fixture's
+transactional journal proves it has not committed. No customer, supplier, price,
+copied business values or credential appears in this receipt.
 
 The host drains stderr without retaining it, bounds stdout to 32 KiB and
 observation to three minutes, validates the receipt's shape before emitting a
@@ -70,7 +76,9 @@ uv run python scripts/preview-fixture.py dry-run \
 ```
 
 The dry run writes only its provider execution evidence and saves the review
-privately. Inspect the selected identity, fixture digest and record references.
+privately. Inspect the selected identity and fixture digest. Record references
+describe current matching data; the review binds the definition and artifact,
+not a snapshot of database contents. Apply rechecks exact record semantics.
 Apply with the same arguments, `apply`, `--reviewed-dry-run`, and a stable
 `--idempotency-key`. The service repeats the inert preflight and compares its
 digest with the review before dispatching a write. No product fixture can be
@@ -80,13 +88,16 @@ The existing durable provider runner records the actor, original request,
 reason, target, effect checkpoint and bounded receipt. Repeating the identical
 apply/key replays a completed receipt. An uncertain outcome retains its original
 reservation and blocks another target mutation. Repeat that original request
-and key to reconcile through product readback; no write is dispatched by
-reconciliation. A readback that cannot prove the full original fixture keeps the
-operation unknown. Do not replace the key to get around it.
+and key to reconcile through product readback. Verified commit evidence adopts
+the existing result. Verified absence permits the original idempotent operation
+to retry after its current preflight. The native workflow lock, atomic journal
+and exact-match reuse must keep even a delayed original writer from creating
+duplicates. An unavailable or conflicting readback keeps the operation unknown.
+Do not replace the key to get around it. Preflight failure releases a reservation
+without claiming a data effect; all modes retain actor-scoped audit evidence.
 
 The separate `readback` client mode invokes the same fixed product read-only
 path against the exact generation. It verifies current records rather than
-replaying an old response. Product-specific plain names and the generated
-receipt reference are checked separately through the product's authorized read
-surface and kept out of public control-plane receipts. Coordinate with the
+replaying an old response. The bounded synthetic reference can supply the actual
+generated receipt number for the Client's sample instructions. Coordinate with the
 preview's operator before an append while someone is testing it.

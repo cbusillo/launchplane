@@ -1,10 +1,12 @@
 import base64
 from contextlib import contextmanager
 import json
+import io
 import os
 from pathlib import Path
 import subprocess
 import sys
+import runpy
 from tempfile import TemporaryDirectory
 from typing import Iterator, cast
 import unittest
@@ -18,6 +20,8 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity, RUNTIME_ID
 from control_plane.host_package import host_package
 from control_plane.odoo_app_maintenance_http import OdooAppMaintenanceEnvelope
 from control_plane.preview_fixture import PreviewFixtureAdapter
+from control_plane._preview_fixture_program import PREVIEW_FIXTURE_RESULT_MARKER
+from control_plane.dokploy.post_deploy import OdooPostDeployReadbackFailure
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
     ProviderOperationLease,
@@ -132,6 +136,109 @@ class PreviewFixtureTests(unittest.TestCase):
                 adapter.apply("original", Mock())
         self.assertEqual([call.args[0] for call in invoke.call_args_list], ["dry-run"])
 
+    def test_preflight_provider_failures_release_the_target_without_dispatch(self) -> None:
+        for error in (
+            OdooPostDeployReadbackFailure("refused", evidence={}),
+            FileNotFoundError("missing"),
+            OSError("provider unavailable"),
+        ):
+            with self.subTest(error=type(error).__name__), TemporaryDirectory() as directory:
+                store = PostgresRecordStore(
+                    database_url="sqlite+pysqlite:///" + str(Path(directory) / "state.db")
+                )
+                store.ensure_schema()
+                self.addCleanup(store.close)
+                adapter = PreviewFixtureAdapter(
+                    store,
+                    Path(directory),
+                    "example-product",
+                    fixture_request(mode="apply", reviewed_plan_sha256="c" * 64),
+                    "trace",
+                )
+                with (
+                    patch.object(PreviewFixtureAdapter, "plan", side_effect=error),
+                    patch.object(PreviewFixtureAdapter, "invoke") as invoke,
+                ):
+                    with self.assertRaisesRegex(ValueError, "preflight"):
+                        run_durable_provider_operation(
+                            store=store,
+                            scope="operator:example",
+                            route_path="/v1/drivers/odoo/app-maintenance",
+                            idempotency_key="failure",
+                            request_fingerprint="same",
+                            lease_owner="test",
+                            response_trace_id="trace",
+                            adapter=adapter,
+                        )
+                self.assertIsNone(
+                    store.read_idempotency_record(
+                        scope="operator:example",
+                        route_path="/v1/drivers/odoo/app-maintenance",
+                        idempotency_key="failure",
+                    )
+                )
+                invoke.assert_not_called()
+
+    def test_absent_atomic_fixture_allows_original_retry_and_conflict_releases_cleanup(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url="sqlite+pysqlite:///" + str(Path(directory) / "state.db")
+            )
+            store.ensure_schema()
+            self.addCleanup(store.close)
+            planned = fixture_receipt("dry-run")
+            adapter = PreviewFixtureAdapter(
+                store, Path(directory), "example-product", fixture_request(), "trace"
+            )
+            with patch.object(PreviewFixtureAdapter, "invoke", return_value=planned):
+                _receipt, digest = adapter.plan()
+            adapter.request = fixture_request(mode="apply", reviewed_plan_sha256=digest)
+            calls: list[str] = []
+
+            def invoke(
+                _adapter: PreviewFixtureAdapter,
+                mode: str,
+                lease: ProviderOperationLease | None = None,
+            ) -> PreviewFixtureReceipt:
+                calls.append(mode)
+                if mode == "apply":
+                    assert lease is not None
+                    lease.checkpoint_effect("fixture_started")
+                    raise OdooPostDeployReadbackFailure("product refused", evidence={})
+                if mode == "readback":
+                    return fixture_receipt(mode, records=[])
+                if "apply" in calls:
+                    raise ValueError("sample conflict")
+                return planned
+
+            def run() -> DurableProviderOperationResult:
+                return run_durable_provider_operation(
+                    store=store,
+                    scope="operator:example",
+                    route_path="/v1/drivers/odoo/app-maintenance",
+                    idempotency_key="failure",
+                    request_fingerprint="same",
+                    lease_owner="test",
+                    response_trace_id="trace",
+                    adapter=adapter,
+                )
+
+            with patch.object(PreviewFixtureAdapter, "invoke", invoke):
+                with self.assertRaises(OdooPostDeployReadbackFailure):
+                    run()
+                with self.assertRaisesRegex(ValueError, "preflight"):
+                    run()
+            self.assertEqual(calls, ["dry-run", "apply", "readback", "dry-run"])
+            self.assertIsNone(
+                store.read_idempotency_record(
+                    scope="operator:example",
+                    route_path="/v1/drivers/odoo/app-maintenance",
+                    idempotency_key="failure",
+                )
+            )
+
     def test_repeat_and_uncertain_apply_use_durable_receipt_without_repeating_write(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
@@ -203,7 +310,8 @@ class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
             ("odoo_app_maintenance.execute", "apply", 403),
             ("odoo_preview_apply.execute", "apply", 202),
             ("operations.read", "apply", 403),
-            ("operations.read", "dry-run", 202),
+            ("operations.read", "dry-run", 403),
+            ("odoo_preview_apply.execute", "dry-run", 202),
         ):
             with self.subTest(action=action, mode=mode), TemporaryDirectory() as directory:
                 store = PostgresRecordStore(
@@ -268,6 +376,51 @@ class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, expected, response.text)
                 if expected == 403 or mode == "dry-run":
                     invoke.assert_not_called()
+
+
+class PreviewFixtureClientTests(unittest.TestCase):
+    def test_readback_needs_no_review_and_malformed_response_is_unverified(self) -> None:
+        client = runpy.run_path(str(Path(__file__).parents[1] / "scripts" / "preview-fixture.py"))
+        with TemporaryDirectory() as directory:
+            payload = Path(directory) / "request.json"
+            payload.write_text(
+                json.dumps(
+                    {
+                        "product": "example-product",
+                        "maintenance": fixture_request().model_dump(mode="json"),
+                    }
+                )
+            )
+            helper = Path(directory) / "launchplane-write-action.py"
+            helper.touch()
+            transport = {
+                "resolve_settings": lambda _args: {
+                    "service_url": "https://example.invalid",
+                    "token": "fixture-token",
+                },
+                "validate_service_url": lambda _url: None,
+                "request_launchplane": lambda **_kwargs: {"status": "accepted"},
+            }
+            output = io.StringIO()
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "preview-fixture.py",
+                        "readback",
+                        "--payload-file",
+                        str(payload),
+                        "--operator-helper",
+                        str(helper),
+                    ],
+                ),
+                patch.object(runpy, "run_path", return_value=transport),
+                patch.object(sys, "stdout", output),
+            ):
+                self.assertEqual(client["main"](), 1)
+            self.assertEqual(json.loads(output.getvalue())["status"], "unverified")
+            self.assertNotIn("fixture-token", output.getvalue())
 
 
 class PreviewFixtureHostTests(unittest.TestCase):
@@ -338,12 +491,12 @@ class PreviewFixtureHostTests(unittest.TestCase):
             encoded = next(
                 line.partition("=")[2]
                 for line in result.stdout.splitlines()
-                if line.startswith("preview_fixture_result=")
+                if line.startswith(PREVIEW_FIXTURE_RESULT_MARKER + "=")
             )
             self.assertEqual(json.loads(bytes.fromhex(encoded)), good)
         with self.host(good, stable=True) as result:
             self.assertNotEqual(result.returncode, 0)
-            self.assertNotIn("preview_fixture_result=", result.stdout)
+            self.assertNotIn(PREVIEW_FIXTURE_RESULT_MARKER + "=", result.stdout)
         with self.host({**good, "private_data": "PRIVATE-CUSTOMER"}) as result:
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("PRIVATE-CUSTOMER", result.stdout + result.stderr)

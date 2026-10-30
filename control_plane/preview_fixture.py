@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import json
+import click
 from pathlib import Path
 from typing import cast
 
@@ -22,6 +23,30 @@ from control_plane.provider_operations import (
     provider_operation_response_payload,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane._preview_fixture_program import PREVIEW_FIXTURE_RESULT_MARKER
+
+
+@dataclass
+class FixtureEffectLease:
+    lease: ProviderOperationLease
+    started: bool = False
+
+    def assert_current(self) -> None:
+        self.lease.assert_current()
+
+    def checkpoint_effect(self, phase: str) -> None:
+        self.lease.checkpoint_effect(phase)
+        self.started = True
+
+
+def fixture_plan_sha256(receipt: PreviewFixtureReceipt) -> str:
+    return canonical_json_sha256(
+        {
+            "identity": receipt.identity.model_dump(mode="json"),
+            "fixture": receipt.fixture,
+            "fixture_sha256": receipt.fixture_sha256,
+        }
+    )
 
 
 @dataclass
@@ -145,7 +170,7 @@ class PreviewFixtureAdapter:
             resolved_schedule_execution_timeout_seconds=240,
             before_provider_mutation=checkpoint,
         )
-        encoded = evidence.get("preview_fixture_result", "")
+        encoded = evidence.get(PREVIEW_FIXTURE_RESULT_MARKER, "")
         if not encoded or len(encoded) > 65536:
             raise ValueError("Fixture receipt is unavailable.")
         receipt = PreviewFixtureReceipt.model_validate(json.loads(bytes.fromhex(encoded)))
@@ -160,13 +185,7 @@ class PreviewFixtureAdapter:
 
     def plan(self) -> tuple[PreviewFixtureReceipt, str]:
         receipt = self.invoke("dry-run")
-        return receipt, canonical_json_sha256(
-            {
-                "identity": receipt.identity.model_dump(mode="json"),
-                "fixture": receipt.fixture,
-                "fixture_sha256": receipt.fixture_sha256,
-            }
-        )
+        return receipt, fixture_plan_sha256(receipt)
 
     def response(
         self, receipt: PreviewFixtureReceipt, *, recovered: bool = False
@@ -187,11 +206,19 @@ class PreviewFixtureAdapter:
             planned, digest = self.plan()
             if digest != self.request.reviewed_plan_sha256:
                 raise ValueError("Fixture or serving generation changed; review a new dry run.")
-        except (ValueError, api.DokployScheduleExecutionFailed) as error:
+        except Exception as error:
             raise ProviderMutationRejectedError(
                 ValueError("Fixture preflight did not match its review.")
             ) from error
-        receipt = self.invoke("apply", lease)
+        effect = FixtureEffectLease(lease)
+        try:
+            receipt = self.invoke("apply", effect)
+        except Exception as error:
+            if not effect.started:
+                raise ProviderMutationRejectedError(
+                    ValueError("Fixture dispatch did not begin.")
+                ) from error
+            raise
         if receipt.fixture_sha256 != planned.fixture_sha256:
             raise ValueError(
                 "Applied fixture differs from its review; reconcile the original operation."
@@ -205,17 +232,13 @@ class PreviewFixtureAdapter:
             return ProviderObservation("unknown")
         try:
             receipt = self.invoke("readback")
-            digest = canonical_json_sha256(
-                {
-                    "identity": receipt.identity.model_dump(mode="json"),
-                    "fixture": receipt.fixture,
-                    "fixture_sha256": receipt.fixture_sha256,
-                }
-            )
+            digest = fixture_plan_sha256(receipt)
             if digest != self.request.reviewed_plan_sha256:
                 return ProviderObservation("unknown")
-        except (ValueError, api.DokployScheduleExecutionFailed):
+        except (ValueError, OSError, click.ClickException):
             return ProviderObservation("unknown")
+        if not receipt.records:
+            return ProviderObservation("absent", retry_safe=True)
         return ProviderObservation(
             "present", response_payload=self.response(receipt, recovered=True)
         )

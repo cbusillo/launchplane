@@ -1,4 +1,10 @@
-PREVIEW_FIXTURE_PROGRAM = r"""
+PREVIEW_FIXTURE_RESULT_MARKER = "preview_fixture_result"
+
+PREVIEW_FIXTURE_PROGRAM = (
+    "RESULT_MARKER = "
+    + repr(PREVIEW_FIXTURE_RESULT_MARKER)
+    + "\n"
+    + r"""
 import json, os, re, selectors, subprocess, time
 
 def inspect_container(container):
@@ -60,15 +66,17 @@ def run_fixture(spec):
                 or not isinstance(receipt['records'], list) or len(receipt['records']) > 128):
             raise ValueError('Fixture receipt identity changed')
         for record in receipt['records']:
-            if (not isinstance(record, dict) or set(record) != {'model','id','disposition'}
+            if (not isinstance(record, dict) or not {'model','id','disposition'} <= set(record) <= {'model','id','disposition','reference'}
                     or not isinstance(record['model'], str) or len(record['model']) > 128
                     or not re.fullmatch(r'[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+', record['model'])
                     or type(record['id']) is not int or record['id'] < 1
-                    or record['disposition'] not in {'created','reused'}):
+                    or record['disposition'] not in {'created','reused'}
+                    or not isinstance(record.get('reference',''), str)
+                    or not re.fullmatch(r'(|[A-Z0-9][A-Z0-9/._-]{0,79})', record.get('reference',''))):
                 raise ValueError('Fixture record identity invalid')
         if inspect_container(spec['container_id'])['State']['Running'] is not True:
             raise ValueError('Preview stopped during fixture')
-        print('preview_fixture_result=' + json.dumps(receipt, separators=(',', ':')).encode().hex(), flush=True)
+        print(RESULT_MARKER + '=' + json.dumps(receipt, separators=(',', ':')).encode().hex(), flush=True)
     finally:
         if child.poll() is None:
             child.kill()
@@ -77,3 +85,4 @@ def run_fixture(spec):
 
 run_fixture(spec)
 """
+)
