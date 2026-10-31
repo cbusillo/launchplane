@@ -237,7 +237,7 @@ run in the product artifact and use existing managed runtime settings.
 
 Review returns the normalized declarations and a plan bound to the whole current
 profile. A signed-in administrator applies with existing `product_profile.write`
-authority and CSRF. The Director's authenticated local-operator or terminal-agent
+authority and CSRF. The Director's authenticated `local_operator` or `terminal_agent`
 identity can apply preview-only declarations on an existing `generic-web` product
 through the same service API, under `product_profile.preview_transition.apply`.
 It cannot change the driver or any stable-lane declaration, including testing and
