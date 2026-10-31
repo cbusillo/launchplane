@@ -15,7 +15,7 @@ Launchplane receives the webhook of the GitHub App its merge train already
 uses (the App is installed on every product repository). One receiver,
 `POST /v1/github/app-webhook`, takes `workflow_run` and `pull_request`
 deliveries for deploy reconciliation. Opted-in source checks also consume
-`push` and `merge_group` deliveries as described below. Other events are
+`push` and `merge_group` deliveries as described below. Message events also wake the existing [attention readers](request-attention.md#message-events). Other events are
 acknowledged and ignored.
 
 Events carry no instructions. An event only says which target to look at

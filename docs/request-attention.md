@@ -68,3 +68,26 @@ sessions cannot read the cross-product view. Provider reads reuse Launchplane's
 existing repository-read token purpose, restricted to read permissions, and token
 lifetime management. One token covers each repository read. This adds no
 credential, grant or permission system.
+
+## Message events
+
+The existing signed App webhook receiver also publishes identifier-only message
+hints for tracked repository inventory. It uses the inventory's canonical
+repository name. Openings, body edits, conversation comments, inline comments
+and review bodies wake existing readers. No source body, new credential,
+second public webhook receiver or durable request copy is introduced.
+
+Administrators and Director agents with the existing attention read permission
+can subscribe at `GET /v1/attention/requests/events`. The bounded JSON-lines
+response sends connection and heartbeat observations and message identifiers.
+It uses a dedicated PostgreSQL connection, releases it on disconnect, limits
+concurrent subscribers per API worker, and reconnects within a minute to recheck access.
+The catalog's existing foreign watcher consumes these hints, rereads source,
+and uses its existing native-session delivery. The attention view continues
+to read the original waiting requests; event delivery never clears a request.
+
+The App must subscribe to issues, pull requests, issue comments, review comments
+and review submissions. Existing grants and event subscriptions are separate:
+source delivery does not assert live activation. Any needed access or credential
+change remains a Director decision. The scheduled watch/radar sweep recovers
+missed transient notifications and records causes on its existing repair issue.
