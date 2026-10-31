@@ -175,6 +175,11 @@ class PreviewFixtureTests(unittest.TestCase):
                 )
                 store.ensure_schema()
                 self.addCleanup(store.close)
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _odoo_preview_profile_payload("example-product")
+                    )
+                )
                 binding = fixture_binding()
                 planned = fixture_receipt("dry-run")
                 adapter = PreviewFixtureAdapter(
