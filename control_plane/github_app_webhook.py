@@ -17,6 +17,8 @@ from typing import Literal, Protocol, cast
 from pydantic import JsonValue
 
 import click
+import psycopg
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -218,8 +220,15 @@ def handle_github_app_webhook_request(
         notify_attention_for_event(
             record_store, normalized_event, payload, normalized_delivery_id, received_at
         )
-    # noinspection PyBroadException
-    except Exception:
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        LookupError,
+        RuntimeError,
+        SQLAlchemyError,
+        psycopg.Error,
+    ):
         logging.getLogger(__name__).warning("Request attention hint unavailable; sweep recovers.")
     target_shapes = _target_shapes(event_name=normalized_event, action=action, payload=payload)
     scan_event = config_authority_event_supported(normalized_event, payload)
