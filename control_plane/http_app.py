@@ -1000,6 +1000,8 @@ from control_plane.http_routes.product_generic_web_transition import (
 )
 from control_plane.http_routes.product_display_name import register_product_display_name_routes
 from control_plane.http_routes.discussion_topics import register_discussion_topic_routes
+from control_plane.http_routes.request_attention import register_request_attention_routes
+from control_plane.request_attention_github import GitHubOpenRequestReader
 from control_plane.http_routes.product_testing_restore_policy import (
     register_testing_restore_policy_routes,
 )
@@ -28897,6 +28899,11 @@ def create_launchplane_fastapi_app(
     register_privileged_operation_routes(
         app,
         dependencies=privileged_operation_route_dependencies,
+    )
+    register_request_attention_routes(
+        app,
+        dependencies=read_route_dependencies,
+        read=GitHubOpenRequestReader(resolved_control_plane_root),
     )
     register_governance_projection_routes(
         app,

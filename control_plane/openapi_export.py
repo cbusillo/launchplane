@@ -140,6 +140,7 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
+    "/v1/attention/requests": "read_request_attention",
     "/v1/product-config/integration-allowances": "read_integration_allowances",
     "/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile": "read_odoo_secret_reference_plan",
     "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}": "read_promotion_recovery",

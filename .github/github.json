@@ -32,6 +32,7 @@
     "productRepoContract": "docs/product-repo-contract.md",
     "newProductRepo": "docs/new-product-repo.md",
     "operatorExperience": "docs/operator-experience.md",
+    "requestAttention": "docs/request-attention.md",
     "postV2Audit": "docs/post-v2-audit.md",
     "uiStandards": "docs/ui-standards.md",
     "mergeTrainPolicy": "docs/merge-train-policy.md",

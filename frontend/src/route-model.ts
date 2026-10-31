@@ -23,6 +23,7 @@ export type EnvironmentView =
 
 export type EngineeringView =
   | "hub"
+  | "request-attention"
   | "merge-train"
   | "tenant-admission"
   | "governance-projection"
@@ -66,6 +67,7 @@ export function ownerReviewPath(): string {
 }
 
 export function engineeringViewLabel(view: EngineeringView): string {
+  if (view === "request-attention") return "Waiting requests";
   if (view === "runtime-setting-removal") return "Remove stored settings";
   if (view === "preview-lifecycle") return "Preview cleanup";
   if (view === "github-delivery") {
@@ -111,6 +113,7 @@ export function parseAppRoute(pathname: string): AppRoute {
     if (
       routeSegments.length === 1 &&
       [
+        "request-attention",
         "merge-train",
         "tenant-admission",
         "governance-projection",
