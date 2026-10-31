@@ -1944,7 +1944,12 @@ def reconcile_preview_target(
                 "held_reservations_truncated": len(held) > 100,
                 **{
                     key: decision.plan[key]
-                    for key in ("head_sha", "build_run_id", "last_failed_error_code")
+                    for key in (
+                        "head_sha",
+                        "pull_request_state",
+                        "build_run_id",
+                        "last_failed_error_code",
+                    )
                     if key in decision.plan
                 },
                 **(
@@ -2213,6 +2218,7 @@ def _plan_preview_target(
     if not head_sha:
         raise ProductReconcileError(f"GitHub returned no head for PR {pull_request_number}.")
     plan["head_sha"] = head_sha.lower()
+    plan["pull_request_state"] = pull_request.get("state")
     observed.update(
         head_sha=head_sha.lower(),
         eligible=_preview_eligible(pull_request),
@@ -3048,6 +3054,8 @@ def reconcile_product_request(
     if (
         outcome.plan.get("build_run_id")
         and not outcome.deferred
+        and outcome.plan.get("reason")
+        in {"preview_build_failed", "held_preview_recovery_required", "interrupted_preview_restore"}
         and (not outcome.error or outcome.plan.get("reason") == "held_preview_recovery_required")
     ):
         return _preview_failure(dict(outcome.plan), "preview_build_failed")
@@ -3163,9 +3171,9 @@ def run_product_reconcile_once(
     if (
         request.target_kind == "preview"
         and not outcome.error
-        and (plan.get("action") != "destroy" or plan.get("reason") == "interrupted_preview_restore")
+        and plan.get("action") != "destroy"
         and plan.get("reason") not in {"pull_request_not_open", "already_serving"}
-        and not (plan.get("action") == "apply" and plan.get("preview_result_status") == "pass")
+        and plan.get("preview_result_status") != "pass"
         and preview_refresh_failure(request)
     ):
         for key in ("last_failed_error_code", "last_failed_error_summary"):
@@ -3201,6 +3209,7 @@ def run_product_reconcile_once(
         request.target_kind == "preview"
         and feedback is not None
         and feedback.get("status") == "failed"
+        and plan.get("last_failed_error_code") != "preview_build_failed"
         and (
             (
                 outcome.error

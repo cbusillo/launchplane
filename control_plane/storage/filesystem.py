@@ -7416,6 +7416,11 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def read_preview_pr_feedback_record(self, feedback_id: str) -> PreviewPrFeedbackRecord:
+        return self._read_model(
+            PreviewPrFeedbackRecord, "launchplane_preview_pr_feedback", feedback_id
+        )
+
     def write_preview_pr_feedback_record(self, record: PreviewPrFeedbackRecord) -> Path:
         return self._write_model("launchplane_preview_pr_feedback", record.feedback_id, record)
 

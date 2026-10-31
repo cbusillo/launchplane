@@ -27100,6 +27100,13 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def read_preview_pr_feedback_record(self, feedback_id: str) -> PreviewPrFeedbackRecord:
+        return self._read_model(
+            model_type=PreviewPrFeedbackRecord,
+            orm_model=LaunchplanePreviewPrFeedbackRow,
+            filters=(LaunchplanePreviewPrFeedbackRow.feedback_id == feedback_id,),
+        )
+
     def write_preview_pr_feedback_record(self, record: PreviewPrFeedbackRecord) -> None:
         self._write_row(
             LaunchplanePreviewPrFeedbackRow(
