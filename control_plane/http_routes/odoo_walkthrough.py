@@ -124,7 +124,7 @@ def register_walkthrough_route(
                 context=payload.context,
                 target=AuthorizationTarget(scope="instance", instances=("testing",)),
             )
-        if not operator or not allowed:
+        if (not operator and not payload.read_only) or not allowed:
             refuse("authorization_denied", "Identity cannot operate this testing task.", 403)
         if not isinstance(record_store, PostgresRecordStore):
             refuse("database_required", "Testing tasks require shared database storage.", 503)
@@ -171,17 +171,17 @@ def register_walkthrough_route(
                     except ValueError:
                         refuse(
                             WALKTHROUGH_RECONCILIATION_REQUIRED,
-                            "The original dispatch evidence is unavailable; preserve its key and task account.",
+                            "The original dispatch evidence is unavailable; retry only this original key.",
                         )
                         raise AssertionError
                     if recovery.status in {"completed", "replayed", "adopted"}:
                         return OdooWalkthroughResponse.model_validate(recovery.response_payload)
                     refuse(
                         WALKTHROUGH_RECONCILIATION_REQUIRED,
-                        "The original dispatch is still active or unobservable; preserve its key and task account.",
+                        "The original dispatch is still active or unobservable; retry only this original key.",
                     )
             with ExitStack() as reservations:
-                if preview:
+                if preview and payload.mode == "apply":
                     check = reservations.enter_context(
                         postgres_store.testing_replacement_execution_lock(
                             preview_execution_lock_name(
@@ -195,7 +195,7 @@ def register_walkthrough_route(
                         refuse("preview_busy", "Another operation holds this preview.")
                     assert check is not None
                     check()
-                else:
+                elif not preview:
                     owner = reservations.enter_context(
                         postgres_store.odoo_synchronous_lane_reservation(
                             product=payload.product,
@@ -269,7 +269,7 @@ def register_walkthrough_route(
                     return response
                 refuse(
                     WALKTHROUGH_RECONCILIATION_REQUIRED,
-                    "Retry only this original key; then clean up its task account.",
+                    "The original outcome is unverified; retry only this original key.",
                 )
                 raise AssertionError
 

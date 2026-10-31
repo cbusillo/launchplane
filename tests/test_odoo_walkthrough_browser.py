@@ -189,6 +189,7 @@ class OpaqueBrowserTests(unittest.TestCase):
         for verb, path in (
             ("GET", "/report/pdf/product.label/1"),
             ("POST", "/web/dataset/call_button"),
+            ("POST", "/web/dataset/call_button/stock.picking/button_validate"),
             ("POST", "/web/session/change_password"),
             ("GET", "/web/content/1?download=true"),
             ("POST", "/mail/message/post"),
@@ -251,6 +252,14 @@ class OpaqueBrowserTests(unittest.TestCase):
             self.run_browser(read_only=True)
         self.assertNotIsInstance(failed.exception, ReadonlyBrowserCheckFailed)
         self.context.request.post.assert_not_called()
+
+    def test_readonly_failed_step_rechecks_the_live_runtime_before_settling(self) -> None:
+        healthy = self.context.request.get.return_value
+        self.context.request.get.side_effect = [healthy, healthy, MagicMock(status=503)]
+        self.page.locator.return_value.count.return_value = 0
+        with self.assertRaises(ValueError) as failed:
+            self.run_browser(WalkthroughStep(action="visible", selector=".missing"), read_only=True)
+        self.assertNotIsInstance(failed.exception, ReadonlyBrowserCheckFailed)
 
     def test_readonly_route_aborts_malformed_rpc_and_allows_my_printers(self) -> None:
         self.run_browser(read_only=True)

@@ -31,8 +31,9 @@ product, context and `testing` instance. The inert dry run uses
 `odoo_testing_walkthrough.plan`. Declaring these actions installs no policy
 rules, grants or credentials. A machine denial remains `authorization_denied`;
 record its trace and exact action under [denial handling](authorization-authority.md#denial-handling).
-terminal-agent and GitHub Actions identities are not accepted on this mutation
-surface. Use the existing `local_operator` transport selected by the Director.
+The ordinary mode that permits business writes requires these administrator
+transports. Read-only identities use existing scoped authorization without an
+additional caller-type restriction; see [read-only product identities](#read-only-product-identities).
 Do not switch identities or use another operation to carry a denied call.
 The Director decides any new grant through the existing policy approval path.
 An exact `local_operator` subject/token-label rule may leave product and context
@@ -364,7 +365,7 @@ even inside a database savepoint.
 | CM check | Minimum permission |
 | --- | --- |
 | Sign in, sign out, sign in again | Internal web client and authentication bookkeeping |
-| Inventory and Repair Tickets menus | Menu/action/view reads and displayed-record reads; no stock operator role |
+| Inventory and Repair Tickets menus | Menu/action/view reads and displayed-record reads; no stock operations role |
 | Three SAMPLE parts | Product/template, unit, displayed stock and location reads; no quantity/count writes |
 | `WH/IN/00001` | Receipt, move, move-line, picking-type and location reads; no validation |
 | Label controls and My printers | Action/view, printer metadata and own-user form reads; no print, preference or credential writes |
@@ -390,6 +391,6 @@ closure uncertainty retain reconciliation. Recovery of an interrupted read-only
 run records an unverified observation, rather than requiring account cleanup.
 
 Deploy normally, then qualify the image-owned role/fixture. Coordinate an
-existing Client preview's serving tuple and activation window with its owner
+existing Client preview's serving tuple and activation window with its lead
 before account changes. Preserve samples, receipt state and recorded acceptance.
 A source test or provision receipt never establishes a real authenticated UI pass.

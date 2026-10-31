@@ -438,12 +438,12 @@ if request['operation']!='cleanup' and not preview:
     if env.cr.fetchone()[0]:
         raise RuntimeError('Testing lane has other recent successful sign-ins')
 if request['operation']=='provision':
+    if readonly:
+        user.write({'password':request['password'],'active':True})
     if marker:
         if marker['state']!=__TASK_ACTIVE_STATE__ or not user.active: raise RuntimeError('Task already closed')
     else:
-        if readonly:
-            user.write({'password':request['password'],'active':True})
-        else:
+        if not readonly:
             groups=[env.ref(name) for name in request['groups']]
             if any(group._name!='res.groups' for group in groups): raise RuntimeError('Invalid business groups')
             field='group_ids' if 'group_ids' in users._fields else 'groups_id'
@@ -454,7 +454,7 @@ if request['operation']=='provision':
         marker={'account_id':user.id,'binding':request['binding'],'copy_binding':request['copy_binding'],'state':__TASK_ACTIVE_STATE__,'groups':sorted(request['groups'])}
         write_string_parameter(parameters,key,json.dumps(marker,sort_keys=True))
 elif request['operation']=='cleanup':
-    if marker and marker['state']==__TASK_ACTIVE_STATE__:
+    if marker and (readonly or marker['state']==__TASK_ACTIVE_STATE__):
         user.write({'active':False,'password':secrets.token_urlsafe(48)})
         if 'res.users.apikeys' in env.registry:
             env['res.users.apikeys'].sudo().search([('user_id','=',user.id)]).unlink()

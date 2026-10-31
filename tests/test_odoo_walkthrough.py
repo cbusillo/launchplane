@@ -399,7 +399,12 @@ class TaskRouteTests(unittest.TestCase):
         self.planner.assert_not_called()
         self.account.assert_not_called()
         self.allowed = True
-        status, planned = self.invoke(request)
+        with patch.object(
+            self.store,
+            "testing_replacement_execution_lock",
+            side_effect=AssertionError("Read-only planning must not take an execution lock"),
+        ):
+            status, planned = self.invoke(request)
         self.assertEqual(status, 200)
         self.assertEqual(planned["result"]["instance"], identity.instance)
         applied = request.model_copy(
@@ -441,12 +446,24 @@ class TaskRouteTests(unittest.TestCase):
         self.browser.side_effect = RuntimeError("Browser interrupted")
         status, _ = self.invoke(run, "preview-run")
         self.assertEqual(status, 409)
+        self.assertGreater(self.account.call_count, native_calls)
+        self.assertGreater(self.browser.call_count, browser_calls)
         native_calls = self.account.call_count
         status, recovered = self.invoke(run, "preview-run")
         self.assertEqual(status, 200, recovered)
         self.assertEqual(recovered["result"]["status"], "unknown")
         self.assertEqual(recovered["result"]["instance"], identity.instance)
         self.assertEqual(self.account.call_count, native_calls)
+
+    def test_scoped_terminal_identity_can_plan_readonly_testing_without_operator_type(self) -> None:
+        self.identity = TerminalAgentIdentity(subject="client-agent", token_label="testing-token")
+        request = task_request(read_only=True, task_id=canonical_json_sha256("example-odoo")[:32])
+        status, _ = self.invoke(request)
+        self.assertEqual(status, 200)
+        self.account.assert_not_called()
+        self.allowed = False
+        status, _ = self.invoke(request)
+        self.assertEqual(status, 403)
 
     def test_fixed_readonly_identity_can_be_revoked_and_reopened_with_a_new_secret(self) -> None:
         request = task_request(read_only=True, task_id=canonical_json_sha256("example-odoo")[:32])
@@ -968,7 +985,7 @@ class AccountProgramTests(unittest.TestCase):
             create=False,
         )
         self.execute()
-        self.user.write.assert_called_once()
+        self.assertEqual(self.user.write.call_args.args[0]["password"], self.request["password"])
         self.request.update({"binding": "new-generation-binding", "operation": "cleanup"})
         self.user.write.side_effect = lambda updates: setattr(
             self.user, "active", updates["active"]
@@ -1033,6 +1050,25 @@ class AccountProgramTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.execute()
         replacement.write.assert_not_called()
+
+    def test_readonly_reprovision_replaces_the_password_on_an_active_marker(self) -> None:
+        self.configure_readonly_identity()
+        self.execute()
+        self.request["password"] = "current-service-secret"
+        self.execute()
+        self.assertEqual(self.user.write.call_args.args[0]["password"], self.request["password"])
+
+    def test_readonly_cleanup_revokes_a_reactivated_closed_marker(self) -> None:
+        self.configure_readonly_identity()
+        self.execute()
+        self.user.write.side_effect = lambda updates: setattr(
+            self.user, "active", updates["active"]
+        )
+        self.request["operation"] = "cleanup"
+        self.execute()
+        self.user.active = True
+        self.execute()
+        self.assertFalse(self.user.active)
 
     def test_provision_preserves_staff_and_does_not_reset_existing_task(self) -> None:
         self.assertEqual(self.execute()["account_id"], self.user.id)

@@ -31,6 +31,7 @@ from control_plane.odoo_walkthrough import (
 from control_plane.contracts.odoo_walkthrough import (
     OdooWalkthroughRequest,
     WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS,
+    WALKTHROUGH_LOGIN_PREFIX,
 )
 from control_plane.product_path_check import PathCheckStep
 from tests.test_odoo_walkthrough import task_request
@@ -53,6 +54,10 @@ class WalkthroughPlanTests(unittest.TestCase):
             operation="provision",
         )
         adapter = MagicMock()
+        self.host.connection.database.execute(
+            "INSERT INTO res_users VALUES (?, ?)",
+            (17, WALKTHROUGH_LOGIN_PREFIX + request.task_id),
+        )
         connection = replace(
             self.connection,
             selection=OdooRuntimeSelection(identity, "https://preview.example"),
@@ -100,7 +105,7 @@ class WalkthroughPlanTests(unittest.TestCase):
                 production_resources="isolated", usage="in_use", data="only_copy"
             )
             self.store.read_disposable_lane_safety.return_value = safety
-            self.host.connection.account_present = False
+            self.host.connection.database.execute("DELETE FROM res_users")
             with (
                 patch("control_plane.odoo_walkthrough.fixture_preview_slot", return_value="pr-42"),
                 patch(

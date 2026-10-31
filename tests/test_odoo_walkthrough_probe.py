@@ -48,11 +48,11 @@ class ProbeConnection:
         self.used = False
         self.copy = spec["copy_binding"]
         self.active = True
-        self.account_present = True
         self.statement = ""
         self.parameters: tuple[object, ...] = ()
         self.database = sqlite3.connect(":memory:")
         seed(self.database)
+        self.database.execute("CREATE TABLE res_users (id INTEGER PRIMARY KEY, login TEXT UNIQUE)")
         self.sql = SqliteCursor(self.database)
         namespace: dict[str, Any] = {}
         exec(connection_isolation_library(), namespace)
@@ -87,7 +87,6 @@ class ProbeConnection:
                 "res_users_log",
                 "SELECT value FROM ir_config_parameter WHERE key=%s",
                 "SELECT login,active FROM res_users",
-                "SELECT EXISTS (SELECT 1 FROM res_users WHERE login=",
             )
         )
         if self.sql_result:
@@ -95,7 +94,8 @@ class ProbeConnection:
 
     def fetchone(self) -> tuple[object, ...]:
         if self.sql_result:
-            return tuple(self.sql.fetchone())
+            row = tuple(self.sql.fetchone())
+            return (bool(row[0]),) if "res_users" in self.statement else row
         if "pg_try_advisory_xact_lock" in self.statement:
             return (self.free,)
         if "res_users_log" in self.statement:
@@ -112,8 +112,6 @@ class ProbeConnection:
                     }
                 ),
             )
-        if "SELECT EXISTS (SELECT 1 FROM res_users WHERE login=" in self.statement:
-            return (self.account_present,)
         if "res_users" in self.statement:
             return (WALKTHROUGH_LOGIN_PREFIX + self.spec["task_id"], self.active)
         raise AssertionError("Unexpected database read")

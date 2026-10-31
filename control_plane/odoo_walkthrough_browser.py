@@ -26,17 +26,22 @@ def readonly_browser_request(method: str, path: str, payload: object) -> bool:
         return False
     if method == "GET":
         return True
-    if method != "POST" or path in {
-        "/web/dataset/call_button",
-        "/web/action/run",
-        "/mail/message/post",
-        "/web/dataset/resequence",
-        "/web/binary/upload",
-        "/web/binary/upload_attachment",
-        "/mail/attachment/upload",
-        "/mail/message/update_content",
-        "/mail/message/reaction",
-    }:
+    if (
+        method != "POST"
+        or path.startswith("/web/dataset/call_button/")
+        or path
+        in {
+            "/web/dataset/call_button",
+            "/web/action/run",
+            "/mail/message/post",
+            "/web/dataset/resequence",
+            "/web/binary/upload",
+            "/web/binary/upload_attachment",
+            "/mail/attachment/upload",
+            "/mail/message/update_content",
+            "/mail/message/reaction",
+        }
+    ):
         return False
     if path.startswith("/web/session/") and path != "/web/session/get_session_info":
         return False
@@ -310,6 +315,7 @@ def run_walkthrough_browser(
             except (PlaywrightError, ValueError):
                 if not read_only or prerequisite_failed:
                     raise
+                check_origin_identity()
                 observation_failed = True
             finally:
                 context.close()
