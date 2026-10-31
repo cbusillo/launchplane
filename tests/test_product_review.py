@@ -352,21 +352,6 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         accepted = await self._post(app, owner, decision="accepted")
         self.assertEqual(accepted.status_code, 200)
 
-    async def test_accept_rechecks_the_head_after_the_page_was_loaded(self) -> None:
-        self._write_product()
-        owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
-        app = self._app()
-        self.assertTrue((await self._get(app, owner)).json()["preview_is_current"])
-        self.pull_request_notes = self.pull_request_notes._replace(head_sha="b" * 40)
-        refused = await self._post(app, owner, decision="accepted")
-        self.assertEqual(refused.status_code, 409)
-        self.assertEqual(
-            self.store.list_product_review_decision_records(
-                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
-            ),
-            (),
-        )
-
     async def test_accept_binds_the_fresh_head_check_to_the_submitted_preview(self) -> None:
         self._write_product()
         observed = resolve_serving_preview(

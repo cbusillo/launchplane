@@ -84,6 +84,38 @@ test("an earlier accepted decision cannot look like approval of the current prev
   await page.screenshot({ path: testInfo.outputPath("owner-feedback-history.png"), fullPage: true });
 });
 
+for (const samePreview of [true, false]) {
+  test(`retry delivery preserves eligibility only for the same reviewed preview: ${samePreview}`, { tag: "@responsive" }, async ({ page }) => {
+    await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308");
+    const original = await page.evaluate(async () => {
+      const modulePath = "/ui/src/dev-fixtures.ts";
+      const fixtures = await import(modulePath);
+      return fixtures.productReviewForFixture("products", { ...fixtures.productReviewDecisionForFixture("changes_requested", "Fix the price."), feedback_url: "" });
+    });
+    const delivered = {
+      ...original,
+      preview_generation_id: samePreview ? original.preview_generation_id : "generation-next",
+      preview_is_current: false,
+      cannot_accept_reason: "We could not check the latest version of this change. Refresh the review.",
+      latest_decision: { ...original.latest_decision, feedback_url: `${original.pull_request_url}#issuecomment-1` },
+    };
+    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "example-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+    await page.route("**/v1/product-review?*", route => route.fulfill({ json: original }));
+    await page.route("**/v1/product-review/feedback/retry", route => route.fulfill({ json: delivered }));
+    await page.goto("/ui/owner-review?repository=example%2Fcontrol-plane&pull_request=308");
+    await openAndConfirmPreview(page);
+    await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "Retry delivery", exact: true }).click();
+    await expect(page.getByLabel("Recorded decision")).not.toContainText("delivery to the agent is pending");
+    if (samePreview) {
+      await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeEnabled();
+    } else {
+      await expect(page.getByRole("button", { name: "Accept", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Refresh review", exact: true })).toBeVisible();
+    }
+  });
+}
+
 test("an unavailable notes read after a saved decision keeps Accept disabled", async ({ page }) => {
   await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308");
   const original = await page.evaluate(async () => {

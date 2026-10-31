@@ -242,6 +242,10 @@ function OwnerReviewState({
   );
 }
 
+function previewIdentity(review: ProductReviewResponse): string {
+  return `${review.repository}:${review.pull_request_number}:${review.head_sha}:${review.preview_url}:${review.preview_generation_id}`;
+}
+
 function ProductReviewCard({
   historical,
   fixtureMode,
@@ -257,7 +261,7 @@ function ProductReviewCard({
 }) {
   const previewUrl = safeExternalUrl(review.preview_url);
   const pullRequestUrl = safeExternalUrl(review.pull_request_url);
-  const previewIdentity = `${review.repository}:${review.pull_request_number}:${review.head_sha}:${review.preview_url}:${review.preview_generation_id}`;
+  const previewKey = previewIdentity(review);
   const [openedPreview, setOpenedPreview] = useState("");
   return (
     <article className="owner-review-card" data-product={review.product}>
@@ -273,7 +277,8 @@ function ProductReviewCard({
             href={previewUrl.toString()}
             target="_blank"
             rel="noreferrer"
-            onClick={() => setOpenedPreview(previewIdentity)}
+            onClick={() => setOpenedPreview(previewKey)}
+            onAuxClick={(event) => { if (event.button === 1) setOpenedPreview(previewKey); }}
           >
             Open the preview <ExternalLink size={15} aria-hidden="true" />
           </a>
@@ -310,10 +315,10 @@ function ProductReviewCard({
       ) : null}
       {!historical && review.can_decide && previewUrl ? (
         <ProductReviewDecisionForm
-          key={previewIdentity}
+          key={previewKey}
           fixtureMode={fixtureMode}
           review={review}
-          previewOpened={openedPreview === previewIdentity}
+          previewOpened={openedPreview === previewKey}
           onDecided={onDecided}
           onRefresh={onRefresh}
         />
@@ -372,7 +377,15 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
             pull_request: review.pull_request_number,
             decision_id: decision.record_id,
           });
-      onDecided({ ...response, pull_request_title: review.pull_request_title, client_test_notes: review.client_test_notes, client_test_notes_error: review.client_test_notes_error });
+      const samePreview = previewIdentity(response) === previewIdentity(review);
+      onDecided({
+        ...response,
+        pull_request_title: review.pull_request_title,
+        client_test_notes: review.client_test_notes,
+        client_test_notes_error: review.client_test_notes_error,
+        preview_is_current: samePreview && review.preview_is_current,
+        cannot_accept_reason: samePreview ? review.cannot_accept_reason : response.cannot_accept_reason,
+      });
       if (!response.latest_decision?.feedback_url) {
         setFailure("Delivery is still pending. Your saved decision has not changed.");
       }
