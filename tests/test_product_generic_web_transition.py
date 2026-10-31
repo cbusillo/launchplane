@@ -22,7 +22,11 @@ from control_plane.product_generic_web_transition import (
     ProductGenericWebTransitionRequest,
     build_generic_web_transition_plan,
 )
-from control_plane.service_auth import BearerIdentityConfig, LocalOperatorPolicyRule
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
+)
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore, ProductProfileCompareWriteResult
 from tests.http_app_test_support import (
@@ -36,6 +40,7 @@ from tests.http_app_test_support import (
 )
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import sqlite_database_url
+from tests.support.auth import scoped_agent_transport
 
 
 def profile() -> LaunchplaneProductProfileRecord:
@@ -339,6 +344,158 @@ class GenericWebTransitionHttpTests(unittest.IsolatedAsyncioTestCase):
             },
             payload=payload,
         )
+
+    def agent_app(self, transport: str, *, scoped_rule: bool = False) -> None:
+        self.app = create_launchplane_fastapi_app(
+            bearer_identity_config=BearerIdentityConfig.model_validate(
+                {
+                    f"{transport}_token": "fixture-agent-token",
+                    f"{transport}_subject": "fixture-agent",
+                    f"{transport}_token_label": "fixture",
+                }
+            ),
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=3,
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=("fixture-agent",),
+                        token_labels=("fixture",),
+                        products=("example-site",),
+                        contexts=("launchplane",),
+                        actions=(
+                            "product_profile.write",
+                            "product_profile.preview_transition.apply",
+                        ),
+                    ),
+                )
+                if scoped_rule
+                else (),
+            ),
+            record_store_factory=lambda: self.store,
+        )
+
+    async def agent_post(self, payload: dict[str, object], key: str = "") -> _AsgiResponse:
+        return await _asgi_request(
+            self.app,
+            "POST",
+            "/v1/product-profiles/example-site/generic-web-transition",
+            headers={"Authorization": "Bearer fixture-agent-token", "Idempotency-Key": key},
+            payload=payload,
+        )
+
+    async def test_director_agent_preview_apply_replays_and_preserves_stable_profile(self) -> None:
+        for transport in ("local_operator", "terminal_agent"):
+            with self.subTest(transport=transport):
+                before = profile().model_copy(update={"driver_id": "generic-web"})
+                self.store.write_product_profile_record(before)
+                stored = before.model_dump(mode="json")
+                stored["preview"].update(
+                    transport_extension="verireel-postgres",
+                    transport_database_prefix="example_site",
+                )
+                with self.store._engine.begin() as connection:
+                    connection.execute(
+                        update(LaunchplaneProductProfileRow)
+                        .where(LaunchplaneProductProfileRow.product == before.product)
+                        .values(payload=stored)
+                    )
+                before = self.store.read_product_profile_record(before.product)
+                self.agent_app(transport)
+                request = draft(before)
+                request["preview"] = {
+                    "data_transport_mode": "driver",
+                    "transport_extension": "postgres",
+                    "transport_database_prefix": before.preview.transport_database_prefix,
+                    "copied_env_keys": [],
+                    "generated_secret_env": {},
+                    "preview_url_env_keys": [],
+                    "preview_domain_env_keys": [],
+                }
+                request["lanes"] = [
+                    {
+                        "context": lane.context,
+                        "instance": lane.instance,
+                        "extensions": lane.generic_web_extensions.model_dump(mode="json"),
+                    }
+                    for lane in before.lanes
+                ]
+                dry = await self.agent_post(request)
+                self.assertEqual(dry.status_code, 202, dry.text)
+                self.assertEqual(self.store.read_product_profile_record(before.product), before)
+                body = {
+                    **request,
+                    "mode": "apply",
+                    "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+                }
+                applied = await self.agent_post(body, transport)
+                self.assertEqual(applied.status_code, 202, applied.text)
+                after = self.store.read_product_profile_record(before.product)
+                self.assertEqual(after.preview.transport_extension, "postgres")
+                self.assertEqual(
+                    after.model_dump(exclude={"preview", "updated_at", "source", "schema_version"}),
+                    before.model_dump(
+                        exclude={"preview", "updated_at", "source", "schema_version"}
+                    ),
+                )
+                replay = await self.agent_post(body, transport)
+                self.assertTrue(replay.json()["replayed"], replay.text)
+                self.assertEqual(replay.json()["original_trace_id"], applied.json()["trace_id"])
+                receipt = await _asgi_request(
+                    self.app,
+                    "GET",
+                    f"/v1/product-profiles/example-site/mutation-receipts/generic-web-transition?operation_key={transport}",
+                    headers={"Authorization": "Bearer fixture-agent-token"},
+                )
+                self.assertEqual(receipt.json()["state"], "completed", receipt.text)
+
+    async def test_director_agent_refuses_driver_and_stable_lane_changes(self) -> None:
+        self.agent_app("local_operator")
+        for driver, instance in (
+            ("verireel", ""),
+            ("generic-web", "testing"),
+            ("generic-web", "prod"),
+        ):
+            before = profile().model_copy(update={"driver_id": driver})
+            self.store.write_product_profile_record(before)
+            with self.subTest(driver=driver, instance=instance):
+                request = draft(before)
+                request["lanes"] = [
+                    {
+                        "context": lane.context,
+                        "instance": lane.instance,
+                        "extensions": (
+                            {"maintenance": [{"name": "migrate", "command": "node migrate"}]}
+                            if lane.instance == instance
+                            else lane.generic_web_extensions.model_dump(mode="json")
+                        ),
+                    }
+                    for lane in before.lanes
+                ]
+                dry = await self.agent_post(request)
+                self.assertEqual(dry.status_code, 202, dry.text)
+                response = await self.agent_post(
+                    {
+                        **request,
+                        "mode": "apply",
+                        "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+                    },
+                    f"{driver}-{instance}",
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(self.store.read_product_profile_record(before.product), before)
+
+    async def test_scoped_agent_cannot_apply_even_with_profile_write_rule(self) -> None:
+        self.agent_app("local_operator", scoped_rule=True)
+        before = profile().model_copy(update={"driver_id": "generic-web"})
+        self.store.write_product_profile_record(before)
+        with scoped_agent_transport():
+            response = await self.agent_post(
+                {**draft(before), "mode": "apply", "reviewed_plan_sha256": "a" * 64},
+                "scoped-agent",
+            )
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.store.read_product_profile_record(before.product), before)
 
     async def test_stored_legacy_transition_and_retiring_cleanup_keep_original_resource_names(
         self,
@@ -658,3 +815,22 @@ class GenericWebTransitionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.session = self.sessions.issue(_github_human_identity(role="read_only"))
         self.assertEqual((await self.post(request)).status_code, 403)
         self.assertEqual(self.store.read_product_profile_record("example-site"), before)
+
+    async def test_existing_preview_namespace_conflict_refuses_without_changing_profile(
+        self,
+    ) -> None:
+        before = self.store.read_product_profile_record("example-site")
+        self.store.write_preview_record(_preview(before))
+        request = draft(before)
+        dry = await self.post(request)
+        self.assertEqual(dry.status_code, 202, dry.text)
+        response = await self.post(
+            {
+                **request,
+                "mode": "apply",
+                "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+            },
+            "namespace-change",
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.store.read_product_profile_record(before.product), before)

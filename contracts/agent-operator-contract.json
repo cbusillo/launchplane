@@ -46,6 +46,37 @@
     },
     "operations": [
       {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply"
+        ],
+        "operation_id": "apply_product_generic_web_transition",
+        "path": "/v1/product-profiles/{product}/generic-web-transition",
+        "purpose": "Review shared-web declarations; Director agents may apply preview-only changes on an existing generic-web product, preserving every stable declaration and existing credential gates.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "b4bb7c2ac860584193497ed93cd85ecd6fa64cc2faa584f61a74d57626ef2f48",
+        "supported_surfaces": [
+          "service_api",
+          "browser"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_identity"
@@ -1443,8 +1474,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "b56a1c88d63118e1c36e6292897c48003b4b14bc"
+    "source_commit_sha": "8e7557eed82c36578ea488c0d601a52cbe75db1d"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "612504dc87f0f9347ce878827dc95442cccd23595c1b185edb99d5f6f8b02ed4"
+  "semantic_digest_sha256": "e27e19e78ee1262ad110a3e5180941490a954d2ff316fa3a1dfa68d1516982d1"
 }
