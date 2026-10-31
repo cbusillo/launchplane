@@ -173,10 +173,20 @@ class RequestAttentionSourceTests(unittest.TestCase):
             "author": {"login": "plan-bot", "__typename": "Bot", "databaseId": 7},
         }
 
-    def read_rows(self, rows: list[dict[str, object]]) -> OpenRequestPage:
+    def read_rows(self, rows: list[dict[str, object]], *, kind: str = "request") -> OpenRequestPage:
         self.transport.request.side_effect = [
-            {"data": {"repository": {"issues": self.connection(rows)}}},
-            {"data": {"repository": {"pullRequests": self.connection([])}}},
+            {
+                "data": {
+                    "repository": {"issues": self.connection(rows if kind == "request" else [])}
+                }
+            },
+            {
+                "data": {
+                    "repository": {
+                        "pullRequests": self.connection(rows if kind == "change" else [])
+                    }
+                }
+            },
         ]
         return self.reader("team/site", trusted_author_ids=(7,))
 
@@ -293,6 +303,36 @@ class RequestAttentionSourceTests(unittest.TestCase):
                 comments=self.connection([latest]),
             )
             self.assertEqual(self.read_rows([raw]).requests[0].next_actor, expected)
+
+    def test_untrusted_edits_of_trusted_plain_work_cannot_restore_old_status(self) -> None:
+        author = {"login": "plan-bot", "__typename": "Bot", "databaseId": 7}
+        editor = {"login": "client-agent", "__typename": "User", "databaseId": 8}
+        older_actor = "person:client"
+        older = self.comment(
+            f"## Current Status\nNext actor: {older_actor}\nNext action: Old action."
+        )
+        newer_actor = "event:current checks"
+        newer = self.comment(
+            f"## Current Status\nNext actor: {newer_actor}\nNext action: Finish checks.",
+            8,
+            "2026-10-30T19:40:00Z",
+        )
+        raw = self.raw(
+            author=author,
+            editor=editor,
+            lastEditedAt="2026-10-30T19:30:00Z",
+            body="## Current Status\nNext actor: agent:new-worker",
+            comments=self.connection([older]),
+        )
+        for kind in ("request", "change"):
+            with self.subTest(kind=kind):
+                self.assertIsNone(self.read_rows([raw], kind=kind).requests[0].next_actor)
+                restored = self.read_rows(
+                    [{**raw, "comments": self.connection([older, newer])}], kind=kind
+                ).requests[0]
+                self.assertEqual(restored.next_actor, newer_actor)
+        never_trusted = {**raw, "author": editor}
+        self.assertEqual(self.read_rows([never_trusted]).requests[0].next_actor, older_actor)
 
     def test_cursor_reads_continue_from_the_source_cursor_and_reuse_one_token(self) -> None:
         first = self.connection([self.raw()], "after-7")

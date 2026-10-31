@@ -50,7 +50,7 @@ release requires source verification and is routed to Supervisor, since this
 read does not qualify termination evidence. Person and event waits keep their
 recorded next actor and are excluded from the unowned filter. A general
 `agent` next actor or a released worker's historical claim is not an assigned
-agent. A later requester edit that prevents verifying managed status keeps the
+agent. A later source edit that prevents verifying recorded status keeps the
 request visible with a source-verification action. The Opened field measures
 source creation age, including after reopening, rather than claiming how long a
 late request has waited. Product mappings come from existing profiles. Requester logins remain

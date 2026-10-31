@@ -156,10 +156,12 @@ def _collected_request(
         managed = contributor_plan_body(raw) if kind == "request" else None
         writer = {"author": raw.get("editor")} if raw.get("lastEditedAt") else raw
         body_trusted = author_is_trusted(writer, owner, author_ids=author_ids)
-        managed_status_unverifiable = managed is not None and not body_trusted
+        body_status_unverifiable = not body_trusted and (
+            managed is not None or author_is_trusted(raw, owner, author_ids=author_ids)
+        )
         if body_trusted:
             discussion["body"] = managed if managed is not None else raw.get("body") or ""
-        elif managed_status_unverifiable:
+        elif body_status_unverifiable:
             discussion["body"] = "## Current Status\n"
         status = current_status(
             {
@@ -174,8 +176,8 @@ def _collected_request(
         )
         actor = next_actor.read(status)
         action = status_field(status, "Next action") or action
-        if not status and managed_status_unverifiable:
-            action = "Open the source to verify its managed status after a requester edit."
+        if not status and body_status_unverifiable:
+            action = "Open the source to verify its current status after a later body edit."
         if actor and actor.startswith("agent:"):
             authored: list[dict[str, Any]] = [
                 {**row, "user": {"login": row["author"]}}
