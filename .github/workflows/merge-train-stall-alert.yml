@@ -6,11 +6,8 @@ name: Merge Train Stall Alert
       repository:
         description: Repository whose train needs attention
         required: true
-      issue_number:
-        description: Durable Supervisor issue in that repository
-        required: true
       state:
-        description: Current issue state
+        description: Current stall state
         type: choice
         options: [open, closed]
         required: true
@@ -42,7 +39,6 @@ jobs:
         env:
           DISCORD_LAUNCHPLANE_WEBHOOK: ${{ secrets.DISCORD_LAUNCHPLANE_WEBHOOK }}
           STALL_REPOSITORY: ${{ inputs.repository }}
-          STALL_ISSUE_NUMBER: ${{ inputs.issue_number }}
           STALL_STATE: ${{ inputs.state }}
           STALL_NOTIFICATION_KEY: ${{ inputs.notification_key }}
         run: uv run python scripts/notify-merge-train-stall.py

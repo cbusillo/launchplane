@@ -9,14 +9,12 @@ import logging
 from pathlib import Path
 from threading import Event
 from typing import Protocol, cast
-from urllib.parse import quote
 
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerStateRecord,
     merge_train_controller_alias_reconciliation_detail,
 )
 from control_plane import runtime_environments
-from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.contracts.merge_train_stall import (
     MergeTrainStallObservation,
@@ -34,7 +32,6 @@ from control_plane.merge_train_release_hold import merge_train_release_hold_read
 from control_plane.workflows.ship import utc_now_timestamp
 
 STALL_SECONDS = 30 * 60
-STALL_ISSUE_MARKER = "<!-- launchplane:merge-train-stall -->"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -122,79 +119,9 @@ def resolve_stall_workflow(root: Path) -> MergeTrainStallWorkflow | None:
     return MergeTrainStallWorkflow(repository=repository, ref=ref)
 
 
-class GitHubStallReporter:
-    """Reuse the delivery App and the existing Discord workflow secret."""
-
-    def __init__(self, *, root: Path, repository: str) -> None:
+class DiscordStallNotifier:
+    def __init__(self, *, root: Path) -> None:
         self.root = root
-        self.repository = repository
-        token = resolve_delivery_github_token(
-            control_plane_root=root,
-            context_name="launchplane",
-            repository=repository,
-            purpose="release_record",
-        )
-        self.transport = UrllibMergeTrainGitHubTransport(token=token)
-        self.path = f"/repos/{repository}"
-
-    def publish(self, record: MergeTrainStallRecord, body: str, *, stalled: bool) -> int | None:
-        number = record.issue_number
-        if number is None:
-            # Reconcile a create whose reply was lost before creating again. Never
-            # edit human requests or silently pick one of several matching issues.
-            query = quote(
-                f'repo:{self.repository} is:issue in:title "Merge train stalled"', safe=""
-            )
-            result = cast(
-                dict[str, object],
-                self.transport.request(method="GET", path=f"/search/issues?q={query}&per_page=100"),
-            )
-            items = cast(list[dict[str, object]], result["items"])
-            if result.get("incomplete_results") or int(cast(int, result["total_count"])) > len(
-                items
-            ):
-                raise ValueError("Incomplete stall issue reconciliation.")
-            matches = [
-                item
-                for item in items
-                if isinstance(item.get("body"), str)
-                and STALL_ISSUE_MARKER in cast(str, item["body"])
-                and cast(dict[str, object], item["user"]).get("type") == "Bot"
-            ]
-            if len(matches) > 1:
-                raise ValueError("Ambiguous stall issue reconciliation.")
-            if matches:
-                number = int(cast(int, matches[0]["number"]))
-            elif not stalled:
-                return None
-            else:
-                created = cast(
-                    dict[str, object],
-                    self.transport.request(
-                        method="POST",
-                        path=f"{self.path}/issues",
-                        body={"title": "Merge train stalled", "body": body},
-                    ),
-                )
-                return int(cast(int, created["number"]))
-        existing = cast(
-            dict[str, object],
-            self.transport.request(method="GET", path=f"{self.path}/issues/{number}"),
-        )
-        if (
-            not isinstance(existing.get("body"), str)
-            or STALL_ISSUE_MARKER not in cast(str, existing["body"])
-            or cast(dict[str, object], existing["user"]).get("type") != "Bot"
-        ):
-            raise ValueError("Stall issue ownership changed.")
-        state = "open" if stalled else "closed"
-        if existing.get("body") != body or existing.get("state") != state:
-            self.transport.request(
-                method="PATCH",
-                path=f"{self.path}/issues/{number}",
-                body={"body": body, "state": state},
-            )
-        return number
 
     def notify(self, record: MergeTrainStallRecord, workflow: MergeTrainStallWorkflow) -> None:
         token = resolve_delivery_github_token(
@@ -210,7 +137,6 @@ class GitHubStallReporter:
                 "ref": workflow.ref,
                 "inputs": {
                     "repository": record.repository,
-                    "issue_number": str(record.issue_number),
                     "state": record.issue_state,
                     "notification_key": record.notification_key,
                 },
@@ -218,38 +144,12 @@ class GitHubStallReporter:
         )
 
 
-def _issue_body(record: MergeTrainStallRecord) -> str:
-    lines = [STALL_ISSUE_MARKER, "The merge train needs the Supervisor's attention.", ""]
-    for base, observation in sorted(record.observations.items()):
-        if observation.reasons:
-            lines.append(f"- Base `{base}`: {', '.join(observation.reasons)}.")
-            lines.extend(
-                f"  - Ready change `{key}` since {since}."
-                for key, since in sorted(observation.ready_since.items())
-            )
-            lines.extend(
-                f"  - Train-blocked change `{key}` since {since}."
-                for key, since in sorted(observation.blocked_since.items())
-            )
-            lines.extend(f"  - Missing setting: {gap}" for gap in observation.setting_gaps)
-    if not any(item.reasons for item in record.observations.values()):
-        lines.append("Resolved: no actionable stall condition remains.")
-    lines.extend(
-        [
-            "",
-            "The monitor does not merge, release leases, rerun checks or change readiness labels.",
-            "Supervisor: diagnose/recover through the supported controller path.",
-        ]
-    )
-    return "\n".join(lines)
-
-
 def run_stall_monitor_pass(
     *,
     store: object,
     root: Path,
     now: Callable[[], str] = utc_now_timestamp,
-    reporter_factory: Callable[..., GitHubStallReporter] = GitHubStallReporter,
+    notifier_factory: Callable[..., DiscordStallNotifier] = DiscordStallNotifier,
 ) -> None:
     policy_record = resolve_merge_train_policy_record(store)
     targets: dict[str, list[MergeTrainRepositoryPolicy]] = {}
@@ -419,47 +319,28 @@ def run_stall_monitor_pass(
                     update={"observations": observations, "observed_at": observed_at}
                 )
                 stalled = any(o.reasons for o in observations.values())
-                body = _issue_body(record)
-                body_digest = hashlib.sha256(body.encode()).hexdigest()
-                # Preserve the observation clock even if issue delivery is unavailable.
-                stall_store.write_merge_train_stall_record(record)
-                if not stalled and record.issue_number is None and not record.delivery_error:
-                    continue
-                try:
-                    reporter = reporter_factory(root=root, repository=repository)
-                    number = reporter.publish(record, body, stalled=stalled)
-                except Exception as error:
-                    updates: dict[str, object] = {"delivery_error": type(error).__name__}
-                    if isinstance(error, MergeTrainGitHubError) and error.status_code in {404, 410}:
-                        updates.update({"issue_number": None})
-                    stall_store.write_merge_train_stall_record(record.model_copy(update=updates))
-                    continue
                 next_state = "open" if stalled else "closed"
-                if number is not None and (
+                if (
                     record.issue_state != next_state
-                    or record.published_issue_number != number
                     or (stalled and record.published_reason_sha256 != reason_digest)
                     or (stalled and not record.notification_key)
                 ):
                     record = record.model_copy(
                         update={
                             "notification_key": hashlib.sha256(
-                                f"{repository}:{observed_at}:{next_state}:{body_digest}".encode()
+                                f"{repository}:{observed_at}:{next_state}:{reason_digest}".encode()
                             ).hexdigest()
                         }
                     )
                 record = record.model_copy(
                     update={
-                        "issue_number": number,
                         "issue_state": next_state,
-                        "issue_body_sha256": body_digest,
-                        "published_issue_number": number,
                         "published_reason_sha256": reason_digest,
                         "delivery_error": "",
                     }
                 )
                 stall_store.write_merge_train_stall_record(record)
-                if number is not None and record.notification_key != record.notified_key:
+                if record.notification_key != record.notified_key:
                     try:
                         workflow = resolve_stall_workflow(root)
                         if workflow is None:
@@ -467,7 +348,7 @@ def run_stall_monitor_pass(
                                 update={"delivery_error": "stall_alert_workflow_not_configured"}
                             )
                         else:
-                            reporter.notify(record, workflow)
+                            notifier_factory(root=root).notify(record, workflow)
                             record = record.model_copy(
                                 update={"notified_key": record.notification_key}
                             )
