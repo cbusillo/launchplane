@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -206,22 +207,34 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         )
         return body
 
-    def reconcile_walkthrough(self, finished: bool) -> ReconcileOutcome:
+    def reconcile_walkthrough(self, finished: bool, *, busy: bool = False) -> ReconcileOutcome:
         execute = Mock()
         hooks = PreviewProviderHooks(build_inputs=Mock(), execute_apply=execute)
         with (
             patch(
                 "control_plane.product_reconcile._plan_preview_target",
-                return_value=ReconcileOutcome({"product": self.profile.product, "action": "noop"}),
+                return_value=ReconcileOutcome(
+                    {
+                        "product": self.profile.product,
+                        "action": "apply" if busy else "noop",
+                        "build_run_id": 1,
+                    }
+                ),
             ),
             patch(
                 "control_plane.odoo_walkthrough.source.read_dokploy_config",
                 return_value=("https://provider.example", "private-fixture"),
             ),
             patch(
+                "control_plane.product_reconcile._run_preview_operation",
+                return_value=ReconcileOutcome(
+                    {"action": "apply", "deferred": "preview_operation_busy"}, deferred=True
+                ),
+            ),
+            patch(
                 "control_plane.odoo_walkthrough.testing_account_dispatch_finished",
                 return_value=finished,
-            ),
+            ) as proof,
             patch("control_plane.odoo_walkthrough.testing_account_command") as account,
             patch("control_plane.odoo_walkthrough.run_walkthrough_browser") as browser,
             patch(
@@ -243,6 +256,8 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             account.assert_not_called()
             browser.assert_not_called()
             execute.assert_not_called()
+            if busy:
+                proof.assert_not_called()
             return outcome
 
     def test_walkthrough_original_settles_without_its_browser_request_and_replays(self) -> None:
@@ -341,11 +356,37 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             outcome = recover_held_walkthrough(
                 store=self.store, reservation=self.reservation, profile=self.profile, root=self.root
             )
-        self.assertEqual(outcome["settlement"], "refused")
+        self.assertNotIn(outcome["settlement"], {"adopted", "completed", "replayed"})
         proof.assert_not_called()
         self.assertEqual(
             held_preview_reservations(self.store, product=self.profile.product), (self.reservation,)
         )
+
+    def test_active_walkthrough_defers_concurrent_preview_work_without_a_failure(self) -> None:
+        self.use_walkthrough_original()
+        for locked in (False, True):
+            with self.subTest(locked=locked):
+                self.reservation = self.replace_record(
+                    state="reconcile_required" if locked else "running",
+                    lease_expires_at=(
+                        datetime.now(timezone.utc) + timedelta(hours=-1 if locked else 1)
+                    ).isoformat(),
+                )
+                exclusion = (
+                    self.store.testing_replacement_execution_lock(
+                        preview_execution_lock_name(self.reservation.provider_target_key)
+                    )
+                    if locked
+                    else nullcontext()
+                )
+                with exclusion:
+                    outcome = self.reconcile_walkthrough(True, busy=True)
+                self.assertTrue(outcome.deferred, outcome.plan)
+                self.assertFalse(outcome.error)
+                self.assertEqual(
+                    held_preview_reservations(self.store, product=self.profile.product),
+                    (self.reservation,),
+                )
 
     def test_observed_preview_without_lifecycle_keeps_its_original_recovery_status(self) -> None:
         from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord

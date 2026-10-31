@@ -673,11 +673,21 @@ def recover_held_walkthrough(
             preview_execution_lock_name(reservation.provider_target_key)
         ) as check:
             if check is None:
-                return {**result, "settlement": "refused", "reason": "preview_executor_active"}
+                return {
+                    **result,
+                    "settlement": "reconcile_required",
+                    "reason": "preview_executor_active",
+                }
             check()
             refusal = _original_recovery_refusal(store, reservation)
             if refusal:
-                return {**result, "settlement": "refused", "reason": refusal}
+                return {
+                    **result,
+                    "settlement": "reconcile_required"
+                    if refusal == "preview_grace_active"
+                    else "refused",
+                    "reason": refusal,
+                }
 
             def check_original() -> None:
                 check()
