@@ -62,6 +62,26 @@ from control_plane.odoo_preview_apply_http import (
     issue_odoo_preview_apply_plan,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationRecord,
+    PreviewPullRequestSummary,
+)
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetStaffTestingHold,
+)
+from control_plane.workflows.generic_web_preview import (
+    effective_preview_app_name_prefix,
+    preview_application_name,
+    resolve_generic_web_preview_slug,
+)
+from control_plane.contracts.preview_execution import odoo_preview_target_key
+from control_plane.odoo_runtime_reads import OdooRuntimeConnection, OdooRuntimeEvidence
+from control_plane.preview_fixture import require_fixture_container_cancelled
+from tests.support.disposable_lanes import record_safety
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.test_odoo_preview_apply_execution import _refresh_payload, _issued_plan
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
@@ -156,6 +176,11 @@ class PreviewFixtureTests(unittest.TestCase):
                 )
                 store.ensure_schema()
                 self.addCleanup(store.close)
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _odoo_preview_profile_payload("example-product")
+                    )
+                )
                 binding = fixture_binding()
                 planned = fixture_receipt("dry-run")
                 adapter = PreviewFixtureAdapter(
@@ -482,26 +507,6 @@ class PreviewFixtureTests(unittest.TestCase):
         ):
             self.assertEqual(adapter.original_intent(intent), intent)
 
-    def test_read_qualification_does_not_apply_mutation_holds(self) -> None:
-        adapter = PreviewFixtureAdapter(
-            Mock(), Path("."), "example-product", fixture_request(), "trace"
-        )
-        selected = Mock(identity=fixture_identity())
-        with (
-            patch(
-                "control_plane.preview_fixture.reads.select_preview_runtime", return_value=selected
-            ),
-            patch(
-                "control_plane.preview_fixture.require_disposable_lane",
-                side_effect=ValueError("held"),
-            ) as guard,
-        ):
-            self.assertIs(adapter.selection(), selected)
-            guard.assert_not_called()
-            with self.assertRaises(ValueError):
-                adapter.selection(mutation=True)
-            guard.assert_called_once()
-
     def test_historical_witness_adopts_before_mutable_sample_qualification(self) -> None:
         receipt = fixture_receipt("readback")
         adapter = PreviewFixtureAdapter(
@@ -788,6 +793,300 @@ class PreviewFixtureTests(unittest.TestCase):
                 cast(dict[str, object], second.response_payload["result"])["receipt"]
             )
             self.assertEqual(recovered.records, planned.records)
+
+
+class PreviewFixtureLaneTests(unittest.TestCase):
+    @contextmanager
+    def preview(self) -> Iterator[tuple[PostgresRecordStore, PreviewFixtureAdapter, str]]:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url="sqlite+pysqlite:///" + str(Path(directory) / "state.db")
+            )
+            store.ensure_schema()
+            try:
+                payload = _odoo_preview_profile_payload("example-product")
+                payload["preview"] = {
+                    **cast(dict[str, object], payload["preview"]),
+                    "context": "example",
+                    "app_name_prefix": "example-preview",
+                }
+                profile = LaunchplaneProductProfileRecord.model_validate(payload)
+                slot = resolve_generic_web_preview_slug(
+                    profile=profile, preview_slug="", anchor_pr_number=42, label="Fixture"
+                )
+                native = preview_application_name(
+                    app_name_prefix=effective_preview_app_name_prefix(profile=profile),
+                    preview_slug=slot,
+                )
+                identity_value = fixture_identity().model_copy(update={"instance": native})
+                preview = PreviewRecord(
+                    preview_id=identity_value.preview_id,
+                    context=identity_value.context,
+                    anchor_repo=profile.repository.partition("/")[2],
+                    anchor_pr_number=42,
+                    anchor_pr_url=f"https://github.com/{profile.repository}/pull/42",
+                    preview_label="preview",
+                    canonical_url="https://pr-42.example.invalid",
+                    state="active",
+                    created_at=profile.updated_at,
+                    updated_at=profile.updated_at,
+                    eligible_at=profile.updated_at,
+                    active_generation_id=identity_value.preview_generation_id,
+                    serving_generation_id=identity_value.preview_generation_id,
+                    latest_generation_id=identity_value.preview_generation_id,
+                    latest_manifest_fingerprint="fixture-manifest",
+                )
+                store.write_product_profile_record(profile)
+                store.write_preview_record(preview)
+                store.write_preview_generation_record(
+                    PreviewGenerationRecord(
+                        generation_id=identity_value.preview_generation_id,
+                        preview_id=preview.preview_id,
+                        sequence=1,
+                        state="ready",
+                        requested_reason="fixture",
+                        requested_at=profile.updated_at,
+                        resolved_manifest_fingerprint=preview.latest_manifest_fingerprint,
+                        artifact_id=identity_value.artifact_id,
+                        anchor_summary=PreviewPullRequestSummary(
+                            repo=preview.anchor_repo,
+                            pr_number=preview.anchor_pr_number,
+                            head_sha=identity_value.source_git_ref,
+                            pr_url=preview.anchor_pr_url,
+                        ),
+                        deploy_status="pass",
+                        verify_status="pass",
+                        overall_health_status="pass",
+                        runtime_identity=identity_value,
+                    )
+                )
+                store.write_dokploy_target_id_record(
+                    DokployTargetIdRecord(
+                        context=preview.context,
+                        instance=slot,
+                        target_id=fixture_binding().target_id,
+                        updated_at=profile.updated_at,
+                    )
+                )
+                planned = fixture_receipt("dry-run", identity=identity_value)
+                adapter = PreviewFixtureAdapter(
+                    store,
+                    Path(directory),
+                    profile.product,
+                    fixture_request(
+                        instance=native,
+                        mode="apply",
+                        reviewed_plan_sha256=fixture_plan_sha256(planned),
+                    ),
+                    "trace",
+                )
+                yield store, adapter, slot
+            finally:
+                store.close()
+
+    @contextmanager
+    def provider(
+        self, adapter: PreviewFixtureAdapter, before_trigger: Callable[[], None] | None = None
+    ) -> Iterator[tuple[list[str], PreviewFixtureBinding]]:
+        selected = adapter.selection()
+        binding = fixture_binding().model_copy(
+            update={"identity": selected.identity, "target_name": selected.identity.instance}
+        )
+        connection = OdooRuntimeConnection(
+            selection=selected,
+            evidence=OdooRuntimeEvidence(
+                identity=selected.identity,
+                target_id=binding.target_id,
+                target_name=binding.target_name,
+                container_id=binding.container_id,
+                observed_at=adapter.store.read_product_profile_record(adapter.product).updated_at,
+            ),
+            host="https://provider.example.invalid",
+            token="fixture-token",
+            server_id="server",
+            app_name=binding.app_name,
+            credentials={"ODOO_DB_NAME": binding.database},
+        )
+        calls: list[str] = []
+
+        def schedule(**arguments: object) -> dict[str, str]:
+            mode = cast(str, arguments["mode"])
+            callback = cast(Callable[[str], None], arguments["before_provider_mutation"])
+            callback(ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
+            if mode == "apply" and before_trigger:
+                before_trigger()
+            callback(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+            calls.append(mode)
+            receipt = fixture_receipt(
+                mode,
+                identity=selected.identity,
+                records=[] if mode == "readback" else fixture_receipt(mode).records,
+            )
+            return {PREVIEW_FIXTURE_RESULT_MARKER: receipt.model_dump_json().encode().hex()}
+
+        with (
+            patch("control_plane.preview_fixture.reads.connect_runtime", return_value=connection),
+            patch.object(PreviewFixtureAdapter, "runtime_binding", return_value=binding),
+            patch("control_plane.preview_fixture.run_fixture_schedule", side_effect=schedule),
+        ):
+            yield calls, binding
+
+    def test_prefixed_runtime_reaches_apply_under_real_logical_lane_guards(self) -> None:
+        with self.preview() as (store, adapter, slot), self.provider(adapter) as (calls, _binding):
+            selected = adapter.selection(mutation=True)
+            self.assertNotEqual(selected.identity.instance, slot)
+            self.assertEqual(
+                adapter.target_key(),
+                odoo_preview_target_key(
+                    context=selected.identity.context, compose_name=selected.identity.instance
+                ),
+            )
+            result = run_durable_provider_operation(
+                store=store,
+                scope="fixture-operator",
+                route_path="/v1/drivers/odoo/app-maintenance",
+                idempotency_key="fixture",
+                request_fingerprint="fixture",
+                lease_owner="fixture",
+                response_trace_id="trace",
+                adapter=adapter,
+                original_intent=adapter.original_intent(),
+            )
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(calls, ["readback", "dry-run", "apply"])
+
+    def test_logical_target_registration_allows_reads_and_cancellation_readback(self) -> None:
+        with self.preview() as (store, adapter, _slot), self.provider(adapter) as (_calls, binding):
+            self.assertEqual(adapter.connect().evidence.target_id, binding.target_id)
+            intent = PreviewFixtureIntent.model_validate(adapter.original_intent())
+            stopped = {"container_id": binding.container_id, "stopped": True}
+            with (
+                patch(
+                    "control_plane.preview_fixture.source.read_dokploy_config",
+                    return_value=("host", "token"),
+                ),
+                patch(
+                    "control_plane.preview_fixture.run_fixture_schedule",
+                    return_value={
+                        PREVIEW_FIXTURE_RESULT_MARKER: json.dumps(stopped).encode().hex()
+                    },
+                ) as observe,
+            ):
+                require_fixture_container_cancelled(store=store, root=adapter.root, intent=intent)
+            self.assertEqual(observe.call_args.kwargs["binding"], binding)
+            self.assertEqual(observe.call_args.kwargs["mode"], "cancel-readback")
+
+    def test_logical_protections_refuse_apply_without_blocking_read_qualification(self) -> None:
+        for protection in ("staff", "in_use", "only_copy", "shared", "separation_ready"):
+            with self.subTest(protection=protection), self.preview() as (store, adapter, slot):
+                preview = store.read_preview_record(adapter.request.preview_id)
+                if protection == "staff":
+                    target = DokployTargetRecord(
+                        context=preview.context, instance=slot, updated_at=preview.updated_at
+                    )
+                    target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                        reason="staff"
+                    )
+                    store.write_dokploy_target_record(target)
+                else:
+                    changes = (
+                        {"usage": protection}
+                        if protection == "in_use"
+                        else {"data": protection}
+                        if protection == "only_copy"
+                        else {"production_resources": protection}
+                    )
+                    record_safety(
+                        store, adapter.product, preview.context, slot, preview=preview, **changes
+                    )
+                self.assertEqual(adapter.selection().identity.instance, adapter.request.instance)
+                with self.assertRaises(ValueError):
+                    adapter.selection(mutation=True)
+
+    def test_foreign_target_alias_and_owned_target_drift_refuse_apply(self) -> None:
+        for foreign in (False, True):
+            with (
+                self.subTest(foreign=foreign),
+                self.preview() as (store, adapter, slot),
+                self.provider(adapter),
+            ):
+                store.write_dokploy_target_id_record(
+                    DokployTargetIdRecord(
+                        context=adapter.request.context,
+                        instance="another-lane" if foreign else slot,
+                        target_id=fixture_binding().target_id if foreign else "different-target",
+                        updated_at=store.read_product_profile_record(adapter.product).updated_at,
+                    )
+                )
+                if not foreign:
+                    self.assertEqual(
+                        adapter.connect().evidence.target_id, fixture_binding().target_id
+                    )
+                with self.assertRaises(ValueError):
+                    adapter.connect(mutation=True)
+
+    def test_owned_physical_provider_target_drift_refuses_apply(self) -> None:
+        with self.preview() as (store, adapter, slot), self.provider(adapter):
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context=adapter.request.context,
+                    instance=slot,
+                    provider_id="dokploy",
+                    target_category="compose",
+                    target_id="different-target",
+                    display_name="replacement",
+                    updated_at=store.read_product_profile_record(adapter.product).updated_at,
+                )
+            )
+            self.assertEqual(adapter.connect().evidence.target_id, fixture_binding().target_id)
+            with self.assertRaises(ValueError):
+                adapter.connect(mutation=True)
+
+    def test_mutation_requires_unique_context_and_matching_current_namespace(self) -> None:
+        for change in ("context_owner", "duplicate", "prefix"):
+            with self.subTest(change=change), self.preview() as (store, adapter, _slot):
+                profile = store.read_product_profile_record(adapter.product)
+                preview = store.read_preview_record(adapter.request.preview_id)
+                if change == "context_owner":
+                    store.write_product_profile_record(
+                        profile.model_copy(update={"product": "another-product"})
+                    )
+                elif change == "duplicate":
+                    store.write_preview_record(
+                        preview.model_copy(update={"preview_id": "another-preview"})
+                    )
+                else:
+                    store.write_product_profile_record(
+                        profile.model_copy(
+                            update={
+                                "preview": profile.preview.model_copy(
+                                    update={"app_name_prefix": "changed-prefix"}
+                                )
+                            }
+                        )
+                    )
+                self.assertEqual(adapter.selection().identity.instance, adapter.request.instance)
+                with self.assertRaises(ValueError):
+                    adapter.selection(mutation=True)
+
+    def test_target_binding_drift_before_trigger_refuses_effect_checkpoint(self) -> None:
+        with self.preview() as (store, adapter, slot):
+            target = store.read_dokploy_target_id_record(
+                context_name=adapter.request.context, instance_name=slot
+            )
+
+            def drift() -> None:
+                store.write_dokploy_target_id_record(
+                    target.model_copy(update={"target_id": "replacement-target"})
+                )
+
+            lease = Mock()
+            with self.provider(adapter, before_trigger=drift) as (calls, binding):
+                adapter.binding = binding
+                with self.assertRaises(ValueError):
+                    adapter.invoke("apply", lease)
+                self.assertEqual(calls, [])
+                lease.checkpoint_effect.assert_not_called()
 
 
 class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
