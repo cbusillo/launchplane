@@ -136,3 +136,13 @@ fits this file.
   them through the catalog's question record unchanged; ends if a question
   still has to be asked or found somewhere else, or Launchplane needs more
   upkeep for questions than the catalog's own store did.
+- `One copy of each fact` proves Launchplane reads what GitHub or a provider
+  already holds instead of keeping its own copy, with a week in which no agent
+  reconciles Launchplane records; ends if a new record duplicates a provider
+  fact.
+- `A breaking update stops at a preview` proves a shared update, such as an
+  `odoo-devkit` pin, is checked on one preview before any testing lane takes
+  it; ends if one update turns more than one testing lane red.
+- `Previews work the first time` proves that for a week every pull request's
+  preview builds and serves without a provenance or reconcile refusal; ends if
+  a preview needs an agent's repair to serve.
