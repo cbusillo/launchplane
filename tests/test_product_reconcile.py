@@ -7173,6 +7173,27 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
 
         self.assertEqual(self.artifact_scanner.call_count, 1)
 
+    def test_failed_build_is_reported_until_the_current_head_preview_publishes(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.runs[50]["conclusion"] = "failure"
+        self.request("preview", 5)
+        failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.last_plan["last_failed_error_code"], "preview_build_failed")
+        self.assertEqual(failed.last_plan["build_run_id"], 50)
+        self.assertFalse(self.driver.changes)
+        self.github.runs.clear()
+        self.request("preview", 5)
+        waiting = self.run_once()
+        self.github.add_run(51, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        published = self.run_once()
+        for completed, status in ((failed, "failed"), (waiting, "failed"), (published, "ready")):
+            feedback = completed.last_plan["pr_feedback"]
+            assert isinstance(feedback, dict)
+            self.assertEqual(feedback["status"], status)
+        self.assertNotIn("last_failed_error_code", published.last_plan)
+
     def test_a_failed_refresh_keeps_driver_text_out_and_waits_for_a_new_build(self) -> None:
         self.driver.refresh_status = "fail"
         self.github.add_run(50, PR_HEAD, event="pull_request")

@@ -2025,6 +2025,8 @@ def reconcile_preview_target(
     if plan["action"] not in {"apply", "destroy"}:
         if unresolved:
             plan.update(held=True, reason="held_preview_recovery_required")
+        if plan.get("reason") == "preview_build_failed":
+            return _preview_failure(plan, "preview_build_failed")
         return ReconcileOutcome(plan)
     odoo = product_profile_uses_odoo_driver(profile)
     if not odoo and not reconciles_as_generic_web(profile):
@@ -2302,8 +2304,9 @@ def _plan_preview_target(
             )
         )
     except BuildProvenanceError as error:
-        # A PR's build is untrusted input: an unprovable or malformed one is not built yet.
         plan.update(action="wait", reason="no_verified_build", detail=str(error), held=False)
+        if error.code == "build_run_failed":
+            plan.update(reason="preview_build_failed", build_run_id=error.run_id)
         return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
     manifest = verified.manifest
     desired_digest = manifest.image.digest.lower()

@@ -40,6 +40,7 @@ PRODUCT_REVIEW_FEEDBACK_RETRY_ROUTE = "/v1/product-review/feedback/retry"
 _NO_OWNER_REASON = "No Client set for this product"
 _NOT_OWNER_REASON = "You are not this product's Client."
 _NO_PREVIEW_REASON = "No preview is ready for this pull request yet."
+CLIENT_REVIEW_NOTES_PENDING = "We are updating the preview and its test notes. We will let you know when it is ready to review."
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,7 +203,9 @@ def register_product_review_routes(
             ),
             pull_request_title=notes.title,
             client_test_notes=notes.client_test_notes,
-            client_test_notes_error=notes.client_test_notes_error,
+            client_test_notes_error=CLIENT_REVIEW_NOTES_PENDING
+            if notes.client_test_notes_error
+            else "",
             preview_url=preview.preview_url,
             head_sha=preview.head_sha,
             preview_generation_id=preview.generation_id,
@@ -329,7 +332,7 @@ def register_product_review_routes(
                 status_code=409,
                 trace_id=trace_id,
                 code="client_test_notes_required",
-                message=notes_error,
+                message=CLIENT_REVIEW_NOTES_PENDING,
             )
         try:
             record_product_review_decision(

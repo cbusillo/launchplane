@@ -448,6 +448,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_notes_block_acceptance_until_questions_are_answered(self) -> None:
         from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+        from control_plane.http_routes.product_review import CLIENT_REVIEW_NOTES_PENDING
 
         self._write_product()
         app = self._app()
@@ -464,10 +465,13 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                     client_test_notes_error=client_test_notes(notes).error,
                 )
                 read = await self._get(app, owner)
-                self.assertTrue(read.json()["client_test_notes_error"])
+                self.assertEqual(
+                    read.json()["client_test_notes_error"], CLIENT_REVIEW_NOTES_PENDING
+                )
                 refused = await self._post(app, owner, decision="accepted")
                 self.assertEqual(refused.status_code, 409)
                 self.assertEqual(refused.json()["error"]["code"], "client_test_notes_required")
+                self.assertEqual(refused.json()["error"]["message"], CLIENT_REVIEW_NOTES_PENDING)
                 self.assertFalse(
                     self.store.list_product_review_decision_records(
                         repository=_REPOSITORY, pull_request_number=_PULL_REQUEST

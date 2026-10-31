@@ -424,6 +424,11 @@ needs no workflow to report previews or testing deploys.
   build arrives removes its pending comment and records terminal cleared feedback;
   a closed PR without feedback history posts nothing. Other plans that change
   nothing, are deferred, or are held for another driver say nothing.
+  A completed failed Build for the exact head is recorded as a preview failure,
+  with its run ID, rather than an ordinary build wait. A retry waiting on another
+  build retains that failure in the existing feedback until a current-head
+  preview is ready. An unfinished run or a run from another repository does not
+  establish a failed build.
 - **Testing:** one comment on the PR GitHub merged as the desired commit
   (`merge_commit_sha` equals it), marked `<!-- launchplane-reconcile-testing -->`:
   the deploy is queued, the testing lane runs it, it is waiting because the

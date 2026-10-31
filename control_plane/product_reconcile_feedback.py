@@ -197,14 +197,19 @@ def _preview_feedback(
     failure_summary = ""
     waiting_for = ""
     status: PreviewPrFeedbackStatus
-    if action == "wait" and plan.get("reason") == "client_test_notes_required":
+    if (action == "apply" and error) or (
+        action == "wait"
+        and plan.get("reason") in {"no_verified_build", "preview_build_failed"}
+        and (error or plan.get("last_failed_error_summary"))
+    ):
+        status = "failed"
+        failure_summary = _failure_summary(error or _text(plan.get("last_failed_error_summary")))
+    elif action == "wait" and plan.get("reason") == "client_test_notes_required":
         status = "pending"
         waiting_for = _text(plan.get("detail"))
     elif action == "wait" and plan.get("reason") == "no_verified_build":
         status = "pending"
         waiting_for = "a verified build of this commit"
-    elif action == "apply" and error:
-        status, failure_summary = "failed", _failure_summary(error)
     elif action == "destroy" and error:
         status, failure_summary = "cleanup_failed", _failure_summary(error)
     elif action == "apply" and plan.get("preview_result_status") == "pass":
