@@ -33,6 +33,7 @@ for (const environmentView of [false, true]) {
       const refresh = (value: unknown) => {
         if (!value || typeof value !== "object") return;
         const record = value as Record<string, unknown>;
+        if ("after" in record) record.after = now;
         if ("stale_after" in record) {
           record.stale_after = now;
           record.refreshed_at = new Date(start + 3 * READ_REFRESH_INTERVAL_MS).toISOString();
@@ -68,6 +69,7 @@ for (const environmentView of [false, true]) {
       if (responseMode === "unverified") {
         data = currentProof(data);
         const lane = environmentView ? data : data.environments.find((value: { environment: string }) => value.environment === "testing");
+        Object.assign(lane.lane_status.current, { tone: "warning", sidebar_tone: "warning", release_healthy: false, public_observation_gap: "Runtime identity unverified" });
         lane.provenance.freshness_status = "recorded";
         lane.trust_state = "recorded";
         lane.health_monitoring.checks[0].runtime_identity_status = "missing";
