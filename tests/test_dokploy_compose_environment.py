@@ -185,7 +185,10 @@ class DokployComposeConsumerTests(unittest.TestCase):
                 if key not in {"ODOO_DB_PASSWORD", "JSON_KEPT"}
             }
         )
-        for previous in (unmarked, saved + "\n" + unmarked, credential + "\n" + references):
+        edited = api.serialize_dokploy_env_text(
+            legacy_values | {"ODOO_DB_PASSWORD": "retained$value"}, target_type="compose"
+        ).replace("ODOO_DB_PASSWORD=", "ODOO_DB_PASSWORD=provider's ")
+        for previous in (unmarked, saved + "\n" + unmarked, credential + "\n" + references, edited):
             with self.subTest(previous=previous):
                 before, _ = consume_compose_environment(
                     previous, tuple(legacy_values), project_env="INPUT=project-value"

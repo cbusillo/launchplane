@@ -142,7 +142,12 @@ def _literal_provider_environment(
         values[key] = literal
         decoded_keys.add(key)
     for name in bindings:
-        values.pop(name)
+        if not any(
+            "${" + name in value
+            for key, value in values.items()
+            if key not in decoded_keys and key not in bindings
+        ):
+            values.pop(name)
     return values, decoded_keys
 
 
