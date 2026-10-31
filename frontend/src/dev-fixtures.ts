@@ -2525,9 +2525,9 @@ export function productReviewForFixture(
       "answered-questions": "Check the contact page.\n### Open questions for the Client\n",
     }[scenario] ?? "1. Open **iPhone 15** repairs.\n2. Confirm each repair shows its price.",
     client_test_notes_error: {
-      "missing-notes": "Client test notes are missing.",
-      "notes-unavailable": "Client test notes are missing.",
-      "open-questions": "Some Client facts are unanswered.",
+      "missing-notes": "We are updating the preview and its test notes. We will let you know when it is ready to review.",
+      "notes-unavailable": "The test notes could not be loaded. Refresh the review.",
+      "open-questions": "We are updating the preview and its test notes. We will let you know when it is ready to review.",
     }[scenario] ?? "",
     preview_url: previewUrl,
     head_sha: previewUrl ? "a".repeat(40) : "",
@@ -2537,8 +2537,10 @@ export function productReviewForFixture(
     viewer_is_owner: viewerIsOwner,
     can_decide: !cannotDecideReason,
     cannot_decide_reason: cannotDecideReason,
-    preview_is_current: Boolean(previewUrl) && scenario !== "stale-preview",
-    cannot_accept_reason: scenario === "stale-preview" ? "We are updating the preview for the latest change. We will let you know when it is ready to review." : "",
+    preview_is_current: Boolean(previewUrl) && !["stale-preview", "notes-unavailable"].includes(scenario),
+    cannot_accept_reason: !previewUrl ? "No preview is ready for this pull request yet."
+      : scenario === "notes-unavailable" ? "We could not check the latest version of this change. Refresh the review."
+      : scenario === "stale-preview" ? "We are updating the preview for the latest change. We will let you know when it is ready to review." : "",
     latest_decision:
       (latestDecision ? {
         ...latestDecision,
