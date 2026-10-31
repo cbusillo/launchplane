@@ -31,6 +31,7 @@ from control_plane.product_review import (
 from control_plane.release_review import UNREAD_PULL_REQUEST_NOTES, PullRequestNotes
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.product_review_feedback import validate_owner_feedback_decision
+from control_plane.client_test_notes import CLIENT_REVIEW_NOTES_PENDING
 
 
 PRODUCT_REVIEW_ROUTE = "/v1/product-review"
@@ -40,6 +41,14 @@ PRODUCT_REVIEW_FEEDBACK_RETRY_ROUTE = "/v1/product-review/feedback/retry"
 _NO_OWNER_REASON = "No Client set for this product"
 _NOT_OWNER_REASON = "You are not this product's Client."
 _NO_PREVIEW_REASON = "No preview is ready for this pull request yet."
+
+
+def _client_review_notes_error(notes: PullRequestNotes) -> str:
+    if not notes.client_test_notes_error:
+        return ""
+    if notes.client_test_notes_error == UNREAD_PULL_REQUEST_NOTES.client_test_notes_error:
+        return notes.client_test_notes_error
+    return CLIENT_REVIEW_NOTES_PENDING
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,7 +211,7 @@ def register_product_review_routes(
             ),
             pull_request_title=notes.title,
             client_test_notes=notes.client_test_notes,
-            client_test_notes_error=notes.client_test_notes_error,
+            client_test_notes_error=_client_review_notes_error(notes),
             preview_url=preview.preview_url,
             head_sha=preview.head_sha,
             preview_generation_id=preview.generation_id,
@@ -329,7 +338,7 @@ def register_product_review_routes(
                 status_code=409,
                 trace_id=trace_id,
                 code="client_test_notes_required",
-                message=notes_error,
+                message=_client_review_notes_error(notes),
             )
         try:
             record_product_review_decision(

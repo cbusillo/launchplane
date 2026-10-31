@@ -171,6 +171,31 @@ class BuildProvenanceTests(unittest.TestCase):
             with self.subTest(run=run), self.assertRaises(BuildProvenanceError):
                 _verify(FakeGitHub(runs=[run]))
 
+    def test_failed_preview_build_retains_its_run_instead_of_looking_missing(self) -> None:
+        failed = _run(event="pull_request", conclusion="failure")
+        with self.assertRaises(BuildProvenanceError) as caught:
+            _verify(FakeGitHub(runs=[failed]), purpose="preview", pull_request_number=5)
+        self.assertEqual(caught.exception.code, "build_run_failed")
+        self.assertEqual(caught.exception.run_id, failed["id"])
+        running = {**failed, "id": 8, "status": "in_progress"}
+        with self.assertRaises(BuildProvenanceError) as caught:
+            _verify(FakeGitHub(runs=[failed, running]), purpose="preview", pull_request_number=5)
+        self.assertEqual(caught.exception.code, "build_run_failed")
+        self.assertEqual(caught.exception.run_id, failed["id"])
+        for change in (
+            {"status": "in_progress"},
+            {"head_repository": {"id": 999}},
+            {"conclusion": "cancelled"},
+            {"conclusion": "action_required"},
+        ):
+            with self.subTest(change=change), self.assertRaises(BuildProvenanceError) as caught:
+                _verify(
+                    FakeGitHub(runs=[{**failed, **change}]),
+                    purpose="preview",
+                    pull_request_number=5,
+                )
+            self.assertEqual(caught.exception.code, "build_run_missing")
+
     def test_refuses_manifest_for_another_commit_or_image(self) -> None:
         for manifest in (
             {

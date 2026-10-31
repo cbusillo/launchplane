@@ -7173,6 +7173,151 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
 
         self.assertEqual(self.artifact_scanner.call_count, 1)
 
+    def test_failed_build_is_reported_until_the_current_head_preview_publishes(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.runs[50]["conclusion"] = "failure"
+        self.request("preview", 5)
+        failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.last_plan["last_failed_error_code"], "preview_build_failed")
+        self.assertEqual(failed.last_plan["build_run_id"], 50)
+        self.assertFalse(self.driver.changes)
+        self.github.pull_request["state"] = "closed"
+        self.request("preview", 5)
+        closed = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(closed, dict)
+        self.assertEqual(closed["status"], "cleared")
+        self.assertFalse(self.comments.on(5))
+        self.github.pull_request["state"] = "open"
+        self.request("preview", 5)
+        self.run_once()
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=OSError("Source unavailable")):
+            self.run_once()
+        self.request("preview", 5)
+        with patch(
+            "control_plane.product_reconcile.reconcile_product_request",
+            return_value=ReconcileOutcome(
+                {
+                    "action": "destroy",
+                    "reason": "interrupted_preview_restore",
+                    "pull_request_state": "open",
+                    "preview_result_status": "pass",
+                }
+            ),
+        ):
+            self.run_once()
+        self.assertEqual(self.store.list_preview_pr_feedback_records(limit=1)[0].status, "failed")
+        self.github.runs.clear()
+        next_head = "c" * 40
+        self.github.pull_request["head"] = {"sha": next_head}
+        self.request("preview", 5)
+        waiting = self.run_once()
+        feedback_record = self.store.list_preview_pr_feedback_records(limit=1)[0]
+        self.assertEqual(feedback_record.revision, PR_HEAD)
+        self.github.add_run(51, next_head, event="pull_request")
+        self.request("preview", 5)
+        published = self.run_once()
+        for completed, status in ((failed, "failed"), (waiting, "failed"), (published, "ready")):
+            feedback = completed.last_plan["pr_feedback"]
+            assert isinstance(feedback, dict)
+            self.assertEqual(feedback["status"], status)
+        self.assertNotIn("last_failed_error_code", published.last_plan)
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=OSError("Source unavailable")):
+            self.run_once()
+        self.github.runs.clear()
+        self.github.pull_request["head"] = {"sha": "d" * 40}
+        self.request("preview", 5)
+        self.run_once()
+        unknown_origin = self.store.list_preview_pr_feedback_records(limit=1)[0]
+        self.assertEqual(unknown_origin.status, "pending")
+        self.assertEqual(unknown_origin.failure_summary, "")
+
+    def test_retained_failure_read_errors_preserve_identity_and_recover_delivery(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.runs[50]["conclusion"] = "failure"
+        self.request("preview", 5)
+        failed = self.run_once()
+        previous = failed.last_plan["pr_feedback"]
+        assert isinstance(previous, dict)
+        feedback_id = str(previous["feedback_id"])
+        original = self.store.read_preview_pr_feedback_record(feedback_id)
+        writes = list(self.comments.writes)
+        self.github.runs.clear()
+        for failure in (
+            {"side_effect": OSError("Feedback record unavailable")},
+            {"return_value": original.model_copy(update={"product": "other-product"})},
+        ):
+            with (
+                self.subTest(failure=failure),
+                patch.object(self.store, "read_preview_pr_feedback_record", **failure),
+            ):
+                self.request("preview", 5)
+                blocked = self.run_once().last_plan["pr_feedback"]
+                assert isinstance(blocked, dict)
+                self.assertEqual(blocked["status"], previous["status"])
+                self.assertEqual(blocked["feedback_id"], feedback_id)
+                self.assertEqual(self.comments.writes, writes)
+        self.request("preview", 5)
+        with patch.object(
+            self.store, "write_preview_pr_feedback_record", side_effect=OSError("Write unavailable")
+        ):
+            write_failed = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(write_failed, dict)
+        self.assertEqual(write_failed["feedback_id"], feedback_id)
+        self.request("preview", 5)
+        recovered = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(recovered, dict)
+        self.assertEqual(recovered["delivery_status"], "delivered")
+        self.assertEqual(recovered["status"], "failed")
+
+        new_head = "e" * 40
+        self.github.pull_request["head"] = {"sha": new_head}
+        self.github.add_run(51, new_head, event="pull_request")
+        self.github.runs[51]["conclusion"] = "failure"
+        self.request("preview", 5)
+        with patch.object(
+            self.store, "write_preview_pr_feedback_record", side_effect=OSError("Write unavailable")
+        ):
+            self.run_once()
+        self.request("preview", 5)
+        restored = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(restored, dict)
+        saved = self.store.read_preview_pr_feedback_record(str(restored["feedback_id"]))
+        self.assertEqual(saved.revision, new_head)
+        self.assertEqual(saved.delivery_status, "delivered")
+
+    def test_successful_cleanup_replaces_its_failure_for_an_open_change(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        for result, error, status in (
+            ("fail", "Cleanup attempt failed", "cleanup_failed"),
+            ("pass", "", "destroyed"),
+        ):
+            with (
+                self.subTest(result=result),
+                patch(
+                    "control_plane.product_reconcile.reconcile_product_request",
+                    return_value=ReconcileOutcome(
+                        {
+                            "action": "destroy",
+                            "reason": "interrupted_preview_restore",
+                            "pull_request_state": "open",
+                            "preview_result_status": result,
+                            "head_sha": PR_HEAD,
+                        },
+                        error=error,
+                    ),
+                ),
+            ):
+                self.request("preview", 5)
+                feedback = self.run_once().last_plan["pr_feedback"]
+                assert isinstance(feedback, dict)
+                self.assertEqual(feedback["status"], status)
+
     def test_a_failed_refresh_keeps_driver_text_out_and_waits_for_a_new_build(self) -> None:
         self.driver.refresh_status = "fail"
         self.github.add_run(50, PR_HEAD, event="pull_request")
@@ -7959,6 +8104,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
 
     def test_notes_without_label_invite_client_and_missing_notes_are_visible(self) -> None:
         from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+        from control_plane.client_test_notes import CLIENT_REVIEW_NOTES_PENDING
 
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
@@ -7978,7 +8124,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.request("preview", 5)
         result = self.reconcile()
         self.assertEqual(result["reason"], "client_test_notes_required")
-        self.assertIn("Client test notes are missing", self.comment_body())
+        self.assertIn(CLIENT_REVIEW_NOTES_PENDING, self.comment_body())
         self.assertEqual(
             tuple(self.owner_review_status_calls), calls_before_refusal + (("site", 5),)
         )
@@ -8096,6 +8242,18 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             )
             self.assertEqual(self.owner_review_status_calls, [("site", 5)])
             self.assertEqual(self.comments.writes, writes)
+
+            self.github.runs[50]["conclusion"] = "failure"
+            self.request("preview", 5)
+            build_failed = self.run_once()
+            self.assertTrue(build_failed.last_plan["held"])
+            self.assertEqual(
+                build_failed.last_plan["last_failed_error_code"], "preview_build_failed"
+            )
+            self.assertEqual(
+                self.store.list_held_odoo_preview_reservations(product="site"), held_before
+            )
+            self.assertEqual(apply.call_count, 1)
 
     def test_review_publication_failure_preserves_preview_feedback(self) -> None:
         previous = self.reconcile_preview()["pr_feedback"]

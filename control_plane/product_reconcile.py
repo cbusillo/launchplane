@@ -1942,6 +1942,16 @@ def reconcile_preview_target(
                 "reason": "held_preview_recovery_required",
                 "held_reservations": recovery,
                 "held_reservations_truncated": len(held) > 100,
+                **{
+                    key: decision.plan[key]
+                    for key in (
+                        "head_sha",
+                        "pull_request_state",
+                        "build_run_id",
+                        "last_failed_error_code",
+                    )
+                    if key in decision.plan
+                },
                 **(
                     {"disposal_original_reservation_id": disposal_original}
                     if disposal_original
@@ -2208,6 +2218,7 @@ def _plan_preview_target(
     if not head_sha:
         raise ProductReconcileError(f"GitHub returned no head for PR {pull_request_number}.")
     plan["head_sha"] = head_sha.lower()
+    plan["pull_request_state"] = pull_request.get("state")
     observed.update(
         head_sha=head_sha.lower(),
         eligible=_preview_eligible(pull_request),
@@ -2302,8 +2313,13 @@ def _plan_preview_target(
             )
         )
     except BuildProvenanceError as error:
-        # A PR's build is untrusted input: an unprovable or malformed one is not built yet.
         plan.update(action="wait", reason="no_verified_build", detail=str(error), held=False)
+        if error.code == "build_run_failed":
+            plan.update(
+                reason="preview_build_failed",
+                build_run_id=error.run_id,
+                last_failed_error_code="preview_build_failed",
+            )
         return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
     manifest = verified.manifest
     desired_digest = manifest.image.digest.lower()
@@ -3024,7 +3040,7 @@ def reconcile_product_request(
             testing_hooks=testing_hooks,
         )
     assert request.pull_request_number is not None
-    return reconcile_preview_target(
+    outcome = reconcile_preview_target(
         previous_plan=dict(request.last_plan),
         lease_held=lease_held,
         record_store=record_store,
@@ -3035,6 +3051,15 @@ def reconcile_product_request(
         control_plane_root=control_plane_root,
         preview_hooks=preview_hooks,
     )
+    if (
+        outcome.plan.get("build_run_id")
+        and not outcome.deferred
+        and outcome.plan.get("reason")
+        in {"preview_build_failed", "held_preview_recovery_required", "interrupted_preview_restore"}
+        and (not outcome.error or outcome.plan.get("reason") == "held_preview_recovery_required")
+    ):
+        return _preview_failure(dict(outcome.plan), "preview_build_failed")
+    return outcome
 
 
 def _has_preview_reservation(
@@ -3184,6 +3209,7 @@ def run_product_reconcile_once(
         request.target_kind == "preview"
         and feedback is not None
         and feedback.get("status") == "failed"
+        and plan.get("last_failed_error_code") != "preview_build_failed"
         and (
             (
                 outcome.error

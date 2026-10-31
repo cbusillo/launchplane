@@ -206,6 +206,12 @@ asks whether this one change is exactly right. It links that change's preview
 and explains that Accept approves the change while nothing goes live yet.
 The review page shows the pull request's title and its Client test notes under
 **What to check**, read from the pull request when the page loads.
+An invalid notes gate tells the Client that the preview and notes are being updated;
+it never asks them to edit the pull request or remove answered question items.
+When the Client supplies requested facts, the owning agent immediately acknowledges
+that it is updating the preview and asks the Client to wait for its ready note.
+The agent incorporates the answers and removes resolved question items before
+asking the Client to review again. An acknowledgement does not resolve the request.
 The separate release invitation is described in [release-review.md](release-review.md).
 
 A Client does not need an authorization policy role to sign in. When GitHub

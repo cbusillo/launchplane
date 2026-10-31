@@ -12,7 +12,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_review_status import OwnerReviewStatusPublisher
-from control_plane.release_review import PullRequestNotes
+from control_plane.release_review import PullRequestNotes, UNREAD_PULL_REQUEST_NOTES
 from control_plane.client_test_notes import client_test_notes
 from control_plane.service_auth import (
     BearerIdentityConfig,
@@ -448,6 +448,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_notes_block_acceptance_until_questions_are_answered(self) -> None:
         from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+        from control_plane.client_test_notes import CLIENT_REVIEW_NOTES_PENDING
 
         self._write_product()
         app = self._app()
@@ -464,10 +465,13 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                     client_test_notes_error=client_test_notes(notes).error,
                 )
                 read = await self._get(app, owner)
-                self.assertTrue(read.json()["client_test_notes_error"])
+                self.assertEqual(
+                    read.json()["client_test_notes_error"], CLIENT_REVIEW_NOTES_PENDING
+                )
                 refused = await self._post(app, owner, decision="accepted")
                 self.assertEqual(refused.status_code, 409)
                 self.assertEqual(refused.json()["error"]["code"], "client_test_notes_required")
+                self.assertEqual(refused.json()["error"]["message"], CLIENT_REVIEW_NOTES_PENDING)
                 self.assertFalse(
                     self.store.list_product_review_decision_records(
                         repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
@@ -486,6 +490,22 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(read.json()["client_test_notes_error"])
         accepted = await self._post(app, owner, decision="accepted")
         self.assertEqual(accepted.status_code, 200)
+
+    async def test_unread_notes_offer_refresh_without_claiming_a_preview_update(self) -> None:
+        self._write_product()
+        self.pull_request_notes = UNREAD_PULL_REQUEST_NOTES
+        app = self._app()
+        owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
+        read = await self._get(app, owner)
+        self.assertEqual(
+            read.json()["client_test_notes_error"],
+            UNREAD_PULL_REQUEST_NOTES.client_test_notes_error,
+        )
+        refused = await self._post(app, owner, decision="accepted")
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(
+            refused.json()["error"]["message"], UNREAD_PULL_REQUEST_NOTES.client_test_notes_error
+        )
 
     async def test_owner_is_recognized_by_github_id_after_a_login_rename(self) -> None:
         self._write_product()
