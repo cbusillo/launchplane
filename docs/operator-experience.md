@@ -1087,9 +1087,9 @@ result. Its ordered `transitions` contain only changes caused by evidence expiry
 clients select the last transition whose `after` timestamp has passed. An open
 page therefore expires cached evidence without a second health algorithm.
 
-The catalog's `product-status-read --product PRODUCT` reads the same product
-overview once and returns every recorded lane's sidebar tone and description,
-attention and warning reasons, plus the product's warnings. Missing lane status
+The catalog's `product-status-read` reads the same product
+inventory once and returns each caller-visible product and every recorded lane's sidebar tone and description,
+sidebar reasons and attention and warning reasons, plus the product's warnings. Missing lane status
 fails the read rather than implying healthy. Omitted lanes are not recorded,
 as shown by the sidebar's absent-lane icon. The read does not change a lane,
 resolve an incident or authorize a deployment.

@@ -50,6 +50,7 @@ class ProductLaneSignal(BaseModel):
     tone: SignalTone
     sidebar_tone: SignalTone
     description: str
+    reasons: tuple[str, ...] = ()
     attention_reasons: tuple[str, ...] = ()
     warning_reasons: tuple[str, ...] = ()
     release_healthy: bool = False
@@ -396,6 +397,7 @@ def _signal(
         tone=tone,
         sidebar_tone=sidebar_tone,
         description=description,
+        reasons=_unique(sidebar_reasons),
         attention_reasons=_unique(reasons),
         warning_reasons=warning_reasons,
         release_healthy=release_healthy,

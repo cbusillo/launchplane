@@ -7,7 +7,7 @@ function expireProvenance(provenance: DataProvenance, now: number): DataProvenan
 
 type Topology = ProductEnvironmentSummary["topology"];
 type Evidence = { trust_state: DataProvenance["freshness_status"]; provenance: DataProvenance };
-type EnvironmentEvidence = Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology">;
+export type EnvironmentEvidence = Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology" | "lane_status">;
 
 function expireEvidence<T extends Evidence>(evidence: T, now: number): T {
   const provenance = expireProvenance(evidence.provenance, now);
@@ -27,11 +27,12 @@ function publicTopologyApplicable(topology: Topology): boolean {
 }
 
 export function environmentEvidenceDeadlines(environment: EnvironmentEvidence): string[] {
-  return [environment.provenance, ...environment.health_monitoring.checks.map(check => check.provenance),
+  const deadlines = [environment.provenance, ...environment.health_monitoring.checks.map(check => check.provenance),
     environment.topology.provider_recorded.placement.provenance,
     environment.topology.observed.placement.provenance,
     ...publicTopologyEvidence(environment.topology).map(evidence => evidence.provenance),
   ].map(provenance => provenance.stale_after);
+  return [...deadlines, ...(environment.lane_status?.transitions.map(transition => transition.after) ?? [])];
 }
 
 function expiredAggregate(state: DataProvenance["freshness_status"], expired: boolean): DataProvenance["freshness_status"] {
@@ -85,7 +86,9 @@ export function expireProductEvidence(product: ProductSiteOverview, now = Date.n
 
 export type SignalTone = ProductEnvironmentSummary["trust_state"] | "warning" | "danger";
 
-export function laneSignal(environment: ProductEnvironmentSummary | ProductEnvironmentDetail | null, now = Date.now()) {
+export type LaneStatusEvidence = Partial<Pick<ProductEnvironmentSummary, "lane_status">>;
+
+export function laneSignal(environment: LaneStatusEvidence | null, now = Date.now()) {
   const status = environment?.lane_status;
   if (!status) return null;
   let signal = status.current;
@@ -99,15 +102,15 @@ export function publicObservationGap(environment: ProductEnvironmentSummary): st
   return laneSignal(environment)?.public_observation_gap ?? null;
 }
 
-export function operationalWarningReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
+export function operationalWarningReasons(environment: LaneStatusEvidence | null, now = Date.now()): string[] {
   return laneSignal(environment, now)?.warning_reasons ?? [];
 }
 
-export function operationalAttentionReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
+export function operationalAttentionReasons(environment: LaneStatusEvidence | null, now = Date.now()): string[] {
   return laneSignal(environment, now)?.attention_reasons ?? [];
 }
 
-export function environmentReleaseHealthy(environment: ProductEnvironmentSummary | null, now = Date.now()): boolean {
+export function environmentReleaseHealthy(environment: LaneStatusEvidence | null, now = Date.now()): boolean {
   return laneSignal(environment, now)?.release_healthy ?? false;
 }
 
@@ -120,6 +123,6 @@ export function deployHoldNotice(environment: ProductEnvironmentSummary | null):
   return environment?.deploy_hold ? deployHoldNotices[environment.deploy_hold] : null;
 }
 
-export function environmentOperationalTone(environment: ProductEnvironmentSummary | ProductEnvironmentDetail | null, now = Date.now()): SignalTone {
+export function environmentOperationalTone(environment: LaneStatusEvidence | null, now = Date.now()): SignalTone {
   return laneSignal(environment, now)?.tone ?? "missing";
 }

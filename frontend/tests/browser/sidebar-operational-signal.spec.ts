@@ -1,7 +1,7 @@
 import { setClockTime, expect, test } from "./state";
 import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
-const cases = ["healthy", "missing-route", "expired-route", "failed", "incident", "delivery-warning", "recovery-warning", "recovery-stale", "failed-with-warning", "production-unknown", "stale", "unknown", "absent"] as const;
+const cases = ["healthy", "failed", "delivery-warning", "recovery-warning", "stale", "unknown", "absent"] as const;
 
 for (const theme of ["dark", "light"] as const) {
 
@@ -15,104 +15,42 @@ for (const state of cases) {
       const product = structuredClone(module.productsForFixture("products")[0]);
       const lane = product.environments.find((lane: { environment: string }) => lane.environment === "testing");
       const now = Date.now();
-      // Raw recorded trust reproduces the healthy lane hidden by the old sidebar.
-      lane.trust_state = "recorded";
-      lane.provenance.freshness_status = "verified";
-      lane.provenance.stale_after = new Date(now + 60_000).toISOString();
-      // Keep unrelated topology proof fresh; expired proof has its own browser cases.
       const freshen = (value: unknown) => {
         if (!value || typeof value !== "object") return;
         const record = value as Record<string, unknown>;
-        if ("stale_after" in record) record.stale_after = lane.provenance.stale_after;
+        if ("stale_after" in record) record.stale_after = new Date(now + 60_000).toISOString();
         Object.values(record).forEach(freshen);
       };
-      freshen(lane.topology);
+      freshen(lane);
+      lane.provenance.freshness_status = "verified";
       lane.warnings = [];
       lane.topology.warnings = [];
-      lane.topology.observed.placement.runtime_identity_status = "match";
-      lane.health_monitoring.checks = [structuredClone(lane.health_monitoring.checks[0])];
-      const check = lane.health_monitoring.checks[0];
-      check.probe_effective = true;
-      check.status = "pass";
-      check.trust_state = "verified";
-      check.incident_status = "";
-      check.provenance.stale_after = lane.provenance.stale_after;
-      if (state === "recovery-warning" || state === "recovery-stale") {
-        lane.environment = "prod";
-        lane.health_monitoring.open_incidents = [];
-        lane.health_monitoring.checks.push({ ...structuredClone(check), name: "Recovery path", advisory: true, status: state === "recovery-stale" ? "pass" : "fail", trust_state: state === "recovery-stale" ? "stale" : "verified", summary: "Recovery route is unavailable." });
-      }
+      lane.health_monitoring.open_incidents = [];
+      if (state === "delivery-warning" || state === "recovery-warning") lane.environment = "prod";
       if (state === "delivery-warning") {
-        const incident = structuredClone(product.environments.find((lane: { environment: string }) => lane.environment === "prod").health_monitoring.open_incidents[0]);
-        lane.environment = "prod";
-        Object.assign(incident, { severity: "warning", check_kind: "provider", failure_layer: "provider", check_name: "production-delivery-example", failure_code: "production_delivery_failed", summary: "A production delivery failed." });
+        const incident = structuredClone(module.productsForFixture("products")[0].environments.find((value: { environment: string }) => value.environment === "prod").health_monitoring.open_incidents[0]);
+        Object.assign(incident, { severity: "warning", check_kind: "provider", failure_layer: "provider", check_name: "production-delivery-example", failure_code: "production_delivery_failed" });
         lane.health_monitoring.open_incidents = [incident];
       }
-      if (state === "failed") check.status = "fail";
-      if (state === "failed-with-warning") {
-        const incident = structuredClone(product.environments.find((lane: { environment: string }) => lane.environment === "prod").health_monitoring.open_incidents[0]);
-        lane.environment = "prod";
-        check.status = "fail";
-        Object.assign(incident, { severity: "warning", check_kind: "public_http", check_name: "Recovery path" });
-        lane.health_monitoring.open_incidents = [incident];
-        lane.health_monitoring.checks.push({ ...structuredClone(check), name: "Recovery path", advisory: true });
-      }
-      if (state === "production-unknown") {
-        lane.environment = "prod";
-        lane.health_monitoring.monitoring_intent = "public";
-        lane.health_monitoring.open_incidents = [];
-        lane.topology.observed.placement.runtime_identity_status = "unchecked";
-      }
-      if (state === "incident") check.incident_status = "open";
-      if (state === "stale") lane.provenance.stale_after = new Date(now - 1000).toISOString();
-      if (state === "missing-route" || state === "expired-route") {
-        lane.trust_state = state === "missing-route" ? "missing" : "stale";
-        lane.topology.provider_recorded.trust_state = lane.trust_state;
-        lane.topology.provider_recorded.provenance.stale_after = new Date(now - 1000).toISOString();
-        const warning = { code: state === "missing-route" ? "missing_route_authority" : "stale_route_authority", scope: "authority", severity: "error", detail: "Stored route authority unavailable", domain_name: "" };
-        lane.topology.warnings = [warning];
-        lane.warnings = [warning.detail];
-      }
-      if (state === "unknown") {
-        lane.trust_state = "missing";
-        lane.provenance.freshness_status = "missing";
-        lane.health_monitoring.checks = [];
-      }
-      product.environments = state === "absent" ? [] : [lane];
-      const products = [product];
-      if (state === "healthy") {
-        for (const extraState of ["warning", "stale", "failing", "unknown"]) {
-          const extra = structuredClone(product);
-          extra.product = `example-${extraState}`;
-          extra.display_name = `${extraState[0].toUpperCase() + extraState.slice(1)} example`;
-          const extraLane = extra.environments[0];
-          if (extraState === "stale") extraLane.provenance.stale_after = new Date(now - 1000).toISOString();
-          if (extraState === "warning") extraLane.topology.observed.tls_domains = [];
-          if (extraState === "failing") {
-            extraLane.health_monitoring.checks[0].status = "fail";
-            extraLane.health_monitoring.checks[0].failure_code = "dns_failure";
-          }
-          if (extraState === "unknown") {
-            extraLane.trust_state = "missing";
-            extraLane.provenance.freshness_status = "missing";
-            extraLane.health_monitoring.checks = [];
-          }
-          products.push(extra);
-        }
-      }
-      const healthy = ["healthy", "missing-route", "expired-route"].includes(state);
-      const tone = healthy ? "verified" : ["failed", "failed-with-warning", "incident", "production-unknown"].includes(state) ? "danger" : ["stale", "delivery-warning", "recovery-warning", "recovery-stale"].includes(state) ? "warning" : "missing";
+      if (state === "recovery-warning") lane.health_monitoring.checks.push({ ...structuredClone(lane.health_monitoring.checks[0]), name: "Recovery path", advisory: true, status: "fail", summary: "Recovery route is unavailable" });
+      const tone = state === "healthy" ? "verified" : state === "failed" ? "danger" : state === "unknown" || state === "absent" ? "missing" : state === "stale" ? "stale" : "warning";
       lane.lane_status = module.fixtureLaneStatus(tone);
       lane.lane_status.transitions = [];
-      if (state === "stale") lane.lane_status.current.sidebar_tone = "stale";
       if (state === "delivery-warning") {
         lane.lane_status.current.warning_reasons = ["Production delivery failed; the current production release is healthy"];
         lane.lane_status.current.release_healthy = true;
       }
-      for (const extra of products.slice(1)) {
-        const extraState = extra.product.replace("example-", "");
-        extra.environments[0].lane_status = module.fixtureLaneStatus(extraState === "failing" ? "danger" : extraState === "unknown" ? "missing" : extraState);
-        extra.environments[0].lane_status.transitions = [];
+      product.environments = state === "absent" ? [] : [lane];
+      const products = [product];
+      if (state === "healthy") {
+        for (const extraState of ["warning", "stale", "danger", "missing"] as const) {
+          const extra = structuredClone(product);
+          extra.product = `example-${extraState}`;
+          extra.display_name = `${extraState[0].toUpperCase() + extraState.slice(1)} example`;
+          extra.environments[0].lane_status = module.fixtureLaneStatus(extraState);
+          extra.environments[0].lane_status.transitions = [];
+          products.push(extra);
+        }
       }
       const laneLabel = lane.environment === "prod" ? "Production" : "Testing";
       const detail = Object.assign(module.environmentForFixture("products", product.product, lane.environment), lane);
@@ -137,8 +75,8 @@ for (const state of cases) {
     await expect(page.getByRole("heading", { level: 1, name: fixtures.product.display_name })).toBeVisible();
     const dot = railLink.locator(`[data-lane="${fixtures.laneName}"]`);
     const signal = page.locator(".signal-tile").filter({ hasText: new RegExp(`^${fixtures.laneLabel}`, "i") });
-    const healthy = state === "healthy" || state === "missing-route" || state === "expired-route";
-    const tone = healthy ? "verified" : state === "failed" || state === "failed-with-warning" || state === "incident" || state === "production-unknown" ? "danger" : state === "stale" || state === "delivery-warning" || state === "recovery-warning" || state === "recovery-stale" ? "warning" : "missing";
+    const healthy = state === "healthy";
+    const tone = healthy ? "verified" : state === "failed" ? "danger" : state === "stale" || state === "delivery-warning" || state === "recovery-warning" ? "warning" : "missing";
     await expect(signal).toHaveAttribute("data-tone", tone);
     await expect(dot).toHaveAttribute("data-tone", state === "stale" ? "stale" : tone);
     await expect(dot).toHaveAttribute("title", fixtures.testingDescription);
@@ -172,10 +110,10 @@ for (const state of cases) {
         icons.map(icon => `${getComputedStyle(icon).color};${icon.querySelector("svg")?.innerHTML}`));
       expect(new Set(signals).size).toBe(signals.length);
     }
-    if (state === "recovery-warning" || state === "recovery-stale" || state === "failed-with-warning") {
+    if (state === "recovery-warning") {
       await page.goto(`/ui/products/${fixtures.product.product}/environments/${fixtures.laneName}`);
       const monitoring = page.locator(".condition-tile").filter({ has: page.locator("span").getByText("Monitoring", { exact: true }) });
-      await expect(monitoring).toHaveAttribute("data-tone", state === "failed-with-warning" ? "danger" : "warning");
+      await expect(monitoring).toHaveAttribute("data-tone", "warning");
     }
     expect(mutations).toEqual([]);
   });

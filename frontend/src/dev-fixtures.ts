@@ -3002,14 +3002,15 @@ export function fixtureLaneStatus(tone: "verified" | "danger" | "warning" | "sta
   return {
     evaluated_at: OBSERVED_AT,
     current: {
-      tone, sidebar_tone: tone,
+      tone: tone === "stale" ? "warning" : tone, sidebar_tone: tone,
       description: tone === "verified" ? "Healthy" : tone === "danger" ? `Alert; ${reason}` : tone === "warning" ? "Warning; Public DNS/TLS observation incomplete" : tone === "stale" ? "Stale evidence; awaiting current observations" : "Unknown (unverified)",
+      reasons: tone === "danger" ? [reason] : [],
       attention_reasons: tone === "danger" ? [reason] : [], warning_reasons: [],
       release_healthy: tone === "verified", public_observation_gap: null,
     },
     transitions: tone === "verified" ? [{ after: STALE_AFTER, signal: {
       tone: "warning", sidebar_tone: "stale", description: "Stale evidence; awaiting current observations",
-      attention_reasons: [], warning_reasons: [], release_healthy: false,
+      reasons: [], attention_reasons: [], warning_reasons: [], release_healthy: false,
       public_observation_gap: "Public route observation incomplete",
     } }] : [],
   };

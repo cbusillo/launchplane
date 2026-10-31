@@ -5,7 +5,11 @@ import unittest
 
 from control_plane.contracts.data_provenance import DataProvenance
 from control_plane.contracts.product_environment_read_model import ProductEnvironmentSummary
-from control_plane.contracts.product_lane_status import ProductLaneSignal, build_product_lane_status
+from control_plane.contracts.product_lane_status import (
+    LAYER_LABELS,
+    ProductLaneSignal,
+    build_product_lane_status,
+)
 from control_plane.contracts.product_incident_read_model import ProductIncidentSummary
 
 
@@ -119,7 +123,7 @@ class ProductLaneStatusTests(unittest.TestCase):
         self.assertNotEqual(self.signal().tone, "danger")
         self.lane.topology.observed.placement.runtime_identity_status = "mismatch"
         self.assertEqual(self.signal().tone, "danger")
-        self.assertIn("Runtime identity", self.signal().description)
+        self.assertIn(LAYER_LABELS["runtime_identity"], self.signal().description)
 
     def test_open_incidents_remain_red_after_a_passing_check(self) -> None:
         self.lane.health_monitoring.checks[0].incident_status = "open"
@@ -169,14 +173,14 @@ class ProductLaneStatusTests(unittest.TestCase):
                 domain.status = state
                 domain.provenance.stale_after = (self.now - timedelta(seconds=1)).isoformat()
                 self.assertEqual(self.signal().tone, "danger")
-                self.assertIn("Certificate", self.signal().description)
+                self.assertIn(LAYER_LABELS["tls"], self.signal().description)
                 domain.advisory = True
                 self.assertNotEqual(self.signal().tone, "danger")
                 domain.advisory = False
         domain.provenance.stale_after = self.lane.provenance.stale_after
         domain.status = "expiring"
         self.assertEqual(self.signal().tone, "warning")
-        self.assertNotIn("Certificate", self.signal().description)
+        self.assertNotIn(LAYER_LABELS["tls"], self.signal().description)
 
     def test_public_green_requires_named_tls_and_public_runtime(self) -> None:
         topology = self.lane.topology
@@ -217,6 +221,7 @@ class ProductLaneStatusTests(unittest.TestCase):
         self.lane.warnings += ("Integration credential unverified",)
         self.assertEqual(self.signal().tone, "warning")
         self.assertIn("Integration credential unverified", self.signal().description)
+        self.assertIn(self.lane.warnings[-1], self.signal().reasons)
 
     def test_expiry_transitions_match_fresh_calculation_without_mutating_input(self) -> None:
         earlier = self.now + timedelta(seconds=30)
@@ -246,3 +251,95 @@ class ProductLaneStatusTests(unittest.TestCase):
         self.assertEqual(self.signal().tone, "recorded")
         self.lane.provenance.freshness_status = "missing"
         self.assertEqual(self.signal().tone, "missing")
+
+    def test_lane_freshness_and_additional_checks_never_make_unverified_evidence_green(
+        self,
+    ) -> None:
+        for freshness in ("recorded", "stale", "missing"):
+            self.lane.provenance.freshness_status = freshness
+            self.assertNotEqual(self.signal().tone, "verified")
+        self.lane = environment(self.now)
+        missing = self.lane.health_monitoring.checks[0].model_copy(update={"status": "missing"})
+        self.lane.health_monitoring.checks += (missing,)
+        self.assertEqual(self.signal().tone, "warning")
+
+    def test_delivery_warnings_turn_red_on_runtime_expiry_or_another_blocker(self) -> None:
+        for code in ("production_delivery_failed", "deploy_fence_held"):
+            self.lane = environment(self.now)
+            self.lane.environment = "prod"
+            delivery = incident().model_copy(update={"failure_code": code})
+            self.lane.health_monitoring.open_incidents = (delivery,)
+            self.assertEqual(self.signal().tone, "warning")
+            transitions = build_product_lane_status(self.lane, now=self.now).transitions
+            self.assertTrue(
+                any(
+                    item.signal.tone == "danger" and not item.signal.warning_reasons
+                    for item in transitions
+                )
+            )
+            for blocker in ("critical", "check_incident", "tls"):
+                self.lane = environment(self.now)
+                self.lane.environment = "prod"
+                self.lane.health_monitoring.open_incidents = (delivery,)
+                if blocker == "critical":
+                    self.lane.health_monitoring.open_incidents += (
+                        delivery.model_copy(update={"severity": "critical"}),
+                    )
+                elif blocker == "check_incident":
+                    self.lane.health_monitoring.checks[0].incident_status = "open"
+                else:
+                    self.lane.topology.observed.tls_domains += (
+                        self.lane.topology.observed.tls_domains[0].model_copy(
+                            update={"status": "expired"}
+                        ),
+                    )
+                self.assertEqual(self.signal().tone, "danger")
+                self.assertFalse(self.signal().warning_reasons)
+
+    def test_informational_and_expired_private_route_evidence_stays_diagnostic(self) -> None:
+        from control_plane.contracts.product_topology_read_model import ProductTopologyWarning
+
+        self.lane.topology.warnings = (
+            ProductTopologyWarning(
+                code="public_ingress_failure",
+                severity="info",
+                scope="observation",
+                detail="Historical observation",
+            ),
+        )
+        self.assertEqual(self.signal().tone, "verified")
+        self.lane.topology.desired.public_website = "none"
+        self.lane.health_monitoring.checks[0].kind = "private_http"
+        self.lane.topology.provider_recorded.provenance.stale_after = (
+            self.now - timedelta(seconds=1)
+        ).isoformat()
+        self.assertEqual(self.signal().tone, "verified")
+
+    def test_advisory_expiry_warns_without_stale_sidebar_but_placement_expiry_is_stale(
+        self,
+    ) -> None:
+        deadline = self.now + timedelta(seconds=30)
+        for source in ("check", "tls", "placement"):
+            self.lane = environment(self.now)
+            if source == "check":
+                evidence = self.lane.health_monitoring.checks[0].model_copy(
+                    deep=True, update={"advisory": True}
+                )
+                self.lane.health_monitoring.checks += (evidence,)
+                proof = evidence.provenance
+            elif source == "tls":
+                tls_evidence = self.lane.topology.observed.tls_domains[0].model_copy(
+                    deep=True, update={"advisory": True}
+                )
+                self.lane.topology.observed.tls_domains += (tls_evidence,)
+                proof = tls_evidence.provenance
+            else:
+                proof = self.lane.topology.observed.placement.provenance
+            proof.stale_after = deadline.isoformat()
+            status = build_product_lane_status(self.lane, now=self.now)
+            self.assertEqual(status.current.tone, "verified")
+            self.assertEqual(status.transitions[0].signal.tone, "warning")
+            self.assertEqual(
+                status.transitions[0].signal.sidebar_tone,
+                "stale" if source == "placement" else "warning",
+            )
