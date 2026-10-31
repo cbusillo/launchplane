@@ -1,6 +1,14 @@
 import { validateRemovalResponse } from "./runtime-setting-removal";
+import type { RequestAttentionPage } from "./generated/openapi.ts";
+
+
 import type { ApplyIntegrationAllowancesData, ApplyIntegrationAllowancesResponse, ReadIntegrationAllowancesData, ReadIntegrationAllowancesResponse } from "./generated/openapi.ts";
 
+export function readRequestAttention(repository?: string, signal?: AbortSignal): Promise<RequestAttentionPage> {
+  const query = new URLSearchParams();
+  if (repository) query.set("repository", repository);
+  return requestJson(`/v1/attention/requests?${query}`, "GET", undefined, signal);
+}
 export function readIntegrationAllowances(query: NonNullable<ReadIntegrationAllowancesData["query"]>, signal?: AbortSignal): Promise<ReadIntegrationAllowancesResponse> {
   return requestJson(`/v1/product-config/integration-allowances?${new URLSearchParams(query as Record<string, string>)}`, "GET", undefined, signal);
 }

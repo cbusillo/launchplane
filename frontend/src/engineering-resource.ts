@@ -160,7 +160,7 @@ export function useEngineeringResource<T>(
           }
           const failure = engineeringFailure(error);
           setState((current) =>
-            current.data
+            current.data && !failure.denied
               ? {
                   ...current,
                   phase: "ready",
