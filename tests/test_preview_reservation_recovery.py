@@ -15,6 +15,11 @@ from sqlalchemy import select
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    build_authz_policy_record_id,
+    authz_policy_sha256,
+)
 from control_plane.contracts.odoo_walkthrough import (
     OdooWalkthroughRequest,
     OdooWalkthroughResponse,
@@ -269,9 +274,20 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             self.reconcile_walkthrough(True).plan["preview_operation_status"], "adopted"
         )
         self.assertEqual(held_preview_reservations(self.store, product=self.profile.product), ())
+        policy = LaunchplaneAuthzPolicy(schema_version=2)
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                source="test:walkthrough-recovery",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+        )
         app = create_launchplane_fastapi_app(
             verifier=StubVerifier(workflow_identity()),
-            authz_policy=LaunchplaneAuthzPolicy(schema_version=2),
+            authz_policy=policy,
             bearer_identity_config=BearerIdentityConfig(
                 local_operator_token="fixture-token",
                 local_operator_subject="fixture-operator",

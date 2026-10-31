@@ -1280,8 +1280,9 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
 
         with _isolated_postgres_database() as database_url:
             url = database_url.replace("postgresql+psycopg://", "postgresql://")
-            spec = {
+            spec: dict[str, Any] = {
                 "mode": "quiescence",
+                "identity": {"environment_kind": "stable"},
                 "binding": "fixture-binding",
                 "copy_binding": "fixture-copy",
                 "task_id": "1" * 32,
