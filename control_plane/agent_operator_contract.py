@@ -109,6 +109,15 @@ class OperationSpec:
 
 OPERATION_SPECS = (
     OperationSpec(
+        "POST",
+        "/v1/product-profiles/{product}/generic-web-transition",
+        "Review shared-web declarations; Director agents may apply preview-only changes on an existing generic-web product, preserving every stable declaration and existing credential gates.",
+        ("service_api", "browser"),
+        ("dry-run", "apply"),
+        "required_for_apply",
+        ("reviewed_plan_sha256",),
+    ),
+    OperationSpec(
         "GET",
         "/v1/runner-relabel/{policy_id}/policy",
         "Read a service-owned repository/host runner roster policy without provider effects.",

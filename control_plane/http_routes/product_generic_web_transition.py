@@ -1,5 +1,3 @@
-"""Signed-in admin review/apply of shared-web profile declarations."""
-
 from collections.abc import Callable
 from typing import Annotated, NoReturn
 
@@ -26,6 +24,7 @@ from control_plane.service_auth import (
     LaunchplaneIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
+    director_agent_identity,
 )
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
@@ -73,7 +72,17 @@ def register_product_generic_web_transition_routes(
                 context=LAUNCHPLANE_SERVICE_CONTEXT,
             )
         )
-        if not admin_write and not agent_plan:
+        agent_write = (
+            body.mode == "apply"
+            and director_agent_identity(identity)
+            and dependencies.authorization_allows(
+                identity=identity,
+                action="product_profile.preview_transition.apply",
+                product=product,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+        )
+        if not admin_write and not agent_plan and not agent_write:
             refusal(
                 403, "authorization_denied", "Caller cannot plan or apply this product transition."
             )
@@ -128,6 +137,16 @@ def register_product_generic_web_transition_routes(
                 trace_id=trace,
                 records={"product_profile": product},
                 result=plan.model_dump(mode="json"),
+            )
+        if not admin_write and (
+            profile.driver_id != "generic-web"
+            or replacement.model_dump(exclude={"preview", "schema_version"})
+            != profile.model_dump(exclude={"preview", "schema_version"})
+        ):
+            refusal(
+                403,
+                "authorization_denied",
+                "Director agents may change only preview declarations on an existing generic-web product.",
             )
         if body.reviewed_plan_sha256 != plan.plan_sha256:
             # A same-key original can commit between preflight and this read.
