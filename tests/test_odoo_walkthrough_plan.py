@@ -35,54 +35,56 @@ from control_plane.contracts.odoo_walkthrough import (
 from control_plane.product_path_check import PathCheckStep
 from tests.test_odoo_walkthrough import task_request
 from tests.test_odoo_walkthrough_probe import NativeHost
-from tests.test_preview_fixture import fixture_binding, fixture_receipt
+from tests.test_preview_fixture import fixture_binding
+from control_plane.contracts.runtime_identity import runtime_identity_env
 
 
 class WalkthroughPlanTests(unittest.TestCase):
-    def test_preview_uses_its_fixture_and_generation_instead_of_testing_copy_witness(self) -> None:
-        binding = fixture_binding()
+    def test_preview_plan_reads_native_metadata_without_executing_product_fixtures(self) -> None:
+        identity = fixture_binding().identity
         request = OdooWalkthroughRequest(
-            product=binding.identity.product,
-            context=binding.identity.context,
-            instance=binding.identity.instance,
+            product=identity.product,
+            context=identity.context,
+            instance=identity.instance,
             read_only=True,
-            preview_id=binding.identity.preview_id,
-            generation_id=binding.identity.preview_generation_id,
-            task_id=canonical_json_sha256(binding.identity.product)[:32],
+            preview_id=identity.preview_id,
+            generation_id=identity.preview_generation_id,
+            task_id=canonical_json_sha256(identity.product)[:32],
             operation="provision",
         )
         adapter = MagicMock()
         connection = replace(
             self.connection,
-            selection=OdooRuntimeSelection(binding.identity, "https://preview.example"),
+            selection=OdooRuntimeSelection(identity, "https://preview.example"),
+            evidence=self.connection.evidence.model_copy(update={"identity": identity}),
         )
         adapter.connect.return_value = connection
-        adapter.runtime_binding.return_value = binding
-        adapter.invoke.return_value = fixture_receipt(
-            "readback",
-            records=[{"model": "res.users", "id": 17, "disposition": "created"}],
+        adapter.invoke.side_effect = AssertionError("Plans cannot execute product fixtures")
+        adapter.runtime_binding.side_effect = AssertionError("Plans do not resolve schedules")
+        self.host.identity = identity
+        self.host.environment.update(
+            runtime_identity_env(identity) | {"PLATFORM_INSTANCE": "preview"}
         )
         self.store.list_product_profile_records.return_value = ()
         self.store.list_preview_records.return_value = ()
         with patch("control_plane.odoo_walkthrough.PreviewFixtureAdapter", return_value=adapter):
             plan = plan_walkthrough(self.store, Path("."), request, "actor")
-            adapter.invoke.assert_called_once_with("readback")
             self.generation_read.assert_not_called()
-            self.assertEqual(plan.account_id, 17)
-            binding = binding.model_copy(
-                update={
-                    "identity": binding.identity.model_copy(
-                        update={"preview_generation_id": "another-generation"}
-                    )
-                }
+            changed_identity = identity.model_copy(
+                update={"preview_generation_id": "another-generation"}
             )
-            adapter.runtime_binding.return_value = binding
-            changed = plan_walkthrough(
-                self.store,
-                Path("."),
-                request.model_copy(update={"generation_id": "another-generation"}),
-                "actor",
+            connection = replace(
+                connection,
+                selection=OdooRuntimeSelection(changed_identity, "https://preview.example"),
+                evidence=connection.evidence.model_copy(update={"identity": changed_identity}),
             )
+            adapter.connect.return_value = connection
+            self.host.identity = changed_identity
+            self.host.environment.update(runtime_identity_env(changed_identity))
+            changed_request = request.model_copy(
+                update={"generation_id": changed_identity.preview_generation_id}
+            )
+            changed = plan_walkthrough(self.store, Path("."), changed_request, "actor")
             self.assertNotEqual(plan.secret_name, changed.secret_name)
             self.assertNotEqual(plan.digest, changed.digest)
 
@@ -93,11 +95,12 @@ class WalkthroughPlanTests(unittest.TestCase):
 
             adapter.connect.side_effect = protected_connection
             with self.assertRaises(ValueError):
-                plan_walkthrough(self.store, Path("."), request, "actor")
+                plan_walkthrough(self.store, Path("."), changed_request, "actor")
             safety = SimpleNamespace(
                 production_resources="isolated", usage="in_use", data="only_copy"
             )
             self.store.read_disposable_lane_safety.return_value = safety
+            self.host.connection.account_present = False
             with (
                 patch("control_plane.odoo_walkthrough.fixture_preview_slot", return_value="pr-42"),
                 patch(
@@ -106,15 +109,16 @@ class WalkthroughPlanTests(unittest.TestCase):
                 ),
                 patch("control_plane.odoo_walkthrough.require_fixture_target_ownership"),
             ):
-                cleanup = request.model_copy(update={"operation": "cleanup"})
+                cleanup = changed_request.model_copy(update={"operation": "cleanup"})
                 plan_walkthrough(self.store, Path("."), cleanup, "actor")
                 safety.production_resources = "shared"
                 with self.assertRaises(ValueError):
                     plan_walkthrough(self.store, Path("."), cleanup, "actor")
             adapter.connect.side_effect = None
-            adapter.invoke.return_value = fixture_receipt("readback", records=[])
             with self.assertRaises(ValueError):
-                plan_walkthrough(self.store, Path("."), request, "actor")
+                plan_walkthrough(self.store, Path("."), changed_request, "actor")
+            adapter.invoke.assert_not_called()
+            adapter.runtime_binding.assert_not_called()
 
     def setUp(self) -> None:
         self.stack = ExitStack()

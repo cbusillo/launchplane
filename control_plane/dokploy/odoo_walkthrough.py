@@ -136,6 +136,17 @@ def read_testing_connection_isolation(
     )
 
 
+def read_testing_account_presence(
+    *, host: str, token: str, server_id: str, intent: dict[str, object]
+) -> TestingRead:
+    return _testing_read(
+        host=host,
+        token=token,
+        server_id=server_id,
+        payload={**intent, "mode": "account_presence"},
+    )
+
+
 def _testing_read(
     *, host: str, token: str, server_id: str, payload: dict[str, object]
 ) -> TestingRead:
@@ -185,7 +196,7 @@ try:
                 cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',('__LP_COPY_WITNESS__',))
                 row=cursor.fetchone()
                 if not row or row[0]!=spec['copy_binding']: raise Refused('copy_changed')
-            if spec['mode'] in ('usage','lane_usage','isolation') and connection_isolation(cursor, apply=False):
+            if spec['mode'] in ('usage','lane_usage','isolation','account_presence') and connection_isolation(cursor, apply=False):
                 raise Refused('isolation_refused')
             if spec['mode']=='quiescence':
                 cursor.execute('SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0))',(__TASK_LOCK_PREFIX__+spec['binding'],))
@@ -194,6 +205,11 @@ try:
                 if free is not True: raise RuntimeError('Unreadable dispatch lock')
             elif spec['mode']=='isolation':
                 pass
+            elif spec['mode']=='account_presence':
+                cursor.execute('SELECT EXISTS (SELECT 1 FROM res_users WHERE login=%s AND id>2)',(__TASK_LOGIN_PREFIX__+spec['task_id'],))
+                present=cursor.fetchone()[0]
+                if present is False: raise Refused('task_account_changed')
+                if present is not True: raise RuntimeError('Unreadable account existence')
             elif spec['mode'] in ('usage','lane_usage'):
                 if spec['mode']=='usage':
                     cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',(__TASK_MARKER_PREFIX__+spec['task_id'],))
@@ -251,7 +267,7 @@ try:
             pass
     if reason=='clear':
         pass
-    elif spec.get('mode') in ('usage','lane_usage','isolation') or ('dispatch_deadline' in spec and time.time()>spec['dispatch_deadline']):
+    elif spec.get('mode') in ('usage','lane_usage','isolation','account_presence') or ('dispatch_deadline' in spec and time.time()>spec['dispatch_deadline']):
         def docker(*args,data=None):
             result=subprocess.run(['docker',*args],input=data,capture_output=True,timeout=15)
             if result.returncode: raise RuntimeError('Testing read unavailable')
@@ -397,19 +413,19 @@ raw=read_string_parameter(parameters,key)
 marker=json.loads(raw) if raw else None
 login=__TASK_LOGIN_PREFIX__+request['task_id']
 user=users.browse(marker['account_id']).exists() if marker else users.browse([])
-if readonly:
+if readonly and request['operation']!='cleanup':
     if request['groups']!=[__READONLY_GROUP__] and tuple(request['groups'])!=(__READONLY_GROUP__,):
         raise RuntimeError('Read-only identity cannot select business roles')
     user=users._launchplane_readonly_test_identity(request['identity'],login,create=not preview and request['operation']=='provision')
-    if len(user)!=1 or user.id<=2 or user.login!=login or not user.has_group(__READONLY_GROUP__) or (request.get('expected_account_id') is not None and user.id!=request['expected_account_id']):
+    if len(user)!=1 or user.id<=2 or user.login!=login or not user.has_group(__READONLY_GROUP__):
         raise RuntimeError('Product read-only identity qualification failed')
+    if marker and marker['account_id']!=user.id:
+        raise RuntimeError('Read-only identity ownership changed')
     if marker and (marker['binding']!=request['binding'] or marker['state']==__TASK_CLOSED_STATE__):
-        if marker['account_id']!=user.id:
-            raise RuntimeError('Read-only identity ownership changed')
         if request['operation']=='provision':
             marker=None
-        elif request['operation']=='cleanup':
-            marker={**marker,'binding':request['binding'],'copy_binding':request['copy_binding']}
+if readonly and request['operation']=='cleanup' and marker and len(user)==1 and user.id>2 and user.login==login:
+    marker={**marker,'binding':request['binding'],'copy_binding':request['copy_binding']}
 if marker and (marker['binding']!=request['binding'] or len(user)!=1
                or user.id<=2 or user.login!=login):
     raise RuntimeError('Testing task account ownership changed')

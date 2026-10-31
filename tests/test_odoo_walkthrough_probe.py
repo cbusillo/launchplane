@@ -48,6 +48,7 @@ class ProbeConnection:
         self.used = False
         self.copy = spec["copy_binding"]
         self.active = True
+        self.account_present = True
         self.statement = ""
         self.parameters: tuple[object, ...] = ()
         self.database = sqlite3.connect(":memory:")
@@ -86,6 +87,7 @@ class ProbeConnection:
                 "res_users_log",
                 "SELECT value FROM ir_config_parameter WHERE key=%s",
                 "SELECT login,active FROM res_users",
+                "SELECT EXISTS (SELECT 1 FROM res_users WHERE login=",
             )
         )
         if self.sql_result:
@@ -110,6 +112,8 @@ class ProbeConnection:
                     }
                 ),
             )
+        if "SELECT EXISTS (SELECT 1 FROM res_users WHERE login=" in self.statement:
+            return (self.account_present,)
         if "res_users" in self.statement:
             return (WALKTHROUGH_LOGIN_PREFIX + self.spec["task_id"], self.active)
         raise AssertionError("Unexpected database read")

@@ -63,6 +63,7 @@ from control_plane.odoo_walkthrough import (
     disable_walkthrough_credentials,
 )
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
+from control_plane.odoo_walkthrough_browser import ReadonlyBrowserCheckFailed
 from control_plane.odoo_connection_isolation import connection_isolation_library
 from control_plane.service_auth import (
     AuthorizationTarget,
@@ -380,8 +381,6 @@ class TaskRouteTests(unittest.TestCase):
                 self.plan.connection,
                 selection=OdooRuntimeSelection(identity, "https://preview.example"),
             ),
-            fixture=MagicMock(binding=None),
-            account_id=17,
         )
         self.planner.return_value = self.plan
         self.stack.enter_context(
@@ -427,9 +426,19 @@ class TaskRouteTests(unittest.TestCase):
         )
         assert original is not None
         self.assertNotIn(password, json.dumps(self.store.read_original_mutation_intent(original)))
-        self.assertEqual(self.account.call_args.kwargs["payload"]["expected_account_id"], 17)
-        self.browser.side_effect = RuntimeError("Browser interrupted")
+        self.assertTrue(self.account.call_args.kwargs["payload"]["read_only"])
         run = applied.model_copy(update={"operation": "run"})
+        self.browser.side_effect = ReadonlyBrowserCheckFailed(1)
+        status, failed = self.invoke(run, "preview-observation-failed")
+        self.assertEqual((status, failed["result"]["status"]), (200, "fail"))
+        self.assertEqual(failed["result"]["steps_passed"], 1)
+        native_calls = self.account.call_count
+        browser_calls = self.browser.call_count
+        status, _ = self.invoke(run, "preview-observation-failed")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.account.call_count, native_calls)
+        self.assertEqual(self.browser.call_count, browser_calls)
+        self.browser.side_effect = RuntimeError("Browser interrupted")
         status, _ = self.invoke(run, "preview-run")
         self.assertEqual(status, 409)
         native_calls = self.account.call_count
@@ -943,7 +952,6 @@ class AccountProgramTests(unittest.TestCase):
                     "preview_id": "preview-fixture",
                     "preview_generation_id": "generation-fixture",
                 },
-                "expected_account_id": self.user.id,
             }
         )
         self.parameters.pop(TESTING_COPY_COMPLETION_PARAMETER)
@@ -952,9 +960,8 @@ class AccountProgramTests(unittest.TestCase):
         self.users._launchplane_readonly_test_identity.return_value = self.user
         self.assertEqual(self.execute()["account_id"], self.user.id)
         self.users.create.assert_not_called()
-        self.user.write.assert_called_once_with(
-            {"password": self.request["password"], "active": True}
-        )
+        self.assertEqual(self.user.write.call_args.args[0]["password"], self.request["password"])
+        self.assertTrue(self.user.write.call_args.args[0]["active"])
         self.users._launchplane_readonly_test_identity.assert_called_once_with(
             self.request["identity"],
             self.user.login,
@@ -962,16 +969,7 @@ class AccountProgramTests(unittest.TestCase):
         )
         self.execute()
         self.user.write.assert_called_once()
-        self.request["expected_account_id"] = self.user.id + 1
-        with self.assertRaises(RuntimeError):
-            self.execute()
-        self.request.update(
-            {
-                "expected_account_id": self.user.id,
-                "binding": "new-generation-binding",
-                "operation": "cleanup",
-            }
-        )
+        self.request.update({"binding": "new-generation-binding", "operation": "cleanup"})
         self.user.write.side_effect = lambda updates: setattr(
             self.user, "active", updates["active"]
         )
@@ -982,7 +980,7 @@ class AccountProgramTests(unittest.TestCase):
         self.assertTrue(self.user.active)
         self.assertEqual(self.user.write.call_args.args[0]["password"], self.request["password"])
 
-    def test_readonly_account_refuses_missing_product_guard_and_role_escalation(self) -> None:
+    def configure_readonly_identity(self) -> None:
         self.request.update(
             {
                 "read_only": True,
@@ -990,6 +988,12 @@ class AccountProgramTests(unittest.TestCase):
                 "identity": {"environment_kind": "stable"},
             }
         )
+        self.user.login = WALKTHROUGH_LOGIN_PREFIX + self.request["task_id"]
+        self.user.has_group.side_effect = lambda name: name == WALKTHROUGH_READONLY_GROUP
+        self.users._launchplane_readonly_test_identity.return_value = self.user
+
+    def test_readonly_account_refuses_missing_product_guard_and_role_escalation(self) -> None:
+        self.configure_readonly_identity()
         self.users._launchplane_readonly_test_identity.side_effect = RuntimeError(
             "No product guard"
         )
@@ -1002,6 +1006,33 @@ class AccountProgramTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.execute()
         self.users._launchplane_readonly_test_identity.assert_not_called()
+
+    def test_readonly_cleanup_revokes_its_marker_account_when_the_guard_is_unavailable(
+        self,
+    ) -> None:
+        self.configure_readonly_identity()
+        self.execute()
+        self.users._launchplane_readonly_test_identity.side_effect = RuntimeError("Guard removed")
+        self.user.has_group.side_effect = AssertionError("Cleanup cannot require a role")
+        self.user.write.side_effect = lambda updates: setattr(
+            self.user, "active", updates["active"]
+        )
+        self.request.update({"operation": "cleanup", "binding": "current-generation"})
+        result = self.execute()
+        self.assertEqual(result["status"], "pass")
+        self.assertFalse(self.user.active)
+        self.assertNotEqual(self.user.write.call_args.args[0]["password"], self.request["password"])
+
+    def test_readonly_hook_cannot_replace_an_existing_marker_account(self) -> None:
+        self.configure_readonly_identity()
+        self.execute()
+        replacement = MagicMock(id=self.user.id + 1, login=self.user.login, active=True)
+        replacement.__len__.return_value = 1
+        replacement.has_group.side_effect = lambda name: name == WALKTHROUGH_READONLY_GROUP
+        self.users._launchplane_readonly_test_identity.return_value = replacement
+        with self.assertRaises(RuntimeError):
+            self.execute()
+        replacement.write.assert_not_called()
 
     def test_provision_preserves_staff_and_does_not_reset_existing_task(self) -> None:
         self.assertEqual(self.execute()["account_id"], self.user.id)

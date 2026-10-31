@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 from typing import Any
 
 from control_plane.contracts.odoo_walkthrough import WalkthroughStep
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.odoo_walkthrough_browser import (
+    ReadonlyBrowserCheckFailed,
     readonly_browser_request,
     run_walkthrough_browser,
 )
@@ -47,7 +48,9 @@ class OpaqueBrowserTests(unittest.TestCase):
         self.launch.start()
         self.checkpoint = MagicMock()
 
-    def run_browser(self, *steps: WalkthroughStep) -> tuple[int, tuple[str, ...]]:
+    def run_browser(
+        self, *steps: WalkthroughStep, read_only: bool = False
+    ) -> tuple[int, tuple[str, ...]]:
         return run_walkthrough_browser(
             origin="https://testing.example",
             database="testing",
@@ -57,6 +60,7 @@ class OpaqueBrowserTests(unittest.TestCase):
             identity=self.identity,
             steps=steps,
             checkpoint=self.checkpoint,
+            read_only=read_only,
         )
 
     def test_opaque_login_masks_inputs_and_password_and_exports_only_png(self) -> None:
@@ -153,8 +157,6 @@ class OpaqueBrowserTests(unittest.TestCase):
             if "password" in call.kwargs["data"].get("params", {}):
                 self.assertTrue(call.args[0].endswith("/web/session/authenticate"))
                 self.assertEqual(call.kwargs["data"]["params"]["login"], "task-user")
-        self.context.clear_cookies.assert_called_once()
-        self.page.close.assert_called_once()
 
     def test_signout_must_really_remove_the_authenticated_session(self) -> None:
         with self.assertRaises(ValueError):
@@ -227,6 +229,44 @@ class OpaqueBrowserTests(unittest.TestCase):
         }
         run_walkthrough_browser(**arguments, read_only=True, steps=())
         self.context.close.assert_called_once()
+
+    def test_readonly_step_failure_settles_only_after_the_browser_closes(self) -> None:
+        self.page.locator.return_value.count.return_value = 0
+        with self.assertRaises(ReadonlyBrowserCheckFailed) as failed:
+            self.run_browser(WalkthroughStep(action="visible", selector=".missing"), read_only=True)
+        self.assertEqual(failed.exception.steps_passed, 0)
+        self.context.close.assert_called_once()
+        self.browser.close.assert_called_once()
+        self.context.close.side_effect = RuntimeError("Unverified close")
+        with self.assertRaises(RuntimeError):
+            self.run_browser(WalkthroughStep(action="visible", selector=".missing"), read_only=True)
+
+    def test_readonly_checkpoint_and_identity_failures_remain_unverified(self) -> None:
+        self.checkpoint.side_effect = RuntimeError("Changed lane")
+        with self.assertRaises(RuntimeError):
+            self.run_browser(read_only=True)
+        self.checkpoint.side_effect = None
+        self.context.request.get.return_value.status = 503
+        with self.assertRaises(ValueError) as failed:
+            self.run_browser(read_only=True)
+        self.assertNotIsInstance(failed.exception, ReadonlyBrowserCheckFailed)
+        self.context.request.post.assert_not_called()
+
+    def test_readonly_route_aborts_malformed_rpc_and_allows_my_printers(self) -> None:
+        self.run_browser(read_only=True)
+        handle = self.context.route.call_args.args[1]
+        route = MagicMock()
+        route.request.url = "https://testing.example/web/dataset/call_kw"
+        route.request.method = "POST"
+        type(route.request).post_data_json = PropertyMock(side_effect=ValueError("Not JSON"))
+        handle(route)
+        route.abort.assert_called_once()
+        route.continue_.assert_not_called()
+        self.assertTrue(
+            readonly_browser_request(
+                "POST", "/web/dataset/call_kw", {"params": {"method": "action_my_printers"}}
+            )
+        )
 
 
 if __name__ == "__main__":

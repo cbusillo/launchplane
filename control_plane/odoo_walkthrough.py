@@ -47,6 +47,7 @@ from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.dokploy.odoo_walkthrough import (
     TestingRead,
     read_testing_connection_isolation,
+    read_testing_account_presence,
     read_testing_task_usage,
     testing_account_command,
     testing_account_dispatch_finished,
@@ -67,7 +68,10 @@ from control_plane.odoo_testing_drill_usage import (
     testing_drill_environment,
 )
 from control_plane.odoo_testing_restore import generation_binding, read_current_testing_generation
-from control_plane.odoo_walkthrough_browser import run_walkthrough_browser
+from control_plane.odoo_walkthrough_browser import (
+    run_walkthrough_browser,
+    ReadonlyBrowserCheckFailed,
+)
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderObservation,
@@ -151,6 +155,7 @@ class WalkthroughPrerequisite(StrEnum):
     COPY_WITNESS_CHANGED = "testing_task_copy_witness_changed"
     ISOLATION_REFUSED = "testing_task_isolation_refused"
     PROTECTED_SIGNIN = "testing_task_protected_signin_observed"
+    ACCOUNT_CHANGED = "testing_task_account_changed"
     CREDENTIAL = "testing_task_credential_custody_unavailable"
 
 
@@ -178,6 +183,7 @@ _OBSERVED_READ_REFUSALS = {
     TestingRead.COPY_CHANGED: WalkthroughPrerequisite.COPY_WITNESS_CHANGED,
     TestingRead.ISOLATION_REFUSED: WalkthroughPrerequisite.ISOLATION_REFUSED,
     TestingRead.PROTECTED_SIGNIN: WalkthroughPrerequisite.PROTECTED_SIGNIN,
+    TestingRead.TASK_ACCOUNT_CHANGED: WalkthroughPrerequisite.ACCOUNT_CHANGED,
 }
 
 
@@ -213,8 +219,6 @@ class WalkthroughPlan:
     usage_since: str
     secret_name: str
     connection: OdooRuntimeConnection = field(repr=False)
-    fixture: PreviewFixtureAdapter | None = field(default=None, repr=False)
-    account_id: int | None = None
 
 
 def plan_walkthrough(
@@ -276,8 +280,6 @@ def _plan_preview_walkthrough(
             target_id=connection.evidence.target_id,
             mutation=True,
         )
-    binding = fixture.runtime_binding(connection)
-    fixture.binding = binding
     parsed = urlsplit(connection.selection.base_url)
     if (
         parsed.scheme != "https"
@@ -301,10 +303,7 @@ def _plan_preview_walkthrough(
         for preview in store.list_preview_records()
     ):
         raise ValueError("The preview origin aliases another lane.")
-    receipt = fixture.invoke("readback")
-    users = [record for record in receipt.records if record.model == "res.users"]
-    if len(users) != 1:
-        raise ValueError("Apply the product's read-only identity fixture before signing in.")
+    database = connection.credentials["ODOO_DB_NAME"]
     copy_binding = canonical_json_sha256(
         [
             request.product,
@@ -312,9 +311,31 @@ def _plan_preview_walkthrough(
             request.instance,
             request.preview_id,
             request.generation_id,
-            binding.target_id,
-            binding.database,
+            connection.evidence.target_id,
+            database,
         ]
+    )
+    reader = (
+        read_testing_connection_isolation
+        if request.operation == "cleanup"
+        else read_testing_account_presence
+    )
+    _require_clear_read(
+        reader(
+            host=connection.host,
+            token=connection.token,
+            server_id=connection.server_id,
+            intent={
+                "project": connection.app_name,
+                "identity": connection.selection.identity.model_dump(mode="json"),
+                "identity_key": RUNTIME_IDENTITY_ENV_KEY,
+                "image": connection.selection.identity.image_reference,
+                "database": database,
+                "copy_binding": copy_binding,
+                "task_id": request.task_id,
+                "read_only": True,
+            },
+        )
     )
     account_binding = canonical_json_sha256(
         [request.product, request.context, request.task_id, copy_binding]
@@ -333,21 +354,23 @@ def _plan_preview_walkthrough(
         [
             actor,
             request.operation_payload(exclude={"mode", "reviewed_plan_sha256"}),
-            binding.model_dump(mode="json"),
+            connection.selection.identity.model_dump(mode="json", exclude={"deployed_at"}),
             connection.selection.base_url,
-            users[0].id,
+            connection.evidence.target_id,
+            connection.evidence.container_id,
+            connection.server_id,
+            connection.app_name,
+            database,
         ]
     )
     return WalkthroughPlan(
         digest,
         account_binding,
-        binding.database,
+        database,
         copy_binding,
         "",
         secret_name,
         connection,
-        fixture,
-        users[0].id,
     )
 
 
@@ -675,7 +698,7 @@ class WalkthroughAdapter:
         self.dispatch_deadline = int(time.time()) + WALKTHROUGH_DISPATCH_SECONDS
 
     def provider_target_origin(self) -> ProviderTargetOrigin | None:
-        if self.plan.fixture is not None:
+        if self.request.instance != "testing":
             return None
         return ProviderTargetOrigin(
             product=self.request.product,
@@ -687,7 +710,7 @@ class WalkthroughAdapter:
         )
 
     def target_key(self) -> str:
-        if self.plan.fixture is not None:
+        if self.request.instance != "testing":
             return odoo_preview_target_key(
                 context=self.request.context, compose_name=self.request.instance
             )
@@ -700,7 +723,7 @@ class WalkthroughAdapter:
         )
 
     def reconciliation_key(self) -> str:
-        if self.plan.fixture is not None:
+        if self.request.instance != "testing":
             return odoo_preview_reconciliation_key(
                 context=self.request.context, compose_name=self.request.instance
             )
@@ -722,12 +745,6 @@ class WalkthroughAdapter:
             "dispatch_deadline": self.dispatch_deadline,
             "read_only": self.request.read_only,
             "instance": self.request.instance,
-            "expected_account_id": self.plan.account_id,
-            **(
-                {"preview_binding": self.plan.fixture.binding.model_dump(mode="json")}
-                if self.plan.fixture is not None and self.plan.fixture.binding is not None
-                else {}
-            ),
         }
 
     @staticmethod
@@ -869,8 +886,24 @@ class WalkthroughAdapter:
                 def checkpoint() -> None:
                     lease.assert_current()
                     assert_selection_current(self.store, connection.selection)
-                    if self.plan.fixture is not None:
-                        self.plan.fixture.selection()
+                    if self.request.instance != "testing":
+                        fixture = PreviewFixtureAdapter(
+                            self.store,
+                            self.root,
+                            self.request.product,
+                            PreviewFixtureRequest(
+                                action="preview-fixture",
+                                intent="preview-fixture",
+                                context=self.request.context,
+                                instance=self.request.instance,
+                                preview_id=self.request.preview_id,
+                                generation_id=self.request.generation_id,
+                                fixture=WALKTHROUGH_READONLY_FIXTURE,
+                                reason="Verify the current read-only preview target.",
+                            ),
+                            self.trace,
+                        )
+                        fixture.selection()
                     else:
                         require_drill_use_unprotected(
                             self.store,
@@ -888,17 +921,27 @@ class WalkthroughAdapter:
                             "Testing task usage or account identity changed or is unreadable."
                         )
 
-                passed, screenshots = run_walkthrough_browser(
-                    origin=connection.selection.base_url.rstrip("/"),
-                    database=self.plan.database,
-                    login=WALKTHROUGH_LOGIN_PREFIX + self.request.task_id,
-                    password=password,
-                    account_id=uid,
-                    identity=connection.selection.identity,
-                    steps=self.request.steps,
-                    checkpoint=checkpoint,
-                    read_only=self.request.read_only,
-                )
+                try:
+                    passed, screenshots = run_walkthrough_browser(
+                        origin=connection.selection.base_url.rstrip("/"),
+                        database=self.plan.database,
+                        login=WALKTHROUGH_LOGIN_PREFIX + self.request.task_id,
+                        password=password,
+                        account_id=uid,
+                        identity=connection.selection.identity,
+                        steps=self.request.steps,
+                        checkpoint=checkpoint,
+                        read_only=self.request.read_only,
+                    )
+                except ReadonlyBrowserCheckFailed as error:
+                    if not self.request.read_only:
+                        raise
+                    lease.assert_current()
+                    assert_selection_current(self.store, connection.selection)
+                    result.status = "fail"
+                    result.code = "read_only_browser_check_failed"
+                    result.steps_passed = error.steps_passed
+                    return ProviderMutationOutcome(200, self.response(result))
                 result.signed_in = True
                 result.steps_passed = passed
                 self.transient_screenshots = screenshots
@@ -975,7 +1018,11 @@ class InterruptedWalkthroughAdapter:
                     product=self.request.product,
                     context=self.request.context,
                     instance=self.request.instance,
-                    code="interrupted_task_requires_cleanup",
+                    code=(
+                        "interrupted_read_only_observation"
+                        if self.request.read_only and self.request.operation == "run"
+                        else "interrupted_task_requires_cleanup"
+                    ),
                 ).model_dump(mode="json"),
             },
         )

@@ -4,7 +4,7 @@ import base64
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
-from playwright.sync_api import Locator, Page, Route, sync_playwright
+from playwright.sync_api import Error as PlaywrightError, Locator, Page, Route, sync_playwright
 
 from control_plane.contracts.odoo_walkthrough import WalkthroughStep
 from control_plane.contracts.runtime_identity import (
@@ -13,6 +13,12 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.odoo_runtime_reads import require_runtime_identity
 from control_plane.testing_browser import launch_testing_browser
+
+
+class ReadonlyBrowserCheckFailed(ValueError):
+    def __init__(self, steps_passed: int = 0) -> None:
+        self.steps_passed = steps_passed
+        super().__init__("The read-only observation failed after its browser closed.")
 
 
 def readonly_browser_request(method: str, path: str, payload: object) -> bool:
@@ -24,6 +30,12 @@ def readonly_browser_request(method: str, path: str, payload: object) -> bool:
         "/web/dataset/call_button",
         "/web/action/run",
         "/mail/message/post",
+        "/web/dataset/resequence",
+        "/web/binary/upload",
+        "/web/binary/upload_attachment",
+        "/mail/attachment/upload",
+        "/mail/message/update_content",
+        "/mail/message/reaction",
     }:
         return False
     if path.startswith("/web/session/") and path != "/web/session/get_session_info":
@@ -40,14 +52,20 @@ def readonly_browser_request(method: str, path: str, payload: object) -> bool:
             "web_save",
             "load",
             "message_post",
+            "name_create",
+            "copy",
+            "toggle_active",
+            "web_resequence",
         } and not operation.startswith(
             (
-                "action_",
                 "button_",
+                "do_",
                 "set_",
                 "save_",
                 "scan_",
                 "print_",
+                "action_print",
+                "action_send",
                 "post_",
                 "send_",
                 "import_",
@@ -108,6 +126,10 @@ def run_walkthrough_browser(
         or expected_origin.path not in {"", "/"}
     ):
         raise ValueError("Testing browser requires its recorded HTTPS origin.")
+    prerequisite_failed = False
+    observation_failed = False
+    passed = 0
+    outcome: tuple[int, tuple[str, ...]] | None = None
     with sync_playwright() as playwright:
         browser = launch_testing_browser(playwright.chromium)
         try:
@@ -127,13 +149,20 @@ def run_walkthrough_browser(
                         ("/web/login", "/web/reset_password", "/web/signup")
                     ):
                         route.abort()
-                    elif read_only and not readonly_browser_request(
-                        route.request.method,
-                        request_url.path,
-                        route.request.post_data_json if route.request.post_data else None,
-                    ):
-                        route.abort()
                     else:
+                        if read_only:
+                            payload = None
+                            if request_url.path.startswith("/web/dataset/call_kw"):
+                                try:
+                                    payload = route.request.post_data_json
+                                except (ValueError, PlaywrightError):
+                                    route.abort()
+                                    return
+                            if not readonly_browser_request(
+                                route.request.method, request_url.path, payload
+                            ):
+                                route.abort()
+                                return
                         route.continue_()
 
                 context.route("**/*", route_request)
@@ -141,18 +170,23 @@ def run_walkthrough_browser(
                 context.set_default_timeout(10000)
 
                 def check_origin_identity() -> None:
-                    checkpoint()
-                    health = context.request.get(
-                        origin + "/launchplane/health", max_redirects=0, timeout=10000
-                    )
+                    nonlocal prerequisite_failed
                     try:
-                        if health.status != 200:
-                            raise ValueError("Testing origin identity is unavailable.")
-                        require_runtime_identity(
-                            identity, runtime_identity_from_health_payload(health.json())
+                        checkpoint()
+                        health = context.request.get(
+                            origin + "/launchplane/health", max_redirects=0, timeout=10000
                         )
-                    finally:
-                        health.dispose()
+                        try:
+                            if health.status != 200:
+                                raise ValueError("Testing origin identity is unavailable.")
+                            require_runtime_identity(
+                                identity, runtime_identity_from_health_payload(health.json())
+                            )
+                        finally:
+                            health.dispose()
+                    except Exception:
+                        prerequisite_failed = True
+                        raise
 
                 def sign_in() -> Page:
                     check_origin_identity()
@@ -188,7 +222,6 @@ def run_walkthrough_browser(
                 page = sign_in()
                 signed_in = True
                 screenshots: list[str] = []
-                passed = 0
                 for step in steps:
                     check_origin_identity()
                     if step.action == "sign_in":
@@ -269,11 +302,20 @@ def run_walkthrough_browser(
                         expected_origin.scheme,
                         expected_origin.netloc,
                     ):
+                        prerequisite_failed = True
                         raise ValueError("The browser left its testing origin.")
                     passed += 1
                 check_origin_identity()
-                return passed, tuple(screenshots)
+                outcome = passed, tuple(screenshots)
+            except (PlaywrightError, ValueError):
+                if not read_only or prerequisite_failed:
+                    raise
+                observation_failed = True
             finally:
                 context.close()
         finally:
             browser.close()
+    if observation_failed:
+        raise ReadonlyBrowserCheckFailed(passed)
+    assert outcome is not None
+    return outcome
