@@ -10,6 +10,7 @@ const { parse } = createRequire(import.meta.url)('./dotenv/main.cjs');
 const input = JSON.parse(readFileSync(0, 'utf8'));
 const context = vm.createContext({
   parse, join, dirname,
+  quote: words => words.map(word => "'" + word.replaceAll("'", "'\\''") + "'").join(" "),
   paths: () => ({ COMPOSE_PATH: input.root }),
   encodeBase64: value => Buffer.from(value).toString('base64'),
 });
@@ -18,6 +19,7 @@ for (const file of ['prepare-environment.ts', 'create-env-file.ts']) {
     .replaceAll('export const ', 'const '), context);
 }
 context.compose = {
+  composeType: input.composeType ?? "docker-compose",
   env: input.env, appName: 'synthetic', composePath: 'compose.json',
   environment: { env: input.environmentEnv ?? '', project: { env: input.projectEnv ?? '' } },
 };
