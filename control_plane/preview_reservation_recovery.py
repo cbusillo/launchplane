@@ -21,6 +21,12 @@ from control_plane.contracts.preview_execution import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_fixture import PreviewFixtureIntent
+from control_plane.contracts.odoo_walkthrough import (
+    OdooWalkthroughRequest,
+    WALKTHROUGH_ROUTE,
+    walkthrough_activity_scope,
+)
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.odoo_preview_apply_http import (
@@ -103,6 +109,44 @@ def preview_reservation_reference(
     )
 
 
+def original_walkthrough_intent(
+    reservation: LaunchplaneIdempotencyRecord,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    store: PostgresRecordStore,
+) -> OdooWalkthroughRequest:
+    intent = store.read_original_mutation_intent(reservation)
+    identity = RuntimeIdentity.model_validate(intent.get("identity"))
+    if (
+        reservation.route_path != WALKTHROUGH_ROUTE
+        or reservation.scope != walkthrough_activity_scope(profile.product)
+        or intent.get("read_only") is not True
+        or identity.environment_kind != "preview"
+        or identity.product != profile.product
+        or identity.context != profile.preview.context
+        or intent.get("instance") != identity.instance
+        or reservation.reconciliation_key
+        != odoo_preview_reconciliation_key(context=identity.context, compose_name=identity.instance)
+        or reservation.provider_target_key
+        != odoo_preview_target_key(context=identity.context, compose_name=identity.instance)
+    ):
+        raise ValueError("preview_walkthrough_original_binding_changed")
+    return OdooWalkthroughRequest.model_validate(
+        {
+            "product": identity.product,
+            "context": identity.context,
+            "instance": identity.instance,
+            "preview_id": identity.preview_id,
+            "generation_id": identity.preview_generation_id,
+            "read_only": True,
+            "task_id": intent.get("task_id"),
+            "operation": intent.get("operation"),
+            "mode": "apply",
+            "reviewed_plan_sha256": intent.get("reviewed_plan_sha256"),
+        }
+    )
+
+
 def classify_preview_reservation(
     reservation: LaunchplaneIdempotencyRecord,
     *,
@@ -115,6 +159,7 @@ def classify_preview_reservation(
     retained_intent = store.read_original_mutation_intent(reservation)
     available = False
     fixture_available = False
+    walkthrough_available = False
     action = "unavailable"
     number = 0
     try:
@@ -143,6 +188,14 @@ def classify_preview_reservation(
             available = fixture_available = True
             action = "preview-fixture"
             number = fixture.fixture_binding.anchor_pr_number
+        if not available and reservation.route_path == WALKTHROUGH_ROUTE:
+            try:
+                original_walkthrough_intent(reservation, profile=profile, store=store)
+            except ValueError:
+                pass
+            else:
+                available = walkthrough_available = True
+                action = "odoo-walkthrough"
     # Current target attribution can stop new planning; it cannot restore the
     # missing original action, plan, attempt or schedule binding for settlement.
     target_number = 0
@@ -164,6 +217,8 @@ def classify_preview_reservation(
             == "dokploy-provider-target:" + hashlib.sha256(key.encode()).hexdigest()
         ):
             target_number = candidate
+    if walkthrough_available:
+        number = target_number
     return {
         "reservation_id": reservation.record_id,
         "recovery_reference": preview_reservation_reference(reservation, retained_intent),
@@ -579,6 +634,106 @@ def require_unrecorded_preview_refresh(
     )
 
 
+def _original_recovery_refusal(
+    store: PostgresRecordStore, reservation: LaunchplaneIdempotencyRecord
+) -> str:
+    lookup = store.lookup_existing_mutation_reservation(
+        route_path=reservation.route_path,
+        idempotency_key=reservation.idempotency_key,
+        request_fingerprint=reservation.request_fingerprint,
+    )
+    if lookup.status != "found" or lookup.record != reservation:
+        return "preview_reservation_changed"
+    if not reservation.lease_expires_at or (
+        parse_launchplane_mutation_timestamp(
+            reservation.lease_expires_at, field_name="lease_expires_at"
+        )
+        + timedelta(seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS)
+        > parse_launchplane_mutation_timestamp(lookup.observed_at, field_name="observed_at")
+    ):
+        return "preview_grace_active"
+    return ""
+
+
+def recover_held_walkthrough(
+    *,
+    store: PostgresRecordStore,
+    reservation: LaunchplaneIdempotencyRecord,
+    profile: LaunchplaneProductProfileRecord,
+    root: Path,
+) -> dict[str, object]:
+    from control_plane.odoo_walkthrough import InterruptedWalkthroughAdapter
+    from control_plane.provider_operations import run_durable_provider_operation
+
+    result = classify_preview_reservation(reservation, profile=profile, store=store)
+    retained = store.read_original_mutation_intent(reservation)
+    try:
+        request = original_walkthrough_intent(reservation, profile=profile, store=store)
+        with store.testing_replacement_execution_lock(
+            preview_execution_lock_name(reservation.provider_target_key)
+        ) as check:
+            if check is None:
+                return {
+                    **result,
+                    "settlement": "reconcile_required",
+                    "reason": "preview_executor_active",
+                }
+            check()
+            refusal = _original_recovery_refusal(store, reservation)
+            if refusal:
+                return {
+                    **result,
+                    "settlement": "reconcile_required"
+                    if refusal == "preview_grace_active"
+                    else "refused",
+                    "reason": refusal,
+                }
+
+            def check_original() -> None:
+                check()
+                current = store.read_idempotency_record(
+                    scope=reservation.scope,
+                    route_path=reservation.route_path,
+                    idempotency_key=reservation.idempotency_key,
+                )
+                if (
+                    current is None
+                    or current.model_dump(exclude={"state", "updated_at"})
+                    != reservation.model_dump(exclude={"state", "updated_at"})
+                    or store.read_original_mutation_intent(reservation) != retained
+                    or store.read_product_profile_record(profile.product) != profile
+                ):
+                    raise ValueError("preview_reservation_changed")
+
+            check_original()
+            trace = "preview-recovery-" + reservation.record_id
+            outcome = run_durable_provider_operation(
+                store=store,
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=reservation.idempotency_key,
+                request_fingerprint=reservation.request_fingerprint,
+                lease_owner=trace,
+                response_trace_id=trace,
+                adapter=InterruptedWalkthroughAdapter(
+                    reservation, request, trace, store, root, check=check_original
+                ),
+                allow_mutation=False,
+            )
+            payload = outcome.response_payload.get("result")
+            return {
+                **result,
+                "settlement": outcome.status,
+                "result_status": payload.get("status", "") if isinstance(payload, dict) else "",
+            }
+    except (ValueError, OSError, RuntimeError):
+        return {
+            **result,
+            "settlement": "refused",
+            "reason": "preview_original_or_provider_proof_unavailable",
+        }
+
+
 def recover_held_preview(
     *,
     store: PostgresRecordStore,
@@ -602,21 +757,9 @@ def recover_held_preview(
             if check is None:
                 return refuse("preview_executor_active")
             check()
-            lookup = store.lookup_existing_mutation_reservation(
-                route_path=reservation.route_path,
-                idempotency_key=reservation.idempotency_key,
-                request_fingerprint=reservation.request_fingerprint,
-            )
-            if lookup.status != "found" or lookup.record != reservation:
-                return refuse("preview_reservation_changed")
-            if not reservation.lease_expires_at or (
-                parse_launchplane_mutation_timestamp(
-                    reservation.lease_expires_at, field_name="lease_expires_at"
-                )
-                + timedelta(seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS)
-                > parse_launchplane_mutation_timestamp(lookup.observed_at, field_name="observed_at")
-            ):
-                return refuse("preview_grace_active")
+            refusal = _original_recovery_refusal(store, reservation)
+            if refusal:
+                return refuse(refusal)
             if not quiescence(
                 control_plane_root_path=root,
                 request=intent.apply_request,

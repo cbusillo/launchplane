@@ -13,6 +13,7 @@ from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_ACTIVE_STATE,
     WALKTHROUGH_CLOSED_STATE,
     WALKTHROUGH_FORBIDDEN_GROUPS,
+    WALKTHROUGH_READONLY_GROUP,
 )
 
 WALKTHROUGH_JOURNAL_DIRECTORY = "/tmp/launchplane-walkthrough"
@@ -135,6 +136,17 @@ def read_testing_connection_isolation(
     )
 
 
+def read_testing_account_presence(
+    *, host: str, token: str, server_id: str, intent: dict[str, object]
+) -> TestingRead:
+    return _testing_read(
+        host=host,
+        token=token,
+        server_id=server_id,
+        payload={**intent, "mode": "account_presence"},
+    )
+
+
 def _testing_read(
     *, host: str, token: str, server_id: str, payload: dict[str, object]
 ) -> TestingRead:
@@ -180,10 +192,11 @@ try:
     try:
         with connection.cursor() as cursor:
             cursor.execute("SET LOCAL statement_timeout='5s'")
-            cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',('__LP_COPY_WITNESS__',))
-            row=cursor.fetchone()
-            if not row or row[0]!=spec['copy_binding']: raise Refused('copy_changed')
-            if spec['mode'] in ('usage','lane_usage','isolation') and connection_isolation(cursor, apply=False):
+            if spec['identity']['environment_kind']!='preview':
+                cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',('__LP_COPY_WITNESS__',))
+                row=cursor.fetchone()
+                if not row or row[0]!=spec['copy_binding']: raise Refused('copy_changed')
+            if spec['mode'] in ('usage','lane_usage','isolation','account_presence') and connection_isolation(cursor, apply=False):
                 raise Refused('isolation_refused')
             if spec['mode']=='quiescence':
                 cursor.execute('SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0))',(__TASK_LOCK_PREFIX__+spec['binding'],))
@@ -192,6 +205,11 @@ try:
                 if free is not True: raise RuntimeError('Unreadable dispatch lock')
             elif spec['mode']=='isolation':
                 pass
+            elif spec['mode']=='account_presence':
+                cursor.execute('SELECT EXISTS (SELECT 1 FROM res_users WHERE login=%s AND id>2)',(__TASK_LOGIN_PREFIX__+spec['task_id'],))
+                present=cursor.fetchone()[0]
+                if present is False: raise Refused('task_account_changed')
+                if present is not True: raise RuntimeError('Unreadable account existence')
             elif spec['mode'] in ('usage','lane_usage'):
                 if spec['mode']=='usage':
                     cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',(__TASK_MARKER_PREFIX__+spec['task_id'],))
@@ -202,10 +220,11 @@ try:
                         raise Refused('task_account_changed')
                     cursor.execute('SELECT login,active FROM res_users WHERE id=%s',(uid,))
                     if cursor.fetchone()!=(__TASK_LOGIN_PREFIX__+spec['task_id'],True): raise Refused('task_account_changed')
-                cursor.execute(__USAGE_QUERY__,(__TASK_MARKER_PREFIX__,spec['usage_since'],__TASK_MARKER_PREFIX__,__LOGIN_PATTERN__,__LOGIN_PATTERN__,spec['copy_binding'],__TASK_ACTIVE_STATE__,__TASK_CLOSED_STATE__))
-                used=cursor.fetchone()[0]
-                if used is True: raise Refused('protected_signin')
-                if used is not False: raise RuntimeError('Unreadable sign-in history')
+                if spec['identity']['environment_kind']!='preview':
+                    cursor.execute(__USAGE_QUERY__,(__TASK_MARKER_PREFIX__,spec['usage_since'],__TASK_MARKER_PREFIX__,__LOGIN_PATTERN__,__LOGIN_PATTERN__,spec['copy_binding'],__TASK_ACTIVE_STATE__,__TASK_CLOSED_STATE__))
+                    used=cursor.fetchone()[0]
+                    if used is True: raise Refused('protected_signin')
+                    if used is not False: raise RuntimeError('Unreadable sign-in history')
             else: raise RuntimeError('Unsupported read')
     except Refused as refusal:
         reason=refusal.args[0]
@@ -248,12 +267,15 @@ try:
             pass
     if reason=='clear':
         pass
-    elif spec.get('mode') in ('usage','lane_usage','isolation') or ('dispatch_deadline' in spec and time.time()>spec['dispatch_deadline']):
+    elif spec.get('mode') in ('usage','lane_usage','isolation','account_presence') or ('dispatch_deadline' in spec and time.time()>spec['dispatch_deadline']):
         def docker(*args,data=None):
             result=subprocess.run(['docker',*args],input=data,capture_output=True,timeout=15)
             if result.returncode: raise RuntimeError('Testing read unavailable')
             return result.stdout
-        if spec['identity']['instance']!='testing': raise RuntimeError('Not testing')
+        identity=spec['identity']
+        preview=identity['environment_kind']=='preview'
+        if identity['instance'] in ('prod','production') or (preview and not (spec.get('read_only') and identity.get('preview_id') and identity.get('preview_generation_id'))) or (not preview and identity['instance']!='testing'):
+            raise RuntimeError('Unsupported task target')
         ids=docker('ps','--filter','label=com.docker.compose.project='+spec['project'],
             '--filter','label=com.docker.compose.service=script-runner','--format','{{.ID}}').decode().split()
         if len(ids)!=1: raise Refused('runner_unselected')
@@ -261,7 +283,7 @@ try:
         environment=dict(value.split('=',1) for value in runner['Config']['Env'] if '=' in value)
         observed=json.loads(environment.get(spec['identity_key'],'{}')); expected=spec['identity']
         observed.pop('deployed_at',None); expected.pop('deployed_at',None)
-        if observed!=expected or runner['Config']['Image']!=spec['image'] or environment.get('PLATFORM_INSTANCE')!='testing' or environment.get('ODOO_DB_HOST')!='database' or environment.get('ODOO_DB_NAME')!=spec['database']:
+        if observed!=expected or runner['Config']['Image']!=spec['image'] or environment.get('PLATFORM_INSTANCE')!=('preview' if preview else 'testing') or environment.get('ODOO_DB_HOST')!='database' or environment.get('ODOO_DB_NAME')!=spec['database']:
             raise Refused('runner_changed')
         response=json.loads(docker('exec','-i',ids[0],'python3','-c',spec['probe'],data=json.dumps(spec).encode()))
         if not isinstance(response,dict) or set(response)!={'reason'} or response['reason'] not in __PROBE_READS__:
@@ -298,7 +320,10 @@ def docker(*args, data=None):
     if result.returncode: raise RuntimeError('Testing account provider command failed')
     return result.stdout
 try:
-    if spec['instance']!='testing': raise RuntimeError('Not testing')
+    identity=spec['identity']
+    preview=identity['environment_kind']=='preview'
+    if identity['instance']!=spec['instance'] or spec['instance'] in ('prod','production') or (preview and not (spec.get('read_only') and identity.get('preview_id') and identity.get('preview_generation_id'))) or (not preview and spec['instance']!='testing'):
+        raise RuntimeError('Unsupported task target')
     if not re.fullmatch('[a-f0-9]{64}',spec['dispatch_id']): raise RuntimeError('Invalid dispatch')
     directory=Path(__JOURNAL_DIRECTORY__)
     directory.mkdir(mode=0o700,exist_ok=True)
@@ -321,7 +346,7 @@ try:
     observed.pop('deployed_at',None); expected.pop('deployed_at',None)
     if observed!=expected or runner['Config']['Image']!=spec['image']:
         raise RuntimeError('Testing runner identity changed')
-    if expected.get('instance')!='testing' or env.get('PLATFORM_INSTANCE')!='testing' or env.get('ODOO_DB_HOST')!='database' or env.get('ODOO_DB_NAME')!=spec['database']:
+    if env.get('PLATFORM_INSTANCE')!=('preview' if preview else 'testing') or env.get('ODOO_DB_HOST')!='database' or env.get('ODOO_DB_NAME')!=spec['database']:
         raise RuntimeError('Testing runner database changed')
     source=spec.pop('account_program')
     wrapper="""
@@ -370,11 +395,14 @@ ACCOUNT_ODOO_PROGRAM = (
     + r"""
 import json, logging, os, secrets, time
 logging.disable(logging.CRITICAL)
-if request['instance']!='testing': raise RuntimeError('Not testing')
+preview=request.get('identity',{}).get('environment_kind')=='preview'
+readonly=request.get('read_only',False)
+if request['instance'] in ('prod','production') or (preview and not (readonly and request['identity'].get('preview_id') and request['identity'].get('preview_generation_id'))) or (not preview and request['instance']!='testing'):
+    raise RuntimeError('Unsupported task target')
 env.cr.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',(__TASK_LOCK_PREFIX__+request['binding'],))
 if time.time()>request['dispatch_deadline']: raise RuntimeError('Dispatch deadline expired')
 parameters=env['ir.config_parameter'].sudo()
-if read_string_parameter(parameters,'__LP_COPY_WITNESS__')!=request['copy_binding']:
+if not preview and read_string_parameter(parameters,'__LP_COPY_WITNESS__')!=request['copy_binding']:
     raise RuntimeError('Testing copy witness changed')
 if connection_isolation(env.cr, apply=False):
     raise RuntimeError('Testing connection isolation did not pass')
@@ -385,32 +413,46 @@ raw=read_string_parameter(parameters,key)
 marker=json.loads(raw) if raw else None
 login=__TASK_LOGIN_PREFIX__+request['task_id']
 user=users.browse(marker['account_id']).exists() if marker else users.browse([])
+if readonly and request['operation']!='cleanup':
+    if request['groups']!=[__READONLY_GROUP__] and tuple(request['groups'])!=(__READONLY_GROUP__,):
+        raise RuntimeError('Read-only identity cannot select business roles')
+    user=users._launchplane_readonly_test_identity(request['identity'],login,create=not preview and request['operation']=='provision')
+    if len(user)!=1 or user.id<=2 or user.login!=login or not user.has_group(__READONLY_GROUP__):
+        raise RuntimeError('Product read-only identity qualification failed')
+    if marker and marker['account_id']!=user.id:
+        raise RuntimeError('Read-only identity ownership changed')
+    if marker and (marker['binding']!=request['binding'] or marker['state']==__TASK_CLOSED_STATE__):
+        if request['operation']=='provision':
+            marker=None
+if readonly and request['operation']=='cleanup' and marker and len(user)==1 and user.id>2 and user.login==login:
+    marker={**marker,'binding':request['binding'],'copy_binding':request['copy_binding']}
 if marker and (marker['binding']!=request['binding'] or len(user)!=1
                or user.id<=2 or user.login!=login):
     raise RuntimeError('Testing task account ownership changed')
 if marker and request['operation']=='provision' and marker['groups']!=sorted(request['groups']):
     raise RuntimeError('Testing task group request changed')
-if not marker and users.search_count([('login','=',login)]):
+if not marker and not readonly and users.search_count([('login','=',login)]):
     raise RuntimeError('Existing login cannot be adopted')
-if request['operation']!='cleanup':
+if request['operation']!='cleanup' and not preview:
     env.cr.execute(__USAGE_QUERY__,(__TASK_MARKER_PREFIX__,request['usage_since'],__TASK_MARKER_PREFIX__,__LOGIN_PATTERN__,__LOGIN_PATTERN__,request['copy_binding'],__TASK_ACTIVE_STATE__,__TASK_CLOSED_STATE__))
     if env.cr.fetchone()[0]:
         raise RuntimeError('Testing lane has other recent successful sign-ins')
 if request['operation']=='provision':
+    if readonly:
+        user.write({'password':request['password'],'active':True})
     if marker:
         if marker['state']!=__TASK_ACTIVE_STATE__ or not user.active: raise RuntimeError('Task already closed')
     else:
-        groups=[env.ref(name) for name in request['groups']]
-        if any(group._name!='res.groups' for group in groups): raise RuntimeError('Invalid business groups')
-        field='group_ids' if 'group_ids' in users._fields else 'groups_id'
-        user=users.create({'name':'TEST Launchplane walkthrough','login':login,
-            'password':request['password'],'active':True,field:[(6,0,[group.id for group in groups])]})
-        if any(env.ref(name,raise_if_not_found=False) and user.has_group(name) for name in __FORBIDDEN_GROUPS__):
-            raise RuntimeError('Testing task privileges are forbidden')
+        if not readonly:
+            groups=[env.ref(name) for name in request['groups']]
+            if any(group._name!='res.groups' for group in groups): raise RuntimeError('Invalid business groups')
+            field='group_ids' if 'group_ids' in users._fields else 'groups_id'
+            user=users.create({'name':'TEST Launchplane walkthrough','login':login,
+                'password':request['password'],'active':True,field:[(6,0,[group.id for group in groups])]})
         marker={'account_id':user.id,'binding':request['binding'],'copy_binding':request['copy_binding'],'state':__TASK_ACTIVE_STATE__,'groups':sorted(request['groups'])}
         write_string_parameter(parameters,key,json.dumps(marker,sort_keys=True))
 elif request['operation']=='cleanup':
-    if marker and marker['state']==__TASK_ACTIVE_STATE__:
+    if marker and (readonly or marker['state']==__TASK_ACTIVE_STATE__):
         user.write({'active':False,'password':secrets.token_urlsafe(48)})
         if 'res.users.apikeys' in env.registry:
             env['res.users.apikeys'].sudo().search([('user_id','=',user.id)]).unlink()
@@ -419,8 +461,8 @@ elif request['operation']=='cleanup':
 else:
     if not marker or marker['state']!=__TASK_ACTIVE_STATE__ or not user.active:
         raise RuntimeError('Task is not active')
-    if any(env.ref(name,raise_if_not_found=False) and user.has_group(name) for name in __FORBIDDEN_GROUPS__):
-        raise RuntimeError('Task privileges changed')
+if request['operation'] in ('provision','run') and any(env.ref(name,raise_if_not_found=False) and user.has_group(name) for name in __FORBIDDEN_GROUPS__):
+    raise RuntimeError('Testing task privileges are forbidden')
 commit_started=True
 env.cr.commit()
 if request['operation']=='cleanup' and marker:
@@ -437,4 +479,5 @@ with os.fdopen(os.open(request['result_file'],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0
     .replace("__LOGIN_PATTERN__", repr(WALKTHROUGH_LOGIN_PATTERN))
     .replace("__USAGE_QUERY__", repr(OTHER_TESTING_SIGNINS_SQL))
     .replace("__FORBIDDEN_GROUPS__", repr(WALKTHROUGH_FORBIDDEN_GROUPS))
+    .replace("__READONLY_GROUP__", repr(WALKTHROUGH_READONLY_GROUP))
 )

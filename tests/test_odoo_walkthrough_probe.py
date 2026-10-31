@@ -52,6 +52,7 @@ class ProbeConnection:
         self.parameters: tuple[object, ...] = ()
         self.database = sqlite3.connect(":memory:")
         seed(self.database)
+        self.database.execute("CREATE TABLE res_users (id INTEGER PRIMARY KEY, login TEXT UNIQUE)")
         self.sql = SqliteCursor(self.database)
         namespace: dict[str, Any] = {}
         exec(connection_isolation_library(), namespace)
@@ -93,7 +94,8 @@ class ProbeConnection:
 
     def fetchone(self) -> tuple[object, ...]:
         if self.sql_result:
-            return tuple(self.sql.fetchone())
+            row = tuple(self.sql.fetchone())
+            return (bool(row[0]),) if "res_users" in self.statement else row
         if "pg_try_advisory_xact_lock" in self.statement:
             return (self.free,)
         if "res_users_log" in self.statement:

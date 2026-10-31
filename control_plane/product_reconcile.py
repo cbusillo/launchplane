@@ -1852,6 +1852,7 @@ def reconcile_preview_target(
         interrupted_preview_restore,
         original_preview_intent,
         recover_held_preview,
+        recover_held_walkthrough,
         preview_restore_originals,
         preview_rebuild_already_failed,
     )
@@ -1864,6 +1865,21 @@ def reconcile_preview_target(
     retained_intent_invalid = False
     for reservation in held[:100]:
         classified = classify_preview_reservation(reservation, profile=profile, store=record_store)
+        if (
+            classified["action"] == "odoo-walkthrough"
+            and classified["target_pull_request_number"] == pull_request_number
+            and control_plane_root is not None
+            and isinstance(record_store, PostgresRecordStore)
+        ):
+            recovery.append(
+                recover_held_walkthrough(
+                    store=record_store,
+                    reservation=reservation,
+                    profile=profile,
+                    root=control_plane_root,
+                )
+            )
+            continue
         try:
             original = original_preview_intent(reservation, profile=profile, store=record_store)
         except ValueError:
