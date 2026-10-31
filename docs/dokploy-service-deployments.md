@@ -127,8 +127,16 @@ this optional input; use the workflow or the existing authorized service API.
 Historical recipient and activation recovery retains its original parsed-value
 contract, including previously stored runtime identity.
 
-The wire quotes and Compose-supported escapes are transport data, not a product
-storage convention. Metadata survives comment movement and CRLF normalization;
+The adapter matches Dokploy's current generated-file writer, which already
+quotes values. It supplies each logical value once. Transport metadata binds
+literal keys and, when needed, character variables that defer dollar signs,
+apostrophes, backslashes and carriage returns until Compose interpolation.
+The variables are chosen without replacing an existing key or reference and
+are omitted from logical readback. Products need no decoder. Previous
+JSON/octal envelopes remain readable and unchanged values retain their existing
+transport; they no longer qualify current literal delivery. New, changed or
+explicitly requalified values use the current transport.
+Metadata survives comment movement and CRLF normalization;
 new provider-only fields and edits that cease to match the encoding remain
 legacy fields rather than making the record unreadable. Canonical reconciliation
 can then replace or retire them through the existing runtime-input path. Swarm
@@ -148,6 +156,10 @@ contract.
 `scripts/qualify-dokploy-compose-environment.sh` exercises the tracked pinned
 Dokploy generated-file functions and actual Compose `config`, covering both
 interpolation and service `env_file` consumption with synthetic values only.
+Keep the vendor excerpts aligned with the deployed provider before treating
+this qualification as current provider evidence. Saved legacy-record fixtures
+also prove preservation without losing their logical inputs, and explicit
+requalification through the current transport.
 Provision Node through the repository's CI Node setup and Compose through
 `scripts/setup-ci-compose.sh` using the CI-declared version before running it.
 The frontend validation CI job runs this qualification; ordinary unit discovery
