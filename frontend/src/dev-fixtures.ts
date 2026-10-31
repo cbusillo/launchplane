@@ -2537,6 +2537,8 @@ export function productReviewForFixture(
     viewer_is_owner: viewerIsOwner,
     can_decide: !cannotDecideReason,
     cannot_decide_reason: cannotDecideReason,
+    preview_is_current: Boolean(previewUrl) && scenario !== "stale-preview",
+    cannot_accept_reason: scenario === "stale-preview" ? "We are updating the preview for the latest change. We will let you know when it is ready to review." : "",
     latest_decision:
       (latestDecision ? {
         ...latestDecision,

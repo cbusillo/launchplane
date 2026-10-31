@@ -257,6 +257,8 @@ function ProductReviewCard({
 }) {
   const previewUrl = safeExternalUrl(review.preview_url);
   const pullRequestUrl = safeExternalUrl(review.pull_request_url);
+  const previewIdentity = `${review.repository}:${review.pull_request_number}:${review.head_sha}:${review.preview_url}:${review.preview_generation_id}`;
+  const [openedPreview, setOpenedPreview] = useState("");
   return (
     <article className="owner-review-card" data-product={review.product}>
       <header>
@@ -271,6 +273,7 @@ function ProductReviewCard({
             href={previewUrl.toString()}
             target="_blank"
             rel="noreferrer"
+            onClick={() => setOpenedPreview(previewIdentity)}
           >
             Open the preview <ExternalLink size={15} aria-hidden="true" />
           </a>
@@ -307,9 +310,10 @@ function ProductReviewCard({
       ) : null}
       {!historical && review.can_decide && previewUrl ? (
         <ProductReviewDecisionForm
-          key={`${review.repository}:${review.pull_request_number}:${review.head_sha}:${review.preview_url}:${review.preview_generation_id}`}
+          key={previewIdentity}
           fixtureMode={fixtureMode}
           review={review}
+          previewOpened={openedPreview === previewIdentity}
           onDecided={onDecided}
           onRefresh={onRefresh}
         />
@@ -429,12 +433,15 @@ function ProductReviewDecisionForm({
   onDecided,
   onRefresh,
   review,
+  previewOpened,
 }: {
   fixtureMode: DevFixtureMode;
   onDecided: (review: ProductReviewResponse) => void;
   onRefresh: () => Promise<void>;
   review: ProductReviewResponse;
+  previewOpened: boolean;
 }) {
+  const [previewConfirmed, setPreviewConfirmed] = useState(false);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
@@ -505,15 +512,28 @@ function ProductReviewDecisionForm({
           }}
         />
       </label>
+      {review.preview_is_current ? (
+        <label className="owner-review-preview-confirmation">
+          <input
+            type="checkbox"
+            checked={previewConfirmed}
+            disabled={busy || stale || !previewOpened}
+            onChange={(event) => setPreviewConfirmed(event.target.checked)}
+          />
+          I looked at this preview and it is right.
+        </label>
+      ) : null}
       <div className="owner-review-action-buttons">
-        <button
-          className="button button-primary"
-          type="button"
-          disabled={busy || stale || Boolean(review.client_test_notes_error)}
-          onClick={() => void record("accepted")}
-        >
-          Accept
-        </button>
+        {review.preview_is_current ? (
+          <button
+            className="button button-primary"
+            type="button"
+            disabled={busy || stale || !previewOpened || !previewConfirmed || Boolean(review.client_test_notes_error)}
+            onClick={() => void record("accepted")}
+          >
+            Accept
+          </button>
+        ) : null}
         <button
           className="button"
           type="button"
@@ -523,10 +543,12 @@ function ProductReviewDecisionForm({
           Request changes
         </button>
       </div>
+      {review.preview_is_current && !previewOpened ? <p className="owner-review-state">Open the preview, check the notes above, then confirm that it is right.</p> : null}
+      {!review.preview_is_current ? <OwnerReviewState>{review.cannot_accept_reason}</OwnerReviewState> : null}
       {review.client_test_notes_error ? <p className="owner-review-alert" role="alert">{review.client_test_notes_error}</p> : null}
       {busy ? <p className="owner-review-state" role="status">Recording…</p> : null}
       {failure ? <p className="owner-review-alert" role="alert">{failure}</p> : null}
-      {stale ? <button className="button" type="button" disabled={busy} onClick={async () => {
+      {stale || !review.preview_is_current ? <button className="button" type="button" disabled={busy} onClick={async () => {
         setBusy(true);
         try { await onRefresh(); } finally { setBusy(false); }
       }}>Refresh review</button> : null}

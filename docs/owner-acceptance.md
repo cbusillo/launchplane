@@ -89,6 +89,16 @@ returns the change to standing acceptance; a saved Client rejection still vetoes
 Production release remains on the gated path described in [release-review.md](release-review.md), including its checklist-note validation.
 
 The Client named on the product profile reviews a preview at `/ui/owner-review`.
+Accept appears only when the serving preview is verified for the open PR's
+exact current head. The Client opens that preview and confirms “I looked at
+this preview and it is right” beside the short test notes before accepting.
+Changing the serving head, URL or generation resets that confirmation. The
+service rereads the PR head on Accept and retains its existing exact-preview
+lock and notes gates. An unavailable head check or a preview still being
+updated cannot be accepted; Request changes remains available on an older
+serving preview. Opening a link and confirming records the Client's statement;
+it cannot measure their attention. This decision never merges or publishes.
+
 Launchplane requests review when a pull request has real `Client test notes`
 (`Owner test notes` remains a supported heading). No label is needed. The
 product's review label remains an explicit override requiring real test notes.
