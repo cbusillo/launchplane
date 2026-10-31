@@ -1,4 +1,5 @@
 import { EngineeringRuntimeSettingRemovalRoute } from "./EngineeringRuntimeSettingRemovalRoute";
+import { RequestAttentionRoute } from "./RequestAttentionRoute";
 import {
   ArrowRight,
   KeyRound,
@@ -22,6 +23,8 @@ import {
 import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
+  { detail: "Read waiting requests and their next actions. Unowned requests go to the Supervisor.",
+    icon: Wrench, label: "Read only", title: "Waiting requests", view: "request-attention" as const },
   { detail: "Review exact stored plain-setting removals and approve them as the signed-in administrator.",
     icon: KeyRound, label: "Director controls", title: "Remove stored settings", view: "runtime-setting-removal" as const },
   {
@@ -83,6 +86,7 @@ export function EngineeringOpsRoute({
   view: EngineeringView;
   actorId: number;
 }) {
+  if (view === "request-attention") return <RequestAttentionRoute key={actorId} />;
   if (view === "runtime-setting-removal") return <EngineeringRuntimeSettingRemovalRoute admin={admin} actorId={actorId} />;
   if (view === "preview-lifecycle") {
     return <EngineeringPreviewLifecycleRoute key={actorId} actorId={actorId} admin={admin} fixtureMode={fixtureMode} />;

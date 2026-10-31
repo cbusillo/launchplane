@@ -75,6 +75,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   graph.
 - [discussion-topics.md](discussion-topics.md) — product-scoped neutral topics,
   supported add/close API, and separate page/reminder delivery slices.
+- [request-attention.md](request-attention.md) — original-source waiting requests,
+  Supervisor routing and explicit collection coverage.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
   train policy contract, enqueue authority, and smoke-target policy.
 - [merge-train-events.md](merge-train-events.md) — signed App events, worker wake hints,
