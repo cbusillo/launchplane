@@ -16,36 +16,47 @@ from control_plane.testing_browser import launch_testing_browser
 
 
 def readonly_browser_request(method: str, path: str, payload: object) -> bool:
+    if path.startswith(("/report/", "/web/content/", "/web/export/", "/web/database/")):
+        return False
     if method == "GET":
-        return path in {"/web", "/odoo"} or path.startswith(
-            ("/odoo/", "/web/assets/", "/web/static/", "/web/image/", "/web/webclient/load_menus/")
+        return True
+    if method != "POST" or path in {
+        "/web/dataset/call_button",
+        "/web/action/run",
+        "/mail/message/post",
+    }:
+        return False
+    if path.startswith("/web/session/") and path != "/web/session/get_session_info":
+        return False
+    if path == "/web/dataset/call_kw" or path.startswith("/web/dataset/call_kw/"):
+        params = payload.get("params") if isinstance(payload, dict) else None
+        if not isinstance(params, dict) or not isinstance(params.get("method"), str):
+            return False
+        operation = params["method"]
+        return operation not in {
+            "create",
+            "write",
+            "unlink",
+            "web_save",
+            "load",
+            "message_post",
+        } and not operation.startswith(
+            (
+                "action_",
+                "button_",
+                "set_",
+                "save_",
+                "scan_",
+                "print_",
+                "post_",
+                "send_",
+                "import_",
+                "export_",
+                "execute_",
+                "validate_",
+            )
         )
-    if method != "POST" or not isinstance(payload, dict):
-        return False
-    params = payload.get("params")
-    if not isinstance(params, dict):
-        return False
-    if path == "/web/action/load":
-        return set(params) <= {"action_id", "additional_context"}
-    if not (path == "/web/dataset/call_kw" or path.startswith("/web/dataset/call_kw/")):
-        return False
-    return params.get("method") in {
-        "read",
-        "search",
-        "search_count",
-        "search_read",
-        "read_group",
-        "web_read_group",
-        "web_read",
-        "web_search_read",
-        "name_search",
-        "fields_get",
-        "get_views",
-        "default_get",
-        "has_group",
-        "has_groups",
-        "check_access_rights",
-    }
+    return True
 
 
 def require_safe_browser_control(locator: Locator) -> None:
@@ -201,6 +212,25 @@ def run_walkthrough_browser(
                                 raise ValueError("Test identity sign-out was not verified.")
                         finally:
                             response.dispose()
+                        session = context.request.post(
+                            origin + "/web/session/get_session_info",
+                            data={"jsonrpc": "2.0", "method": "call", "params": {}},
+                            max_redirects=0,
+                            timeout=15000,
+                        )
+                        try:
+                            status = session.json() if session.status == 200 else {}
+                            logged_out = (
+                                status.get("result", {}).get("uid") in {False, None}
+                                if "result" in status
+                                else status.get("error", {}).get("code") == 100
+                            )
+                            if not logged_out:
+                                raise ValueError(
+                                    "The test identity session is still active or unavailable."
+                                )
+                        finally:
+                            session.dispose()
                         page.close()
                         context.clear_cookies()
                         signed_in = False

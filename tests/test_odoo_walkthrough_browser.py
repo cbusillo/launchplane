@@ -133,6 +133,12 @@ class OpaqueBrowserTests(unittest.TestCase):
         self.assertFalse(self.browser.new_context.call_args.kwargs["accept_downloads"])
 
     def test_signout_and_signin_use_only_the_private_task_identity(self) -> None:
+        authenticated = self.context.request.post.return_value
+        signed_out = MagicMock(status=200)
+        signed_out.json.return_value = {"result": {"uid": False}}
+        self.context.request.post.side_effect = lambda url, **_kwargs: (
+            signed_out if url.endswith("/web/session/get_session_info") else authenticated
+        )
         passed, screenshots = self.run_browser(
             WalkthroughStep(action="sign_out"),
             WalkthroughStep(action="sign_in"),
@@ -140,14 +146,28 @@ class OpaqueBrowserTests(unittest.TestCase):
         )
         self.assertEqual(passed, 3)
         self.assertFalse(screenshots)
-        self.assertEqual(self.context.request.post.call_count, 3)
         self.assertTrue(
             self.context.request.post.call_args.args[0].endswith("/web/session/authenticate")
         )
+        for call in self.context.request.post.call_args_list:
+            if "password" in call.kwargs["data"].get("params", {}):
+                self.assertTrue(call.args[0].endswith("/web/session/authenticate"))
+                self.assertEqual(call.kwargs["data"]["params"]["login"], "task-user")
         self.context.clear_cookies.assert_called_once()
         self.page.close.assert_called_once()
 
+    def test_signout_must_really_remove_the_authenticated_session(self) -> None:
+        with self.assertRaises(ValueError):
+            self.run_browser(WalkthroughStep(action="sign_out"), WalkthroughStep(action="sign_in"))
+        self.context.close.assert_called_once()
+        self.browser.close.assert_called_once()
+
     def test_readonly_transport_allows_ui_reads_and_refuses_business_calls(self) -> None:
+        for path in ("/web/webclient/translations/hash", "/web/webclient/locale/en_US"):
+            self.assertTrue(readonly_browser_request("GET", path, None))
+        self.assertTrue(
+            readonly_browser_request("POST", "/web/action/load", {"params": {"context": {}}})
+        )
         for method in ("web_read", "web_search_read", "get_views", "default_get"):
             self.assertTrue(
                 readonly_browser_request(

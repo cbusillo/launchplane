@@ -59,12 +59,16 @@ from control_plane.odoo_walkthrough import (
     WalkthroughPrerequisite,
     WalkthroughPrerequisiteError,
     WALKTHROUGH_SECRET_INTEGRATION,
+    walkthrough_secret_name,
+    disable_walkthrough_credentials,
 )
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 from control_plane.odoo_connection_isolation import connection_isolation_library
 from control_plane.service_auth import (
     AuthorizationTarget,
     LocalOperatorIdentity,
+    TerminalAgentIdentity,
+    LaunchplaneIdentity,
     LocalOperatorPolicyRule,
     LaunchplaneAuthzPolicy,
 )
@@ -86,6 +90,22 @@ def task_request(**changes: Any) -> OdooWalkthroughRequest:
 
 
 class TaskContractTests(unittest.TestCase):
+    def test_existing_testing_requests_keep_their_original_idempotency_fingerprint(self) -> None:
+        request = task_request()
+        original = request.model_dump(
+            mode="json", exclude={"read_only", "preview_id", "generation_id"}
+        )
+        actor = walkthrough_actor(LocalOperatorIdentity(subject="existing", token_label="token"))
+        persisted_fingerprint = canonical_json_sha256([actor, original])
+        self.assertEqual(walkthrough_fingerprint(actor, request), persisted_fingerprint)
+
+    def test_terminal_actors_are_named_and_distinct(self) -> None:
+        one = walkthrough_actor(TerminalAgentIdentity(subject="first", token_label="token"))
+        two = walkthrough_actor(TerminalAgentIdentity(subject="second", token_label="token"))
+        self.assertTrue(one)
+        self.assertTrue(two)
+        self.assertNotEqual(one, two)
+
     def test_readonly_identity_requires_exact_preview_and_refuses_business_roles(self) -> None:
         fields = {
             "read_only": True,
@@ -292,8 +312,12 @@ class TaskRouteTests(unittest.TestCase):
         self.actions: list[str] = []
         self.app: Any = FastAPI()
 
-        def read_identity() -> LocalOperatorIdentity:
-            return LocalOperatorIdentity(subject="test-agent", token_label="test-token")
+        self.identity: LaunchplaneIdentity = LocalOperatorIdentity(
+            subject="test-agent", token_label="test-token"
+        )
+
+        def read_identity() -> LaunchplaneIdentity:
+            return self.identity
 
         def allows(**arguments: Any) -> bool:
             self.actions.append(arguments["action"])
@@ -341,6 +365,7 @@ class TaskRouteTests(unittest.TestCase):
 
     def test_preview_authority_keeps_secret_and_receipt_on_the_exact_preview(self) -> None:
         self.preview_target = True
+        self.identity = TerminalAgentIdentity(subject="client-agent", token_label="preview-token")
         identity = self.plan.connection.selection.identity.model_copy(
             update={
                 "instance": "example-pr-1",
@@ -403,6 +428,123 @@ class TaskRouteTests(unittest.TestCase):
         assert original is not None
         self.assertNotIn(password, json.dumps(self.store.read_original_mutation_intent(original)))
         self.assertEqual(self.account.call_args.kwargs["payload"]["expected_account_id"], 17)
+        self.browser.side_effect = RuntimeError("Browser interrupted")
+        run = applied.model_copy(update={"operation": "run"})
+        status, _ = self.invoke(run, "preview-run")
+        self.assertEqual(status, 409)
+        native_calls = self.account.call_count
+        status, recovered = self.invoke(run, "preview-run")
+        self.assertEqual(status, 200, recovered)
+        self.assertEqual(recovered["result"]["status"], "unknown")
+        self.assertEqual(recovered["result"]["instance"], identity.instance)
+        self.assertEqual(self.account.call_count, native_calls)
+
+    def test_fixed_readonly_identity_can_be_revoked_and_reopened_with_a_new_secret(self) -> None:
+        request = task_request(read_only=True, task_id=canonical_json_sha256("example-odoo")[:32])
+        self.plan = replace(
+            self.plan, secret_name=walkthrough_secret_name(request, self.plan.binding)
+        )
+        self.planner.return_value = self.plan
+        self.stack.enter_context(
+            patch("control_plane.odoo_walkthrough.plan_walkthrough", return_value=self.plan)
+        )
+        provision = request.model_copy(
+            update={"mode": "apply", "reviewed_plan_sha256": self.plan.digest}
+        )
+        status, _ = self.invoke(provision, "readonly-provision")
+        self.assertEqual(status, 200)
+        first_password = self.account.call_args.kwargs["payload"]["password"]
+        cleanup = provision.model_copy(update={"operation": "cleanup"})
+        status, response = self.invoke(cleanup, "readonly-cleanup")
+        self.assertEqual(status, 200, response)
+        record = self.store.find_secret_record(
+            scope="context_instance",
+            integration=WALKTHROUGH_SECRET_INTEGRATION,
+            name=self.plan.secret_name,
+            context=request.context,
+            instance=request.instance,
+        )
+        assert record is not None
+        self.assertEqual(record.status, "disabled")
+        status, response = self.invoke(provision, "readonly-reopen")
+        self.assertEqual(status, 200, response)
+        second_password = self.account.call_args.kwargs["payload"]["password"]
+        self.assertNotEqual(first_password, second_password)
+        for password in (first_password, second_password):
+            self.assertNotIn(password, json.dumps(response))
+
+    def test_readonly_secret_retirement_is_limited_to_its_product_and_lane(self) -> None:
+        from control_plane.secrets import write_secret_value
+
+        request = task_request(read_only=True, task_id=canonical_json_sha256("example-odoo")[:32])
+        names = [walkthrough_secret_name(request, generation) for generation in ("old", "current")]
+        other = task_request(
+            product="other", read_only=True, task_id=canonical_json_sha256("other")[:32]
+        )
+        names.append(walkthrough_secret_name(other, "old"))
+        records = []
+        for name in names:
+            write_secret_value(
+                record_store=self.store,
+                scope="context_instance",
+                integration=WALKTHROUGH_SECRET_INTEGRATION,
+                name=name,
+                plaintext_value="test-fixture-password",
+                binding_key="TEST_PASSWORD",
+                context_name=request.context,
+                instance_name=request.instance,
+                actor="fixture",
+            )
+            records.append(
+                self.store.find_secret_record(
+                    scope="context_instance",
+                    integration=WALKTHROUGH_SECRET_INTEGRATION,
+                    name=name,
+                    context=request.context,
+                    instance=request.instance,
+                )
+            )
+        old, current, unrelated = records
+        assert old is not None and current is not None and unrelated is not None
+        production = write_secret_value(
+            record_store=self.store,
+            scope="context_instance",
+            integration=WALKTHROUGH_SECRET_INTEGRATION,
+            name=names[0],
+            plaintext_value="isolated-production-fixture",
+            binding_key="TEST_PASSWORD",
+            context_name=request.context,
+            instance_name="prod",
+            actor="fixture",
+        )
+        disable_walkthrough_credentials(
+            self.store, request, "fixture", keep_secret_id=current.secret_id
+        )
+        self.assertEqual(self.store.read_secret_record(old.secret_id).status, "disabled")
+        self.assertEqual(self.store.read_secret_record(current.secret_id).status, "configured")
+        self.assertEqual(self.store.read_secret_record(unrelated.secret_id).status, "configured")
+        bindings = self.store.list_secret_bindings(
+            integration=WALKTHROUGH_SECRET_INTEGRATION,
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+        old_binding = next(binding for binding in bindings if binding.secret_id == old.secret_id)
+        self.store.write_secret_binding(old_binding.model_copy(update={"status": "configured"}))
+        disable_walkthrough_credentials(self.store, request, "fixture")
+        self.assertEqual(self.store.read_secret_record(current.secret_id).status, "disabled")
+        self.assertEqual(
+            self.store.read_secret_record(production["secret_id"]).status, "configured"
+        )
+        reconciled = next(
+            binding
+            for binding in self.store.list_secret_bindings(
+                integration=WALKTHROUGH_SECRET_INTEGRATION,
+                context_name=request.context,
+                instance_name=request.instance,
+            )
+            if binding.binding_id == old_binding.binding_id
+        )
+        self.assertEqual(reconciled.status, "disabled")
 
     def test_denial_happens_before_any_provider_or_secret_operation(self) -> None:
         self.allowed = False
@@ -823,6 +965,22 @@ class AccountProgramTests(unittest.TestCase):
         self.request["expected_account_id"] = self.user.id + 1
         with self.assertRaises(RuntimeError):
             self.execute()
+        self.request.update(
+            {
+                "expected_account_id": self.user.id,
+                "binding": "new-generation-binding",
+                "operation": "cleanup",
+            }
+        )
+        self.user.write.side_effect = lambda updates: setattr(
+            self.user, "active", updates["active"]
+        )
+        self.execute()
+        self.assertFalse(self.user.active)
+        self.request.update({"operation": "provision", "password": "reopened-private-password"})
+        self.execute()
+        self.assertTrue(self.user.active)
+        self.assertEqual(self.user.write.call_args.args[0]["password"], self.request["password"])
 
     def test_readonly_account_refuses_missing_product_guard_and_role_escalation(self) -> None:
         self.request.update(

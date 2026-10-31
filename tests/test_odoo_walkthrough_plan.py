@@ -52,10 +52,11 @@ class WalkthroughPlanTests(unittest.TestCase):
             operation="provision",
         )
         adapter = MagicMock()
-        adapter.connect.return_value = replace(
+        connection = replace(
             self.connection,
             selection=OdooRuntimeSelection(binding.identity, "https://preview.example"),
         )
+        adapter.connect.return_value = connection
         adapter.runtime_binding.return_value = binding
         adapter.invoke.return_value = fixture_receipt(
             "readback",
@@ -65,7 +66,6 @@ class WalkthroughPlanTests(unittest.TestCase):
         self.store.list_preview_records.return_value = ()
         with patch("control_plane.odoo_walkthrough.PreviewFixtureAdapter", return_value=adapter):
             plan = plan_walkthrough(self.store, Path("."), request, "actor")
-            adapter.connect.assert_called_once_with(mutation=True)
             adapter.invoke.assert_called_once_with("readback")
             self.generation_read.assert_not_called()
             self.assertEqual(plan.account_id, 17)
@@ -85,6 +85,33 @@ class WalkthroughPlanTests(unittest.TestCase):
             )
             self.assertNotEqual(plan.secret_name, changed.secret_name)
             self.assertNotEqual(plan.digest, changed.digest)
+
+            def protected_connection(*, mutation: bool = False) -> OdooRuntimeConnection:
+                if mutation:
+                    raise ValueError("Protected preview")
+                return connection
+
+            adapter.connect.side_effect = protected_connection
+            with self.assertRaises(ValueError):
+                plan_walkthrough(self.store, Path("."), request, "actor")
+            safety = SimpleNamespace(
+                production_resources="isolated", usage="in_use", data="only_copy"
+            )
+            self.store.read_disposable_lane_safety.return_value = safety
+            with (
+                patch("control_plane.odoo_walkthrough.fixture_preview_slot", return_value="pr-42"),
+                patch(
+                    "control_plane.odoo_walkthrough.resolve_disposable_preview",
+                    return_value=SimpleNamespace(preview_id=request.preview_id),
+                ),
+                patch("control_plane.odoo_walkthrough.require_fixture_target_ownership"),
+            ):
+                cleanup = request.model_copy(update={"operation": "cleanup"})
+                plan_walkthrough(self.store, Path("."), cleanup, "actor")
+                safety.production_resources = "shared"
+                with self.assertRaises(ValueError):
+                    plan_walkthrough(self.store, Path("."), cleanup, "actor")
+            adapter.connect.side_effect = None
             adapter.invoke.return_value = fixture_receipt("readback", records=[])
             with self.assertRaises(ValueError):
                 plan_walkthrough(self.store, Path("."), request, "actor")

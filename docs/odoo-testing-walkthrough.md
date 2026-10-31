@@ -300,15 +300,21 @@ The password stays encrypted in the existing `odoo_walkthrough` integration,
 separately bound to each testing copy or exact preview generation. It is never
 inherited as a usable credential, delivered as runtime environment, or returned.
 This standing product identity has no four-hour consumption limit. Explicit
-cleanup still revokes its account and secret on the current target; ordinary
-task accounts keep their existing lifetime.
+cleanup revokes its account and all of its older-copy secrets on the current
+lane. Provision can reopen the same qualified account with a fresh password
+and secret version, without rebuilding the preview. Provisioning a new
+generation also disables its older-generation service credentials. Retained
+old databases remain under their existing custody; cleanup never redirects to
+them. Ordinary task accounts keep their existing lifetime.
 
 Testing retains its copy, isolation, use and authorization checks. A preview
 requires its native `instance`, `preview_id` and `generation_id`, matching its
 active serving identity. It uses existing Director-agent preview authority or
-`odoo_preview_apply.execute` for its product preview context, rather than a new
-grant or an expansion of testing-only rules. Account changes retain fixture
-protected-use and exclusive target-ownership checks. Browser work retains
+`odoo_preview_apply.execute` for its product preview context. Inert planning
+uses the existing `odoo_testing_walkthrough.plan` read action. Neither adds a
+grant or expands testing-only execution rules. Provisioning retains fixture protected-use and exclusive target-ownership
+checks. Cleanup can revoke its own account under a hold, while keeping current
+runtime, unique target ownership and production-separation checks. Browser work retains
 current identity and isolation checks. The preview uses its existing execution
 lock and durable provider fence. Recovery observes the original receiver/key;
 it never redirects or repeats a browser transaction.
@@ -325,16 +331,29 @@ sanitizer again, while existing previews retain their data and Client edits.
 The product artifact supplies `launchplane_readonly.group_user` and private
 `res.users._launchplane_readonly_test_identity(identity, login, create=False)`.
 The method returns only its owned, qualified user and refuses a staff account
-or absent guard. Testing may pass `create=True` to create that product's shell;
+or absent guard. Its direct/implied groups must contain only the read-only
+role's declared closure and ordinary internal-user support, never extra stock,
+accounting, printing or administration roles. Testing may pass `create=True`
+to create that product's shell;
 previews always pass `create=False` and require the fixture. A new generation
-may rebind only the same qualified owned user. Caller-selected business groups
-and form-filling steps are refused.
+may rebind only the same qualified owned user. The ownership witness must be
+created by the product fixture/service contract, never inferred from a reserved
+login or adopted from a staff record or production restore. Caller-selected
+business groups and form-filling steps are refused. The product sanitizer must
+deactivate/scramble copied test identities, remove their API keys and clear
+operative walkthrough markers before a restored copy can serve. A retained
+nonsecret product-ownership witness may support a new preview fixture; it never
+supplies a usable password or current-generation authority.
 
 The product owns and tests its business permissions. Odoo ACLs add rights, so
 read-only ACL entries alone cannot enforce this contract. Its server guard must
 refuse business create/write/unlink, sudo business paths, scans, quantity/count
 changes, validation, accounting, imports, preference saves, messages, server
-actions and reports/printing. Only sign-in/out bookkeeping may write.
+actions and reports/printing. Only sign-in/out bookkeeping may write. The guard
+must still allow the service superuser to activate, revoke and set the password
+of its owned test account. Product tests prove negative business operations
+before activation; Launchplane never probes business writes on a Client preview,
+even inside a database savepoint.
 
 | CM check | Minimum permission |
 | --- | --- |
@@ -349,10 +368,12 @@ The product defines the exact models and record rules. Fix missing menu access
 in its read-only role, without granting full inventory operations. An absent
 PrintNode credential or empty printer list is expected.
 
-The browser adds a read-only transport boundary: web-client/assets/menu GETs,
-action loading and a closed set of ORM reads. It blocks business RPCs, server
-actions, reports/downloads, mail posting, external requests and websockets.
-Menu clicks remain available within this transport. `sign_out` and `sign_in`
+The product server guard is the read-only authority. The browser adds a small
+blocklist for known business-write RPCs, object buttons, server actions,
+reports/downloads, mail posting, external requests and websockets. It leaves
+localization, ordinary read methods and menu loading to the product web client,
+without maintaining a second list of every Odoo read. Menu clicks remain
+available within this transport. `sign_out` and `sign_in`
 steps use fixed private session endpoints for the same managed identity; they
 accept neither selectors nor credentials. Screenshots retain existing masking
 and private custody, and every run closes its browser without exporting sessions.

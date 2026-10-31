@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, cast
 import secrets as random_secrets
 import time
 import hashlib
@@ -25,7 +25,12 @@ from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_READONLY_FIXTURE,
 )
 from control_plane.contracts.preview_fixture import PreviewFixtureRequest
-from control_plane.preview_fixture import PreviewFixtureAdapter
+from control_plane.preview_fixture import (
+    PreviewFixtureAdapter,
+    fixture_preview_slot,
+    require_fixture_target_ownership,
+)
+from control_plane.disposable_lanes import resolve_disposable_preview, DisposableLaneStore
 from control_plane.contracts.preview_execution import (
     odoo_preview_target_key,
     odoo_preview_reconciliation_key,
@@ -77,6 +82,54 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
 
 WALKTHROUGH_SECRET_INTEGRATION = "odoo_walkthrough"
+
+
+def readonly_secret_prefix(task_id: str) -> str:
+    return "readonly-" + task_id + "-"
+
+
+def walkthrough_secret_name(request: OdooWalkthroughRequest, binding: str) -> str:
+    return (readonly_secret_prefix(request.task_id) if request.read_only else "task-") + binding
+
+
+def disable_walkthrough_credentials(
+    store: PostgresRecordStore,
+    request: OdooWalkthroughRequest,
+    actor: str,
+    *,
+    secret_id: str = "",
+    keep_secret_id: str = "",
+) -> None:
+    records = store.list_secret_records(
+        integration=WALKTHROUGH_SECRET_INTEGRATION,
+        context_name=request.context,
+        instance_name=request.instance,
+    )
+    bindings = store.list_secret_bindings(
+        integration=WALKTHROUGH_SECRET_INTEGRATION,
+        context_name=request.context,
+        instance_name=request.instance,
+    )
+    now = utc_now_timestamp()
+    for record in records:
+        selected = (
+            record.name.startswith(readonly_secret_prefix(request.task_id))
+            if request.read_only
+            else record.secret_id == secret_id
+        )
+        if not selected or record.secret_id == keep_secret_id:
+            continue
+        if record.status == "configured":
+            store.write_secret_record(
+                record.model_copy(
+                    update={"status": "disabled", "updated_at": now, "updated_by": actor}
+                )
+            )
+        for binding in bindings:
+            if binding.secret_id == record.secret_id:
+                store.write_secret_binding(
+                    binding.model_copy(update={"status": "disabled", "updated_at": now})
+                )
 
 
 class WalkthroughPrerequisite(StrEnum):
@@ -202,7 +255,27 @@ def _plan_preview_walkthrough(
             reason="Qualify the product-owned read-only test identity.",
         ),
     )
-    connection = fixture.connect(mutation=request.operation != "run")
+    connection = fixture.connect(mutation=request.operation == "provision")
+    if request.operation == "cleanup":
+        profile = store.read_product_profile_record(request.product)
+        preview = store.read_preview_record(request.preview_id)
+        slot = fixture_preview_slot(store, request.product, preview.anchor_pr_number)
+        owned = resolve_disposable_preview(
+            cast(DisposableLaneStore, store), profile, request.context, slot
+        )
+        if owned.preview_id != request.preview_id:
+            raise ValueError("The cleanup target is not this product's preview.")
+        safety = store.read_disposable_lane_safety(request.product, request.context, slot)
+        if safety is not None and safety.production_resources in {"shared", "separation_ready"}:
+            raise ValueError("Shared production resources forbid test-account cleanup.")
+        require_fixture_target_ownership(
+            store,
+            product=request.product,
+            context=request.context,
+            anchor_pr_number=preview.anchor_pr_number,
+            target_id=connection.evidence.target_id,
+            mutation=True,
+        )
     binding = fixture.runtime_binding(connection)
     fixture.binding = binding
     parsed = urlsplit(connection.selection.base_url)
@@ -246,7 +319,7 @@ def _plan_preview_walkthrough(
     account_binding = canonical_json_sha256(
         [request.product, request.context, request.task_id, copy_binding]
     )
-    secret_name = "task-" + account_binding
+    secret_name = walkthrough_secret_name(request, account_binding)
     secret = store.find_secret_record(
         scope="context_instance",
         integration=WALKTHROUGH_SECRET_INTEGRATION,
@@ -259,7 +332,7 @@ def _plan_preview_walkthrough(
     digest = canonical_json_sha256(
         [
             actor,
-            request.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"}),
+            request.operation_payload(exclude={"mode", "reviewed_plan_sha256"}),
             binding.model_dump(mode="json"),
             connection.selection.base_url,
             users[0].id,
@@ -537,7 +610,7 @@ def _walkthrough_preflight(
     ) as run:
         if run:
             assert request is not None
-            secret_name = "task-" + binding
+            secret_name = walkthrough_secret_name(request, binding)
             secret = store.find_secret_record(
                 scope="context_instance",
                 integration=WALKTHROUGH_SECRET_INTEGRATION,
@@ -547,7 +620,12 @@ def _walkthrough_preflight(
             )
             if operation == "run" and secret is None:
                 raise ValueError("There is no task account for this testing copy.")
-            if secret is not None and secret.status != "configured" and operation != "cleanup":
+            if (
+                secret is not None
+                and secret.status != "configured"
+                and operation != "cleanup"
+                and not (request.read_only and operation == "provision")
+            ):
                 raise ValueError("The task account is closed.")
             if secret is not None and operation != "cleanup" and not request.read_only:
                 created = datetime.fromisoformat(secret.created_at.replace("Z", "+00:00"))
@@ -562,7 +640,7 @@ def _walkthrough_preflight(
     digest = canonical_json_sha256(
         [
             actor,
-            request.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"}),
+            request.operation_payload(exclude={"mode", "reviewed_plan_sha256"}),
             selection.identity.model_dump(mode="json"),
             selection.base_url,
             copy_binding,
@@ -699,7 +777,9 @@ class WalkthroughAdapter:
                 context=self.request.context,
                 instance=self.request.instance,
             )
-            if secret is None and self.request.operation != "cleanup":
+            if (
+                secret is None or self.request.read_only and secret.status == "disabled"
+            ) and self.request.operation != "cleanup":
                 if self.request.operation != "provision":
                     raise ValueError("No task credential exists.")
                 write_secret_value(
@@ -768,33 +848,21 @@ class WalkthroughAdapter:
             if uid <= 2 and not (uid == 0 and self.request.operation == "cleanup"):
                 raise ValueError("Invalid testing account ID.")
             result.account_id = uid or None
-            if self.request.operation == "cleanup" and secret is not None:
-                # Revoke in Odoo before disabling the internal secret. Retain
-                # encrypted history and the marker for audit/retry, never reuse it.
-                now = utc_now_timestamp()
-                self.store.write_secret_record(
-                    secret.model_copy(
-                        update={
-                            "status": "disabled",
-                            "updated_at": now,
-                            "updated_by": self.actor,
-                        }
-                    )
+            if self.request.operation == "cleanup":
+                disable_walkthrough_credentials(
+                    self.store,
+                    self.request,
+                    self.actor,
+                    secret_id=secret.secret_id if secret is not None else "",
                 )
-                for binding in self.store.list_secret_bindings(
-                    integration=WALKTHROUGH_SECRET_INTEGRATION,
-                    context_name=self.request.context,
-                    instance_name=self.request.instance,
-                ):
-                    if binding.secret_id == secret.secret_id:
-                        self.store.write_secret_binding(
-                            binding.model_copy(
-                                update={
-                                    "status": "disabled",
-                                    "updated_at": now,
-                                }
-                            )
-                        )
+            elif self.request.operation == "provision" and self.request.read_only:
+                assert secret is not None
+                disable_walkthrough_credentials(
+                    self.store,
+                    self.request,
+                    self.actor,
+                    keep_secret_id=secret.secret_id,
+                )
             elif self.request.operation == "run":
                 lease.checkpoint_effect("browser_dispatch")
 
@@ -906,6 +974,7 @@ class InterruptedWalkthroughAdapter:
                     plan_sha256=self.request.reviewed_plan_sha256,
                     product=self.request.product,
                     context=self.request.context,
+                    instance=self.request.instance,
                     code="interrupted_task_requires_cleanup",
                 ).model_dump(mode="json"),
             },

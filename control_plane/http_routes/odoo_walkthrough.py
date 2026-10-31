@@ -16,6 +16,7 @@ from control_plane.contracts.preview_execution import (
 )
 from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_ROUTE,
+    WALKTHROUGH_PLAN_ACTION,
     WALKTHROUGH_RECONCILIATION_REQUIRED,
     OdooWalkthroughRequest,
     OdooWalkthroughResponse,
@@ -43,6 +44,7 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     director_agent_identity,
+    launchplane_identity_actor,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -63,11 +65,11 @@ def walkthrough_actor(identity: LaunchplaneIdentity) -> str:
         return f"github:{identity.github_id}"
     if isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity):
         return f"{type(identity).__name__}:{identity.subject}"
-    return ""
+    return launchplane_identity_actor(identity)
 
 
 def walkthrough_fingerprint(actor: str, request: OdooWalkthroughRequest) -> str:
-    return canonical_json_sha256([actor, request.model_dump(mode="json")])
+    return canonical_json_sha256([actor, request.operation_payload()])
 
 
 def register_walkthrough_route(
@@ -93,12 +95,16 @@ def register_walkthrough_route(
         if preview:
             allowed = director_agent_identity(identity) or dependencies.authorization_allows(
                 identity=identity,
-                action="odoo_preview_apply.execute",
+                action=(
+                    WALKTHROUGH_PLAN_ACTION
+                    if payload.mode == "dry-run"
+                    else "odoo_preview_apply.execute"
+                ),
                 product=payload.product,
                 context=payload.context,
                 target=AuthorizationTarget(scope="preview"),
             )
-            operator = operator or director_agent_identity(identity)
+            operator = allowed
         elif payload.mode == "apply":
             allowed = native_routes.native_driver_route_authorization_allows(
                 endpoint=odoo_testing_walkthrough,

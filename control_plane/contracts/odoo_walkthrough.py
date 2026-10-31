@@ -84,6 +84,12 @@ class OdooWalkthroughRequest(BaseModel):
     groups: tuple[str, ...] = Field(default=("base.group_user",), max_length=20)
     steps: tuple[WalkthroughStep, ...] = Field(default=(), max_length=50)
 
+    def operation_payload(self, *, exclude: set[str] | None = None) -> dict[str, object]:
+        omitted = set(exclude or ())
+        if not self.read_only and not self.preview_id and not self.generation_id:
+            omitted.update({"read_only", "preview_id", "generation_id"})
+        return self.model_dump(mode="json", exclude=omitted)
+
     @model_validator(mode="after")
     def validate_request(self) -> "OdooWalkthroughRequest":
         import re

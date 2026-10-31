@@ -403,10 +403,13 @@ if readonly:
     user=users._launchplane_readonly_test_identity(request['identity'],login,create=not preview and request['operation']=='provision')
     if len(user)!=1 or user.id<=2 or user.login!=login or not user.has_group(__READONLY_GROUP__) or (request.get('expected_account_id') is not None and user.id!=request['expected_account_id']):
         raise RuntimeError('Product read-only identity qualification failed')
-    if marker and marker['binding']!=request['binding'] and request['operation']=='provision':
+    if marker and (marker['binding']!=request['binding'] or marker['state']==__TASK_CLOSED_STATE__):
         if marker['account_id']!=user.id:
             raise RuntimeError('Read-only identity ownership changed')
-        marker=None
+        if request['operation']=='provision':
+            marker=None
+        elif request['operation']=='cleanup':
+            marker={**marker,'binding':request['binding'],'copy_binding':request['copy_binding']}
 if marker and (marker['binding']!=request['binding'] or len(user)!=1
                or user.id<=2 or user.login!=login):
     raise RuntimeError('Testing task account ownership changed')
