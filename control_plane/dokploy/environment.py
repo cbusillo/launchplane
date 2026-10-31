@@ -95,7 +95,10 @@ def _compose_encoded_keys(raw_env_text: str, header: str = _COMPOSE_HEADER) -> s
 
 
 def compose_environment_is_encoded(raw_env_text: str) -> bool:
-    return _compose_encoded_keys(raw_env_text, _COMPOSE_LITERAL_HEADER) is not None
+    return any(
+        _compose_encoded_keys(raw_env_text, header) is not None
+        for header in (_COMPOSE_HEADER, _COMPOSE_LITERAL_HEADER)
+    )
 
 
 def _compose_value(value: str, names: dict[str, str]) -> str:
@@ -143,12 +146,14 @@ def _literal_provider_environment(
     return values, decoded_keys
 
 
-def _provider_environment(raw_env_text: str) -> tuple[dict[str, str], set[str]]:
+def _legacy_provider_environment(raw_env_text: str) -> tuple[dict[str, str], set[str]]:
     values = _parse_dotenv(raw_env_text)
     encoded_keys = _compose_encoded_keys(raw_env_text) or set()
+    decoded_keys: set[str] = set()
     for key in encoded_keys & values.keys():
         wire_value = values[key]
         if _COMPOSE_PLAIN.fullmatch(wire_value):
+            decoded_keys.add(key)
             continue
         try:
             json_value = _COMPOSE_ESCAPES.sub(
@@ -166,6 +171,12 @@ def _provider_environment(raw_env_text: str) -> tuple[dict[str, str], set[str]]:
         except (ValueError, TypeError):
             continue
         values[key] = literal
+        decoded_keys.add(key)
+    return values, decoded_keys
+
+
+def _provider_environment(raw_env_text: str) -> tuple[dict[str, str], set[str]]:
+    values, _ = _legacy_provider_environment(raw_env_text)
     return _literal_provider_environment(raw_env_text, values)
 
 
@@ -221,8 +232,8 @@ def serialize_dokploy_env_text(
                 "Literal qualification requires a Compose target."
             )
         return _serialize_dotenv(env_map)
-    previous, encoded_keys = _provider_environment(current_env_text or "")
-    legacy_keys = _compose_encoded_keys(current_env_text or "") or set()
+    previous, legacy_keys = _legacy_provider_environment(current_env_text or "")
+    previous, encoded_keys = _literal_provider_environment(current_env_text or "", previous)
     previous_wire = _parse_dotenv(current_env_text or "")
     encoded: dict[str, str] = {}
     encoded_literal_keys: set[str] = set()

@@ -159,27 +159,34 @@ class DokployComposeConsumerTests(unittest.TestCase):
             "REFERENCE": "${APP_NAME}",
             "PROJECT": "${{project.INPUT}}",
             "OLD_TOML": '[legacy]\nname = "example"',
+            "JSON_KEPT": "${APP_NAME}",
         }
-        previous = api.serialize_dokploy_env_text(legacy_values)
-        before, _ = consume_compose_environment(
-            previous, tuple(legacy_values), project_env="INPUT=project-value"
-        )
-        with (
-            patch.object(api, "fetch_dokploy_target_payload", return_value={"env": previous}),
-            patch.object(api, "dokploy_request") as request,
-        ):
-            update_dokploy_target_artifact(
-                host="https://provider.invalid",
-                token="synthetic",
-                target_type="compose",
-                target_id="synthetic",
-                artifact_id="synthetic.invalid/example:next",
-            )
-        wire = request.call_args.kwargs["payload"]["env"]
-        after, _ = consume_compose_environment(
-            wire, tuple(legacy_values), project_env="INPUT=project-value"
-        )
-        self.assertEqual(after, before)
-        self.assertEqual(
-            api.parse_dokploy_env_text(wire)["ODOO_DB_PASSWORD"], legacy_values["ODOO_DB_PASSWORD"]
-        )
+        unmarked = api.serialize_dokploy_env_text(legacy_values)
+        saved = (ROOT / "tests/fixtures/dokploy-compose/legacy-literal.env").read_text()
+        for previous in (unmarked, saved + "\n" + unmarked):
+            with self.subTest(previous=previous):
+                before, _ = consume_compose_environment(
+                    previous, tuple(legacy_values), project_env="INPUT=project-value"
+                )
+                with (
+                    patch.object(
+                        api, "fetch_dokploy_target_payload", return_value={"env": previous}
+                    ),
+                    patch.object(api, "dokploy_request") as request,
+                ):
+                    update_dokploy_target_artifact(
+                        host="https://provider.invalid",
+                        token="synthetic",
+                        target_type="compose",
+                        target_id="synthetic",
+                        artifact_id="synthetic.invalid/example:next",
+                    )
+                wire = request.call_args.kwargs["payload"]["env"]
+                after, _ = consume_compose_environment(
+                    wire, tuple(legacy_values), project_env="INPUT=project-value"
+                )
+                self.assertEqual(after, before)
+                self.assertEqual(
+                    api.parse_dokploy_env_text(wire)["ODOO_DB_PASSWORD"],
+                    legacy_values["ODOO_DB_PASSWORD"],
+                )
