@@ -172,7 +172,7 @@ def _collected_request(
         actor = next_actor.read(status)
         action = status_field(status, "Next action") or action
         if actor and actor.startswith("agent:"):
-            authored = [
+            authored: list[dict[str, Any]] = [
                 {**row, "user": {"login": row["author"]}}
                 for row in discussion["comments"]
                 if str(row["author"]).casefold() in trusted
