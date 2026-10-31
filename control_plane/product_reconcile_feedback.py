@@ -24,6 +24,7 @@ from urllib.parse import quote
 import click
 
 from control_plane.child_process_errors import redact_untrusted_text
+from control_plane.client_test_notes import CLIENT_REVIEW_NOTES_PENDING
 from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackDeliveryStatus,
     PreviewPrFeedbackRecord,
@@ -204,9 +205,11 @@ def _preview_feedback(
     ):
         status = "failed"
         failure_summary = _failure_summary(error or _text(plan.get("last_failed_error_summary")))
+        if not error:
+            revision = _text(plan.get("last_failed_head_sha"))
     elif action == "wait" and plan.get("reason") == "client_test_notes_required":
         status = "pending"
-        waiting_for = _text(plan.get("detail"))
+        waiting_for = CLIENT_REVIEW_NOTES_PENDING
     elif action == "wait" and plan.get("reason") == "no_verified_build":
         status = "pending"
         waiting_for = "a verified build of this commit"

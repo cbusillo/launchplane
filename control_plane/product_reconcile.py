@@ -1912,6 +1912,13 @@ def reconcile_preview_target(
         transport=transport,
         pull_request_number=pull_request_number,
     )
+    if decision.plan.get("reason") == "preview_build_failed":
+        decision.plan.update(
+            held=bool(unresolved) or len(held) > 100,
+            held_reservations=recovery,
+            held_reservations_truncated=len(held) > 100,
+        )
+        return _preview_failure(decision.plan, "preview_build_failed")
     cleanup = (
         decision.plan.get("action") == "destroy"
         and decision.plan.get("reason") == "pull_request_not_open"
@@ -2025,8 +2032,6 @@ def reconcile_preview_target(
     if plan["action"] not in {"apply", "destroy"}:
         if unresolved:
             plan.update(held=True, reason="held_preview_recovery_required")
-        if plan.get("reason") == "preview_build_failed":
-            return _preview_failure(plan, "preview_build_failed")
         return ReconcileOutcome(plan)
     odoo = product_profile_uses_odoo_driver(profile)
     if not odoo and not reconciles_as_generic_web(profile):

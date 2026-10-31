@@ -7183,9 +7183,13 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.assertEqual(failed.last_plan["build_run_id"], 50)
         self.assertFalse(self.driver.changes)
         self.github.runs.clear()
+        next_head = "c" * 40
+        self.github.pull_request["head"] = {"sha": next_head}
         self.request("preview", 5)
         waiting = self.run_once()
-        self.github.add_run(51, PR_HEAD, event="pull_request")
+        feedback_record = self.store.list_preview_pr_feedback_records(limit=1)[0]
+        self.assertEqual(feedback_record.revision, PR_HEAD)
+        self.github.add_run(51, next_head, event="pull_request")
         self.request("preview", 5)
         published = self.run_once()
         for completed, status in ((failed, "failed"), (waiting, "failed"), (published, "ready")):
@@ -7193,6 +7197,18 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
             assert isinstance(feedback, dict)
             self.assertEqual(feedback["status"], status)
         self.assertNotIn("last_failed_error_code", published.last_plan)
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=OSError("Source unavailable")):
+            self.run_once()
+        self.github.runs.clear()
+        self.github.pull_request["head"] = {"sha": "d" * 40}
+        self.request("preview", 5)
+        self.run_once()
+        unknown_origin = self.store.list_preview_pr_feedback_records(limit=1)[0]
+        self.assertEqual(unknown_origin.revision, "")
+        self.assertEqual(
+            unknown_origin.failure_summary, record_failure_summary("preview_reconcile_failed")
+        )
 
     def test_a_failed_refresh_keeps_driver_text_out_and_waits_for_a_new_build(self) -> None:
         self.driver.refresh_status = "fail"
@@ -7980,6 +7996,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
 
     def test_notes_without_label_invite_client_and_missing_notes_are_visible(self) -> None:
         from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+        from control_plane.client_test_notes import CLIENT_REVIEW_NOTES_PENDING
 
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
@@ -7999,7 +8016,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.request("preview", 5)
         result = self.reconcile()
         self.assertEqual(result["reason"], "client_test_notes_required")
-        self.assertIn("Client test notes are missing", self.comment_body())
+        self.assertIn(CLIENT_REVIEW_NOTES_PENDING, self.comment_body())
         self.assertEqual(
             tuple(self.owner_review_status_calls), calls_before_refusal + (("site", 5),)
         )
@@ -8117,6 +8134,18 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             )
             self.assertEqual(self.owner_review_status_calls, [("site", 5)])
             self.assertEqual(self.comments.writes, writes)
+
+            self.github.runs[50]["conclusion"] = "failure"
+            self.request("preview", 5)
+            build_failed = self.run_once()
+            self.assertTrue(build_failed.last_plan["held"])
+            self.assertEqual(
+                build_failed.last_plan["last_failed_error_code"], "preview_build_failed"
+            )
+            self.assertEqual(
+                self.store.list_held_odoo_preview_reservations(product="site"), held_before
+            )
+            self.assertEqual(apply.call_count, 1)
 
     def test_review_publication_failure_preserves_preview_feedback(self) -> None:
         previous = self.reconcile_preview()["pr_feedback"]

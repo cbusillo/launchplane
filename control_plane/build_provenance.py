@@ -463,14 +463,15 @@ def _select_build_run(
         if run.get("status") == "completed" and run.get("conclusion") == "success"
     ]
     if not successful:
-        latest = max(runs, key=_build_run_order) if runs else None
-        if (
-            purpose == "preview"
-            and latest is not None
-            and latest.get("status") == "completed"
-            and latest.get("conclusion")
+        failed = [
+            run
+            for run in runs
+            if run.get("status") == "completed"
+            and run.get("conclusion")
             in {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
-        ):
+        ]
+        if purpose == "preview" and failed:
+            latest = max(failed, key=_build_run_order)
             raise BuildProvenanceError(
                 "The preview build did not complete successfully.",
                 code="build_run_failed",
