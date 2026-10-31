@@ -336,6 +336,7 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
             failed = self.run_once()
         disposal = self.store.list_held_odoo_preview_reservations(product="site")[0]
         carried = failed.last_plan["disposal_original_reservation_id"]
+        self.github.runs[50]["conclusion"] = "failure"
         self.advance_preview_recovery_grace = False
         self.native.reset_mock()
         for pr_state in ("open", None):
@@ -345,6 +346,15 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
                 waiting = self.run_once()
                 self.assertTrue(waiting.last_plan["held"])
                 self.assertEqual(waiting.last_plan["disposal_original_reservation_id"], carried)
+                if pr_state == "open":
+                    self.assertEqual(waiting.last_plan["reason"], "held_preview_recovery_required")
+                    self.assertEqual(
+                        waiting.last_plan["last_failed_error_code"], "preview_build_failed"
+                    )
+                    self.assertEqual(
+                        waiting.last_plan["destroy_failed_attempts"],
+                        failed.last_plan["destroy_failed_attempts"],
+                    )
         self.github.pull_request["state"] = "open"
         self.advance_preview_recovery_grace = True
         self.request("preview", 5)

@@ -6124,6 +6124,13 @@ private_key_context = "example_context"
                 context_name="verireel-testing",
                 limit=1,
             )
+            feedback = listed_records[0]
+            filesystem = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "files")
+            filesystem.write_preview_pr_feedback_record(feedback)
+            self.assertEqual(
+                filesystem.read_preview_pr_feedback_record(feedback.feedback_id), feedback
+            )
+            self.assertEqual(store.read_preview_pr_feedback_record(feedback.feedback_id), feedback)
             store.close()
 
         self.assertEqual(len(listed_records), 1)
