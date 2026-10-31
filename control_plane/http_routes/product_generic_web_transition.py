@@ -166,21 +166,24 @@ def register_product_generic_web_transition_routes(
             records={"product_profile": product},
             result=plan.model_copy(update={"applied": True}).model_dump(mode="json"),
         )
-        result = record_store.compare_and_write_product_profile_record(
-            expected_record=profile,
-            replacement_record=replacement,
-            mutation=DbOnlyMutationRequest(
-                scope=idempotency_scope(identity),
-                route_path=ROUTE,
-                idempotency_key=key,
-                request_fingerprint=fingerprint,
-                lease_owner=trace,
-                response_status_code=202,
-                response_trace_id=trace,
-                response_payload=response.model_dump(mode="json", exclude_none=True),
-                lease_seconds=300,
-            ),
-        )
+        try:
+            result = record_store.compare_and_write_product_profile_record(
+                expected_record=profile,
+                replacement_record=replacement,
+                mutation=DbOnlyMutationRequest(
+                    scope=idempotency_scope(identity),
+                    route_path=ROUTE,
+                    idempotency_key=key,
+                    request_fingerprint=fingerprint,
+                    lease_owner=trace,
+                    response_status_code=202,
+                    response_trace_id=trace,
+                    response_payload=response.model_dump(mode="json", exclude_none=True),
+                    lease_seconds=300,
+                ),
+            )
+        except ValueError as error:
+            refusal(400, "invalid_generic_web_transition", str(error))
         if result.status == "replayed":
             assert result.idempotency_record is not None
             return replay_idempotent_response(

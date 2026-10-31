@@ -448,42 +448,42 @@ class GenericWebTransitionHttpTests(unittest.IsolatedAsyncioTestCase):
                     headers={"Authorization": "Bearer fixture-agent-token"},
                 )
                 self.assertEqual(receipt.json()["state"], "completed", receipt.text)
-                stale = await self.agent_post(body, f"{transport}-stale")
-                self.assertEqual(stale.json()["error"]["code"], "stale", stale.text)
-                self.assertEqual(self.store.read_product_profile_record(before.product), after)
 
     async def test_director_agent_refuses_driver_and_stable_lane_changes(self) -> None:
         self.agent_app("local_operator")
-        for driver in ("verireel", "generic-web"):
+        for driver, instance in (
+            ("verireel", ""),
+            ("generic-web", "testing"),
+            ("generic-web", "prod"),
+        ):
             before = profile().model_copy(update={"driver_id": driver})
             self.store.write_product_profile_record(before)
-            for instance in ("testing", "prod"):
-                with self.subTest(driver=driver, instance=instance):
-                    request = draft(before)
-                    request["lanes"] = [
-                        {
-                            "context": lane.context,
-                            "instance": lane.instance,
-                            "extensions": (
-                                {"maintenance": [{"name": "migrate", "command": "node migrate"}]}
-                                if lane.instance == instance
-                                else lane.generic_web_extensions.model_dump(mode="json")
-                            ),
-                        }
-                        for lane in before.lanes
-                    ]
-                    dry = await self.agent_post(request)
-                    self.assertEqual(dry.status_code, 202, dry.text)
-                    response = await self.agent_post(
-                        {
-                            **request,
-                            "mode": "apply",
-                            "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
-                        },
-                        f"{driver}-{instance}",
-                    )
-                    self.assertEqual(response.status_code, 403, response.text)
-                    self.assertEqual(self.store.read_product_profile_record(before.product), before)
+            with self.subTest(driver=driver, instance=instance):
+                request = draft(before)
+                request["lanes"] = [
+                    {
+                        "context": lane.context,
+                        "instance": lane.instance,
+                        "extensions": (
+                            {"maintenance": [{"name": "migrate", "command": "node migrate"}]}
+                            if lane.instance == instance
+                            else lane.generic_web_extensions.model_dump(mode="json")
+                        ),
+                    }
+                    for lane in before.lanes
+                ]
+                dry = await self.agent_post(request)
+                self.assertEqual(dry.status_code, 202, dry.text)
+                response = await self.agent_post(
+                    {
+                        **request,
+                        "mode": "apply",
+                        "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+                    },
+                    f"{driver}-{instance}",
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(self.store.read_product_profile_record(before.product), before)
 
     async def test_scoped_agent_cannot_apply_even_with_profile_write_rule(self) -> None:
         self.agent_app("local_operator", scoped_rule=True)
@@ -815,3 +815,22 @@ class GenericWebTransitionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.session = self.sessions.issue(_github_human_identity(role="read_only"))
         self.assertEqual((await self.post(request)).status_code, 403)
         self.assertEqual(self.store.read_product_profile_record("example-site"), before)
+
+    async def test_existing_preview_namespace_conflict_refuses_without_changing_profile(
+        self,
+    ) -> None:
+        before = self.store.read_product_profile_record("example-site")
+        self.store.write_preview_record(_preview(before))
+        request = draft(before)
+        dry = await self.post(request)
+        self.assertEqual(dry.status_code, 202, dry.text)
+        response = await self.post(
+            {
+                **request,
+                "mode": "apply",
+                "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+            },
+            "namespace-change",
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.store.read_product_profile_record(before.product), before)

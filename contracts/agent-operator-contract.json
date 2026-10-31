@@ -46,7 +46,7 @@
     },
     "operations": [
       {
-        "idempotency": "required_for_apply",
+        "idempotency": "apply",
         "identity_dependencies": [
           "read_browser_mutation_identity"
         ],
@@ -1474,8 +1474,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "83bdc3fd57d27858d6759cf68fb6a17606ad48f4"
+    "source_commit_sha": "8e7557eed82c36578ea488c0d601a52cbe75db1d"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "9607c90add9fca0ec1893e757bbb7110f83cba25c9d29568310caa9119abe7cc"
+  "semantic_digest_sha256": "e27e19e78ee1262ad110a3e5180941490a954d2ff316fa3a1dfa68d1516982d1"
 }

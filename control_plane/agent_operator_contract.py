@@ -114,7 +114,7 @@ OPERATION_SPECS = (
         "Review shared-web declarations; Director agents may apply preview-only changes on an existing generic-web product, preserving every stable declaration and existing credential gates.",
         ("service_api", "browser"),
         ("dry-run", "apply"),
-        "required_for_apply",
+        "apply",
         ("reviewed_plan_sha256",),
     ),
     OperationSpec(
