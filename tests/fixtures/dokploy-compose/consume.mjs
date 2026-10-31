@@ -10,15 +10,17 @@ const { parse } = createRequire(import.meta.url)('./dotenv/main.cjs');
 const input = JSON.parse(readFileSync(0, 'utf8'));
 const context = vm.createContext({
   parse, join, dirname,
+  quote: args => args.map(value => "'" + value.replaceAll("'", "'\\''") + "'").join(" "),
   paths: () => ({ COMPOSE_PATH: input.root }),
   encodeBase64: value => Buffer.from(value).toString('base64'),
 });
-for (const file of ['prepare-environment.ts', 'create-env-file.ts']) {
+const providerSuffix = input.provider === 'current' ? '-current' : '';
+for (const file of [`prepare-environment${providerSuffix}.ts`, `create-env-file${providerSuffix}.ts`]) {
   vm.runInContext(stripTypeScriptTypes(readFileSync(join(fixture, file), 'utf8'))
     .replaceAll('export const ', 'const '), context);
 }
 context.compose = {
-  env: input.env, appName: 'synthetic', composePath: 'compose.json',
+  env: input.env, appName: 'synthetic', composePath: 'compose.json', composeType: 'docker-compose',
   environment: { env: input.environmentEnv ?? '', project: { env: input.projectEnv ?? '' } },
 };
 mkdirSync(join(input.root, 'synthetic', 'code'), { recursive: true });

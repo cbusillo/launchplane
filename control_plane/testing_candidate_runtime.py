@@ -417,6 +417,7 @@ def candidate_runtime_inputs(
             isolated_testing=True,
             private_backend_alias=allocation.namespace,
             runtime_port=profile.runtime_port,
+            runtime_identity=identity,
         ),
         runtime_environment=values,
         workflow_environment=workflow.inline_environment,

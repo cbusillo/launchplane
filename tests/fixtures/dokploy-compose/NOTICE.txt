@@ -20,3 +20,12 @@ types with Node's built-in stripper, and executes the generated file command
 inside the test's temporary directory. No network, provider or application
 containers are used. Docker Compose is provisioned from the repository CI's
 single version declaration; it is not vendored here.
+
+Current-provider identity qualification additionally uses the unmodified exports
+getCreateEnvFileCommand, prepareEnvironmentVariables,
+prepareEnvironmentVariablesForFile and parseEnvironmentKeyValuePair from:
+https://github.com/Dokploy/dokploy/blob/v0.30.10/packages/server/src/utils/builders/compose.ts
+https://github.com/Dokploy/dokploy/blob/v0.30.10/packages/server/src/utils/docker/utils.ts
+They are stored in create-env-file-current.ts and prepare-environment-current.ts
+under the same Apache-2.0 license and copyright. The older excerpts above remain
+for historical transport behavior; they do not qualify the current provider.

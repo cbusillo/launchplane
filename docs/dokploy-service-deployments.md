@@ -73,6 +73,24 @@ separate operation under its existing authorization and lane holds.
 
 ### Environment wire formats
 
+The current provider's generated-file writer additionally quotes each value.
+The legacy Compose literal codec can therefore deliver a quoted JSON string
+instead of an object. Odoo's rendered `web` and `script-runner` environments
+now receive the exact control-plane-owned runtime identity directly, as the
+preview gateway already does. Stable replacements pass the new deployment
+identity through both ordinary and maintained-copy renderers; previews and
+fresh testing candidates use their current identity as well. This changes no
+stored credentials or historical custody. The native health endpoint still
+requires a JSON object. A daemon-free check uses the current provider's actual
+file writer and Compose to verify the final application identity.
+
+The legacy arbitrary-value transport below remains a separate correction under
+[the native-writer issue](https://github.com/cbusillo/launchplane/issues/5443).
+Its old consumer fixture proves historical behavior, not current-provider
+literal delivery. Do not infer current integration correctness from a codec
+round trip or a stored value alone.
+
+
 Dokploy application targets consume one dotenv layer. Docker Compose targets
 consume two: Dokploy parses the stored environment and writes those values to
 the generated `.env`, which Compose then reads for interpolation and `env_file`.

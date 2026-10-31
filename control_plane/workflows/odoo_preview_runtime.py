@@ -1916,6 +1916,7 @@ def _execute_refresh(
             domain_certificate_type=plan.domain_certificate_type,
             preview_filestore=filestore,
             preview_identity=expected_runtime_identity if not restore_upstream else None,
+            runtime_identity=expected_runtime_identity,
         )
 
         def qualify_resources() -> None:

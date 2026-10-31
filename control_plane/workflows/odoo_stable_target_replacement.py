@@ -2443,6 +2443,7 @@ def execute_odoo_stable_target_replacement_apply(
                 published_copy,
                 image_reference=image_reference,
                 hold_web=web_held_until_integration_readback(plan.instance),
+                runtime_identity=runtime_identity,
             )
         else:
             compose_file = dokploy_compose.render_odoo_raw_compose_file(
@@ -2458,6 +2459,7 @@ def execute_odoo_stable_target_replacement_apply(
                 domain_certificate_type=generation.certificate_type
                 if generation is not None
                 else "none",
+                runtime_identity=runtime_identity,
             )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
         current_identity = _runtime_identity_map(current_env_map)

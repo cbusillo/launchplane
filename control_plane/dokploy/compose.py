@@ -177,7 +177,15 @@ def render_odoo_raw_compose_file(
     domain_certificate_type: Literal["none", "letsencrypt"] = "none",
     preview_filestore: dict[str, object] | None = None,
     preview_identity: RuntimeIdentity | None = None,
+    runtime_identity: RuntimeIdentity | None = None,
 ) -> str:
+    if (
+        runtime_identity is not None
+        and preview_identity is not None
+        and runtime_identity != preview_identity
+    ):
+        raise ValueError("Preview and application runtime identities disagree.")
+    application_identity = runtime_identity or preview_identity
     if preview_identity is not None and (
         publish_host_ports
         or mount_workflow_ssh
@@ -417,9 +425,16 @@ networks:
   dokploy-network:
     external: true
 """
-    if preview_filestore is None and preview_identity is None:
+    if preview_filestore is None and application_identity is None:
         return compose_file
     compose = yaml.safe_load(compose_file)
+    if application_identity is not None:
+        identity_environment = {
+            key: value.replace("$", "$$")
+            for key, value in runtime_identity_env(application_identity).items()
+        }
+        for service in ("web", "script-runner"):
+            compose["services"][service]["environment"].update(identity_environment)
     if preview_filestore is not None:
         compose["volumes"]["odoo_filestore"] = preview_filestore
         for service in ("web", "script-runner"):

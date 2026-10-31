@@ -2197,6 +2197,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             mount_workflow_ssh=True,
             isolated_testing=False,
             domain_certificate_type="none",
+            runtime_identity=verify_runtime_identity.call_args.kwargs["expected_runtime_identity"],
         )
         sync_source.assert_called_once()
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")

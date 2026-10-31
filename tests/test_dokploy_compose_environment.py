@@ -45,7 +45,12 @@ def consumer_commands_available() -> bool:
 
 
 def consume_compose_environment(
-    wire: str, keys: tuple[str, ...], *, project_env: str = ""
+    wire: str,
+    keys: tuple[str, ...],
+    *,
+    project_env: str = "",
+    provider: str = "legacy",
+    compose_input: dict[str, object] | None = None,
 ) -> tuple[dict[str, dict[str, str]], str]:
     """Run the original provider file writer and Compose without a daemon."""
     with tempfile.TemporaryDirectory() as directory:
@@ -54,7 +59,9 @@ def consume_compose_environment(
                 *json.loads(os.environ["LAUNCHPLANE_TEST_NODE_COMMAND"]),
                 str(ROOT / "tests/fixtures/dokploy-compose/consume.mjs"),
             ],
-            input=json.dumps({"root": directory, "env": wire, "projectEnv": project_env}),
+            input=json.dumps(
+                {"root": directory, "env": wire, "projectEnv": project_env, "provider": provider}
+            ),
             text=True,
             capture_output=True,
             check=True,
@@ -69,7 +76,7 @@ def consume_compose_environment(
                 "file": {"image": "synthetic.invalid/example:latest", "env_file": [".env"]},
             }
         }
-        (code / "compose.json").write_text(json.dumps(compose))
+        (code / "compose.json").write_text(json.dumps(compose_input or compose))
         command = [
             *json.loads(os.environ["LAUNCHPLANE_TEST_COMPOSE_COMMAND"]),
             "--project-directory",
@@ -173,3 +180,54 @@ class DokployComposeConsumerTests(unittest.TestCase):
         self.assertEqual(
             api.parse_dokploy_env_text(wire)["ODOO_DB_PASSWORD"], legacy_values["ODOO_DB_PASSWORD"]
         )
+
+    def test_odoo_identity_reaches_current_provider_consumers(self) -> None:
+        import yaml
+        from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+        from control_plane.dokploy.compose import render_odoo_raw_compose_file
+
+        identity = RuntimeIdentity(
+            product="example",
+            context="example",
+            instance="testing",
+            deployment_record_id="deployment-current",
+            artifact_id="artifact-current",
+            source_git_ref="a" * 40,
+            image_reference="synthetic.invalid/example@sha256:" + "a" * 64,
+        )
+        identity_values = runtime_identity_env(identity)
+        compose = yaml.safe_load(
+            render_odoo_raw_compose_file(
+                image_reference=identity.image_reference,
+                hold_web_until_integration_readback=False,
+                runtime_identity=identity,
+            )
+        )
+        services = {
+            name: {
+                "image": service["image"],
+                "environment": service["environment"],
+                "env_file": [".env"],
+            }
+            for name, service in compose["services"].items()
+            if name in {"web", "script-runner"}
+        }
+        wire = api.serialize_dokploy_env_text(
+            {
+                **identity_values,
+                "ODOO_DB_NAME": "synthetic",
+                "ODOO_DB_USER": "synthetic",
+                "ODOO_DB_PASSWORD": "synthetic",
+                "ODOO_MASTER_PASSWORD": "synthetic",
+            },
+            target_type="compose",
+        )
+        actual, _ = consume_compose_environment(
+            wire, tuple(identity_values), provider="current", compose_input={"services": services}
+        )
+        for service in actual.values():
+            self.assertEqual(service, identity_values)
+            self.assertEqual(
+                json.loads(service["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"]),
+                identity.model_dump(mode="json", exclude_none=True),
+            )

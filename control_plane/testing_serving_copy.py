@@ -1,6 +1,7 @@
 """Resolve adopted copy custody without treating a namespace as serving authority."""
 
 from pathlib import Path
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.runtime_environments import SiteRuntimeEnvironment
 from control_plane.contracts.testing_publication import TestingPublicationRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
@@ -250,7 +251,11 @@ def omitted_maintenance_keys(store: PostgresRecordStore, context: str) -> frozen
 
 
 def render_maintained_testing_copy(
-    record: TestingPublicationRecord, *, image_reference: str, hold_web: bool
+    record: TestingPublicationRecord,
+    *,
+    image_reference: str,
+    hold_web: bool,
+    runtime_identity: RuntimeIdentity | None = None,
 ) -> str:
     from control_plane.dokploy.compose import render_odoo_raw_compose_file
 
@@ -262,6 +267,7 @@ def render_maintained_testing_copy(
         mount_workflow_ssh=False,
         isolated_testing=True,
         private_backend_alias=record.plan.candidate.namespace,
+        runtime_identity=runtime_identity,
     )
 
 
