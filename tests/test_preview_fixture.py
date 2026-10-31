@@ -68,6 +68,7 @@ from control_plane.contracts.preview_generation_record import (
     PreviewPullRequestSummary,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetStaffTestingHold,
@@ -1017,8 +1018,29 @@ class PreviewFixtureLaneTests(unittest.TestCase):
                         updated_at=store.read_product_profile_record(adapter.product).updated_at,
                     )
                 )
+                if not foreign:
+                    self.assertEqual(
+                        adapter.connect().evidence.target_id, fixture_binding().target_id
+                    )
                 with self.assertRaises(ValueError):
                     adapter.connect(mutation=True)
+
+    def test_owned_physical_provider_target_drift_refuses_apply(self) -> None:
+        with self.preview() as (store, adapter, slot), self.provider(adapter):
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context=adapter.request.context,
+                    instance=slot,
+                    provider_id="dokploy",
+                    target_category="compose",
+                    target_id="different-target",
+                    display_name="replacement",
+                    updated_at=store.read_product_profile_record(adapter.product).updated_at,
+                )
+            )
+            self.assertEqual(adapter.connect().evidence.target_id, fixture_binding().target_id)
+            with self.assertRaises(ValueError):
+                adapter.connect(mutation=True)
 
     def test_mutation_requires_unique_context_and_matching_current_namespace(self) -> None:
         for change in ("context_owner", "duplicate", "prefix"):

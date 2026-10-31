@@ -417,19 +417,21 @@ def require_fixture_target_ownership(
     mutation: bool = False,
 ) -> None:
     slot = fixture_preview_slot(store, product, anchor_pr_number)
+    targets = (
+        *store.list_dokploy_target_id_records(),
+        *store.list_physical_provider_target_records(),
+    )
     require_lane_target_ownership(
-        (*store.list_dokploy_target_id_records(), *store.list_physical_provider_target_records()),
+        targets,
         context=context,
         instance=slot,
         target_id=target_id,
     )
-    if mutation:
-        try:
-            target = store.read_dokploy_target_id_record(context_name=context, instance_name=slot)
-        except FileNotFoundError:
-            return
-        if target.target_id != target_id:
-            raise ValueError("Fixture runtime differs from its owned preview target.")
+    if mutation and any(
+        (item.context, item.instance) == (context, slot) and item.target_id != target_id
+        for item in targets
+    ):
+        raise ValueError("Fixture runtime differs from its owned preview target.")
 
 
 def require_fixture_container_cancelled(
