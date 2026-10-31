@@ -100,6 +100,20 @@ for (const state of cases) {
           products.push(extra);
         }
       }
+      const healthy = ["healthy", "missing-route", "expired-route"].includes(state);
+      const tone = healthy ? "verified" : ["failed", "failed-with-warning", "incident", "production-unknown"].includes(state) ? "danger" : ["stale", "delivery-warning", "recovery-warning", "recovery-stale"].includes(state) ? "warning" : "missing";
+      lane.lane_status = module.fixtureLaneStatus(tone);
+      lane.lane_status.transitions = [];
+      if (state === "stale") lane.lane_status.current.sidebar_tone = "stale";
+      if (state === "delivery-warning") {
+        lane.lane_status.current.warning_reasons = ["Production delivery failed; the current production release is healthy"];
+        lane.lane_status.current.release_healthy = true;
+      }
+      for (const extra of products.slice(1)) {
+        const extraState = extra.product.replace("example-", "");
+        extra.environments[0].lane_status = module.fixtureLaneStatus(extraState === "failing" ? "danger" : extraState === "unknown" ? "missing" : extraState);
+        extra.environments[0].lane_status.transitions = [];
+      }
       const laneLabel = lane.environment === "prod" ? "Production" : "Testing";
       const detail = Object.assign(module.environmentForFixture("products", product.product, lane.environment), lane);
       return { detail, product, products, identity: module.fixtureIdentity, now, laneLabel, laneName: lane.environment, testingDescription: sidebarStatus(product.environments[0] ?? null, laneLabel).description };

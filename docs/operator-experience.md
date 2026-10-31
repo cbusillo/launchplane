@@ -1077,3 +1077,19 @@ Database-backed declaration apply also refuses a concurrent product-profile
 change rather than overwriting it with an earlier profile snapshot.
 Existing workflow callers receive the same concurrent-change refusal; review
 current metadata and run a new dry run before retrying a stale apply.
+
+## Lane status for the sidebar and agents
+
+Product overviews and environment reads include `lane_status`, derived by the
+service from health checks, open incidents, runtime identity, TLS, warnings and
+evidence freshness. The sidebar and other lane signals render its `current`
+result. Its ordered `transitions` contain only changes caused by evidence expiry;
+clients select the last transition whose `after` timestamp has passed. An open
+page therefore expires cached evidence without a second health algorithm.
+
+The catalog's `product-status-read --product PRODUCT` reads the same product
+overview once and returns every recorded lane's sidebar tone and description,
+attention and warning reasons, plus the product's warnings. Missing lane status
+fails the read rather than implying healthy. Omitted lanes are not recorded,
+as shown by the sidebar's absent-lane icon. The read does not change a lane,
+resolve an incident or authorize a deployment.

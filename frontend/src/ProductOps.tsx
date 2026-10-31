@@ -30,7 +30,7 @@ import { ProductReleaseReviewLink } from "./ProductReleaseReviewLink";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, environmentReleaseHealthy, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, environmentReleaseHealthy, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -1312,7 +1312,7 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
     return "Needs attention";
   }
   if (tone === "warning") {
-    return environment ? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
+    return environment ? publicObservationGap(environment) ?? "Review warning" : "Review warning";
   }
   if (!environment || tone === "missing") {
     return "Evidence missing";

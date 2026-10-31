@@ -240,6 +240,7 @@ export function environmentForFixture(
     available_actions: summary.available_actions,
     driver_extensions: summary.driver_extensions,
     health_monitoring: summary.health_monitoring,
+    lane_status: summary.lane_status,
     public_ingress: summary.public_ingress,
     topology: {
       ...summary.topology,
@@ -2052,6 +2053,7 @@ function environmentFixture({
     context: `atlas-${environment}`,
     base_url: baseUrl,
     health_url: `${baseUrl}/health`,
+    lane_status: fixtureLaneStatus(warning ? "danger" : "verified"),
     trust_state: trustState,
     provenance: evidence,
     warnings: warning ? [ingressSummary] : [],
@@ -2320,6 +2322,7 @@ function missingEnvironmentFixture(
     context: `beacon-${environment}`,
     base_url: `https://${host}`,
     health_url: `https://${host}/health`,
+    lane_status: fixtureLaneStatus("missing"),
     trust_state: "missing",
     provenance: missing,
     warnings: ["Operational evidence is missing."],
@@ -2991,5 +2994,23 @@ export async function applyProductProfileFieldForFixture(
       plan_sha256: "a".repeat(64), reason: payload.reason,
       lanes: field === "image" ? [{ instance: "prod", current_artifact_id: "ghcr.io/example/old-package@sha256:fixture" }] : [],
     },
+  };
+}
+
+export function fixtureLaneStatus(tone: "verified" | "danger" | "warning" | "stale" | "missing"): NonNullable<ProductEnvironmentSummary["lane_status"]> {
+  const reason = "Public ingress observation needs review";
+  return {
+    evaluated_at: OBSERVED_AT,
+    current: {
+      tone, sidebar_tone: tone,
+      description: tone === "verified" ? "Healthy" : tone === "danger" ? `Alert; ${reason}` : tone === "warning" ? "Warning; Public DNS/TLS observation incomplete" : tone === "stale" ? "Stale evidence; awaiting current observations" : "Unknown (unverified)",
+      attention_reasons: tone === "danger" ? [reason] : [], warning_reasons: [],
+      release_healthy: tone === "verified", public_observation_gap: null,
+    },
+    transitions: tone === "verified" ? [{ after: STALE_AFTER, signal: {
+      tone: "warning", sidebar_tone: "stale", description: "Stale evidence; awaiting current observations",
+      attention_reasons: [], warning_reasons: [], release_healthy: false,
+      public_observation_gap: "Public route observation incomplete",
+    } }] : [],
   };
 }

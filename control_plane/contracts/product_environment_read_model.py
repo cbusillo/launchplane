@@ -5,11 +5,12 @@ import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.contracts.product_lane_status import ProductLaneStatus, build_product_lane_status
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -493,6 +494,13 @@ class ProductEnvironmentDriverExtensions(BaseModel):
 class ProductEnvironmentSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    lane_status: ProductLaneStatus | None = None
+
+    @model_validator(mode="after")
+    def derive_lane_status(self) -> Self:
+        self.lane_status = build_product_lane_status(self)
+        return self
+
     environment: str
     context: str
     base_url: str = ""
@@ -569,6 +577,13 @@ class ProductSiteOverview(BaseModel):
 
 class ProductEnvironmentDetail(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    lane_status: ProductLaneStatus | None = None
+
+    @model_validator(mode="after")
+    def derive_lane_status(self) -> Self:
+        self.lane_status = build_product_lane_status(self)
+        return self
 
     schema_version: int = Field(default=1, ge=1)
     product: str
