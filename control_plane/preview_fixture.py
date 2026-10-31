@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import cast
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.preview_execution import (
     odoo_preview_target_key,
     odoo_preview_reconciliation_key,
@@ -417,7 +419,7 @@ def require_fixture_target_ownership(
     mutation: bool = False,
 ) -> None:
     slot = fixture_preview_slot(store, product, anchor_pr_number)
-    targets = (
+    targets: tuple[DokployTargetIdRecord | ProviderTargetRecord, ...] = (
         *store.list_dokploy_target_id_records(),
         *store.list_physical_provider_target_records(),
     )
