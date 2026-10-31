@@ -904,7 +904,7 @@ class PreviewFixtureLaneTests(unittest.TestCase):
         calls: list[str] = []
 
         def schedule(**arguments: object) -> dict[str, str]:
-            mode = str(arguments["mode"])
+            mode = cast(str, arguments["mode"])
             callback = cast(Callable[[str], None], arguments["before_provider_mutation"])
             callback(ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
             if mode == "apply" and before_trigger:
