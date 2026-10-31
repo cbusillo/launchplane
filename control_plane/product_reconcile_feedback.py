@@ -95,6 +95,7 @@ def post_reconcile_feedback(
     previous = request.last_plan.get(PR_FEEDBACK_PLAN_KEY)
     previous_entry = cast(dict[str, object], previous) if isinstance(previous, dict) else None
     feedback: _Feedback | None = None
+    retaining_failure = False
     try:
         profile = cast(ReconcileFeedbackStore, record_store).read_product_profile_record(
             request.product
@@ -115,6 +116,7 @@ def post_reconcile_feedback(
             candidate=candidate,
             previous=previous_entry,
         )
+        retaining_failure = feedback is not None and feedback is not candidate
         if feedback is None:
             return previous_entry
         body_sha256 = f"sha256:{hashlib.sha256(feedback.body.encode()).hexdigest()}"
@@ -145,9 +147,9 @@ def post_reconcile_feedback(
         failed_entry: dict[str, object] = {
             **(
                 previous_entry
-                if feedback is None
+                if (feedback is None or retaining_failure)
                 and previous_entry is not None
-                and previous_entry.get("status") in ("failed", "cleanup_failed")
+                and previous_entry.get("status") == "failed"
                 else {}
             ),
             "delivery_status": "failed",
@@ -172,7 +174,9 @@ def _retain_preview_failure(
     if (
         request.target_kind != "preview"
         or previous is None
-        or previous.get("status") not in ("failed", "cleanup_failed")
+        or previous.get("status") != "failed"
+        or plan.get("reason")
+        in {"pull_request_not_open", "merge_train_candidate", "preview_not_configured"}
         or (candidate is not None and candidate.status not in {"pending", "destroyed"})
         or (candidate is not None and plan.get("pull_request_state") != "open")
     ):
@@ -187,7 +191,7 @@ def _retain_preview_failure(
         or record.repository.casefold() != profile.repository.casefold()
         or record.anchor_pr_number != request.pull_request_number
         or record.context != profile.preview.context
-        or record.status not in {"failed", "cleanup_failed"}
+        or record.status != "failed"
         or record.marker != PREVIEW_FEEDBACK_MARKER
     ):
         raise ValueError("The saved preview failure does not match this change.")
@@ -284,10 +288,11 @@ def _preview_feedback(
         status, revision = "destroyed", ""
     elif (
         action == "none"
-        and plan.get("reason") == "pull_request_not_open"
+        and plan.get("reason")
+        in {"pull_request_not_open", "merge_train_candidate", "preview_not_configured"}
         and not error
         and isinstance(previous := request.last_plan.get(PR_FEEDBACK_PLAN_KEY), dict)
-        and previous.get("status") in {"pending", "cleared"}
+        and previous.get("status") in {"pending", "failed", "cleared"}
     ):
         status, revision = "cleared", ""
     else:

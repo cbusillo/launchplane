@@ -7184,6 +7184,15 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.assertEqual(failed.last_plan["last_failed_error_code"], "preview_build_failed")
         self.assertEqual(failed.last_plan["build_run_id"], 50)
         self.assertFalse(self.driver.changes)
+        self.github.pull_request["state"] = "closed"
+        self.request("preview", 5)
+        closed = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(closed, dict)
+        self.assertEqual(closed["status"], "cleared")
+        self.assertFalse(self.comments.on(5))
+        self.github.pull_request["state"] = "open"
+        self.request("preview", 5)
+        self.run_once()
         self.request("preview", 5)
         with patch.object(self.github, "get_json", side_effect=OSError("Source unavailable")):
             self.run_once()
@@ -7253,10 +7262,61 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
                 self.assertEqual(blocked["feedback_id"], feedback_id)
                 self.assertEqual(self.comments.writes, writes)
         self.request("preview", 5)
+        with patch.object(
+            self.store, "write_preview_pr_feedback_record", side_effect=OSError("Write unavailable")
+        ):
+            write_failed = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(write_failed, dict)
+        self.assertEqual(write_failed["feedback_id"], feedback_id)
+        self.request("preview", 5)
         recovered = self.run_once().last_plan["pr_feedback"]
         assert isinstance(recovered, dict)
         self.assertEqual(recovered["delivery_status"], "delivered")
         self.assertEqual(recovered["status"], "failed")
+
+        new_head = "e" * 40
+        self.github.pull_request["head"] = {"sha": new_head}
+        self.github.add_run(51, new_head, event="pull_request")
+        self.github.runs[51]["conclusion"] = "failure"
+        self.request("preview", 5)
+        with patch.object(
+            self.store, "write_preview_pr_feedback_record", side_effect=OSError("Write unavailable")
+        ):
+            self.run_once()
+        self.request("preview", 5)
+        restored = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(restored, dict)
+        saved = self.store.read_preview_pr_feedback_record(str(restored["feedback_id"]))
+        self.assertEqual(saved.revision, new_head)
+        self.assertEqual(saved.delivery_status, "delivered")
+
+    def test_successful_cleanup_replaces_its_failure_for_an_open_change(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        for result, error, status in (
+            ("fail", "Cleanup attempt failed", "cleanup_failed"),
+            ("pass", "", "destroyed"),
+        ):
+            with (
+                self.subTest(result=result),
+                patch(
+                    "control_plane.product_reconcile.reconcile_product_request",
+                    return_value=ReconcileOutcome(
+                        {
+                            "action": "destroy",
+                            "reason": "interrupted_preview_restore",
+                            "pull_request_state": "open",
+                            "preview_result_status": result,
+                            "head_sha": PR_HEAD,
+                        },
+                        error=error,
+                    ),
+                ),
+            ):
+                self.request("preview", 5)
+                feedback = self.run_once().last_plan["pr_feedback"]
+                assert isinstance(feedback, dict)
+                self.assertEqual(feedback["status"], status)
 
     def test_a_failed_refresh_keeps_driver_text_out_and_waits_for_a_new_build(self) -> None:
         self.driver.refresh_status = "fail"
