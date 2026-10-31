@@ -291,8 +291,6 @@ def run_walkthrough_browser(
                         screenshots.append(base64.b64encode(png).decode("ascii"))
                     else:
                         locator = page.locator(step.selector)
-                        if locator.count() != 1:
-                            raise ValueError("A step must select exactly one element.")
                         # Browser scripts may not fill secrets or select an iframe.
                         require_safe_browser_control(locator)
                         if step.action == "fill":

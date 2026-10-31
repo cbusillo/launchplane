@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import MagicMock, PropertyMock, patch
 from typing import Any
 
+from playwright.sync_api import Error as PlaywrightError
+
 from control_plane.contracts.odoo_walkthrough import WalkthroughStep
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.odoo_walkthrough_browser import (
@@ -20,7 +22,6 @@ class OpaqueBrowserTests(unittest.TestCase):
         self.context = self.browser.new_context.return_value
         self.page = self.context.new_page.return_value
         self.page.url = "https://testing.example/web"
-        self.page.locator.return_value.count.return_value = 1
         self.page.locator.return_value.evaluate.return_value = True
         self.page.screenshot.return_value = b"\x89PNG\r\n\x1a\nfixture"
         self.context.request.post.return_value.status = 200
@@ -136,6 +137,31 @@ class OpaqueBrowserTests(unittest.TestCase):
         self.page.locator.return_value.fill.assert_called_once_with("TEST return")
         self.assertFalse(self.browser.new_context.call_args.kwargs["accept_downloads"])
 
+    def test_late_rendered_controls_can_be_read_and_clicked(self) -> None:
+        shell = self.page.locator.return_value
+        for action in ("visible", "click"):
+            with self.subTest(action=action):
+                control = MagicMock()
+                rendered = False
+
+                def resolve_control(_script: str) -> bool:
+                    nonlocal rendered
+                    rendered = True
+                    return True
+
+                control.count.side_effect = lambda: int(rendered)
+                control.evaluate.side_effect = resolve_control
+                self.page.locator.side_effect = lambda selector: (
+                    control if selector == ".delayed" else shell
+                )
+                passed, _ = self.run_browser(
+                    WalkthroughStep(action=action, selector=".delayed"), read_only=True
+                )
+                self.assertEqual(passed, 1)
+                self.assertTrue(rendered)
+                if action == "click":
+                    control.click.assert_called_once_with(no_wait_after=True)
+
     def test_signout_and_signin_use_only_the_private_task_identity(self) -> None:
         authenticated = self.context.request.post.return_value
         signed_out = MagicMock(status=200)
@@ -232,10 +258,11 @@ class OpaqueBrowserTests(unittest.TestCase):
         self.context.close.assert_called_once()
 
     def test_readonly_step_failure_settles_only_after_the_browser_closes(self) -> None:
-        self.page.locator.return_value.count.return_value = 0
+        self.page.locator.return_value.evaluate.side_effect = PlaywrightError("Control timed out")
         with self.assertRaises(ReadonlyBrowserCheckFailed) as failed:
-            self.run_browser(WalkthroughStep(action="visible", selector=".missing"), read_only=True)
+            self.run_browser(WalkthroughStep(action="click", selector=".missing"), read_only=True)
         self.assertEqual(failed.exception.steps_passed, 0)
+        self.page.locator.return_value.click.assert_not_called()
         self.context.close.assert_called_once()
         self.browser.close.assert_called_once()
         self.context.close.side_effect = RuntimeError("Unverified close")
@@ -256,7 +283,7 @@ class OpaqueBrowserTests(unittest.TestCase):
     def test_readonly_failed_step_rechecks_the_live_runtime_before_settling(self) -> None:
         healthy = self.context.request.get.return_value
         self.context.request.get.side_effect = [healthy, healthy, MagicMock(status=503)]
-        self.page.locator.return_value.count.return_value = 0
+        self.page.locator.return_value.evaluate.side_effect = PlaywrightError("Control timed out")
         with self.assertRaises(ValueError) as failed:
             self.run_browser(WalkthroughStep(action="visible", selector=".missing"), read_only=True)
         self.assertNotIsInstance(failed.exception, ReadonlyBrowserCheckFailed)
