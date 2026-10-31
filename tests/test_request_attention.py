@@ -13,6 +13,7 @@ from control_plane.request_attention import (
     CollectedRequest,
     OpenRequestPage,
     RequestAttentionPage,
+    SUPERVISOR_ACTOR,
     attention_sources,
     build_request_attention_page,
 )
@@ -85,7 +86,14 @@ class RequestAttentionTests(unittest.TestCase):
     def test_person_and_event_waits_remain_owned_and_released_work_routes_to_supervisor(
         self,
     ) -> None:
-        for actor in ("person:client", "event:current CI", None, "agent"):
+        for actor in (
+            "person:client",
+            "event:current CI",
+            None,
+            "agent",
+            "agent:supervisor",
+            "agent:SuPeRvIsOr",
+        ):
             with self.subTest(actor=actor):
                 self.read.return_value = OpenRequestPage(
                     requests=(source_row(next_actor=actor),), has_more=False
@@ -93,7 +101,10 @@ class RequestAttentionTests(unittest.TestCase):
                 row = self.page().requests[0]
                 self.assertIsNone(row.owning_agent)
                 self.assertEqual(
-                    row.next_actor, actor if actor and actor != "agent" else "agent:Supervisor"
+                    row.next_actor,
+                    actor
+                    if actor and not actor.casefold().startswith("agent")
+                    else SUPERVISOR_ACTOR,
                 )
 
     def test_incomplete_coverage_is_explicit(self) -> None:
@@ -145,7 +156,7 @@ class RequestAttentionSourceTests(unittest.TestCase):
             "state": "OPEN",
             "createdAt": "2026-10-30T18:00:00Z",
             "updatedAt": "2026-10-30T19:50:00Z",
-            "lastEditedAt": "2026-10-30T18:10:00Z",
+            "lastEditedAt": None,
             "comments": self.connection([]),
             **changes,
         }
@@ -182,16 +193,7 @@ class RequestAttentionSourceTests(unittest.TestCase):
             author={"login": "team", "__typename": "User"}, comments=self.connection([status])
         )
         self.assertEqual(self.read_rows([trusted]).requests[0].next_actor, row.next_actor)
-        edited = self.raw(
-            body=wrap_contributor_plan(
-                {"body": "Client edited the original request."},
-                "## Current Status\nNext actor: agent:worker",
-            )
-        )
-        unverifiable = self.read_rows([edited]).requests[0]
-        self.assertIsNone(unverifiable.next_actor)
         forged = self.read_rows([self.raw()]).requests[0]
-        self.assertNotEqual(unverifiable.next_action, forged.next_action)
         self.assertIsNone(forged.next_actor)
         claim = {
             "worker": "worker",
@@ -235,6 +237,62 @@ class RequestAttentionSourceTests(unittest.TestCase):
             .next_actor,
             row.next_actor,
         )
+
+    def test_body_provenance_does_not_resurrect_superseded_status(self) -> None:
+        ordinary = self.read_rows([self.raw()]).requests[0]
+        latest_actor = "person:client"
+        latest = self.comment(
+            f"## Current Status\nNext actor: {latest_actor}\nNext action: Check the menu.",
+            9,
+            "2026-10-30T19:40:00Z",
+        )
+        acknowledgement = self.comment("Thanks.", 10, "2026-10-30T19:50:00Z")
+        for managed in ("## Current Status\nNext actor: agent:new-worker", ""):
+            for previous_actor in (None, "agent:old-worker", "person:client", "event:old checks"):
+                with self.subTest(managed=bool(managed), previous_actor=previous_actor):
+                    previous = (
+                        [
+                            self.comment(
+                                f"## Current Status\nNext actor: {previous_actor}\nNext action: Old action."
+                            )
+                        ]
+                        if previous_actor
+                        else []
+                    )
+                    edited = self.raw(
+                        body=wrap_contributor_plan({"body": "Requester added details."}, managed),
+                        editor={"login": "client-agent", "__typename": "User", "databaseId": 8},
+                        lastEditedAt="2026-10-30T19:30:00Z",
+                        comments=self.connection(previous),
+                    )
+                    unresolved = self.read_rows([edited]).requests[0]
+                    self.assertIsNone(unresolved.next_actor)
+                    self.assertNotEqual(unresolved.next_action, ordinary.next_action)
+                    restored = self.read_rows(
+                        [
+                            {
+                                **edited,
+                                "comments": self.connection([*previous, latest, acknowledgement]),
+                            }
+                        ]
+                    ).requests[0]
+                    self.assertEqual(restored.next_actor, latest_actor)
+        trusted_editor = {"login": "plan-bot", "__typename": "Bot", "databaseId": 7}
+        wrapped = self.raw(
+            body=wrap_contributor_plan({"body": "Request"}, "Plan to triage."),
+            editor=trusted_editor,
+            lastEditedAt="2026-10-30T19:30:00Z",
+        )
+        self.assertEqual(self.read_rows([wrapped]).requests[0].next_action, ordinary.next_action)
+        for body, expected in (("## Current Status\n", None), ("No status section.", latest_actor)):
+            raw = self.raw(
+                body=body,
+                author=trusted_editor,
+                editor=trusted_editor,
+                lastEditedAt="2026-10-30T19:50:00Z",
+                comments=self.connection([latest]),
+            )
+            self.assertEqual(self.read_rows([raw]).requests[0].next_actor, expected)
 
     def test_cursor_reads_continue_from_the_source_cursor_and_reuse_one_token(self) -> None:
         first = self.connection([self.raw()], "after-7")

@@ -257,10 +257,10 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
                 self.assertEqual(
                     self.requested[-1]["repository_ids"], [int(_inventory().repository_id)]
                 )
+                permissions = self.requested[-1]["permissions"]
+                assert isinstance(permissions, dict)
+                self.assertEqual(permissions, delivery._PERMISSIONS[purpose])
                 if purpose in {"repository_read", "admission_read"}:
-                    permissions = self.requested[-1]["permissions"]
-                    if not isinstance(permissions, dict):
-                        self.fail("Token mint omitted its permission bounds.")
                     self.assertNotIn("write", permissions.values())
 
     def test_temporary_provider_failure_is_retryable_and_does_not_become_missing_configuration(

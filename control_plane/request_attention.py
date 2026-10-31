@@ -7,6 +7,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 
 REQUEST_PAGE_LIMIT = 100
+SUPERVISOR_ACTOR = "agent:Supervisor"
 
 
 class CollectedRequest(BaseModel):
@@ -127,6 +128,8 @@ def build_request_attention_page(
         if not row.open or open_ids.intersection(row.canonical_source_ids):
             continue
         actor, action = row.next_actor, row.next_action
+        if actor is None or actor == "agent" or actor.casefold() == SUPERVISOR_ACTOR.casefold():
+            actor = SUPERVISOR_ACTOR
         assigned = actor.removeprefix("agent:") if actor and actor.startswith("agent:") else None
         request = WaitingRequest(
             source_id=row.source_id,
@@ -136,8 +139,8 @@ def build_request_attention_page(
             title=row.title,
             products=source.products,
             requester=row.requester,
-            owning_agent=assigned if assigned and assigned.casefold() != "supervisor" else None,
-            next_actor=actor if actor and actor != "agent" else "agent:Supervisor",
+            owning_agent=assigned if actor != SUPERVISOR_ACTOR else None,
+            next_actor=actor,
             next_action=action,
             created_at=row.created_at,
             age_seconds=max(
