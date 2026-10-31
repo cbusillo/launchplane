@@ -104,7 +104,6 @@ def register_walkthrough_route(
                 context=payload.context,
                 target=AuthorizationTarget(scope="preview"),
             )
-            operator = allowed
         elif payload.mode == "apply":
             allowed = native_routes.native_driver_route_authorization_allows(
                 endpoint=odoo_testing_walkthrough,
@@ -124,7 +123,7 @@ def register_walkthrough_route(
                 context=payload.context,
                 target=AuthorizationTarget(scope="instance", instances=("testing",)),
             )
-        if (not operator and not payload.read_only) or not allowed:
+        if not operator or not allowed:
             refuse("authorization_denied", "Identity cannot operate this testing task.", 403)
         if not isinstance(record_store, PostgresRecordStore):
             refuse("database_required", "Testing tasks require shared database storage.", 503)
@@ -195,7 +194,7 @@ def register_walkthrough_route(
                         refuse("preview_busy", "Another operation holds this preview.")
                     assert check is not None
                     check()
-                elif not preview:
+                elif not preview and payload.mode == "apply":
                     owner = reservations.enter_context(
                         postgres_store.odoo_synchronous_lane_reservation(
                             product=payload.product,

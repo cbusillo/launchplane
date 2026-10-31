@@ -49,6 +49,7 @@ from control_plane.http_routes.odoo_walkthrough import (
     walkthrough_fingerprint,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar
+from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.odoo_runtime_reads import (
     OdooRuntimeConnection,
     OdooRuntimeEvidence,
@@ -72,10 +73,13 @@ from control_plane.service_auth import (
     LaunchplaneIdentity,
     LocalOperatorPolicyRule,
     LaunchplaneAuthzPolicy,
+    BearerIdentityConfig,
+    GitHubActionsPolicyRule,
 )
 from tests.test_odoo_connection_isolation import SqliteCursor, seed
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import request as http_request
+from tests.support.auth import StubVerifier, identity as workflow_identity, scoped_agent_transport
 
 
 def task_request(**changes: Any) -> OdooWalkthroughRequest:
@@ -352,21 +356,26 @@ class TaskRouteTests(unittest.TestCase):
             ),
         )
 
-    def invoke(self, request: OdooWalkthroughRequest, key: str = "") -> tuple[int, dict[str, Any]]:
+    def invoke(
+        self, request: OdooWalkthroughRequest, key: str = "", token: str = ""
+    ) -> tuple[int, dict[str, Any]]:
         response = asyncio.run(
             http_request(
                 self.app,
                 "POST",
                 WALKTHROUGH_ROUTE,
                 payload=request.model_dump(mode="json"),
-                headers={"Idempotency-Key": key},
+                headers={
+                    "Idempotency-Key": key,
+                    **({"Authorization": "Bearer " + token} if token else {}),
+                },
             )
         )
         return response.status_code, response.json()
 
-    def test_preview_authority_keeps_secret_and_receipt_on_the_exact_preview(self) -> None:
+    def test_preview_secret_and_receipt_are_bound_to_the_exact_preview(self) -> None:
         self.preview_target = True
-        self.identity = TerminalAgentIdentity(subject="client-agent", token_label="preview-token")
+        self.identity = LocalOperatorIdentity(subject="preview-agent", token_label="preview-token")
         identity = self.plan.connection.selection.identity.model_copy(
             update={
                 "instance": "example-pr-1",
@@ -455,15 +464,120 @@ class TaskRouteTests(unittest.TestCase):
         self.assertEqual(recovered["result"]["instance"], identity.instance)
         self.assertEqual(self.account.call_count, native_calls)
 
-    def test_scoped_terminal_identity_can_plan_readonly_testing_without_operator_type(self) -> None:
-        self.identity = TerminalAgentIdentity(subject="client-agent", token_label="testing-token")
-        request = task_request(read_only=True, task_id=canonical_json_sha256("example-odoo")[:32])
-        status, _ = self.invoke(request)
-        self.assertEqual(status, 200)
-        self.account.assert_not_called()
-        self.allowed = False
-        status, _ = self.invoke(request)
+    def use_real_identity_dependency(
+        self, config: BearerIdentityConfig, policy: LaunchplaneAuthzPolicy
+    ) -> None:
+        self.app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(workflow_identity()),
+            authz_policy=policy,
+            bearer_identity_config=config,
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        self.planner.side_effect = WalkthroughPrerequisiteError(
+            WalkthroughPrerequisite.GENERATION_MISSING
+        )
+
+    def readonly_request(self, *, preview: bool, mode: str) -> OdooWalkthroughRequest:
+        return task_request(
+            read_only=True,
+            task_id=canonical_json_sha256("example-odoo")[:32],
+            instance="example-pr-1" if preview else "testing",
+            preview_id="preview-one" if preview else "",
+            generation_id="generation-one" if preview else "",
+            mode=mode,
+            reviewed_plan_sha256=self.plan.digest if mode == "apply" else "",
+        )
+
+    def test_real_operator_dependency_preserves_supported_readonly_paths(self) -> None:
+        config = BearerIdentityConfig(
+            local_operator_token="fixture-token",
+            local_operator_subject="fixture-director",
+            local_operator_token_label="fixture",
+        )
+        self.use_real_identity_dependency(config, LaunchplaneAuthzPolicy(schema_version=2))
+        with (
+            patch.object(
+                self.store, "odoo_synchronous_lane_reservation", side_effect=AssertionError
+            ),
+            patch.object(
+                self.store, "testing_replacement_execution_lock", side_effect=AssertionError
+            ),
+        ):
+            for preview in (False, True):
+                status, body = self.invoke(
+                    self.readonly_request(preview=preview, mode="dry-run"), token="fixture-token"
+                )
+                self.assertEqual(status, 409, body)
+                self.assertEqual(
+                    body["error"]["code"], WalkthroughPrerequisite.GENERATION_MISSING.value
+                )
+        status, body = self.invoke(
+            self.readonly_request(preview=True, mode="apply"), "preview", "fixture-token"
+        )
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body["error"]["code"], WalkthroughPrerequisite.GENERATION_MISSING.value)
+        self.planner.reset_mock()
+        status, _ = self.invoke(
+            self.readonly_request(preview=False, mode="apply"), "testing", "fixture-token"
+        )
         self.assertEqual(status, 403)
+        self.planner.assert_not_called()
+
+    def test_real_dependency_refuses_terminal_and_legacy_workflow_callers(self) -> None:
+        caller = workflow_identity()
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(
+                GitHubActionsPolicyRule(repository=caller.repository, instances=("*",)),
+                GitHubActionsPolicyRule(repository=caller.repository),
+            ),
+        )
+        for config, token in (
+            (
+                BearerIdentityConfig(
+                    terminal_agent_token="fixture-token",
+                    terminal_agent_subject="fixture-director",
+                    terminal_agent_token_label="fixture",
+                ),
+                "fixture-token",
+            ),
+            (BearerIdentityConfig(), "valid-token"),
+        ):
+            self.use_real_identity_dependency(config, policy)
+            for preview in (False, True):
+                for mode in ("dry-run", "apply"):
+                    with self.subTest(token=token, preview=preview, mode=mode):
+                        status, body = self.invoke(
+                            self.readonly_request(preview=preview, mode=mode), "fixture", token
+                        )
+                        self.assertEqual(status, 403, body)
+            self.planner.assert_not_called()
+
+    def test_real_scoped_operator_still_requires_its_existing_action_policy(self) -> None:
+        config = BearerIdentityConfig(
+            local_operator_token="fixture-token",
+            local_operator_subject="scoped-operator",
+            local_operator_token_label="fixture",
+        )
+        rule = LocalOperatorPolicyRule(
+            subjects=("scoped-operator",),
+            token_labels=("fixture",),
+            products=("example-odoo",),
+            contexts=("example",),
+            instances=("testing",),
+            actions=(WALKTHROUGH_ACTION,),
+        )
+        with scoped_agent_transport():
+            for rules, expected in (((), 403), ((rule,), 409)):
+                self.use_real_identity_dependency(
+                    config, LaunchplaneAuthzPolicy(schema_version=2, local_operators=rules)
+                )
+                status, body = self.invoke(
+                    self.readonly_request(preview=False, mode="apply"), "scoped", "fixture-token"
+                )
+                self.assertEqual(status, expected, body)
+        self.account.assert_not_called()
 
     def test_fixed_readonly_identity_can_be_revoked_and_reopened_with_a_new_secret(self) -> None:
         request = task_request(read_only=True, task_id=canonical_json_sha256("example-odoo")[:32])
@@ -616,16 +730,14 @@ class TaskRouteTests(unittest.TestCase):
     def test_native_prerequisite_keeps_observation_kind_without_dispatch(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeProgramFailed
         from control_plane.copy_readback_diagnostics import ReadbackPredicate
-        from control_plane.odoo_walkthrough import _prerequisite
 
         for kind in ("refused", "unavailable"):
             cause = NativeProgramFailed(
                 "private-value", predicate=ReadbackPredicate.RUNNER_RUNNING, kind=kind
             )
-            with self.assertRaises(WalkthroughPrerequisiteError) as caught:
-                with _prerequisite(WalkthroughPrerequisite.PHYSICAL_COPY):
-                    MagicMock(side_effect=cause)()
-            self.planner.side_effect = caught.exception
+            self.planner.side_effect = WalkthroughPrerequisiteError(
+                WalkthroughPrerequisite.PHYSICAL_COPY, native_failure=cause
+            )
             status, response = self.invoke(task_request())
             self.assertEqual(status, 409)
             self.assertEqual(response["detail"]["code"], cause.code)
@@ -1057,6 +1169,16 @@ class AccountProgramTests(unittest.TestCase):
         self.request["password"] = "current-service-secret"
         self.execute()
         self.assertEqual(self.user.write.call_args.args[0]["password"], self.request["password"])
+
+    def test_readonly_reprovision_never_commits_forbidden_privileges(self) -> None:
+        self.configure_readonly_identity()
+        self.execute()
+        self.env.cr.commit.reset_mock()
+        self.user.has_group.return_value = True
+        self.user.has_group.side_effect = None
+        with self.assertRaises(RuntimeError):
+            self.execute()
+        self.env.cr.commit.assert_not_called()
 
     def test_readonly_cleanup_revokes_a_reactivated_closed_marker(self) -> None:
         self.configure_readonly_identity()

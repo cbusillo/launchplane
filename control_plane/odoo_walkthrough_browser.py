@@ -34,7 +34,6 @@ def readonly_browser_request(method: str, path: str, payload: object) -> bool:
             "/web/dataset/call_button",
             "/web/action/run",
             "/mail/message/post",
-            "/web/dataset/resequence",
             "/web/binary/upload",
             "/web/binary/upload_attachment",
             "/mail/attachment/upload",

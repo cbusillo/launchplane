@@ -449,8 +449,6 @@ if request['operation']=='provision':
             field='group_ids' if 'group_ids' in users._fields else 'groups_id'
             user=users.create({'name':'TEST Launchplane walkthrough','login':login,
                 'password':request['password'],'active':True,field:[(6,0,[group.id for group in groups])]})
-        if any(env.ref(name,raise_if_not_found=False) and user.has_group(name) for name in __FORBIDDEN_GROUPS__):
-            raise RuntimeError('Testing task privileges are forbidden')
         marker={'account_id':user.id,'binding':request['binding'],'copy_binding':request['copy_binding'],'state':__TASK_ACTIVE_STATE__,'groups':sorted(request['groups'])}
         write_string_parameter(parameters,key,json.dumps(marker,sort_keys=True))
 elif request['operation']=='cleanup':
@@ -463,8 +461,8 @@ elif request['operation']=='cleanup':
 else:
     if not marker or marker['state']!=__TASK_ACTIVE_STATE__ or not user.active:
         raise RuntimeError('Task is not active')
-    if any(env.ref(name,raise_if_not_found=False) and user.has_group(name) for name in __FORBIDDEN_GROUPS__):
-        raise RuntimeError('Task privileges changed')
+if request['operation'] in ('provision','run') and any(env.ref(name,raise_if_not_found=False) and user.has_group(name) for name in __FORBIDDEN_GROUPS__):
+    raise RuntimeError('Testing task privileges are forbidden')
 commit_started=True
 env.cr.commit()
 if request['operation']=='cleanup' and marker:

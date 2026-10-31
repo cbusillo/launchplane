@@ -31,9 +31,8 @@ product, context and `testing` instance. The inert dry run uses
 `odoo_testing_walkthrough.plan`. Declaring these actions installs no policy
 rules, grants or credentials. A machine denial remains `authorization_denied`;
 record its trace and exact action under [denial handling](authorization-authority.md#denial-handling).
-The ordinary mode that permits business writes requires these administrator
-transports. Read-only identities use existing scoped authorization without an
-additional caller-type restriction; see [read-only product identities](#read-only-product-identities).
+Terminal-agent and GitHub Actions identities are not accepted on this mutation
+surface. Use the existing `local_operator` transport selected by the Director.
 Do not switch identities or use another operation to carry a denied call.
 The Director decides any new grant through the existing policy approval path.
 An exact `local_operator` subject/token-label rule may leave product and context
@@ -56,8 +55,8 @@ isolation passes, the account remains active and its native sessions are not
 revoked by the service consumption deadline. Outcome reconciliation remains
 read-only and does not require passing isolation to observe an already
 dispatched operation.
-Dry runs take only a transient lane reservation and perform authenticated
-provider/host reads; they create no account, secret or operative request.
+Dry runs perform authenticated provider/host reads without taking an execution
+reservation; they create no account, secret or operative request.
 
 Prerequisite refusals return HTTP 409 with a fixed `error.code` and trace ID.
 Neither private exception text nor provider output is returned. Diagnose the
@@ -311,13 +310,14 @@ them. Ordinary task accounts keep their existing lifetime.
 
 Testing retains its copy, isolation, use and authorization checks. A preview
 requires its native `instance`, `preview_id` and `generation_id`, matching its
-active serving identity. It uses existing Director-agent preview authority or
+active serving identity. On the same administrator transports, it uses existing Director-agent preview authority or
 `odoo_preview_apply.execute` for its product preview context. Inert planning
 uses the existing `odoo_testing_walkthrough.plan` read action. Neither adds a
 grant or expands testing-only execution rules. Planning checks the selected runtime,
 database isolation and presence of the fixed login through native read-only queries;
 it executes no product fixture or schedule. Provisioning retains fixture protected-use and exclusive target-ownership
-checks. Cleanup can revoke its own account under a hold, while keeping current
+checks, including the preview's protected-use facts. A coordinated activation
+window is required when a Client is using it. Cleanup can revoke its own account under a hold, while keeping current
 runtime, unique target ownership and production-separation checks. Browser work retains
 current identity and isolation checks. The preview uses its existing execution
 lock and durable provider fence. Recovery observes the original receiver/key;
