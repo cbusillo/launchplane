@@ -12,7 +12,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_review_status import OwnerReviewStatusPublisher
-from control_plane.product_review import resolve_serving_preview
+from control_plane.product_review import require_product_review_store, resolve_serving_preview
 from control_plane.release_review import PullRequestNotes, UNREAD_PULL_REQUEST_NOTES
 from control_plane.client_test_notes import client_test_notes
 from control_plane.service_auth import (
@@ -355,7 +355,9 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_accept_binds_the_fresh_head_check_to_the_submitted_preview(self) -> None:
         self._write_product()
         observed = resolve_serving_preview(
-            store=self.store, profile=_profile(), pull_request_number=_PULL_REQUEST
+            store=require_product_review_store(self.store),
+            profile=_profile(),
+            pull_request_number=_PULL_REQUEST,
         )
         generation = _preview_generation_read_record()
         next_head = "b" * 40
