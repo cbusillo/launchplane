@@ -7461,21 +7461,15 @@ def create_launchplane_fastapi_app(
             from control_plane.http_routes.support import run_in_worker_thread
 
             fixture = maintenance_request.maintenance
-            fixture_allowed = resolved_authz_policy_runtime.allows(
+            fixture_allowed = director_agent_identity(
+                identity
+            ) or resolved_authz_policy_runtime.allows(
                 identity=identity,
                 action="odoo_preview_apply.execute",
                 product=maintenance_request.product,
                 context=fixture.context,
                 target=AuthorizationTarget(scope="preview"),
             )
-            if fixture.mode != "apply" and director_agent_identity(identity):
-                fixture_allowed = fixture_allowed or resolved_authz_policy_runtime.allows(
-                    identity=identity,
-                    action="operations.read",
-                    product=maintenance_request.product,
-                    context=fixture.context,
-                    target=AuthorizationTarget(scope="instance", instances=(fixture.instance,)),
-                )
             if not fixture_allowed:
                 raise _launchplane_http_error(
                     status_code=403,
