@@ -236,11 +236,30 @@ the card starts with the current declarations. Maintenance and schedule commands
 run in the product artifact and use existing managed runtime settings.
 
 Review returns the normalized declarations and a plan bound to the whole current
-profile. Apply requires that exact review, a signed-in administrator's existing
-`product_profile.write` authority, CSRF and an operation key. A concurrent profile
+profile. A signed-in administrator applies with existing `product_profile.write`
+authority and CSRF. The Director's authenticated `local_operator` or `terminal_agent`
+identity can apply preview-only declarations on an existing `generic-web` product
+through the same service API, under `product_profile.preview_transition.apply`.
+It cannot change the driver or any stable-lane declaration, including testing and
+production. Other agent identities cannot apply this operation, even with a
+profile-write rule. No access policy or credential is created or changed.
+
+For an agent call, read `GET /v1/product-profiles/{product}` first. Submit each
+lane's current `generic_web_extensions` unchanged as its `extensions`, and the
+reviewed preview declarations from the product's runtime contract. Use
+`mode: dry-run`, inspect the normalized result, then submit the same declarations
+and reason with `mode: apply`, `reviewed_plan_sha256` and an `Idempotency-Key`.
+Read the profile back independently. Credential copying still passes the existing
+preview runtime-key safety gate at deployment; this declaration writes no secret
+and supplies no live-site key. Keep preview resource prefixes and custody intact.
+
+Every apply requires that exact review and an operation key. A concurrent profile
 edit refuses the apply. The write and original response commit atomically;
 a lost response keeps the card locked to its original key until replay or the
 profile mutation receipt settles it.
+API callers retain their original body and key on a lost response; the profile's
+`mutation-receipts/generic-web-transition?operation_key=...` read settles completion
+without repeating a mutation. Same-key replay returns the original response.
 
 This changes driver and extension declarations only. Lane placement, Client,
 release policy, health settings, runtime settings, secrets, artifacts and deployment
