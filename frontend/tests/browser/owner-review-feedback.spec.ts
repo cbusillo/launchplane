@@ -1,4 +1,14 @@
-import { waitForState, expect, test } from "./state";
+import { waitForState, expect, test, type Page } from "./state";
+
+async function openAndConfirmPreview(page: Page): Promise<void> {
+  const link = page.getByRole("link", { name: "Open the preview" });
+  const url = await link.getAttribute("href");
+  await page.context().route(url!, route => route.fulfill({ contentType: "text/html", body: "<h1>Preview</h1>" }));
+  const [preview] = await Promise.all([page.waitForEvent("popup"), link.click()]);
+  await expect(preview.getByRole("heading", { name: "Preview" })).toBeVisible();
+  await preview.close();
+  await page.getByRole("checkbox", { name: "I looked at this preview and it is right." }).check();
+}
 
 test("a carried acceptance explains invisible follow-ups and can be replaced", { tag: "@responsive" }, async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=carried-invisible-decision");
@@ -40,6 +50,7 @@ for (const scenario of ["former-client-carried-decision", "earlier-carried-decis
     if (scenario === "carried-without-preview") {
       await expect(accept).toHaveCount(0);
     } else {
+      await openAndConfirmPreview(page);
       await expect(accept).toBeEnabled();
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -56,6 +67,7 @@ test("a saved decision with pending delivery keeps the reason available to retry
   await expect(page.getByRole("textbox")).toHaveValue(reason);
   await expect(page.getByLabel("Recorded decision").locator("blockquote")).toHaveText(reason);
   await page.getByRole("button", { name: "Retry delivery", exact: true }).click();
+  await openAndConfirmPreview(page);
   await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "Request changes" }).click();
   await expect(page.getByLabel("Recorded decision")).toHaveCount(1);
@@ -72,21 +84,37 @@ test("an earlier accepted decision cannot look like approval of the current prev
   await page.screenshot({ path: testInfo.outputPath("owner-feedback-history.png"), fullPage: true });
 });
 
-test("an unavailable notes read after a saved decision keeps Accept disabled", async ({ page }) => {
-  await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308");
-  const original = await page.evaluate(async () => {
-    const modulePath = "/ui/src/dev-fixtures.ts";
-    return (await import(modulePath)).productReviewForFixture("products");
+for (const samePreview of [true, false]) {
+  test(`retry delivery preserves eligibility only for the same reviewed preview: ${samePreview}`, { tag: "@responsive" }, async ({ page }) => {
+    await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308");
+    const original = await page.evaluate(async () => {
+      const modulePath = "/ui/src/dev-fixtures.ts";
+      const fixtures = await import(modulePath);
+      return fixtures.productReviewForFixture("products", { ...fixtures.productReviewDecisionForFixture("changes_requested", "Fix the price."), feedback_url: "" });
+    });
+    const delivered = {
+      ...original,
+      preview_generation_id: samePreview ? original.preview_generation_id : "generation-next",
+      preview_is_current: false,
+      cannot_accept_reason: "We could not check the latest version of this change. Refresh the review.",
+      latest_decision: { ...original.latest_decision, feedback_url: `${original.pull_request_url}#issuecomment-1` },
+    };
+    await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "example-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+    await page.route("**/v1/product-review?*", route => route.fulfill({ json: original }));
+    await page.route("**/v1/product-review/feedback/retry", route => route.fulfill({ json: delivered }));
+    await page.goto("/ui/owner-review?repository=example%2Fcontrol-plane&pull_request=308");
+    await openAndConfirmPreview(page);
+    await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "Retry delivery", exact: true }).click();
+    await expect(page.getByLabel("Recorded decision")).not.toContainText("delivery to the agent is pending");
+    if (samePreview) {
+      await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeEnabled();
+    } else {
+      await expect(page.getByRole("button", { name: "Accept", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Refresh review", exact: true })).toBeVisible();
+    }
   });
-  const unread = { ...original, pull_request_title: "", client_test_notes: "", client_test_notes_error: "The test notes could not be loaded. Refresh the review." };
-  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "example-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
-  await page.route("**/v1/product-review?*", route => route.fulfill({ json: original }));
-  await page.route("**/v1/product-review/decisions", route => route.fulfill({ json: unread }));
-  await page.goto("/ui/owner-review?repository=example%2Fcontrol-plane&pull_request=308");
-  await page.getByRole("textbox").fill("Please revise the price.");
-  await page.getByRole("button", { name: "Request changes", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeDisabled();
-});
+}
 
 test("delivery of a historical saved decision can be retried without a preview", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=pending-without-preview&decision_id=saved");
@@ -139,6 +167,7 @@ for (const action of ["Accept", "Request changes"]) {
     await page.goto("/ui/owner-review?repository=example%2Fcontrol-plane&pull_request=308");
     await expect(page.getByText(`Preview version ${original.head_sha.slice(0, 7)}`, { exact: true })).toBeVisible();
     if (action === "Request changes") await page.getByRole("textbox").fill("Please fix the price.");
+    else await openAndConfirmPreview(page);
     await page.getByRole("button", { name: action, exact: true }).click();
     await expect(page.getByRole("alert")).toContainText("The preview changed");
     await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeDisabled();
@@ -157,6 +186,8 @@ for (const action of ["Accept", "Request changes"]) {
     await page.getByRole("button", { name: "Refresh review" }).click();
     await expect(page.getByText(`Preview version ${current.head_sha.slice(0, 7)}`, { exact: true })).toBeVisible();
     expect(submitted).toHaveLength(1);
+    await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeDisabled();
+    await openAndConfirmPreview(page);
     await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeEnabled();
     await page.getByRole("button", { name: "Accept", exact: true }).click();
     await expect(page.getByRole("region", { name: `Decision for ${current.display_name}` }).getByRole("status")).toBeVisible();
@@ -176,6 +207,9 @@ test("the Client sees the change title and what to check before deciding", { tag
   const acceptBox = await page.getByRole("button", { name: "Accept", exact: true }).boundingBox();
   expect(notesBox!.y).toBeLessThan(acceptBox!.y);
   await expect(page.getByRole("link", { name: "Topics to discuss" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeDisabled();
+  await expect(page.getByRole("checkbox")).toBeDisabled();
+  await openAndConfirmPreview(page);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("owner-review-notes.png"), fullPage: true });
   await page.getByRole("button", { name: "Accept", exact: true }).click();
@@ -198,7 +232,11 @@ for (const scenario of ["missing-notes", "notes-unavailable", "open-questions", 
   test(`Accept follows the notes gate: ${scenario}`, { tag: "@responsive" }, async ({ page }) => {
     await page.goto(`/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=${scenario}`);
     const accept = page.getByRole("button", { name: "Accept", exact: true });
-    if (scenario === "answered-questions") {
+    if (scenario !== "notes-unavailable") await openAndConfirmPreview(page);
+    if (scenario === "notes-unavailable") {
+      await expect(accept).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Refresh review", exact: true })).toBeVisible();
+    } else if (scenario === "answered-questions") {
       await expect(accept).toBeEnabled();
     } else {
       await expect(accept).toBeDisabled();
@@ -210,3 +248,13 @@ for (const scenario of ["missing-notes", "notes-unavailable", "open-questions", 
     await expect(page.getByRole("button", { name: "Request changes", exact: true })).toBeEnabled();
   });
 }
+
+test("an older serving preview offers feedback while the latest preview is being updated", { tag: "@responsive" }, async ({ page }) => {
+  await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=stale-preview");
+  await expect(page.getByRole("button", { name: "Accept", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("checkbox")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Refresh review", exact: true })).toBeVisible();
+  await page.getByRole("textbox").fill("The older preview still has the wrong price.");
+  await page.getByRole("button", { name: "Request changes", exact: true }).click();
+  await expect(page.getByLabel("Recorded decision")).toContainText("Changes requested");
+});

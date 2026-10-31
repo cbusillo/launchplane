@@ -42,6 +42,8 @@ class ClientTestNotesTests(unittest.TestCase):
                         "title": "Checkout",
                         "body": body,
                         "labels": [{"name": label} for label in labels],
+                        "head": {"sha": "A" * 40},
+                        "state": "open",
                     },
                 ),
             ):
@@ -52,12 +54,47 @@ class ClientTestNotesTests(unittest.TestCase):
                     trace_id="fixture",
                 )
                 self.assertEqual(bool(notes.client_test_notes_error), blocked)
+                self.assertEqual(notes.head_sha, "a" * 40)
+                self.assertEqual(notes.state, "open")
                 self.assertEqual(
                     notes.client_test_notes_error,
                     change_client_review(
                         body=body, labels=labels, review_label=profile.owner.review_label
                     ).error,
                 )
+
+    def test_unknown_pull_request_identity_never_becomes_current_review_evidence(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from control_plane.release_review import read_pull_request_notes
+        from tests.support.profiles import product_profile_payload
+
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload("site"))
+        for head, state in ((None, None), ({"sha": "bad"}, []), ({"sha": 42}, "unknown")):
+            with (
+                self.subTest(head=head, state=state),
+                patch(
+                    "control_plane.release_review.launchplane_github_token",
+                    return_value=nullcontext("fixture"),
+                ),
+                patch(
+                    "control_plane.release_review._read_release_github",
+                    return_value={
+                        "title": "Checkout",
+                        "body": "## Client test notes\nCheck checkout.",
+                        "head": head,
+                        "state": state,
+                    },
+                ),
+            ):
+                notes = read_pull_request_notes(
+                    control_plane_root=Path("unused"),
+                    profile=profile,
+                    pull_request_number=42,
+                    trace_id="fixture",
+                )
+                self.assertFalse(notes.head_sha)
+                self.assertFalse(notes.state)
+                self.assertTrue(notes.client_test_notes)
 
     def test_questions_keep_the_review_notification_without_permitting_acceptance(self) -> None:
         from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS

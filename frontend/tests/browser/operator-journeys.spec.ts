@@ -139,6 +139,11 @@ test.describe("operator journeys", () => {
       "href",
       "https://github.com/example/control-plane/pull/308",
     );
+    await page.context().route("https://site.preview.example.invalid/", route => route.fulfill({ contentType: "text/html", body: "<h1>Preview</h1>" }));
+    const [previewPage] = await Promise.all([page.waitForEvent("popup"), preview.click()]);
+    await expect(previewPage.getByRole("heading", { name: "Preview" })).toBeVisible();
+    await previewPage.close();
+    await card.getByRole("checkbox", { name: "I looked at this preview and it is right." }).check();
     await card.getByRole("button", { name: "Accept" }).click();
     await expect(card.getByText("Decision recorded.")).toBeVisible();
     await expect(card.getByLabel("Recorded decision")).toContainText("Accepted by @example-owner");
