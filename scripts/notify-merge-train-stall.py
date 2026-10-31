@@ -25,7 +25,8 @@ def send_stall_alert() -> None:
                     "title": "Merge train stalled"
                     if state == "open"
                     else "Merge train moving again",
-                    "description": f"{repository}: see Launchplane for merge-train state.",
+                    "description": f"{repository}: see Launchplane controller status "
+                    "(`/v1/work-graph/merge-train/controller/status`, `stall`).",
                 }
             ],
         },

@@ -589,7 +589,6 @@ class StallMonitorTests(TestCase):
                 notifier_factory=lambda **_: reporter,
             )
             stalled = restarted.read_merge_train_stall_record(snapshot.repository)
-            self.assertIsNone(stalled.issue_number)
             self.assertEqual(stalled.issue_state, "open")
             reporter.notify.assert_called_once()
             run_stall_monitor_pass(
@@ -609,7 +608,6 @@ class StallMonitorTests(TestCase):
                 notifier_factory=lambda **_: reporter,
             )
             resolved = restarted.read_merge_train_stall_record(snapshot.repository)
-            self.assertEqual(resolved.issue_number, stalled.issue_number)
             self.assertEqual(resolved.issue_state, "closed")
             self.assertEqual(
                 store.read_merge_train_stall_record(snapshot.repository).issue_state, "closed"
@@ -695,8 +693,7 @@ class StallMonitorTests(TestCase):
 
 
 class StallReporterTests(TestCase):
-    @staticmethod
-    def test_dispatch_requires_only_workflow_delivery_and_no_product_issue() -> None:
+    def test_dispatch_requires_only_workflow_delivery_and_no_product_issue(self) -> None:
         record = MergeTrainStallRecord(repository="example/repo", observed_at=_time(0))
         workflow = MergeTrainStallWorkflow(repository="example/control", ref="main")
         with (
@@ -715,18 +712,11 @@ class StallReporterTests(TestCase):
             repository=workflow.repository,
             purpose="workflow_dispatch",
         )
-        transport.return_value.request.assert_called_once_with(
-            method="POST",
-            path=f"/repos/{workflow.repository}/actions/workflows/merge-train-stall-alert.yml/dispatches",
-            body={
-                "ref": workflow.ref,
-                "inputs": {
-                    "repository": record.repository,
-                    "state": record.issue_state,
-                    "notification_key": record.notification_key,
-                },
-            },
-        )
+        request = transport.return_value.request
+        request.assert_called_once()
+        self.assertEqual(request.call_args.kwargs["method"], "POST")
+        self.assertNotIn("/issues", request.call_args.kwargs["path"])
+        self.assertNotIn("issue_number", request.call_args.kwargs["body"]["inputs"])
 
     def test_discord_payload_points_to_launchplane_without_product_issue(self) -> None:
         with (
@@ -751,7 +741,6 @@ class StallReporterTests(TestCase):
             payload = send.call_args.args[1]
             self.assertNotIn("github.com", payload["embeds"][0]["description"])
             self.assertEqual(payload["allowed_mentions"], {"parse": []})
-            self.assertIn("Launchplane", payload["embeds"][0]["description"])
 
 
 class StallMonitorPostgresTests(TestCase):

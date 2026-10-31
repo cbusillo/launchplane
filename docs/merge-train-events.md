@@ -156,7 +156,8 @@ database lock serializes observations and delivery transitions.
 Disabling or disarming a target suspends monitoring and preserves an unresolved
 incident; it does not claim progress. Re-enabling it resumes fresh observation.
 Legacy issue identity fields remain readable for stored-record compatibility;
-they no longer control delivery.
+they no longer control delivery. Stall state is the `stall` field in the existing
+`GET /v1/work-graph/merge-train/controller/status` response.
 
 Discord stays with the existing Launchplane sender. Put
 `LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REPOSITORY` and
@@ -165,6 +166,9 @@ for its `launchplane` context, through the existing runtime-environment record
 admin path. They select the repository and ref containing
 `merge-train-stall-alert.yml`. They are notification routing, independent of
 train policy and candidate digests; changing them never retires train work.
+The selected ref must contain the current alert workflow. Its optional ignored
+`issue_number` input accepts dispatches from the previous service image during
+rollout or rollback; the current monitor never sends it.
 
 The workflow uses the existing `DISCORD_LAUNCHPLANE_WEBHOOK`; no webhook is copied
 to service records and no new credential or grant is created. Existing delivery

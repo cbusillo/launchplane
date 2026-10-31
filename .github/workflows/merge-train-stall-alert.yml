@@ -6,6 +6,9 @@ name: Merge Train Stall Alert
       repository:
         description: Repository whose train needs attention
         required: true
+      issue_number:
+        description: Ignored legacy input for previous service image compatibility
+        required: false
       state:
         description: Current stall state
         type: choice
