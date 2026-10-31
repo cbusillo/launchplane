@@ -4,7 +4,7 @@ from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 
 from dataclasses import dataclass, field
 from contextlib import contextmanager
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -745,6 +745,8 @@ class WalkthroughAdapter:
             "dispatch_deadline": self.dispatch_deadline,
             "read_only": self.request.read_only,
             "instance": self.request.instance,
+            "operation": self.request.operation,
+            "reviewed_plan_sha256": self.plan.digest,
         }
 
     @staticmethod
@@ -972,9 +974,11 @@ class InterruptedWalkthroughAdapter:
         trace: str,
         store: PostgresRecordStore,
         root: Path,
+        check: Callable[[], None] | None = None,
     ) -> None:
         self.original, self.request, self.trace = original, request, trace
         self.store, self.root = store, root
+        self.check = check
 
     def target_key(self) -> str:
         return self.original.provider_target_key
@@ -987,23 +991,27 @@ class InterruptedWalkthroughAdapter:
     ) -> ProviderObservation:
         if reconciliation_key != self.original.reconciliation_key:
             return ProviderObservation("unknown")
-        if provider_effect_phase not in {"", "managed_secret"}:
-            try:
-                intent = self.store.read_original_mutation_intent(self.original)
-                host, token = source.read_dokploy_config(
-                    control_plane_root=self.root, database_url=self.store.database_url
-                )
-                if host != intent.get("host") or not testing_account_dispatch_finished(
-                    host=host,
-                    token=token,
-                    server_id=str(intent["server_id"]),
-                    dispatch_id=hashlib.sha256(provider_operation_key.encode()).hexdigest(),
-                    original_intent=intent,
-                ):
-                    return ProviderObservation("unknown")
-            # noinspection PyBroadExceptionInspection
-            except Exception:
-                return ProviderObservation("unknown")
+        try:
+            with _prerequisite(WalkthroughPrerequisite.RUNTIME):
+                if self.check is not None:
+                    self.check()
+                if provider_effect_phase not in {"", "managed_secret"}:
+                    intent = self.store.read_original_mutation_intent(self.original)
+                    host, token = source.read_dokploy_config(
+                        control_plane_root=self.root, database_url=self.store.database_url
+                    )
+                    if host != intent.get("host") or not testing_account_dispatch_finished(
+                        host=host,
+                        token=token,
+                        server_id=str(intent["server_id"]),
+                        dispatch_id=hashlib.sha256(provider_operation_key.encode()).hexdigest(),
+                        original_intent=intent,
+                    ):
+                        return ProviderObservation("unknown")
+                if self.check is not None:
+                    self.check()
+        except WalkthroughPrerequisiteError:
+            return ProviderObservation("unknown")
         return ProviderObservation(
             "present",
             response_status_code=200,

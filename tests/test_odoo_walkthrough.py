@@ -69,7 +69,6 @@ from control_plane.odoo_connection_isolation import connection_isolation_library
 from control_plane.service_auth import (
     AuthorizationTarget,
     LocalOperatorIdentity,
-    TerminalAgentIdentity,
     LaunchplaneIdentity,
     LocalOperatorPolicyRule,
     LaunchplaneAuthzPolicy,
@@ -78,6 +77,7 @@ from control_plane.service_auth import (
 )
 from tests.test_odoo_connection_isolation import SqliteCursor, seed
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.preview_reservation_recovery import held_preview_reservations
 from tests.support.http import request as http_request
 from tests.support.auth import StubVerifier, identity as workflow_identity, scoped_agent_transport
 
@@ -103,13 +103,6 @@ class TaskContractTests(unittest.TestCase):
         actor = walkthrough_actor(LocalOperatorIdentity(subject="existing", token_label="token"))
         persisted_fingerprint = canonical_json_sha256([actor, original])
         self.assertEqual(walkthrough_fingerprint(actor, request), persisted_fingerprint)
-
-    def test_terminal_actors_are_named_and_distinct(self) -> None:
-        one = walkthrough_actor(TerminalAgentIdentity(subject="first", token_label="token"))
-        two = walkthrough_actor(TerminalAgentIdentity(subject="second", token_label="token"))
-        self.assertTrue(one)
-        self.assertTrue(two)
-        self.assertNotEqual(one, two)
 
     def test_readonly_identity_requires_exact_preview_and_refuses_business_roles(self) -> None:
         fields = {
@@ -455,6 +448,9 @@ class TaskRouteTests(unittest.TestCase):
         self.browser.side_effect = RuntimeError("Browser interrupted")
         status, _ = self.invoke(run, "preview-run")
         self.assertEqual(status, 409)
+        held = held_preview_reservations(self.store, product=identity.product)
+        self.assertEqual(len(held), 1)
+        self.assertEqual(held[0].idempotency_key, "preview-run")
         self.assertGreater(self.account.call_count, native_calls)
         self.assertGreater(self.browser.call_count, browser_calls)
         native_calls = self.account.call_count

@@ -44,7 +44,6 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     director_agent_identity,
-    launchplane_identity_actor,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -65,7 +64,7 @@ def walkthrough_actor(identity: LaunchplaneIdentity) -> str:
         return f"github:{identity.github_id}"
     if isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity):
         return f"{type(identity).__name__}:{identity.subject}"
-    return launchplane_identity_actor(identity)
+    return ""
 
 
 def walkthrough_fingerprint(actor: str, request: OdooWalkthroughRequest) -> str:

@@ -10029,6 +10029,10 @@ class PostgresRecordStore(HumanSessionStore):
         include_completed: bool = False,
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
+        from control_plane.contracts.odoo_walkthrough import (
+            WALKTHROUGH_ROUTE,
+            walkthrough_activity_scope,
+        )
         from control_plane.product_reconcile import reconcile_reservation_scope
 
         original = aliased(LaunchplaneIdempotencyRow)
@@ -10069,6 +10073,28 @@ class PostgresRecordStore(HumanSessionStore):
             )
             .exists()
         )
+        retained_walkthrough = (
+            select(original.record_id)
+            .where(
+                original.scope == LaunchplaneIdempotencyRow.scope,
+                original.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                original.idempotency_key == LaunchplaneIdempotencyRow.record_id,
+                original.request_fingerprint == LaunchplaneIdempotencyRow.request_fingerprint,
+                original.payload["response_payload"]["original_intent"]["read_only"]
+                .as_boolean()
+                .is_(True),
+                original.payload["response_payload"]["original_intent"]["identity"][
+                    "environment_kind"
+                ].as_string()
+                == "preview",
+            )
+            .exists()
+        )
+        walkthrough = and_(
+            LaunchplaneIdempotencyRow.route_path == WALKTHROUGH_ROUTE,
+            LaunchplaneIdempotencyRow.scope == walkthrough_activity_scope(product),
+            retained_walkthrough,
+        )
         held_states = LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required"))
         states = (
             or_(
@@ -10089,6 +10115,7 @@ class PostgresRecordStore(HumanSessionStore):
             else or_(
                 LaunchplaneIdempotencyRow.scope == reconcile_reservation_scope(product),
                 retained_product,
+                walkthrough,
             )
         )
         return self._list_models(
@@ -10101,6 +10128,7 @@ class PostgresRecordStore(HumanSessionStore):
                         LaunchplaneIdempotencyRow.route_path == "/v1/drivers/odoo/app-maintenance",
                         retained_fixture,
                     ),
+                    walkthrough,
                 ),
                 True if include_completed else states,
                 product_scope,

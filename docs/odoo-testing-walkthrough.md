@@ -322,6 +322,12 @@ runtime, unique target ownership and production-separation checks. Browser work 
 current identity and isolation checks. The preview uses its existing execution
 lock and durable provider fence. Recovery observes the original receiver/key;
 it never redirects or repeats a browser transaction.
+If the original browser request is unavailable, the product's existing preview
+reconciliation observes its retained walkthrough intent. It waits for lease
+grace and native journal/quiescence proof, then settles the original operation
+as unknown without signing in or dispatching account work. The original key
+still returns a valid walkthrough receipt. Missing proof retains the shared
+preview fence; refresh, destruction and fixtures cannot bypass it.
 
 First apply the image-owned `read-only-test-identity` fixture through the
 [preview-fixture route](preview-fixtures.md). It creates only an inactive account
