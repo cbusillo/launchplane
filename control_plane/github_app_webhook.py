@@ -38,6 +38,7 @@ from control_plane.repository_inventory import get_repository_inventory_read_mod
 from control_plane.merge_train_wake import MergeTrainEventReceipt
 from control_plane.workflows.launchplane import verify_github_webhook_signature
 from control_plane.timestamps import utc_now_timestamp
+from control_plane.request_attention_events import notify_attention_for_event
 
 GITHUB_APP_WEBHOOK_ROUTE = "/v1/github/app-webhook"
 GITHUB_APP_WEBHOOK_SECRET_INTEGRATION = "github_app_webhook"
@@ -213,6 +214,12 @@ def handle_github_app_webhook_request(
             "Merge train event wake failed; timed sweep will retry."
         )
         train_woken = False
+    try:
+        notify_attention_for_event(
+            record_store, normalized_event, payload, normalized_delivery_id, received_at
+        )
+    except Exception:
+        logging.getLogger(__name__).warning("Request attention hint unavailable; sweep recovers.")
     target_shapes = _target_shapes(event_name=normalized_event, action=action, payload=payload)
     scan_event = config_authority_event_supported(normalized_event, payload)
     if not target_shapes and not scan_event:

@@ -27373,6 +27373,17 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def notify_request_attention(self, payload: str) -> None:
+        from control_plane.request_attention_events import ATTENTION_EVENT_CHANNEL
+
+        if self.database_dialect_name != "postgresql":
+            raise ValueError("Attention notifications require PostgreSQL.")
+        with self._engine.begin() as connection:
+            connection.execute(
+                text("SELECT pg_notify(:channel, :payload)"),
+                {"channel": ATTENTION_EVENT_CHANNEL, "payload": payload},
+            )
+
     def notify_merge_train(
         self,
         target_keys: tuple[str, ...] = (),

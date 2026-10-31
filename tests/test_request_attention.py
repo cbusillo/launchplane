@@ -1,9 +1,10 @@
 import unittest
-from contextlib import nullcontext
 import json
+from collections.abc import AsyncGenerator
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from github_plan_status.body import wrap_contributor_plan
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
@@ -381,6 +382,41 @@ class RequestAttentionSourceTests(unittest.TestCase):
                 self.reader("team/site", trusted_author_ids=())
 
 
+class AttentionSubscriptionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dedicated_notification_connection_closes_when_consumer_leaves(self) -> None:
+        from control_plane.request_attention_events import AttentionEventHint, attention_event_lines
+
+        hint = AttentionEventHint(
+            repository="team/site",
+            source_kind="comment",
+            source_id=42,
+            request_number=7,
+            delivery_id="delivery",
+            received_at="2026-10-31T14:00:00Z",
+        )
+        connection = MagicMock()
+        connection.__aenter__.return_value = connection
+        connection.execute = AsyncMock()
+
+        async def notifications(**_kwargs: object) -> AsyncGenerator[Mock, None]:
+            yield Mock(payload=hint.model_dump_json())
+
+        connection.notifies.side_effect = notifications
+        with patch(
+            "control_plane.request_attention_events.psycopg.AsyncConnection.connect",
+            new_callable=AsyncMock,
+            return_value=connection,
+        ):
+            stream = attention_event_lines("postgresql://localhost/fixture")
+            try:
+                await anext(stream)
+                message = json.loads(await anext(stream))
+                self.assertEqual(message["source_id"], hint.source_id)
+            finally:
+                await stream.aclose()
+        connection.__aexit__.assert_awaited_once()
+
+
 class RequestAttentionHttpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         directory = TemporaryDirectory()
@@ -422,6 +458,40 @@ class RequestAttentionHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.headers = {"Authorization": "Bearer local-operator-token"}
         self.route = "/v1/attention/requests"
+
+    async def test_subscription_uses_existing_attention_access_and_closes_source(self) -> None:
+        released = []
+
+        async def hints(_database_url: str) -> AsyncGenerator[bytes, None]:
+            try:
+                yield b'{"type":"connected"}\n'
+                yield b'{"type":"message","source_id":42}\n'
+            finally:
+                released.append(True)
+
+        with (
+            patch(
+                "control_plane.http_routes.request_attention.attention_database_url",
+                return_value="synthetic-database",
+            ),
+            patch(
+                "control_plane.http_routes.request_attention.attention_event_lines",
+                side_effect=hints,
+            ),
+        ):
+            refused = await _asgi_request(self.app, "GET", self.route + "/events")
+            self.assertNotEqual(refused.status_code, 200)
+            self.assertEqual(released, [])
+            response = await _asgi_request(
+                self.app, "GET", self.route + "/events", headers=self.headers
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            [json.loads(line)["type"] for line in response.text.splitlines()],
+            ["connected", "message"],
+        )
+        self.assertEqual(released, [True])
+        self.read.assert_not_called()
 
     async def test_inventory_then_source_reads_are_read_only_and_retirement_removes_source(
         self,
@@ -482,11 +552,12 @@ class RequestAttentionHttpTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: self.store,
             human_session_manager=sessions,
         )
-        response = await _asgi_request(
-            app,
-            "GET",
-            self.route + "?repository=team/site",
-            headers={"Cookie": sessions.session_cookie_header(session)},
-        )
-        self.assertEqual(response.status_code, 403, response.text)
+        for suffix in ("?repository=team/site", "/events"):
+            response = await _asgi_request(
+                app,
+                "GET",
+                self.route + suffix,
+                headers={"Cookie": sessions.session_cookie_header(session)},
+            )
+            self.assertEqual(response.status_code, 403, response.text)
         self.read.assert_not_called()
