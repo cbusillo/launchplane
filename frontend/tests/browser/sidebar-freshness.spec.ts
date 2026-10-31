@@ -29,6 +29,8 @@ for (const theme of ["dark", "light"] as const) {
       lane.health_monitoring.open_incidents = [];
       lane.health_monitoring.checks = [lane.health_monitoring.checks[0]];
       Object.assign(lane.health_monitoring.checks[0], { status: "pass", trust_state: "verified", probe_effective: true, incident_status: "" });
+      lane.lane_status = module.fixtureLaneStatus("verified");
+      lane.lane_status.transitions = [];
       return { products, identity: module.fixtureIdentity, now };
     });
     let mode: "fresh" | "warning" | "alert" | "fail" | "delay" = "fresh";
@@ -47,6 +49,9 @@ for (const theme of ["dark", "light"] as const) {
       const products = structuredClone(fixtures.products);
       if (mode === "warning") products[0].environments[0].topology.observed.tls_domains = [];
       if (mode === "alert") products[0].environments[0].health_monitoring.checks[0].status = "fail";
+      const current = products[0].environments[0].lane_status!.current;
+      if (mode === "warning") Object.assign(current, { tone: "warning", sidebar_tone: "warning", description: "Warning; Public DNS/TLS observation incomplete" });
+      if (mode === "alert") Object.assign(current, { tone: "danger", sidebar_tone: "danger", description: "Alert; public health check failed" });
       return route.fulfill({ json: { status: "ok", trace_id: "products", products } });
     });
     await page.goto("/ui/products");
