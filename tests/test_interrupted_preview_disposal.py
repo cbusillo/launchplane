@@ -147,20 +147,30 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
             return super().run_once()
 
     def test_reconciler_disposes_then_rebuilds_without_replaying_the_restore(self) -> None:
+        self.github.runs[50]["conclusion"] = "failure"
         self.request("preview", 5)
-        disposed = self.reconcile()
+        disposed = self.run_once().last_plan
         self.assertEqual(disposed["action"], "destroy")
+        self.assertEqual(disposed["preview_result_status"], "pass")
+        self.assertEqual(disposed["last_failed_error_code"], "preview_build_failed")
+        self.assertEqual(self.store.list_preview_pr_feedback_records(limit=1)[0].status, "failed")
         self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
         original = self.store.read_idempotency_record_by_id(self.original.record_id)
         assert original is not None
         self.assertEqual(original.state, "completed")
         self.assertNotEqual(original.response_payload["result"]["status"], "pass")
+        self.github.runs.clear()
+        self.request("preview", 5)
+        self.run_once()
+        self.assertEqual(self.store.list_preview_pr_feedback_records(limit=1)[0].status, "failed")
+        self.github.add_run(51, PR_HEAD, event="pull_request")
         self.request("preview", 5)
         rebuilt = self.reconcile()
         self.assertEqual(rebuilt["action"], "apply")
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
         self.assertEqual(self.provider.applied, [("destroy", 5), ("refresh", 5)])
         self.assertEqual(self.store.list_held_odoo_preview_reservations(product="site"), ())
+        self.assertEqual(self.store.list_preview_pr_feedback_records(limit=1)[0].status, "ready")
 
     def test_protected_use_and_needed_data_refuse_before_disposal(self) -> None:
         for protection in (
@@ -336,6 +346,7 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
             failed = self.run_once()
         disposal = self.store.list_held_odoo_preview_reservations(product="site")[0]
         carried = failed.last_plan["disposal_original_reservation_id"]
+        self.github.runs[50]["conclusion"] = "failure"
         self.advance_preview_recovery_grace = False
         self.native.reset_mock()
         for pr_state in ("open", None):
@@ -345,6 +356,15 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
                 waiting = self.run_once()
                 self.assertTrue(waiting.last_plan["held"])
                 self.assertEqual(waiting.last_plan["disposal_original_reservation_id"], carried)
+                if pr_state == "open":
+                    self.assertEqual(waiting.last_plan["reason"], "held_preview_recovery_required")
+                    self.assertEqual(
+                        waiting.last_plan["last_failed_error_code"], "preview_build_failed"
+                    )
+                    self.assertEqual(
+                        waiting.last_plan["destroy_failed_attempts"],
+                        failed.last_plan["destroy_failed_attempts"],
+                    )
         self.github.pull_request["state"] = "open"
         self.advance_preview_recovery_grace = True
         self.request("preview", 5)

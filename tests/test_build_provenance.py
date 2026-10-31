@@ -182,7 +182,12 @@ class BuildProvenanceTests(unittest.TestCase):
             _verify(FakeGitHub(runs=[failed, running]), purpose="preview", pull_request_number=5)
         self.assertEqual(caught.exception.code, "build_run_failed")
         self.assertEqual(caught.exception.run_id, failed["id"])
-        for change in ({"status": "in_progress"}, {"head_repository": {"id": 999}}):
+        for change in (
+            {"status": "in_progress"},
+            {"head_repository": {"id": 999}},
+            {"conclusion": "cancelled"},
+            {"conclusion": "action_required"},
+        ):
             with self.subTest(change=change), self.assertRaises(BuildProvenanceError) as caught:
                 _verify(
                     FakeGitHub(runs=[{**failed, **change}]),

@@ -7205,10 +7205,8 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         self.run_once()
         unknown_origin = self.store.list_preview_pr_feedback_records(limit=1)[0]
-        self.assertEqual(unknown_origin.revision, "")
-        self.assertEqual(
-            unknown_origin.failure_summary, record_failure_summary("preview_reconcile_failed")
-        )
+        self.assertEqual(unknown_origin.status, "pending")
+        self.assertEqual(unknown_origin.failure_summary, "")
 
     def test_a_failed_refresh_keeps_driver_text_out_and_waits_for_a_new_build(self) -> None:
         self.driver.refresh_status = "fail"

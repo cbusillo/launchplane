@@ -467,8 +467,7 @@ def _select_build_run(
             run
             for run in runs
             if run.get("status") == "completed"
-            and run.get("conclusion")
-            in {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
+            and run.get("conclusion") in {"failure", "timed_out", "startup_failure"}
         ]
         if purpose == "preview" and failed:
             latest = max(failed, key=_build_run_order)

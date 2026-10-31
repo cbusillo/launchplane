@@ -198,10 +198,17 @@ def _preview_feedback(
     failure_summary = ""
     waiting_for = ""
     status: PreviewPrFeedbackStatus
-    if (action == "apply" and error) or (
-        action == "wait"
-        and plan.get("reason") in {"no_verified_build", "preview_build_failed"}
-        and (error or plan.get("last_failed_error_summary"))
+    if (
+        (action == "apply" and error)
+        or (error and plan.get("last_failed_error_code") == "preview_build_failed")
+        or (
+            not error
+            and plan.get("last_failed_error_code")
+            in ("preview_build_failed", "preview_apply_failed")
+            and plan.get("last_failed_error_summary")
+            and plan.get("reason") not in {"pull_request_not_open", "already_serving"}
+            and not (action == "apply" and plan.get("preview_result_status") == "pass")
+        )
     ):
         status = "failed"
         failure_summary = _failure_summary(error or _text(plan.get("last_failed_error_summary")))
