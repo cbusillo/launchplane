@@ -1,9 +1,6 @@
 from datetime import datetime, timezone
 from typing import Literal, Protocol
 
-from github_plan_status import next_actor
-from github_plan_status.body import contributor_plan_body
-from github_plan_status.waits import live_lines
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -20,7 +17,9 @@ class CollectedRequest(BaseModel):
     source_kind: Literal["request", "change"]
     title: str
     requester: str
-    body: str
+    next_actor: str | None = None
+    next_action: str = "Triage the original request."
+    canonical_source_ids: tuple[str, ...] = ()
     created_at: AwareDatetime
     open: bool
 
@@ -65,7 +64,6 @@ class RequestAttentionPage(BaseModel):
     observed_at: str
     sources: tuple[AttentionSource, ...]
     requests: tuple[WaitingRequest, ...] = ()
-    next_page: int | None = None
     truncated: bool = False
 
 
@@ -78,7 +76,9 @@ class RequestAttentionStore(Protocol):
 
 
 class OpenRequestReader(Protocol):
-    def __call__(self, repository: str, page: int) -> OpenRequestPage: ...
+    def __call__(
+        self, repository: str, *, trusted_author_ids: tuple[int, ...]
+    ) -> OpenRequestPage: ...
 
 
 def attention_sources(store: RequestAttentionStore) -> tuple[AttentionSource, ...]:
@@ -104,35 +104,14 @@ def attention_sources(store: RequestAttentionStore) -> tuple[AttentionSource, ..
     )
 
 
-def request_status(body: str) -> tuple[str | None, str]:
-    managed = contributor_plan_body({"body": body})
-    status_lines: list[str] = []
-    in_status = False
-    for _, line in live_lines(managed if managed is not None else body, prefix=""):
-        if line.startswith("## "):
-            in_status = line.strip().casefold() == "## current status"
-        elif in_status:
-            status_lines.append(line)
-    status = "\n".join(status_lines)
-    actor = next_actor.read(status)
-    actions = [
-        line.removeprefix("Next action:").strip()
-        for line in status_lines
-        if line.startswith("Next action:")
-    ]
-    action = actions[0] if len(actions) == 1 and actions[0] else "Triage the original request."
-    return actor, action
-
-
 def build_request_attention_page(
     *,
     sources: tuple[AttentionSource, ...],
     repository: str,
-    page: int,
+    trusted_author_ids: tuple[int, ...] = (),
     read: OpenRequestReader,
     trace_id: str,
     observed_at: str,
-    max_pages: int = REQUEST_PAGE_LIMIT,
 ) -> RequestAttentionPage:
     result = RequestAttentionPage(trace_id=trace_id, observed_at=observed_at, sources=sources)
     if not repository:
@@ -140,16 +119,14 @@ def build_request_attention_page(
     source = next((source for source in sources if source.repository == repository), None)
     if source is None or not source.available:
         raise LookupError("Request source is not in tracked inventory.")
-    source_page = read(repository, page)
+    source_page = read(repository, trusted_author_ids=trusted_author_ids)
     now = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
     requests: dict[str, WaitingRequest] = {}
+    open_ids = {row.source_id for row in source_page.requests if row.open}
     for row in source_page.requests:
-        if not row.open:
+        if not row.open or open_ids.intersection(row.canonical_source_ids):
             continue
-        try:
-            actor, action = request_status(row.body)
-        except ValueError:
-            actor, action = None, "Review the original request's ambiguous Current Status."
+        actor, action = row.next_actor, row.next_action
         assigned = actor.removeprefix("agent:") if actor and actor.startswith("agent:") else None
         request = WaitingRequest(
             source_id=row.source_id,
@@ -160,7 +137,7 @@ def build_request_attention_page(
             products=source.products,
             requester=row.requester,
             owning_agent=assigned if assigned and assigned.casefold() != "supervisor" else None,
-            next_actor=actor or "agent:Supervisor",
+            next_actor=actor if actor and actor != "agent" else "agent:Supervisor",
             next_action=action,
             created_at=row.created_at,
             age_seconds=max(
@@ -172,7 +149,6 @@ def build_request_attention_page(
     return result.model_copy(
         update={
             "requests": tuple(requests.values()),
-            "next_page": page + 1 if more and page < max_pages else None,
-            "truncated": more and page >= max_pages,
+            "truncated": more,
         }
     )

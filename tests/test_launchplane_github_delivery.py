@@ -244,7 +244,7 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
 
     def test_each_operation_mints_only_its_permissions_for_the_inventory_repository(self) -> None:
         for purpose, permissions in (
-            ("repository_read", {"contents": "read", "pull_requests": "read"}),
+            ("repository_read", {"contents": "read", "pull_requests": "read", "issues": "read"}),
             ("pull_request_feedback", {"contents": "read", "pull_requests": "write"}),
             (
                 "source_issue_feedback",

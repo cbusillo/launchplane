@@ -9,11 +9,11 @@ from control_plane.http_routes.support import (
 )
 from control_plane.request_attention import (
     OpenRequestReader,
-    REQUEST_PAGE_LIMIT,
     RequestAttentionPage,
     attention_sources,
     build_request_attention_page,
 )
+from control_plane.merge_train_policy_source import resolve_merge_train_policy_record
 from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneIdentity,
@@ -33,7 +33,6 @@ def register_request_attention_routes(
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         store: Annotated[object, Depends(dependencies.get_record_store)],
         repository: Annotated[str, Query(max_length=256)] = "",
-        page: Annotated[int, Query(ge=1, le=REQUEST_PAGE_LIMIT)] = 1,
     ) -> RequestAttentionPage:
         trace = dependencies.next_trace_id()
         admin = (
@@ -63,11 +62,22 @@ def register_request_attention_routes(
             )
         sources = attention_sources(store)
         try:
+            repository = repository.strip().casefold()
+            author_ids = (
+                tuple(
+                    author_id
+                    for policy in resolve_merge_train_policy_record(store).policy.policies
+                    if policy.repository.casefold() == repository
+                    for author_id in policy.enqueue.trusted_automation_github_user_ids
+                )
+                if repository
+                else ()
+            )
             return await run_in_worker_thread(
                 lambda: build_request_attention_page(
                     sources=sources,
-                    repository=repository.strip().casefold(),
-                    page=page,
+                    repository=repository,
+                    trusted_author_ids=author_ids,
                     read=read,
                     trace_id=trace,
                     observed_at=utc_now_timestamp(),

@@ -1,6 +1,6 @@
 import unittest
 from contextlib import nullcontext
-from datetime import timedelta
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -11,7 +11,6 @@ from control_plane.request_attention import (
     AttentionSource,
     CollectedRequest,
     OpenRequestPage,
-    REQUEST_PAGE_LIMIT,
     RequestAttentionPage,
     attention_sources,
     build_request_attention_page,
@@ -41,7 +40,8 @@ def source_row(**changes: object) -> CollectedRequest:
             "created_at": "2026-10-30T18:00:00Z",
             "open": True,
             "requester": "client-agent",
-            "body": "## Current Status\nNext actor: agent:worker-one\nNext action: Restore the menu.",
+            "next_actor": "agent:worker-one",
+            "next_action": "Restore the menu.",
             **changes,
         }
     )
@@ -54,73 +54,56 @@ class RequestAttentionTests(unittest.TestCase):
         )
         self.read = Mock(return_value=OpenRequestPage(requests=(source_row(),), has_more=False))
 
-    def page(self, *, max_pages: int = REQUEST_PAGE_LIMIT) -> RequestAttentionPage:
+    def page(self) -> RequestAttentionPage:
         return build_request_attention_page(
             sources=(self.source,),
             repository="team/site",
-            page=1,
             read=self.read,
             trace_id="fixture-read",
             observed_at="2026-10-30T20:00:00Z",
-            max_pages=max_pages,
         )
 
-    def test_reply_does_not_remove_open_work_and_source_closure_does(self) -> None:
-        first = self.page().requests[0]
-        self.read.return_value = OpenRequestPage(requests=(source_row(),), has_more=False)
-        replied = self.page().requests[0]
-        self.assertEqual(replied, first)
-        self.assertEqual(first.requester, "client-agent")
-        self.assertEqual(first.owning_agent, "worker-one")
-        self.assertEqual(first.age_seconds, int(timedelta(hours=2).total_seconds()))
-        self.read.return_value = OpenRequestPage(requests=(source_row(open=False),), has_more=False)
-        self.assertEqual(self.page().requests, ())
-
-    def test_unowned_and_released_work_routes_to_supervisor_without_parsing_claims(self) -> None:
-        self.read.return_value = OpenRequestPage(
-            requests=(source_row(body="A fresh imported feedback item."),), has_more=False
-        )
-        self.assertIsNone(self.page().requests[0].owning_agent)
-        released = '## Current Status\nNext actor: agent\nNext action: Review the next build.\n<!-- github-plan:claim {"worker":"old-owner"} -->'
-        self.read.return_value = OpenRequestPage(
-            requests=(source_row(body=released),), has_more=False
-        )
-        self.assertIsNone(self.page().requests[0].owning_agent)
-        self.assertIn("Review the next build.", self.page().requests[0].next_action)
-
-    def test_quoted_status_is_not_assignment_and_ambiguous_status_keeps_request(self) -> None:
-        self.read.return_value = OpenRequestPage(
-            requests=(source_row(body="```\n## Current Status\nNext actor: agent:quoted\n```\n"),),
-            has_more=False,
-        )
-        self.assertIsNone(self.page().requests[0].owning_agent)
+    def test_closed_sources_and_linked_changes_do_not_duplicate_work(self) -> None:
         self.read.return_value = OpenRequestPage(
             requests=(
-                source_row(body="## Current Status\nNext actor: agent:a\nNext actor: agent:b"),
+                source_row(),
+                source_row(
+                    source_id="change",
+                    source_kind="change",
+                    canonical_source_ids=(source_row().source_id,),
+                ),
+                source_row(source_id="closed", open=False),
             ),
             has_more=False,
         )
-        self.assertIsNone(self.page().requests[0].owning_agent)
+        rows = self.page().requests
+        self.assertEqual([row.source_id for row in rows], [source_row().source_id])
+        self.assertEqual(rows[0].owning_agent, str(source_row().next_actor).removeprefix("agent:"))
+        self.assertGreater(rows[0].age_seconds, 0)
 
-    def test_pagination_and_bound_never_report_truncated_data_as_complete(self) -> None:
+    def test_person_and_event_waits_remain_owned_and_released_work_routes_to_supervisor(
+        self,
+    ) -> None:
+        for actor in ("person:client", "event:current CI", None, "agent"):
+            with self.subTest(actor=actor):
+                self.read.return_value = OpenRequestPage(
+                    requests=(source_row(next_actor=actor),), has_more=False
+                )
+                row = self.page().requests[0]
+                self.assertIsNone(row.owning_agent)
+                self.assertEqual(
+                    row.next_actor, actor if actor and actor != "agent" else "agent:Supervisor"
+                )
+
+    def test_incomplete_coverage_is_explicit(self) -> None:
         self.read.return_value = OpenRequestPage(requests=(source_row(),), has_more=True)
-        first = self.page(max_pages=2)
-        self.assertEqual(first.next_page, 2)
-        self.assertFalse(first.truncated)
-        bounded = self.page(max_pages=1)
-        self.assertTrue(bounded.truncated)
-        self.assertIsNone(bounded.next_page)
-        self.read.return_value = OpenRequestPage(
-            requests=(source_row(), source_row()), has_more=False
-        )
-        self.assertEqual(len(self.page().requests), 1)
+        self.assertTrue(self.page().truncated)
 
     def test_unknown_source_never_reads_provider_and_malformed_source_fails(self) -> None:
         with self.assertRaises(LookupError):
             build_request_attention_page(
                 sources=(),
                 repository="other/site",
-                page=1,
                 read=self.read,
                 trace_id="test",
                 observed_at="2026-10-30T20:00:00Z",
@@ -129,46 +112,167 @@ class RequestAttentionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             source_row(created_at="2026-10-30T18:00:00")
 
-    def test_source_adapter_keeps_acknowledged_work_open_and_only_sends_reads(self) -> None:
-        requester = "client-agent"
-        raw = {
-            "node_id": "request-source",
-            "html_url": "https://git.example.test/team/site/pull/9",
-            "title": "Menu fix",
-            "user": {"login": requester},
-            "body": "Please restore the menu.",
-            "created_at": "2026-10-30T18:00:00Z",
-            "state": "open",
-            "pull_request": {},
-            "comments": 0,
-        }
-        transport = Mock()
-        transport.request.return_value = [raw]
-        with (
+
+class RequestAttentionSourceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.transport = Mock()
+        self.token = self.enterContext(
             patch(
                 "control_plane.request_attention_github.launchplane_github_token",
-                side_effect=lambda **_: nullcontext("synthetic-source-token"),
-            ),
+                side_effect=lambda **_: nullcontext("synthetic-token"),
+            )
+        )
+        self.enterContext(
             patch(
                 "control_plane.request_attention_github.UrllibMergeTrainGitHubTransport",
-                return_value=transport,
-            ),
+                return_value=self.transport,
+            )
+        )
+        self.reader = GitHubOpenRequestReader(Path("/synthetic/control-plane"))
+
+    @staticmethod
+    def connection(rows: list[dict[str, object]], cursor: str | None = None) -> dict[str, object]:
+        return {"nodes": rows, "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor}}
+
+    def raw(self, **changes: object) -> dict[str, object]:
+        return {
+            "id": "request-7",
+            "url": source_row().source_url,
+            "title": source_row().title,
+            "author": {"login": "client-agent", "__typename": "User", "databaseId": 8},
+            "body": "## Current Status\nNext actor: agent:forged",
+            "state": "OPEN",
+            "createdAt": "2026-10-30T18:00:00Z",
+            "updatedAt": "2026-10-30T19:50:00Z",
+            "lastEditedAt": "2026-10-30T18:10:00Z",
+            "comments": self.connection([]),
+            **changes,
+        }
+
+    @staticmethod
+    def comment(
+        body: str, identifier: int = 1, at: str = "2026-10-30T19:00:00Z"
+    ) -> dict[str, object]:
+        return {
+            "databaseId": identifier,
+            "body": body,
+            "createdAt": at,
+            "updatedAt": at,
+            "author": {"login": "plan-bot", "__typename": "Bot", "databaseId": 7},
+        }
+
+    def read_rows(self, rows: list[dict[str, object]]) -> OpenRequestPage:
+        self.transport.request.side_effect = [
+            {"data": {"repository": {"issues": self.connection(rows)}}},
+            {"data": {"repository": {"pullRequests": self.connection([])}}},
+        ]
+        return self.reader("team/site", trusted_author_ids=(7,))
+
+    def test_trusted_discussion_status_and_exact_release_override_stale_or_untrusted_body(
+        self,
+    ) -> None:
+        status = self.comment(
+            "## Current Status\n- **Next actor:** person:client\n- **Next action:** Test the menu."
+        )
+        row = self.read_rows([self.raw(comments=self.connection([status]))]).requests[0]
+        self.assertEqual(row.next_actor, "person:client")
+        self.assertEqual(row.next_action, "Test the menu.")
+        trusted = self.raw(
+            author={"login": "team", "__typename": "User"}, comments=self.connection([status])
+        )
+        self.assertEqual(self.read_rows([trusted]).requests[0].next_actor, row.next_actor)
+        forged = self.read_rows([self.raw()]).requests[0]
+        self.assertIsNone(forged.next_actor)
+        claim = {
+            "worker": "worker",
+            "session": "ended",
+            "branch": "work/menu",
+            "claimed_at": "2026-10-30T19:00:00Z",
+        }
+        claimed = self.comment("<!-- github-plan:claim " + json.dumps(claim) + " -->", 2)
+        released = self.comment(
+            "Released claim 2\n\nThe next agent continues.", 3, "2026-10-30T19:30:00Z"
+        )
+        stale = self.raw(
+            author={"login": "team", "__typename": "User"},
+            body="## Current Status\nNext actor: agent:ended",
+            comments=self.connection([claimed, released]),
+        )
+        self.assertIsNone(self.read_rows([stale]).requests[0].next_actor)
+        receipt = self.comment(
+            "Released claim 2\n\n<!-- github-plan:abandoned-release invalid -->",
+            5,
+            "2026-10-30T19:30:00Z",
+        )
+        uncertain = self.read_rows(
+            [{**stale, "comments": self.connection([claimed, receipt])}]
+        ).requests[0]
+        self.assertIsNone(uncertain.next_actor)
+        person = self.read_rows([self.raw(comments=self.connection([status, receipt]))]).requests[0]
+        self.assertEqual(person.next_actor, row.next_actor)
+        untrusted = {
+            **receipt,
+            "author": {"login": "client-agent", "__typename": "User", "databaseId": 8},
+        }
+        current = self.read_rows(
+            [{**stale, "comments": self.connection([claimed, untrusted])}]
+        ).requests[0]
+        self.assertEqual(current.next_actor, "agent:ended")
+        acknowledged = self.comment("Thanks, looking into this.", 4, "2026-10-30T19:40:00Z")
+        self.assertEqual(
+            self.read_rows([self.raw(comments=self.connection([status, acknowledged]))])
+            .requests[0]
+            .next_actor,
+            row.next_actor,
+        )
+
+    def test_cursor_reads_survive_earlier_closure_and_use_one_read_only_token(self) -> None:
+        first = self.connection([self.raw()], "after-7")
+        second = self.connection([self.raw(id="request-8")])
+        self.transport.request.side_effect = [
+            {"data": {"repository": {"issues": first}}},
+            {"data": {"repository": {"issues": second}}},
+            {"data": {"repository": {"pullRequests": self.connection([])}}},
+        ]
+        page = self.reader("team/site", trusted_author_ids=())
+        self.assertEqual([row.source_id for row in page.requests], ["request-7", "request-8"])
+        self.assertEqual(
+            self.transport.request.call_args_list[1].kwargs["body"]["variables"]["cursor"],
+            "after-7",
+        )
+        self.assertFalse(page.has_more)
+        self.token.assert_called_once()
+        for call in self.transport.request.call_args_list:
+            self.assertTrue(call.kwargs["body"]["query"].startswith("query("))
+
+    def test_discussion_cursor_and_provider_errors_never_claim_complete_coverage(self) -> None:
+        status = self.comment(
+            "## Current Status\nNext actor: agent:worker\nNext action: Restore the menu."
+        )
+        self.transport.request.side_effect = [
+            {
+                "data": {
+                    "repository": {
+                        "issues": self.connection(
+                            [self.raw(comments=self.connection([], "comment-cursor"))]
+                        )
+                    }
+                }
+            },
+            {"data": {"node": {"comments": self.connection([status])}}},
+            {"data": {"repository": {"pullRequests": self.connection([])}}},
+        ]
+        self.assertEqual(
+            self.reader("team/site", trusted_author_ids=(7,)).requests[0].next_actor, "agent:worker"
+        )
+        self.transport.request.side_effect = None
+        for response in (
+            {"errors": [{"message": "private detail"}]},
+            {"data": {"repository": None}},
         ):
-            reader = GitHubOpenRequestReader(Path("/synthetic/control-plane"))
-            first = reader("team/site", 1)
-            transport.request.return_value = [{**raw, "comments": 2}]
-            self.assertEqual(reader("team/site", 1), first)
-            self.assertEqual(first.requests[0].requester, requester)
-            transport.request.return_value = [{**raw, "state": "closed"}]
-            self.assertFalse(reader("team/site", 1).requests[0].open)
-            for call in transport.request.call_args_list:
-                self.assertEqual(call.kwargs["method"], "GET")
-            transport.request.return_value = [{**raw, "state": None}]
+            self.transport.request.return_value = response
             with self.assertRaises(ValueError):
-                reader("team/site", 1)
-            transport.request.return_value = {"unexpected": "shape"}
-            with self.assertRaises(ValueError):
-                reader("team/site", 1)
+                self.reader("team/site", trusted_author_ids=())
 
 
 class RequestAttentionHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -198,6 +302,12 @@ class RequestAttentionHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         reader_patch.start()
         self.addCleanup(reader_patch.stop)
+        policy_patch = patch(
+            "control_plane.http_routes.request_attention.resolve_merge_train_policy_record",
+            return_value=Mock(policy=Mock(policies=())),
+        )
+        policy_patch.start()
+        self.addCleanup(policy_patch.stop)
         self.app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=LaunchplaneAuthzPolicy(),
@@ -249,10 +359,6 @@ class RequestAttentionHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(failed.status_code, 503)
         self.assertNotIn("private-provider-detail", failed.text)
-        invalid = await _asgi_request(
-            self.app, "GET", self.route + f"?page={REQUEST_PAGE_LIMIT + 1}", headers=self.headers
-        )
-        self.assertEqual(invalid.status_code, 400)
 
     async def test_signed_in_product_reader_cannot_read_cross_product_requests(self) -> None:
         sessions = HumanSessionManager(

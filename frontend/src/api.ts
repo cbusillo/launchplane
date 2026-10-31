@@ -1,8 +1,8 @@
 import { validateRemovalResponse } from "./runtime-setting-removal";
 import type { RequestAttentionPage } from "./generated/openapi.ts";
 
-export function readRequestAttention(repository?: string, page = 1, signal?: AbortSignal): Promise<RequestAttentionPage> {
-  const query = new URLSearchParams({ page: String(page) });
+export function readRequestAttention(repository?: string, signal?: AbortSignal): Promise<RequestAttentionPage> {
+  const query = new URLSearchParams();
   if (repository) query.set("repository", repository);
   return requestJson(`/v1/attention/requests?${query}`, "GET", undefined, signal);
 }

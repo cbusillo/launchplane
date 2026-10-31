@@ -16,7 +16,7 @@ interface AttentionSnapshot {
 }
 
 async function loadRequests(signal: AbortSignal): Promise<AttentionSnapshot> {
-  const inventory = await readRequestAttention(undefined, 1, signal);
+  const inventory = await readRequestAttention(undefined, signal);
   const requests = new Map<string, WaitingRequest>();
   const gaps: string[] = [];
   const queue = [...inventory.sources];
@@ -29,19 +29,9 @@ async function loadRequests(signal: AbortSignal): Promise<AttentionSnapshot> {
         continue;
       }
       try {
-        let page: number | null = 1;
-        const pages = new Set<number>();
-        while (page !== null && !signal.aborted && !denied) {
-          if (pages.has(page)) {
-            gaps.push(`${source.repository}: the source repeated a page.`);
-            break;
-          }
-          pages.add(page);
-          const response = await readRequestAttention(source.repository, page, signal);
-          for (const request of response.requests) requests.set(request.source_id, request);
-          if (response.truncated) gaps.push(`${source.repository}: more requests remain beyond the page limit.`);
-          page = response.next_page;
-        }
+        const response = await readRequestAttention(source.repository, signal);
+        for (const request of response.requests) requests.set(request.source_id, request);
+        if (response.truncated) gaps.push(`${source.repository}: more requests remain beyond the read limit.`);
       } catch (failure) {
         if (signal.aborted) throw failure;
         if (failure instanceof LaunchplaneApiError && [401, 403].includes(failure.statusCode)) {
@@ -69,8 +59,8 @@ export function RequestAttentionRoute() {
 
   const products = [...new Set(snapshot?.sources.flatMap(source => source.products) ?? [])].sort();
   const requests = snapshot?.requests.filter(request =>
-    (!product || request.products.includes(product)) && (!supervisorOnly || !request.owning_agent)) ?? [];
-  const unowned = snapshot?.requests.filter(request => !request.owning_agent).length ?? 0;
+    (!product || request.products.includes(product)) && (!supervisorOnly || request.next_actor === "agent:Supervisor")) ?? [];
+  const unowned = snapshot?.requests.filter(request => request.next_actor === "agent:Supervisor").length ?? 0;
   return (
     <EngineeringRouteFrame
       icon={Inbox}
@@ -99,7 +89,7 @@ export function RequestAttentionRoute() {
               <p>{request.products.join(", ") || "Product not recorded"} · {request.repository} · {request.source_kind === "change" ? "Change" : "Request"}</p>
               <dl className="attention-details">
                 <dt>Requester</dt><dd>{request.requester}</dd>
-                <dt>Owning agent</dt><dd>{request.owning_agent ?? "Supervisor · needs an agent"}</dd>
+                <dt>Owning agent</dt><dd>{request.owning_agent ?? (request.next_actor === "agent:Supervisor" ? "Supervisor · needs an agent" : "No agent action pending")}</dd>
                 <dt>Waiting</dt><dd>{request.age_seconds < 3600 ? "Less than an hour" : request.age_seconds < 86400 ? `${Math.floor(request.age_seconds / 3600)} hours` : `${Math.floor(request.age_seconds / 86400)} days`} · <time dateTime={request.created_at}>{formatTime(request.created_at)}</time></dd>
                 <dt>Next action</dt><dd>{request.next_action}</dd>
                 <dt>Next actor</dt><dd>{request.next_actor}</dd>
