@@ -29,6 +29,8 @@ VALUES = {
     "SEPARATORS": "before\u2028after\u2029end",
     "SLASH_DOLLAR": "\\$NAME \\${NAME} \\$(command)",
     "JSON": '{"message":"a # b"}',
+    "ESCAPE_NAME": "${LAUNCHPLANE_DOTENV_DOLLAR}",
+    "LAUNCHPLANE_DOTENV_DOLLAR": "application-value",
     "QUOTED_SLASH": 'quote " and slash \\',
     "MIXED_QUOTES": "a' b\" c` #\nnext",
     "PROVIDER_LITERAL": "${{project.INPUT}} ${{environment.INPUT}} ${{SELF}}",
@@ -109,10 +111,15 @@ def consume_compose_environment(
 )
 class DokployComposeConsumerTests(unittest.TestCase):
     def test_provider_write_survives_generated_file_and_both_compose_consumers(self) -> None:
-        previous_values = {"KEEP": "provider-only", "REMOVE": "old"}
+        previous_values = {
+            "KEEP": "provider-only",
+            "REMOVE": "old",
+            "JSON_KEPT": '{"deployment_record_id":"example"}',
+        }
         for previous in (
             api.serialize_dokploy_env_text(previous_values),
             api.serialize_dokploy_env_text(previous_values, target_type="compose"),
+            (ROOT / "tests/fixtures/dokploy-compose/legacy-literal.env").read_text(),
         ):
             with self.subTest(previous=previous):
                 logical = api.render_dokploy_env_text_with_overrides(
@@ -128,7 +135,10 @@ class DokployComposeConsumerTests(unittest.TestCase):
                         env_text=logical,
                     )
                 wire = request.call_args.kwargs["payload"]["env"]
-                expected = {"KEEP": previous_values["KEEP"], **VALUES}
+                expected = {
+                    **{key: value for key, value in previous_values.items() if key != "REMOVE"},
+                    **VALUES,
+                }
                 self.assertEqual(api.parse_dokploy_env_text(wire), expected)
                 actual, interpolation = consume_compose_environment(wire, tuple(expected))
                 for service in actual.values():

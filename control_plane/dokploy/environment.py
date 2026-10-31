@@ -31,6 +31,8 @@ class DokployEnvironmentEncodingError(ValueError):
 
 
 _COMPOSE_HEADER = "# launchplane:compose-dotenv-v1"
+_COMPOSE_LITERAL_HEADER = "# launchplane:compose-dotenv-v2"
+_COMPOSE_CHARACTERS = {"DOLLAR": "$", "QUOTE": "'", "SLASH": "\\", "RETURN": "\r"}
 _COMPOSE_PLAIN = re.compile(r"[A-Za-z0-9_./:@%+=,-]*\Z")
 _COMPOSE_ESCAPES = re.compile(r"\\\\|\\0([0-7]{3})")
 
@@ -50,7 +52,7 @@ def _parse_dotenv(raw_env_text: str) -> dict[str, str]:
     return values
 
 
-def _compose_literal(value: str) -> str:
+def _legacy_compose_literal(value: str) -> str:
     if "\x00" in value:
         raise DokployEnvironmentEncodingError(
             "NUL is not a container environment value; remove NUL from this runtime input."
@@ -76,7 +78,7 @@ def _compose_literal(value: str) -> str:
     )
 
 
-def _compose_encoded_keys(raw_env_text: str) -> set[str] | None:
+def _compose_encoded_keys(raw_env_text: str, header: str = _COMPOSE_HEADER) -> set[str] | None:
     normalized = raw_env_text.replace("\r\n", "\n").replace("\r", "\n")
     spans = [match.span(2) for match in _LINE.finditer(normalized)]
     encoded_keys: set[str] | None = None
@@ -84,28 +86,69 @@ def _compose_encoded_keys(raw_env_text: str) -> set[str] | None:
     for line in normalized.splitlines(keepends=True):
         comment = line.strip()
         # A lookalike comment inside a multiline value is data, not metadata.
-        if (comment == _COMPOSE_HEADER or comment.startswith(_COMPOSE_HEADER + " ")) and not any(
+        if (comment == header or comment.startswith(header + " ")) and not any(
             start <= offset < end for start, end in spans
         ):
-            if encoded_keys is None:
-                encoded_keys = set()
-            encoded_keys.update(comment[len(_COMPOSE_HEADER) :].split())
+            encoded_keys = (encoded_keys or set()).union(comment[len(header) :].split())
         offset += len(line)
     return encoded_keys
 
 
 def compose_environment_is_encoded(raw_env_text: str) -> bool:
-    return _compose_encoded_keys(raw_env_text) is not None
+    return _compose_encoded_keys(raw_env_text, _COMPOSE_LITERAL_HEADER) is not None
+
+
+def _compose_value(value: str, names: dict[str, str]) -> str:
+    return "".join(
+        "${" + names[character] + "}" if character in _COMPOSE_CHARACTERS.values() else character
+        for character in value
+    )
+
+
+def _literal_provider_environment(
+    raw_env_text: str, values: dict[str, str]
+) -> tuple[dict[str, str], set[str]]:
+    metadata = _compose_encoded_keys(raw_env_text, _COMPOSE_LITERAL_HEADER)
+    if metadata is None:
+        return values, set()
+    bindings: dict[str, str] = {}
+    for token in metadata:
+        if "=" not in token:
+            continue
+        role, name = token.split("=", 1)
+        if role not in _COMPOSE_CHARACTERS or values.get(name) != _COMPOSE_CHARACTERS[role]:
+            return values, set()
+        bindings[name] = _COMPOSE_CHARACTERS[role]
+    names = {character: name for name, character in bindings.items()}
+
+    def restore_character(match: re.Match[str]) -> str:
+        return bindings.get(match.group(1) or "", match.group() or "")
+
+    decoded_keys: set[str] = set()
+    for key in (metadata & values.keys()) - bindings.keys():
+        literal = re.sub(
+            r"\$\{([^{}]+)}",
+            restore_character,
+            values[key],
+        )
+        try:
+            if _compose_value(literal, names) != values[key]:
+                continue
+        except KeyError:
+            continue
+        values[key] = literal
+        decoded_keys.add(key)
+    for name in bindings:
+        values.pop(name)
+    return values, decoded_keys
 
 
 def _provider_environment(raw_env_text: str) -> tuple[dict[str, str], set[str]]:
     values = _parse_dotenv(raw_env_text)
     encoded_keys = _compose_encoded_keys(raw_env_text) or set()
-    decoded_keys: set[str] = set()
     for key in encoded_keys & values.keys():
         wire_value = values[key]
         if _COMPOSE_PLAIN.fullmatch(wire_value):
-            decoded_keys.add(key)
             continue
         try:
             json_value = _COMPOSE_ESCAPES.sub(
@@ -118,13 +161,12 @@ def _provider_environment(raw_env_text: str) -> tuple[dict[str, str], set[str]]:
             if not isinstance(literal, str):
                 continue
             literal = literal.replace("$$", "$")
-            if _compose_literal(literal) != wire_value:
+            if _legacy_compose_literal(literal) != wire_value:
                 continue
         except (ValueError, TypeError):
             continue
         values[key] = literal
-        decoded_keys.add(key)
-    return values, decoded_keys
+    return _literal_provider_environment(raw_env_text, values)
 
 
 def parse_dokploy_env_text(raw_env_text: str) -> dict[str, str]:
@@ -180,23 +222,43 @@ def serialize_dokploy_env_text(
             )
         return _serialize_dotenv(env_map)
     previous, encoded_keys = _provider_environment(current_env_text or "")
+    legacy_keys = _compose_encoded_keys(current_env_text or "") or set()
     previous_wire = _parse_dotenv(current_env_text or "")
     encoded: dict[str, str] = {}
     encoded_literal_keys: set[str] = set()
     for key, value in env_map.items():
         if (
             current_env_text is not None
-            and key not in encoded_keys | requested_keys
+            and key not in encoded_keys | legacy_keys | requested_keys
             and previous.get(key) == value
         ):
             # A routine image/startup write must not reinterpret an untouched
             # legacy password/reference against an already-initialized database.
             encoded[key] = previous_wire[key]
         else:
-            encoded[key] = _compose_literal(value)
+            encoded[key] = value
             encoded_literal_keys.add(key)
-    rendered = _serialize_dotenv(encoded)
-    return _COMPOSE_HEADER + " " + " ".join(sorted(encoded_literal_keys)) + "\n" + rendered
+    names: dict[str, str] = {}
+    metadata = set(encoded_literal_keys)
+    for role, character in _COMPOSE_CHARACTERS.items():
+        if not any(character in encoded[key] for key in encoded_literal_keys):
+            continue
+        base = "LAUNCHPLANE_DOTENV_" + role
+        name = base
+        suffix = 0
+        while name in env_map or any("${" + name in value for value in env_map.values()):
+            suffix += 1
+            name = f"{base}_{suffix}"
+        names[character] = name
+        metadata.add(role + "=" + name)
+    escaped = {
+        key: _compose_value(value, names) if key in encoded_literal_keys else value
+        for key, value in encoded.items()
+    }
+    rendered = _serialize_dotenv(
+        {**{name: character for character, name in names.items()}, **escaped}
+    )
+    return _COMPOSE_LITERAL_HEADER + " " + " ".join(sorted(metadata)) + "\n" + rendered
 
 
 def _serialize_dotenv(env_map: dict[str, str]) -> str:
