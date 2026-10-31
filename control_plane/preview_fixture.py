@@ -21,6 +21,12 @@ from control_plane.disposable_lanes import (
     DisposableLaneStore,
     require_disposable_lane,
     require_lane_target_ownership,
+    resolve_disposable_preview,
+)
+from control_plane.workflows.generic_web_preview import (
+    effective_preview_app_name_prefix,
+    preview_application_name,
+    resolve_generic_web_preview_slug,
 )
 from control_plane.dokploy import api, post_deploy, source
 from control_plane.host_package import host_schedule
@@ -85,11 +91,25 @@ class PreviewFixtureAdapter:
         ):
             raise ValueError("Fixture target differs from the reviewed preview generation.")
         if mutation:
+            profile = self.store.read_product_profile_record(self.product)
+            slot = fixture_preview_slot(self.store, self.product, preview.anchor_pr_number)
+            owned = resolve_disposable_preview(
+                cast(DisposableLaneStore, self.store), profile, identity.context, slot
+            )
+            if (
+                owned.preview_id != preview.preview_id
+                or identity.instance
+                != preview_application_name(
+                    app_name_prefix=effective_preview_app_name_prefix(profile=profile),
+                    preview_slug=slot,
+                )
+            ):
+                raise ValueError("Fixture runtime differs from the current owned preview slot.")
             require_disposable_lane(
                 cast(DisposableLaneStore, self.store),
                 product=self.product,
                 context=identity.context,
-                instance=identity.instance,
+                instance=slot,
                 preview=preview,
                 preview_operation="refresh",
             )
@@ -113,14 +133,15 @@ class PreviewFixtureAdapter:
             control_plane_root=self.root,
             database_url=self.store.database_url,
         )
-        require_lane_target_ownership(
-            (
-                *self.store.list_dokploy_target_id_records(),
-                *self.store.list_physical_provider_target_records(),
-            ),
+        require_fixture_target_ownership(
+            self.store,
+            product=self.product,
             context=self.request.context,
-            instance=self.request.instance,
+            anchor_pr_number=self.store.read_preview_record(
+                self.request.preview_id
+            ).anchor_pr_number,
             target_id=connection.evidence.target_id,
+            mutation=mutation,
         )
         return connection
 
@@ -200,6 +221,14 @@ class PreviewFixtureAdapter:
 
         def checkpoint(phase: str) -> None:
             self.selection(mutation=mode == "apply")
+            require_fixture_target_ownership(
+                self.store,
+                product=self.product,
+                context=selection.identity.context,
+                anchor_pr_number=binding.anchor_pr_number,
+                target_id=binding.target_id,
+                mutation=mode == "apply",
+            )
             reads.assert_selection_current(self.store, selection)
             if lease is not None and phase == post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER:
                 lease.checkpoint_effect(phase)
@@ -369,6 +398,40 @@ class FixtureContainerStillRunning(ValueError):
     pass
 
 
+def fixture_preview_slot(store: PostgresRecordStore, product: str, anchor_pr_number: int) -> str:
+    return resolve_generic_web_preview_slug(
+        profile=store.read_product_profile_record(product),
+        preview_slug="",
+        anchor_pr_number=anchor_pr_number,
+        label="Preview fixture",
+    )
+
+
+def require_fixture_target_ownership(
+    store: PostgresRecordStore,
+    *,
+    product: str,
+    context: str,
+    anchor_pr_number: int,
+    target_id: str,
+    mutation: bool = False,
+) -> None:
+    slot = fixture_preview_slot(store, product, anchor_pr_number)
+    require_lane_target_ownership(
+        (*store.list_dokploy_target_id_records(), *store.list_physical_provider_target_records()),
+        context=context,
+        instance=slot,
+        target_id=target_id,
+    )
+    if mutation:
+        try:
+            target = store.read_dokploy_target_id_record(context_name=context, instance_name=slot)
+        except FileNotFoundError:
+            return
+        if target.target_id != target_id:
+            raise ValueError("Fixture runtime differs from its owned preview target.")
+
+
 def require_fixture_container_cancelled(
     *,
     store: PostgresRecordStore,
@@ -379,10 +442,11 @@ def require_fixture_container_cancelled(
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> None:
     binding = intent.fixture_binding
-    require_lane_target_ownership(
-        (*store.list_dokploy_target_id_records(), *store.list_physical_provider_target_records()),
+    require_fixture_target_ownership(
+        store,
+        product=intent.product,
         context=binding.identity.context,
-        instance=binding.identity.instance,
+        anchor_pr_number=binding.anchor_pr_number,
         target_id=binding.target_id,
     )
     host, token = source.read_dokploy_config(

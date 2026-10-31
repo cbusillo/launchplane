@@ -13,6 +13,10 @@ Mutation retains the existing disposable-lane, in-use, only-copy and production
 resource-sharing protections. Read-only modes do not require refresh eligibility.
 The fixture shares the preview's execution mutex and durable lifecycle
 reservation: an uncertain writer also fences refresh and idle operations.
+Lane eligibility and target ownership use the product profile's logical preview
+slot. Runtime identity, locks and recovery retain the exact native application
+name. Apply checks that both still resolve to the same preview and rechecks the
+registered target before dispatch.
 
 The authenticated Director agent uses the existing standing preview authority
 described in [disposable-lane engineering](authorization-authority.md#disposable-lane-engineering).
