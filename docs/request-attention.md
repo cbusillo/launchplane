@@ -4,7 +4,7 @@ title: Waiting requests
 
 The administrator page at `/ui/engineering/request-attention` reads waiting work
 from its original source records. It shows the source link, product when mapped,
-requester login, recorded agent, age and next action. Unassigned work is grouped
+requester login, recorded agent, original source age and next action. Unassigned work is grouped
 under Supervisor for the next routine check. This is a view, not an autonomous
 dispatcher, a permission to start work, or a release decision.
 
@@ -15,21 +15,25 @@ inline-review comments, onto the original work's Current Status. Imported
 TestFlight feedback is already an ordinary source issue. This page introduces
 no TestFlight or Discord collector.
 
-A new request on closed work reopens its source issue. A merged change that
+Under the catalog intake rule, an agent must verify a real new request on closed
+work, then reopen its source issue. A merged change that
 cannot reopen reuses or gets one issue, with the source comment link and next
 action until done ([Q1105](https://github.com/cbusillo/launchplane/issues/5405#issuecomment-6537114111)).
 The existing intake agent verifies that it is a real request before reopening;
-acknowledgements alone do not qualify. The weekly check reports sweep misses
+acknowledgements alone do not qualify. The weekly audit must report sweep misses
 and requests left waiting together with false reopens and observed time and
 tool cost per request, using existing source/Supervisor evidence. It states
-missing measurements rather than inventing efficiency or effectiveness.
+missing measurements rather than inventing efficiency or effectiveness. These
+are [catalog intake](https://github.com/cbusillo/codex-skills/blob/main/skills/github-plan/SKILL.md#triage-incoming-reports)
+and weekly-audit duties, not a new collector or dispatcher in this page.
 
 `GET /v1/attention/requests` returns source inventory without contacting the
 source-control provider. Add `repository=OWNER/REPOSITORY` to read open work. The adapter follows
 source cursors within one repository read; `truncated` explicitly reports the
 read bound. An incomplete discussion or failed cursor is a coverage gap. Responses use Launchplane terms (`request`, `change`,
 `source_id`), and only the GitHub adapter knows the current provider endpoints.
-The page deduplicates source IDs and folds changes into their open canonical requests and reads up to four repositories
+The page deduplicates source IDs and folds changes into their open canonical requests
+in the same repository and reads up to four repositories
 at a time. Refresh re-reads source state, and navigation cancels outstanding
 browser reads. Failed sources remain visible as coverage gaps. A denied refresh
 clears previous results through the existing Engineering Ops resource lifecycle.
@@ -46,7 +50,10 @@ release requires source verification and is routed to Supervisor, since this
 read does not qualify termination evidence. Person and event waits keep their
 recorded next actor and are excluded from the unowned filter. A general
 `agent` next actor or a released worker's historical claim is not an assigned
-agent. Product mappings come from existing profiles. Requester logins remain
+agent. A later requester edit that prevents verifying managed status keeps the
+request visible with a source-verification action. The Opened field measures
+source creation age, including after reopening, rather than claiming how long a
+late request has waited. Product mappings come from existing profiles. Requester logins remain
 source metadata and do not create a new person or Client-agent identity map.
 
 The original sources are the only durable request store. Existing collection

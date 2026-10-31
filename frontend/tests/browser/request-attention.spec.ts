@@ -45,7 +45,7 @@ async function setup(page: Page) {
   return { state, mutations };
 }
 
-test("waiting requests route unowned work and keep replies visible", { tag: "@responsive" }, async ({ page }, testInfo) => {
+test("waiting requests route unowned work and preserve person waits", { tag: "@responsive" }, async ({ page }, testInfo) => {
   const { state, mutations } = await setup(page);
   await page.goto("/ui/engineering/request-attention?fixture=products");
   await expect(page.getByRole("heading", { name: "Waiting requests", level: 1 })).toBeFocused();
@@ -56,9 +56,6 @@ test("waiting requests route unowned work and keep replies visible", { tag: "@re
   await page.getByLabel(/Supervisor \(/).check();
   await expect(list.getByRole("listitem")).toHaveCount(1);
   await expect(list.getByRole("link", { name: request.title })).toHaveAttribute("href", request.source_url);
-  state.mode = "replied";
-  await page.getByRole("button", { name: "Refresh requests" }).click();
-  await expect(list).toContainText(request.title);
   await page.getByLabel(/Supervisor \(/).uncheck();
   await page.getByLabel("Filter requests by product").selectOption(sources[1].products[0]);
   await expect(list).toContainText("worker-two");

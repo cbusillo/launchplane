@@ -5,6 +5,7 @@ from github_plan_status import next_actor, normalize_author
 from github_plan_status.body import contributor_plan_body
 from github_plan_status.discussion import (
     current_status,
+    has_release_receipt,
     released_actor,
     released_claim_id,
     records,
@@ -21,7 +22,7 @@ _AUTHOR = "author { login __typename ... on User { databaseId } ... on Bot { dat
 _EDITOR = _AUTHOR.replace("author", "editor", 1)
 _PAGE = "pageInfo { hasNextPage endCursor }"
 _COMMENT = f"databaseId body createdAt updatedAt {_AUTHOR}"
-_FIELDS = f"id url title body createdAt updatedAt lastEditedAt state {_AUTHOR} {_EDITOR} comments(first:100) {{ nodes {{ {_COMMENT} }} {_PAGE} }}"
+_FIELDS = f"id url title body createdAt updatedAt lastEditedAt state {_AUTHOR} {_EDITOR} comments(first:20) {{ nodes {{ {_COMMENT} }} {_PAGE} }}"
 
 
 class GitHubOpenRequestReader:
@@ -171,13 +172,15 @@ def _collected_request(
         )
         actor = next_actor.read(status)
         action = status_field(status, "Next action") or action
+        if not status and kind == "request" and contributor_plan_body(raw):
+            action = "Open the source to verify its managed status after a requester edit."
         if actor and actor.startswith("agent:"):
             authored: list[dict[str, Any]] = [
                 {**row, "user": {"login": row["author"]}}
                 for row in discussion["comments"]
                 if str(row["author"]).casefold() in trusted
             ]
-            receipts = [row for row in authored if "github-plan:abandoned-release " in row["body"]]
+            receipts = [row for row in authored if has_release_receipt(row["body"])]
             claims = [
                 row
                 for row in authored

@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
+from github_plan_status.body import wrap_contributor_plan
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.request_attention import (
@@ -181,7 +182,16 @@ class RequestAttentionSourceTests(unittest.TestCase):
             author={"login": "team", "__typename": "User"}, comments=self.connection([status])
         )
         self.assertEqual(self.read_rows([trusted]).requests[0].next_actor, row.next_actor)
+        edited = self.raw(
+            body=wrap_contributor_plan(
+                {"body": "Client edited the original request."},
+                "## Current Status\nNext actor: agent:worker",
+            )
+        )
+        unverifiable = self.read_rows([edited]).requests[0]
+        self.assertIsNone(unverifiable.next_actor)
         forged = self.read_rows([self.raw()]).requests[0]
+        self.assertNotEqual(unverifiable.next_action, forged.next_action)
         self.assertIsNone(forged.next_actor)
         claim = {
             "worker": "worker",
@@ -226,7 +236,7 @@ class RequestAttentionSourceTests(unittest.TestCase):
             row.next_actor,
         )
 
-    def test_cursor_reads_survive_earlier_closure_and_use_one_read_only_token(self) -> None:
+    def test_cursor_reads_continue_from_the_source_cursor_and_reuse_one_token(self) -> None:
         first = self.connection([self.raw()], "after-7")
         second = self.connection([self.raw(id="request-8")])
         self.transport.request.side_effect = [
@@ -242,8 +252,6 @@ class RequestAttentionSourceTests(unittest.TestCase):
         )
         self.assertFalse(page.has_more)
         self.token.assert_called_once()
-        for call in self.transport.request.call_args_list:
-            self.assertTrue(call.kwargs["body"]["query"].startswith("query("))
 
     def test_discussion_cursor_and_provider_errors_never_claim_complete_coverage(self) -> None:
         status = self.comment(

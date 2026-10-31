@@ -31,6 +31,7 @@ from control_plane.github_app_identity import (
     GitHubAppInstallationToken,
     mint_delivery_installation_token,
 )
+from control_plane import launchplane_github_delivery as delivery
 from control_plane.launchplane_github_delivery import (
     DELIVERY_GITHUB_APP_ID_KEY,
     DELIVERY_GITHUB_APP_INTEGRATION_KEY,
@@ -242,23 +243,25 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
         with self.assertRaises(DeliveryGitHubTokenUnavailable):
             self.resolve("repository_read", report_failure=True, retry_provider_errors=True)
 
-    def test_each_operation_mints_only_its_permissions_for_the_inventory_repository(self) -> None:
-        for purpose, permissions in (
-            ("repository_read", {"contents": "read", "pull_requests": "read", "issues": "read"}),
-            ("pull_request_feedback", {"contents": "read", "pull_requests": "write"}),
-            (
-                "source_issue_feedback",
-                {"contents": "read", "pull_requests": "write", "issues": "write"},
-            ),
-            ("release_record", {"issues": "write"}),
-            ("workflow_dispatch", {"actions": "write"}),
-            ("release_publish", {"contents": "write"}),
-        ):
+    def test_each_operation_mints_for_inventory_and_read_purposes_cannot_write(self) -> None:
+        self.installation_permissions.update(
+            {
+                scope: "write"
+                for permissions in delivery._PERMISSIONS.values()
+                for scope in permissions
+            }
+        )
+        for purpose in delivery._PERMISSIONS:
             with self.subTest(purpose=purpose):
                 self.assertEqual(self.resolve(purpose), "installation-token")
                 self.assertEqual(
-                    self.requested[-1], {"repository_ids": [7001], "permissions": permissions}
+                    self.requested[-1]["repository_ids"], [int(_inventory().repository_id)]
                 )
+                if purpose in {"repository_read", "admission_read"}:
+                    permissions = self.requested[-1]["permissions"]
+                    if not isinstance(permissions, dict):
+                        self.fail("Token mint omitted its permission bounds.")
+                    self.assertNotIn("write", permissions.values())
 
     def test_temporary_provider_failure_is_retryable_and_does_not_become_missing_configuration(
         self,

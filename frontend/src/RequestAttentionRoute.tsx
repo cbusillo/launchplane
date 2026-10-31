@@ -71,7 +71,7 @@ export function RequestAttentionRoute() {
     >
       <EngineeringResourceGate noun="waiting requests" state={resource.state} refresh={resource.refresh}>{snapshot => <>
         <p>Source coverage: {snapshot.sources.length} tracked or product-linked repositories. Sources outside this inventory are not covered.</p>
-        <p>Read at {formatTime(snapshot.observedAt)}. Ages are measured at the source read.</p>
+        <p>Read at {formatTime(snapshot.observedAt)}. Ages are since the source was first opened, including reopened work.</p>
         {snapshot.gaps.length ? <div role="alert"><strong>Coverage is incomplete.</strong><ul>{snapshot.gaps.map(gap => <li key={gap}>{gap}</li>)}</ul></div> : null}
         <div className="topics-toolbar">
           <label>Product <select aria-label="Filter requests by product" value={product} onChange={event => setProduct(event.target.value)}>
@@ -90,7 +90,7 @@ export function RequestAttentionRoute() {
               <dl className="attention-details">
                 <dt>Requester</dt><dd>{request.requester}</dd>
                 <dt>Owning agent</dt><dd>{request.owning_agent ?? (request.next_actor === "agent:Supervisor" ? "Supervisor · needs an agent" : "No agent action pending")}</dd>
-                <dt>Waiting</dt><dd>{request.age_seconds < 3600 ? "Less than an hour" : request.age_seconds < 86400 ? `${Math.floor(request.age_seconds / 3600)} hours` : `${Math.floor(request.age_seconds / 86400)} days`} · <time dateTime={request.created_at}>{formatTime(request.created_at)}</time></dd>
+                <dt>Opened</dt><dd>{request.age_seconds < 3600 ? "Less than an hour" : request.age_seconds < 86400 ? `${Math.floor(request.age_seconds / 3600)} hours` : `${Math.floor(request.age_seconds / 86400)} days`} · <time dateTime={request.created_at}>{formatTime(request.created_at)}</time></dd>
                 <dt>Next action</dt><dd>{request.next_action}</dd>
                 <dt>Next actor</dt><dd>{request.next_actor}</dd>
               </dl>
