@@ -140,14 +140,28 @@ class DokployComposeConsumerTests(unittest.TestCase):
                     **VALUES,
                 }
                 self.assertEqual(api.parse_dokploy_env_text(wire), expected)
+                before, _ = consume_compose_environment(previous, ("JSON_KEPT",))
                 actual, interpolation = consume_compose_environment(wire, tuple(expected))
-                for service in actual.values():
+                for name, service in actual.items():
                     # `config` emits reusable Compose source with escaped dollars.
                     self.assertEqual(
-                        service, {key: value.replace("$", "$$") for key, value in expected.items()}
+                        service,
+                        {
+                            **{key: value.replace("$", "$$") for key, value in expected.items()},
+                            "JSON_KEPT": before[name]["JSON_KEPT"],
+                        },
                     )
                 self.assertIn("DOLLARS=" + VALUES["DOLLARS"], interpolation.splitlines())
                 self.assertNotIn("REMOVE", api.parse_dokploy_env_text(wire))
+                qualified = api.serialize_dokploy_env_text(
+                    expected,
+                    target_type="compose",
+                    current_env_text=wire,
+                    literal_keys=("JSON_KEPT",),
+                )
+                qualified_actual, _ = consume_compose_environment(qualified, ("JSON_KEPT",))
+                for service in qualified_actual.values():
+                    self.assertEqual(service["JSON_KEPT"], expected["JSON_KEPT"])
 
     def test_unrelated_image_write_preserves_legacy_effective_credentials_and_references(
         self,
@@ -163,7 +177,15 @@ class DokployComposeConsumerTests(unittest.TestCase):
         }
         unmarked = api.serialize_dokploy_env_text(legacy_values)
         saved = (ROOT / "tests/fixtures/dokploy-compose/legacy-literal.env").read_text()
-        for previous in (unmarked, saved + "\n" + unmarked):
+        credential = (ROOT / "tests/fixtures/dokploy-compose/legacy-credential.env").read_text()
+        references = api.serialize_dokploy_env_text(
+            {
+                key: value
+                for key, value in legacy_values.items()
+                if key not in {"ODOO_DB_PASSWORD", "JSON_KEPT"}
+            }
+        )
+        for previous in (unmarked, saved + "\n" + unmarked, credential + "\n" + references):
             with self.subTest(previous=previous):
                 before, _ = consume_compose_environment(
                     previous, tuple(legacy_values), project_env="INPUT=project-value"
@@ -188,5 +210,13 @@ class DokployComposeConsumerTests(unittest.TestCase):
                 self.assertEqual(after, before)
                 self.assertEqual(
                     api.parse_dokploy_env_text(wire)["ODOO_DB_PASSWORD"],
-                    legacy_values["ODOO_DB_PASSWORD"],
+                    api.parse_dokploy_env_text(previous)["ODOO_DB_PASSWORD"],
+                )
+                again = api.serialize_dokploy_env_text(
+                    api.parse_dokploy_env_text(wire), target_type="compose", current_env_text=wire
+                )
+                self.assertEqual(again, wire)
+                self.assertEqual(
+                    api.compose_unqualified_keys(wire, ("ODOO_DB_PASSWORD", "JSON_KEPT")),
+                    api.compose_unqualified_keys(previous, ("ODOO_DB_PASSWORD", "JSON_KEPT")),
                 )

@@ -237,15 +237,18 @@ def serialize_dokploy_env_text(
     previous_wire = _parse_dotenv(current_env_text or "")
     encoded: dict[str, str] = {}
     encoded_literal_keys: set[str] = set()
+    preserved_legacy_keys: set[str] = set()
     for key, value in env_map.items():
         if (
             current_env_text is not None
-            and key not in encoded_keys | legacy_keys | requested_keys
+            and key not in encoded_keys | requested_keys
             and previous.get(key) == value
         ):
             # A routine image/startup write must not reinterpret an untouched
             # legacy password/reference against an already-initialized database.
             encoded[key] = previous_wire[key]
+            if key in legacy_keys:
+                preserved_legacy_keys.add(key)
         else:
             encoded[key] = value
             encoded_literal_keys.add(key)
@@ -269,7 +272,10 @@ def serialize_dokploy_env_text(
     rendered = _serialize_dotenv(
         {**{name: character for character, name in names.items()}, **escaped}
     )
-    return _COMPOSE_LITERAL_HEADER + " " + " ".join(sorted(metadata)) + "\n" + rendered
+    headers = [_COMPOSE_LITERAL_HEADER + " " + " ".join(sorted(metadata))]
+    if preserved_legacy_keys:
+        headers.append(_COMPOSE_HEADER + " " + " ".join(sorted(preserved_legacy_keys)))
+    return "\n".join([*headers, rendered])
 
 
 def _serialize_dotenv(env_map: dict[str, str]) -> str:

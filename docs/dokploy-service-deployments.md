@@ -133,8 +133,9 @@ literal keys and, when needed, character variables that defer dollar signs,
 apostrophes, backslashes and carriage returns until Compose interpolation.
 The variables are chosen without replacing an existing key or reference and
 are omitted from logical readback. Products need no decoder. Previous
-JSON/octal envelopes remain readable and are rewritten through this transport
-on the next supported write; they no longer qualify current literal delivery.
+JSON/octal envelopes remain readable and unchanged values retain their existing
+transport; they no longer qualify current literal delivery. New, changed or
+explicitly requalified values use the current transport.
 Metadata survives comment movement and CRLF normalization;
 new provider-only fields and edits that cease to match the encoding remain
 legacy fields rather than making the record unreadable. Canonical reconciliation
@@ -157,7 +158,8 @@ Dokploy generated-file functions and actual Compose `config`, covering both
 interpolation and service `env_file` consumption with synthetic values only.
 Keep the vendor excerpts aligned with the deployed provider before treating
 this qualification as current provider evidence. Saved legacy-record fixtures
-also prove migration without losing their logical inputs.
+also prove preservation without losing their logical inputs, and explicit
+requalification through the current transport.
 Provision Node through the repository's CI Node setup and Compose through
 `scripts/setup-ci-compose.sh` using the CI-declared version before running it.
 The frontend validation CI job runs this qualification; ordinary unit discovery
