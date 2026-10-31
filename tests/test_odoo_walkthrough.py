@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 from contextlib import ExitStack
+from dataclasses import replace
 import json
 import logging
 import sqlite3
@@ -30,8 +31,11 @@ from control_plane.contracts.odoo_walkthrough import (
     WalkthroughStep,
     walkthrough_activity_scope,
     WALKTHROUGH_DISPATCH_SECONDS,
+    WALKTHROUGH_READONLY_GROUP,
+    WALKTHROUGH_LOGIN_PREFIX,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.dokploy.odoo_walkthrough import (
     ACCOUNT_ODOO_PROGRAM,
     ACCOUNT_HOST_PROGRAM,
@@ -54,6 +58,7 @@ from control_plane.odoo_walkthrough import (
     WalkthroughPlan,
     WalkthroughPrerequisite,
     WalkthroughPrerequisiteError,
+    WALKTHROUGH_SECRET_INTEGRATION,
 )
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 from control_plane.odoo_connection_isolation import connection_isolation_library
@@ -81,6 +86,31 @@ def task_request(**changes: Any) -> OdooWalkthroughRequest:
 
 
 class TaskContractTests(unittest.TestCase):
+    def test_readonly_identity_requires_exact_preview_and_refuses_business_roles(self) -> None:
+        fields = {
+            "read_only": True,
+            "instance": "example-pr-1",
+            "preview_id": "preview-one",
+            "generation_id": "generation-one",
+            "task_id": canonical_json_sha256("example-odoo")[:32],
+        }
+        request = task_request(**fields)
+        self.assertEqual(request.groups, (WALKTHROUGH_READONLY_GROUP,))
+        for change in (
+            {"instance": "prod"},
+            {"preview_id": ""},
+            {"generation_id": ""},
+            {"read_only": False},
+            {"groups": ("stock.group_stock_user",)},
+            {"task_id": canonical_json_sha256("another-product")[:32]},
+            {
+                "steps": ({"action": "fill", "selector": "input", "value": "TEST x"},),
+                "operation": "run",
+            },
+        ):
+            with self.subTest(change=change), self.assertRaises(ValidationError):
+                task_request(**(fields | change))
+
     def test_standing_rule_covers_future_products_only_on_testing_for_the_exact_agent(self) -> None:
         identity = LocalOperatorIdentity(subject="director-fixture", token_label="operator-fixture")
         rule = LocalOperatorPolicyRule(
@@ -258,6 +288,7 @@ class TaskRouteTests(unittest.TestCase):
             )
         )
         self.allowed = True
+        self.preview_target = False
         self.actions: list[str] = []
         self.app: Any = FastAPI()
 
@@ -266,7 +297,11 @@ class TaskRouteTests(unittest.TestCase):
 
         def allows(**arguments: Any) -> bool:
             self.actions.append(arguments["action"])
-            self.assertEqual(arguments["target"].instances, ("testing",))
+            if self.preview_target:
+                self.assertEqual(arguments["target"].scope, "preview")
+                self.assertFalse(arguments["target"].instances)
+            else:
+                self.assertEqual(arguments["target"].instances, ("testing",))
             return self.allowed
 
         def error(**arguments: Any) -> HTTPException:
@@ -303,6 +338,71 @@ class TaskRouteTests(unittest.TestCase):
             )
         )
         return response.status_code, response.json()
+
+    def test_preview_authority_keeps_secret_and_receipt_on_the_exact_preview(self) -> None:
+        self.preview_target = True
+        identity = self.plan.connection.selection.identity.model_copy(
+            update={
+                "instance": "example-pr-1",
+                "environment_kind": "preview",
+                "preview_id": "preview-one",
+                "preview_generation_id": "generation-one",
+            }
+        )
+        self.plan = replace(
+            self.plan,
+            connection=replace(
+                self.plan.connection,
+                selection=OdooRuntimeSelection(identity, "https://preview.example"),
+            ),
+            fixture=MagicMock(binding=None),
+            account_id=17,
+        )
+        self.planner.return_value = self.plan
+        self.stack.enter_context(
+            patch("control_plane.odoo_walkthrough.plan_walkthrough", return_value=self.plan)
+        )
+        request = task_request(
+            read_only=True,
+            instance=identity.instance,
+            preview_id=identity.preview_id,
+            generation_id=identity.preview_generation_id,
+            task_id=canonical_json_sha256(identity.product)[:32],
+        )
+        self.allowed = False
+        status, _ = self.invoke(request)
+        self.assertEqual(status, 403)
+        self.planner.assert_not_called()
+        self.account.assert_not_called()
+        self.allowed = True
+        status, planned = self.invoke(request)
+        self.assertEqual(status, 200)
+        self.assertEqual(planned["result"]["instance"], identity.instance)
+        applied = request.model_copy(
+            update={"mode": "apply", "reviewed_plan_sha256": self.plan.digest}
+        )
+        status, receipt = self.invoke(applied, "preview-provision")
+        self.assertEqual(status, 200, receipt)
+        self.assertEqual(receipt["result"]["instance"], identity.instance)
+        self.assertEqual(receipt["result"]["status"], "pass")
+        secret = self.store.find_secret_record(
+            scope="context_instance",
+            integration=WALKTHROUGH_SECRET_INTEGRATION,
+            name=self.plan.secret_name,
+            context=identity.context,
+            instance=identity.instance,
+        )
+        self.assertIsNotNone(secret)
+        password = self.account.call_args.kwargs["payload"]["password"]
+        self.assertNotIn(password, json.dumps(receipt))
+        original = self.store.read_idempotency_record(
+            scope=walkthrough_activity_scope(identity.product),
+            route_path=WALKTHROUGH_ROUTE,
+            idempotency_key="preview-provision",
+        )
+        assert original is not None
+        self.assertNotIn(password, json.dumps(self.store.read_original_mutation_intent(original)))
+        self.assertEqual(self.account.call_args.kwargs["payload"]["expected_account_id"], 17)
 
     def test_denial_happens_before_any_provider_or_secret_operation(self) -> None:
         self.allowed = False
@@ -356,7 +456,7 @@ class TaskRouteTests(unittest.TestCase):
             )
             with self.assertRaises(WalkthroughPrerequisiteError) as caught:
                 with _prerequisite(WalkthroughPrerequisite.PHYSICAL_COPY):
-                    raise cause
+                    MagicMock(side_effect=cause)()
             self.planner.side_effect = caught.exception
             status, response = self.invoke(task_request())
             self.assertEqual(status, 409)
@@ -651,11 +751,11 @@ class AccountProgramTests(unittest.TestCase):
         namespace["connection_isolation"](isolation_cursor, apply=True)
         sql_result = False
 
-        def execute(query: str, parameters: tuple[object, ...] = ()) -> None:
+        def execute(query: str, bindings: tuple[object, ...] = ()) -> None:
             nonlocal sql_result
             sql_result = "pg_advisory_xact_lock" not in query and "res_users_log" not in query
             if sql_result:
-                isolation_cursor.execute(query, parameters)
+                isolation_cursor.execute(query, bindings)
 
         self.env.cr.execute.side_effect = execute
         self.env.cr.fetchone.side_effect = lambda: (
@@ -689,6 +789,61 @@ class AccountProgramTests(unittest.TestCase):
             },
         )
         return json.loads(output.read_text())  # type: ignore[no-any-return]
+
+    def test_readonly_preview_uses_qualified_fixture_account_without_business_groups(self) -> None:
+        self.request.update(
+            {
+                "read_only": True,
+                "instance": "example-pr-12",
+                "groups": [WALKTHROUGH_READONLY_GROUP],
+                "identity": {
+                    "environment_kind": "preview",
+                    "preview_id": "preview-fixture",
+                    "preview_generation_id": "generation-fixture",
+                },
+                "expected_account_id": self.user.id,
+            }
+        )
+        self.parameters.pop(TESTING_COPY_COMPLETION_PARAMETER)
+        self.user.login = WALKTHROUGH_LOGIN_PREFIX + self.request["task_id"]
+        self.user.has_group.side_effect = lambda group: group == WALKTHROUGH_READONLY_GROUP
+        self.users._launchplane_readonly_test_identity.return_value = self.user
+        self.assertEqual(self.execute()["account_id"], self.user.id)
+        self.users.create.assert_not_called()
+        self.user.write.assert_called_once_with(
+            {"password": self.request["password"], "active": True}
+        )
+        self.users._launchplane_readonly_test_identity.assert_called_once_with(
+            self.request["identity"],
+            self.user.login,
+            create=False,
+        )
+        self.execute()
+        self.user.write.assert_called_once()
+        self.request["expected_account_id"] = self.user.id + 1
+        with self.assertRaises(RuntimeError):
+            self.execute()
+
+    def test_readonly_account_refuses_missing_product_guard_and_role_escalation(self) -> None:
+        self.request.update(
+            {
+                "read_only": True,
+                "groups": [WALKTHROUGH_READONLY_GROUP],
+                "identity": {"environment_kind": "stable"},
+            }
+        )
+        self.users._launchplane_readonly_test_identity.side_effect = RuntimeError(
+            "No product guard"
+        )
+        with self.assertRaises(RuntimeError):
+            self.execute()
+        self.user.write.assert_not_called()
+        self.users.create.assert_not_called()
+        self.users._launchplane_readonly_test_identity.reset_mock()
+        self.request["groups"] = ["stock.group_stock_user"]
+        with self.assertRaises(RuntimeError):
+            self.execute()
+        self.users._launchplane_readonly_test_identity.assert_not_called()
 
     def test_provision_preserves_staff_and_does_not_reset_existing_task(self) -> None:
         self.assertEqual(self.execute()["account_id"], self.user.id)
@@ -745,7 +900,9 @@ class AccountProgramTests(unittest.TestCase):
 
         self.env.cr.execute.side_effect = execute
         self.request["operation"] = "cleanup"
-        self.user.write.side_effect = lambda values: setattr(self.user, "active", values["active"])
+        self.user.write.side_effect = lambda updates: setattr(
+            self.user, "active", updates["active"]
+        )
         self.execute()
         values = self.user.write.call_args.args[0]
         self.assertFalse(values["active"])
@@ -785,7 +942,9 @@ class AccountProgramTests(unittest.TestCase):
         self.execute()
         self.user.write.assert_not_called()
         self.request["operation"] = "cleanup"
-        self.user.write.side_effect = lambda values: setattr(self.user, "active", values["active"])
+        self.user.write.side_effect = lambda updates: setattr(
+            self.user, "active", updates["active"]
+        )
         self.execute()
         self.assertFalse(self.user.active)
 
@@ -973,7 +1132,7 @@ class AccountProgramTests(unittest.TestCase):
 
         self.assertEqual(read_journal(), not commit_unknown)
         journal = (
-            original_path(self.directory.name) / "journal" / (payload["dispatch_id"] + ".json")
+            original_path(self.directory.name) / "journal" / (str(payload["dispatch_id"]) + ".json")
         )
         journal.write_text(json.dumps({"finished": False}))
         self.assertFalse(read_journal())

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import unittest
 from unittest.mock import MagicMock, patch
+from typing import Any
 
 from control_plane.contracts.odoo_walkthrough import WalkthroughStep
 from control_plane.contracts.runtime_identity import RuntimeIdentity
-from control_plane.odoo_walkthrough_browser import run_walkthrough_browser
+from control_plane.odoo_walkthrough_browser import (
+    readonly_browser_request,
+    run_walkthrough_browser,
+)
 
 
 class OpaqueBrowserTests(unittest.TestCase):
@@ -127,6 +131,82 @@ class OpaqueBrowserTests(unittest.TestCase):
         )
         self.page.locator.return_value.fill.assert_called_once_with("TEST return")
         self.assertFalse(self.browser.new_context.call_args.kwargs["accept_downloads"])
+
+    def test_signout_and_signin_use_only_the_private_task_identity(self) -> None:
+        passed, screenshots = self.run_browser(
+            WalkthroughStep(action="sign_out"),
+            WalkthroughStep(action="sign_in"),
+            WalkthroughStep(action="visible", selector=".o_web_client"),
+        )
+        self.assertEqual(passed, 3)
+        self.assertFalse(screenshots)
+        self.assertEqual(self.context.request.post.call_count, 3)
+        self.assertTrue(
+            self.context.request.post.call_args.args[0].endswith("/web/session/authenticate")
+        )
+        self.context.clear_cookies.assert_called_once()
+        self.page.close.assert_called_once()
+
+    def test_readonly_transport_allows_ui_reads_and_refuses_business_calls(self) -> None:
+        for method in ("web_read", "web_search_read", "get_views", "default_get"):
+            self.assertTrue(
+                readonly_browser_request(
+                    "POST",
+                    "/web/dataset/call_kw/product.product/" + method,
+                    {"params": {"model": "product.product", "method": method}},
+                )
+            )
+        for method in ("write", "create", "unlink", "button_validate", "action_print"):
+            self.assertFalse(
+                readonly_browser_request(
+                    "POST",
+                    "/web/dataset/call_kw/product.product/read",
+                    {"params": {"model": "product.product", "method": method}},
+                )
+            )
+        for verb, path in (
+            ("GET", "/report/pdf/product.label/1"),
+            ("POST", "/web/dataset/call_button"),
+            ("POST", "/web/session/change_password"),
+            ("GET", "/web/content/1?download=true"),
+            ("POST", "/mail/message/post"),
+        ):
+            self.assertFalse(readonly_browser_request(verb, path, {}))
+        self.assertFalse(readonly_browser_request("POST", "/web/dataset/call_kw", {}))
+        self.assertTrue(readonly_browser_request("GET", "/web/assets/client.js", None))
+
+    def test_preview_browser_requires_readonly_and_rejects_fill_before_signin(self) -> None:
+        preview = self.identity.model_copy(
+            update={
+                "instance": "preview-example-12",
+                "environment_kind": "preview",
+                "preview_id": "preview-example",
+                "preview_generation_id": "generation-example",
+            }
+        )
+        arguments: dict[str, Any] = {
+            "origin": "https://testing.example",
+            "database": "preview",
+            "login": "test-identity",
+            "password": "private-fixture-password",
+            "account_id": 17,
+            "identity": preview,
+            "checkpoint": self.checkpoint,
+        }
+        with self.assertRaises(ValueError):
+            run_walkthrough_browser(**arguments, steps=())
+        with self.assertRaises(ValueError):
+            run_walkthrough_browser(
+                **arguments,
+                read_only=True,
+                steps=(WalkthroughStep(action="fill", selector="input", value="TEST x"),),
+            )
+        self.context.request.post.assert_not_called()
+        self.context.request.get.return_value.json.return_value = {
+            "runtime_identity": preview.model_dump(mode="json")
+        }
+        run_walkthrough_browser(**arguments, read_only=True, steps=())
+        self.context.close.assert_called_once()
 
 
 if __name__ == "__main__":

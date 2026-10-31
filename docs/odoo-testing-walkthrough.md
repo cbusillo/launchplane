@@ -8,8 +8,9 @@ password is generated inside the service, encrypted in an instance-scoped
 account driver and the isolated browser service. This integration is separate
 from product runtime secrets: the password is never delivered as an application
 environment variable or exposed through an admin/helper response. Restored
-staff and admin passwords are preserved. Production and preview instances are
-rejected before provider or secret resolution.
+staff and admin passwords are preserved. Production is rejected before provider
+or secret resolution. General task accounts accept testing only; the read-only
+product identity below also accepts an exact preview generation.
 
 The API is `POST /v1/drivers/odoo/testing-walkthrough`. Its operations are
 `provision`, `run`, and `cleanup`, each with `mode=dry-run` followed by
@@ -290,3 +291,73 @@ and resource qualification; select `source_mode=ssh` if that is the intended cop
 source (the default is `container-export`). Each failure has a plain description
 and fix kind. Dependent or unselected evidence stays unknown. See the
 [path-check contract](service-boundary.md#product-retirement) for the read boundary.
+
+## Read-only product identities
+
+Use the same route with `read_only: true` and the fixed product task ID,
+`canonical_json_sha256(product)[:32]`. The login uses the existing prefix.
+The password stays encrypted in the existing `odoo_walkthrough` integration,
+separately bound to each testing copy or exact preview generation. It is never
+inherited as a usable credential, delivered as runtime environment, or returned.
+This standing product identity has no four-hour consumption limit. Explicit
+cleanup still revokes its account and secret on the current target; ordinary
+task accounts keep their existing lifetime.
+
+Testing retains its copy, isolation, use and authorization checks. A preview
+requires its native `instance`, `preview_id` and `generation_id`, matching its
+active serving identity. It uses existing Director-agent preview authority or
+`odoo_preview_apply.execute` for its product preview context, rather than a new
+grant or an expansion of testing-only rules. Account changes retain fixture
+protected-use and exclusive target-ownership checks. Browser work retains
+current identity and isolation checks. The preview uses its existing execution
+lock and durable provider fence. Recovery observes the original receiver/key;
+it never redirects or repeats a browser transaction.
+
+First apply the image-owned `read-only-test-identity` fixture through the
+[preview-fixture route](preview-fixtures.md). It creates only an inactive account
+shell and ownership witness, without receiving a password. Provisioning binds
+that account ID, database, container, target and generation; the fixed native
+consumer then sets a service-generated password over private non-echo stdin.
+No fixture schedule or retained original intent carries a credential. A snapshot
+restore is insufficient: new previews restore a frozen full database and run the
+sanitizer again, while existing previews retain their data and Client edits.
+
+The product artifact supplies `launchplane_readonly.group_user` and private
+`res.users._launchplane_readonly_test_identity(identity, login, create=False)`.
+The method returns only its owned, qualified user and refuses a staff account
+or absent guard. Testing may pass `create=True` to create that product's shell;
+previews always pass `create=False` and require the fixture. A new generation
+may rebind only the same qualified owned user. Caller-selected business groups
+and form-filling steps are refused.
+
+The product owns and tests its business permissions. Odoo ACLs add rights, so
+read-only ACL entries alone cannot enforce this contract. Its server guard must
+refuse business create/write/unlink, sudo business paths, scans, quantity/count
+changes, validation, accounting, imports, preference saves, messages, server
+actions and reports/printing. Only sign-in/out bookkeeping may write.
+
+| CM check | Minimum permission |
+| --- | --- |
+| Sign in, sign out, sign in again | Internal web client and authentication bookkeeping |
+| Inventory and Repair Tickets menus | Menu/action/view reads and displayed-record reads; no stock operator role |
+| Three SAMPLE parts | Product/template, unit, displayed stock and location reads; no quantity/count writes |
+| `WH/IN/00001` | Receipt, move, move-line, picking-type and location reads; no validation |
+| Label controls and My printers | Action/view, printer metadata and own-user form reads; no print, preference or credential writes |
+| Open Scan parts | Action/view reads only; no scan submission |
+
+The product defines the exact models and record rules. Fix missing menu access
+in its read-only role, without granting full inventory operations. An absent
+PrintNode credential or empty printer list is expected.
+
+The browser adds a read-only transport boundary: web-client/assets/menu GETs,
+action loading and a closed set of ORM reads. It blocks business RPCs, server
+actions, reports/downloads, mail posting, external requests and websockets.
+Menu clicks remain available within this transport. `sign_out` and `sign_in`
+steps use fixed private session endpoints for the same managed identity; they
+accept neither selectors nor credentials. Screenshots retain existing masking
+and private custody, and every run closes its browser without exporting sessions.
+
+Deploy normally, then qualify the image-owned role/fixture. Coordinate an
+existing Client preview's serving tuple and activation window with its owner
+before account changes. Preserve samples, receipt state and recorded acceptance.
+A source test or provision receipt never establishes a real authenticated UI pass.
