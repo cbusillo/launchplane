@@ -76,13 +76,12 @@ def consume_compose_environment(
                 "file": {"image": "synthetic.invalid/example:latest", "env_file": [".env"]},
             }
         }
-        (code / "compose.json").write_text(json.dumps(compose_input or compose))
         command = [
             *json.loads(os.environ["LAUNCHPLANE_TEST_COMPOSE_COMMAND"]),
             "--project-directory",
             str(code),
             "-f",
-            str(code / "compose.json"),
+            "-",
             "config",
         ]
 
@@ -98,6 +97,7 @@ def consume_compose_environment(
                     ),
                 },
                 text=True,
+                input=json.dumps(compose_input or compose),
                 capture_output=True,
                 check=True,
             )
