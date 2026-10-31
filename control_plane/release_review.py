@@ -4,6 +4,7 @@ import hashlib
 from contextlib import AbstractContextManager, ExitStack
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, Protocol, cast
@@ -171,6 +172,8 @@ class PullRequestNotes(NamedTuple):
     title: str
     client_test_notes: str
     client_test_notes_error: str
+    head_sha: str = ""
+    state: str = ""
 
 
 UNREAD_PULL_REQUEST_NOTES = PullRequestNotes(
@@ -224,10 +227,17 @@ def read_pull_request_notes(
         labels=tuple(label["name"] for label in labels),
         review_label=profile.owner.review_label,
     )
+    head = pull.get("head")
+    head_sha = head.get("sha") if isinstance(head, dict) else None
+    state = pull.get("state")
     return PullRequestNotes(
         title=pull["title"],
         client_test_notes=owner_test_notes(body),
         client_test_notes_error=intent.error,
+        head_sha=head_sha.lower()
+        if isinstance(head_sha, str) and re.fullmatch(r"[0-9a-fA-F]{40}", head_sha)
+        else "",
+        state=state if isinstance(state, str) and state in {"open", "closed"} else "",
     )
 
 
