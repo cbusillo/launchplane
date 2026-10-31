@@ -81,7 +81,7 @@ Administrators and Director agents with the existing attention read permission
 can subscribe at `GET /v1/attention/requests/events`. The bounded JSON-lines
 response sends connection and heartbeat observations and message identifiers.
 It uses a dedicated PostgreSQL connection, releases it on disconnect, limits
-concurrent subscribers, and reconnects within a minute to recheck access.
+concurrent subscribers per API worker, and reconnects within a minute to recheck access.
 The catalog's existing foreign watcher consumes these hints, rereads source,
 and uses its existing native-session delivery. The attention view continues
 to read the original waiting requests; event delivery never clears a request.

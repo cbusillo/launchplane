@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import psycopg
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from typing import Annotated
@@ -91,17 +93,23 @@ def register_request_attention_routes(
                 code="attention_subscribers_full",
                 message="Attention subscriber limit reached.",
             )
-        subscriptions += 1
 
         async def lines() -> AsyncIterator[bytes]:
             nonlocal subscriptions
+            if subscriptions >= subscription_limit:
+                yield b'{"type":"disconnected","reason":"subscriber_limit"}\n'
+                return
+            subscriptions += 1
             try:
-                async with aclosing(attention_event_lines(database_url)) as events:
+                async with aclosing(attention_event_lines(str(database_url))) as events:
                     async for line in events:
                         yield line
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except (ValueError, OSError, psycopg.Error):
+                logging.getLogger(__name__).warning(
+                    "Attention subscription unavailable; reconnect for recovery."
+                )
                 yield b'{"type":"disconnected"}\n'
             finally:
                 subscriptions -= 1

@@ -218,6 +218,7 @@ def handle_github_app_webhook_request(
         notify_attention_for_event(
             record_store, normalized_event, payload, normalized_delivery_id, received_at
         )
+    # noinspection PyBroadException
     except Exception:
         logging.getLogger(__name__).warning("Request attention hint unavailable; sweep recovers.")
     target_shapes = _target_shapes(event_name=normalized_event, action=action, payload=payload)

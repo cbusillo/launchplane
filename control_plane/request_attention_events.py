@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 import asyncio
 import json
+import logging
 from typing import Literal, cast
 
 import psycopg
@@ -81,7 +82,7 @@ def notify_attention_for_event(
     notify = getattr(store, "notify_request_attention", None)
     if not callable(notify):
         return False
-    notify(hint.model_dump_json())
+    cast(Callable[[str], None], notify)(hint.model_dump_json())
     return True
 
 
@@ -94,14 +95,22 @@ async def attention_event_lines(database_url: str) -> AsyncGenerator[bytes, None
         autocommit=True,
         connect_timeout=5,
     ) as connection:
-        await connection.execute(f"LISTEN {ATTENTION_EVENT_CHANNEL}")
+        await connection.execute(
+            psycopg.sql.SQL("LISTEN {}").format(psycopg.sql.Identifier(ATTENTION_EVENT_CHANNEL))
+        )
         yield (
             json.dumps({"type": "connected", "observed_at": utc_now_timestamp()}) + "\n"
         ).encode()
         deadline = asyncio.get_running_loop().time() + STREAM_SECONDS
         while (remaining := deadline - asyncio.get_running_loop().time()) > 0:
             async for notification in connection.notifies(timeout=min(10, remaining), stop_after=1):
-                hint = AttentionEventHint.model_validate_json(notification.payload)
+                try:
+                    hint = AttentionEventHint.model_validate_json(notification.payload)
+                except ValueError:
+                    logging.getLogger(__name__).warning(
+                        "Ignoring malformed attention notification."
+                    )
+                    continue
                 yield (hint.model_dump_json() + "\n").encode()
             yield (
                 json.dumps({"type": "heartbeat", "observed_at": utc_now_timestamp()}) + "\n"

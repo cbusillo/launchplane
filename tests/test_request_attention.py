@@ -399,6 +399,7 @@ class AttentionSubscriptionTests(unittest.IsolatedAsyncioTestCase):
         connection.execute = AsyncMock()
 
         async def notifications(**_kwargs: object) -> AsyncGenerator[Mock, None]:
+            yield Mock(payload="invalid prior producer shape")
             yield Mock(payload=hint.model_dump_json())
 
         connection.notifies.side_effect = notifications
@@ -458,6 +459,23 @@ class RequestAttentionHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.headers = {"Authorization": "Bearer local-operator-token"}
         self.route = "/v1/attention/requests"
+
+    async def test_unused_subscription_responses_do_not_consume_connection_capacity(self) -> None:
+        endpoint = next(
+            getattr(route, "endpoint")
+            for route in self.app.routes
+            if getattr(route, "path", None) == self.route + "/events"
+        )
+        with (
+            patch("control_plane.http_routes.request_attention.require_attention_access"),
+            patch(
+                "control_plane.http_routes.request_attention.attention_database_url",
+                return_value="synthetic-database",
+            ),
+        ):
+            for _ in range(6):
+                response = await endpoint(identity=Mock(), store=self.store)
+                await response.body_iterator.aclose()
 
     async def test_subscription_uses_existing_attention_access_and_closes_source(self) -> None:
         released = []
