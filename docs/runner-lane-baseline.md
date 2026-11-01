@@ -244,7 +244,7 @@ For authorized runner label changes, use the catalog's
 [owner-admin helper](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#verified-repository-owner-administration)
 as the verified repository owner: save and review the exact runner's plan,
 apply its digest, then independently read it back. Preserve prior custom labels
-for undo. Director decision Q1160 removed the never-enabled native service route.
+for undo.
 
 `control_plane.workflows.runner_lane_relabel` remains the existing custom-label
 library and typed audit contract.
@@ -265,15 +265,6 @@ means outcome/readback is uncertain: read the runner back and do not retry the
 write automatically. For an inverse, review the verified current custom labels
 as expected and the saved original custom labels as desired, with fresh identity
 checks. Empty custom-label sets are valid inverses.
-
-`audit_delivery_pending` retains the terminal audit, its original idempotency
-key and observed mutation status. `deliver_terminal_audit` validates that packet
-and sends only evidence through the injected poster; it cannot change labels.
-Validation is structural, not cryptographic provenance or a new provider
-observation. Callers must bind packets to the original operation and
-actor, and retain uncertain outcomes for reconciliation. An absent result never
-proves that no provider write occurred. Audit acceptance is evidence acceptance,
-not execution authorization.
 
 ## Lifecycle Executors
 
