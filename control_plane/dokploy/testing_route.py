@@ -465,15 +465,39 @@ def application_load_balancer_configuration(value: Any) -> Any:
     return configuration
 
 
-def router_with_listener_tls(router: dict[str, Any], static_configuration: str) -> dict[str, Any]:
+def require_independent_listener_middlewares(static: Any, points: tuple[str, ...]) -> None:
+    if not isinstance(static, dict) or not isinstance(static.get("entryPoints"), dict):
+        raise ValueError("The managed proxy's listener configuration is unavailable.")
+    for point in points:
+        listener = static["entryPoints"].get(point)
+        if not isinstance(listener, dict) or not isinstance(listener.get("http", {}), dict):
+            raise ValueError("The managed proxy's listener configuration is unavailable.")
+        if listener.get("http", {}).get("middlewares"):
+            raise ValueError("The testing listener uses unsupported middleware.")
+
+
+def router_with_listener_defaults(
+    router: dict[str, Any], static_configuration: str
+) -> dict[str, Any]:
     configuration = router_configuration(router)
-    if configuration.get("tls") is not None or not static_configuration:
+    if not static_configuration:
         return configuration
     static = yaml.safe_load(static_configuration)
+    if not isinstance(static, dict):
+        raise ValueError("The application listener configuration is unavailable.")
+    core = static.get("core") or {}
+    if not isinstance(core, dict):
+        raise ValueError("The application rule syntax configuration is unavailable.")
+    syntax = core.get("defaultRuleSyntax", "")
+    if not isinstance(syntax, str) or syntax not in {"", "default", "v2", "v3"}:
+        raise ValueError("The application rule syntax configuration is unavailable.")
+    if not configuration.get("ruleSyntax") and syntax:
+        configuration["ruleSyntax"] = syntax
+    if configuration.get("tls") is not None:
+        return configuration
     points = configuration.get("entryPoints")
     if (
-        not isinstance(static, dict)
-        or not isinstance(static.get("entryPoints"), dict)
+        not isinstance(static.get("entryPoints"), dict)
         or not isinstance(points, (list, tuple))
         or len(points) != 1
     ):
@@ -484,16 +508,19 @@ def router_with_listener_tls(router: dict[str, Any], static_configuration: str) 
     http = entrypoint.get("http")
     if http is None:
         http = {}
-    if (
-        not isinstance(http, dict)
-        or http.get("tls") is not None
-        and not isinstance(http["tls"], dict)
-    ):
+    if not isinstance(http, dict):
         raise ValueError("The application listener TLS configuration is unavailable.")
-    if http.get("tls") is None:
+    if "tls" not in http:
         configuration.pop("tls", None)
     else:
-        configuration["tls"] = deepcopy(http["tls"])
+        tls = http["tls"]
+        if (
+            not isinstance(tls, dict)
+            or set(tls) - {"certResolver", "options"}
+            or any(not isinstance(value, str) for value in tls.values())
+        ):
+            raise ValueError("The application listener TLS configuration is unavailable.")
+        configuration["tls"] = {key: value for key, value in tls.items() if value}
     return configuration
 
 
@@ -594,8 +621,13 @@ def _compile_testing_route(
                 continue
             expected = router_configuration(http["routers"][name.removesuffix("@file")])
             observed = router_configuration(router)
-            if expected.get("tls") is None and observed.get("tls") is not None:
-                expected = router_with_listener_tls(
+            if (
+                expected.get("tls") is None
+                and observed.get("tls") is not None
+                or not expected.get("ruleSyntax")
+                and observed.get("ruleSyntax") not in {None, "default", "v3"}
+            ):
+                expected = router_with_listener_defaults(
                     http["routers"][name.removesuffix("@file")], static_configuration
                 )
             for configuration in (expected, observed):
@@ -608,7 +640,7 @@ def _compile_testing_route(
                 ]
                 if not configuration.get("priority", 0):
                     configuration["priority"] = len(str(configuration["rule"]).encode("utf-8"))
-                if configuration.get("ruleSyntax") in {None, "default", "v3"}:
+                if configuration.get("ruleSyntax") in {None, "", "default", "v3"}:
                     configuration.pop("ruleSyntax", None)
             service = str(expected["service"]).removesuffix("@file")
             configured = http.get("services", {}).get(service)
@@ -719,6 +751,11 @@ def _compile_testing_route(
         return plan
     if recorded_template is not None or not matches or len(legacy) != len(matches):
         raise ValueError("Initial testing traffic must have only its observed Docker predecessor.")
+    if static_configuration:
+        require_independent_listener_middlewares(
+            yaml.safe_load(static_configuration),
+            tuple({point for router in matches.values() for point in router["entryPoints"]}),
+        )
     routers: dict[str, Any] = {}
     services: dict[str, Any] = {}
     connection_middleware = identifier + "-connections"
@@ -959,6 +996,7 @@ def compile_unavailable_testing_route(
                 raise ValueError(
                     "The declared testing listeners are unavailable on the managed proxy."
                 )
+            require_independent_listener_middlewares(static, points)
             references = []
             for reference in filter(None, fields.get("middlewares", "").split(",")):
                 if reference.endswith("@file"):
@@ -991,10 +1029,10 @@ def compile_unavailable_testing_route(
                     raise ValueError(
                         "The declared testing middleware has no supported independent copy."
                     )
-            tls = fields.get("tls", "false").lower()
-            if tls not in {"true", "false"}:
+            tls = fields.get("tls", "").lower()
+            if tls not in {"", "true", "false"}:
                 raise ValueError("The declared testing TLS behavior is unavailable.")
-            resolver = fields.get("tls.certresolver", "")
+            resolver = fields.get("tls.certresolver", "") if tls != "false" else ""
             if resolver and resolver not in static.get("certificatesResolvers", {}):
                 raise ValueError("The declared testing certificate resolver is unavailable.")
             priority = int(fields.get("priority", str(len(rule.encode()))))
@@ -1005,33 +1043,40 @@ def compile_unavailable_testing_route(
                 and connections + "@file" not in references
             ):
                 references.append(connections + "@file")
-            document = http_route_payload(
-                route_id=identifier,
-                host=host,
-                entrypoints=points,
-                backend=new_backend,
-                tls=tls == "true" or bool(resolver),
-                certificate_resolver=resolver,
-                middlewares=tuple(references),
-            )
-            router = document["http"]["routers"][identifier]
-            router = router_with_listener_tls(router, static_configuration)
-            router["priority"] = priority + 1
-            if "rulesyntax" in fields:
-                router["ruleSyntax"] = fields["rulesyntax"]
-            if "tls.options" in fields:
+            if "tls.options" in fields and tls != "false":
                 raise ValueError(
                     "Declared TLS options require an original recorded testing template."
                 )
-            group = tuple(sorted(set(points)))
-            if used_entrypoints & set(points):
-                if equivalent_routers.get(group) != router:
-                    raise ValueError("Declared testing aliases have conflicting routing behavior.")
-                continue
-            equivalent_routers[group] = router
-            used_entrypoints.update(points)
-            template["http"]["routers"][identifier + "-" + str(index)] = router
-            template["http"]["services"] = document["http"]["services"]
+            for point_index, point in enumerate(dict.fromkeys(points)):
+                document = http_route_payload(
+                    route_id=identifier,
+                    host=host,
+                    entrypoints=(point,),
+                    backend=new_backend,
+                    tls="tls" in fields and tls != "false" or bool(resolver),
+                    certificate_resolver=resolver,
+                    middlewares=tuple(references),
+                )
+                router = document["http"]["routers"][identifier]
+                router["priority"] = priority + 1
+                if "rulesyntax" in fields:
+                    router["ruleSyntax"] = fields["rulesyntax"]
+                router = router_with_listener_defaults(router, static_configuration)
+                if router.get("tls", {}).get("options"):
+                    raise ValueError(
+                        "Declared TLS options require an original recorded testing template."
+                    )
+                group = (point,)
+                if point in used_entrypoints:
+                    if equivalent_routers.get(group) != router:
+                        raise ValueError(
+                            "Declared testing aliases have conflicting routing behavior."
+                        )
+                    continue
+                equivalent_routers[group] = router
+                used_entrypoints.add(point)
+                template["http"]["routers"][f"{identifier}-{index}-{point_index}"] = router
+                template["http"]["services"] = document["http"]["services"]
         template["http"]["middlewares"][connections] = {
             "headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP}
         }

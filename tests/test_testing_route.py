@@ -242,7 +242,9 @@ class TestingRouteTests(unittest.TestCase):
                 applied[section][name + "@file"] = {**observed, "status": "enabled"}
 
         listener_tls = deepcopy(applied["routers"]["old-https@file"]["tls"])
-        static = {"entryPoints": {"web": {}, "websecure": {"http": {"tls": listener_tls}}}}
+        static: dict[str, Any] = {
+            "entryPoints": {"web": {}, "websecure": {"http": {"tls": listener_tls}}}
+        }
         document["http"]["routers"]["old-https"].pop("tls")
 
         def plan(
@@ -267,6 +269,17 @@ class TestingRouteTests(unittest.TestCase):
 
         recorded = plan()
         self.assertEqual(recorded.legacy_backend, self.old_address)
+        static["core"] = {"defaultRuleSyntax": "v2"}
+        for router in applied["routers"].values():
+            router["ruleSyntax"] = static["core"]["defaultRuleSyntax"]
+        self.assertEqual(plan().legacy_backend, self.old_address)
+        document["http"]["routers"]["old-https"]["ruleSyntax"] = "v3"
+        with self.assertRaises(ValueError):
+            plan()
+        document["http"]["routers"]["old-https"].pop("ruleSyntax")
+        static.pop("core")
+        for router in applied["routers"].values():
+            router.pop("ruleSyntax")
         with self.assertRaises(ValueError):
             plan(configuration="")
         document["http"]["routers"]["old-https"]["tls"] = {"certResolver": "different"}
@@ -483,6 +496,14 @@ class TestingRouteTests(unittest.TestCase):
         self.raw["routers"]["old-http@docker"]["middlewares"] = [redirect]
         tls = {"certResolver": "fixture-resolver", "options": "default@file"}
         self.raw["routers"]["old-https@docker"]["tls"] = tls
+        with self.assertRaises(ValueError):
+            self.plan(
+                static_configuration=(
+                    "entryPoints:\n  web:\n    http:\n      middlewares: ["
+                    + redirect
+                    + "]\n  websecure: {}\n"
+                )
+            )
         plan = self.plan()
         document = route_document(plan, self.new)
         for router in document["http"]["routers"].values():
