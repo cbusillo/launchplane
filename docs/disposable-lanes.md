@@ -70,6 +70,13 @@ refuse without positive qualification. Existing protected-use, needed-copy and
 shared-resource records retain their protections. No lane, resource or
 credential is changed.
 
+Serving-process observation accepts the image wrapper's exact
+`/odoo/odoo-bin.source` entry point and its gevent child. Its injected addon and
+server-module options do not replace configuration binding: any explicit
+`--data-dir` must match the configured session root, and unknown switches,
+another configuration or another database remain unqualified. Session traversal
+and read-only sign-in checks still run before usage can be reported.
+
 ## Native generic-web testing deployment
 
 The existing `POST /v1/drivers/generic-web/deploy` accepts the authenticated

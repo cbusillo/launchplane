@@ -121,25 +121,38 @@ class UsageUnavailable(ValueError):
     pass
 
 
+def odoo_process(process: list[bytes]) -> bool:
+    return any(arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin',b'odoo-bin.source'}
+               for arg in process[:2])
+
+
 def serving_configured(process, options, database):
     arguments=[arg.decode() for arg in process]
     if not arguments:
         return False
     if arguments[0].rsplit('/',1)[-1].startswith('python'):
         arguments=arguments[1:]
-    if not arguments or arguments[0].rsplit('/',1)[-1] not in {'odoo','odoo-bin'}:
+    if not arguments or not (arguments[0].rsplit('/',1)[-1] in {'odoo','odoo-bin'}
+                             or arguments[0]=='/odoo/odoo-bin.source'):
         return False
+    arguments=arguments[1:]
+    if arguments and arguments[0]=='gevent':
+        arguments=arguments[1:]
     parser=argparse.ArgumentParser(add_help=False,allow_abbrev=False,exit_on_error=False)
     parser.add_argument('-c','--config')
     parser.add_argument('-d','--database')
+    parser.add_argument('--data-dir')
+    parser.add_argument('--load')
+    parser.add_argument('--addons-path')
     for name in ('db_host','db_port','db_user','db-filter'):
         parser.add_argument('--'+name)
     try:
-        args,unknown=parser.parse_known_args(arguments[1:])
+        args,unknown=parser.parse_known_args(arguments)
     except (argparse.ArgumentError,SystemExit):
         return False
     # Reject unknown switches, especially session-directory/config overrides.
     return (not unknown and args.config==CONFIG_PATH and args.database==database
+            and (args.data_dir is None or args.data_dir==options.get('data_dir'))
             and args.db_host==options['db_host']
             and args.db_port==options.get('db_port','5432')
             and args.db_user==options['db_user']
@@ -196,8 +209,7 @@ def probe():
     checkpoint='process_inventory_unavailable'
     processes=[[a for a in p.read_bytes().split(b'\0') if a]
                for p in Path('/proc').glob('[0-9]*/cmdline')]
-    odoo_processes=[p for p in processes if any(
-        arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin'} for arg in p[:2])]
+    odoo_processes=[p for p in processes if odoo_process(p)]
     if not odoo_processes:
         raise UsageUnavailable('serving_process_absent')
     checkpoint='web_configuration_unavailable'
