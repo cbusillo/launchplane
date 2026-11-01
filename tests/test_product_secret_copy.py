@@ -783,6 +783,34 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private-plain-value", response.text)
         self.assertNotIn("source-only-test-token", response.text)
 
+    async def test_setting_sources_handle_separate_preview_ownership(self) -> None:
+        preview = self.profile.preview.model_copy(update={"context": "example-preview"})
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"preview": preview})
+        )
+        url = "/v1/products/example-site/secret-bindings?include_setting_sources=true"
+        response = await _asgi_request(
+            self.app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(
+            any(
+                lane["context"] == preview.context
+                for lane in response.json()["setting_sources"]["lanes"]
+            )
+        )
+        foreign = self.profile.model_copy(update={"product": "foreign-site", "preview": preview})
+        with patch.object(
+            self.store,
+            "list_product_profile_records",
+            return_value=(*self.store.list_product_profile_records(), foreign),
+        ):
+            refused = await _asgi_request(
+                self.app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
+            )
+        self.assertEqual(refused.status_code, 503, refused.text)
+        self.assertNotIn(self.source.name, refused.text)
+
     @scoped_agent_test
     async def test_setting_sources_refuse_missing_scope_without_exposing_source_names(self) -> None:
         app = self._environment_read_app(products=("other-site",))

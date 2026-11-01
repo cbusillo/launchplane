@@ -13,7 +13,7 @@ Neither path calls a provider, syncs a runtime, deploys, or restarts a lane.
 
 For a values-free comparison before selecting a removal, request
 `GET /v1/products/{product}/secret-bindings?include_setting_sources=true`.
-It reuses the product's existing metadata read permissions and refuses incomplete
+It reuses product/environment and preview read permissions and refuses incomplete
 scope authority or shared context ownership. The additive `setting_sources`
 inventory groups configured key names by lane and source, reports overlapping
 names and retirement intent, and enumerates retained preview records separately.
@@ -24,6 +24,10 @@ copies; secret record names and delivered binding keys remain distinct identitie
 Template policies describe possible inputs, with effective provider and retained
 generation settings explicitly unqualified. Bounds report truncation; the tables
 are read independently, so this is an observation, not an atomic migration plan.
+Plain and secret config-parameter transport names are grouped under their common
+parameter identity for overlaps; the source lists retain their original names.
+Addon literals use the addon and setting names, without inventing an env name.
+Preview targets are enumerated, not compared to their running generations.
 
 Use the repository's bounded reader with the installed operator transport:
 
@@ -32,7 +36,8 @@ uv run python scripts/read-setting-sources.py --product <product> \
   --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py
 ```
 
-The reader prints only the source inventory and trace. An older service that
+The reader prints only the source inventory and trace and exits nonzero on
+truncated coverage. An older service that
 omits the inventory is unavailable, never an empty result. This read does not
 authorize a setting fold, a production release, or removal of retained authority.
 

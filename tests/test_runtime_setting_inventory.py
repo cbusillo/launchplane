@@ -4,6 +4,8 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
+from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
 from control_plane.runtime_setting_inventory import (
     SettingAuthorityConsumer,
     SettingConsumer,
@@ -15,6 +17,70 @@ from tests.test_reviewed_runtime_setting_removal import runtime
 
 
 class SettingConsumerInventoryTests(unittest.TestCase):
+    def test_secret_references_are_not_copies_but_parameter_aliases_overlap(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _odoo_profile_payload_with_prod_lane()
+        )
+        context = profile.lanes[0].context
+        parameter = "cm_data.db.password"
+        secret_key = config_parameter_secret_env_key(parameter)
+        binding = SecretBinding(
+            binding_id="pointer",
+            secret_id="secret",
+            integration="runtime_environment",
+            binding_key=secret_key,
+            context=context,
+            instance="prod",
+            created_at="fixture-time",
+            updated_at="fixture-time",
+        )
+        override = OdooInstanceOverrideRecord.model_validate(
+            {
+                "context": context,
+                "instance": "prod",
+                "updated_at": "fixture-time",
+                "config_parameters": [
+                    {
+                        "key": parameter,
+                        "value": {
+                            "source": "secret_binding",
+                            "secret_binding_id": binding.binding_id,
+                        },
+                    }
+                ],
+            }
+        )
+        referenced = product_setting_source_inventory(
+            profile=profile,
+            records=(),
+            targets=(),
+            bindings=(binding,),
+            overrides=(override,),
+            previews=(),
+        )
+        self.assertFalse(
+            next(lane for lane in referenced.lanes if lane.instance == "prod").overlapping_keys
+        )
+        duplicated = product_setting_source_inventory(
+            profile=profile,
+            records=(
+                runtime(
+                    scope="instance",
+                    context=context,
+                    instance="prod",
+                    env={config_parameter_runtime_key(parameter): "private-old-literal"},
+                ),
+            ),
+            targets=(),
+            bindings=(binding,),
+            overrides=(override,),
+            previews=(),
+        )
+        self.assertEqual(
+            next(lane for lane in duplicated.lanes if lane.instance == "prod").overlapping_keys,
+            (config_parameter_runtime_key(parameter),),
+        )
+
     def test_preview_sources_and_override_references_preserve_their_roles(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
             _odoo_profile_payload_with_prod_lane()
@@ -48,7 +114,7 @@ class SettingConsumerInventoryTests(unittest.TestCase):
                     scope="instance",
                     context=context,
                     instance="testing",
-                    env={"ENV_OVERRIDE_CONFIG_PARAM__CM_DATA__DB__USER": "private-runtime"},
+                    env={config_parameter_runtime_key("cm_data.db.user"): "private-runtime"},
                 ),
                 runtime(
                     scope="instance",
@@ -145,7 +211,6 @@ class SettingConsumerInventoryTests(unittest.TestCase):
         wire = report.model_dump_json()
         for private in ("private-context", "private-lane", "private-target", "HIDDEN"):
             self.assertNotIn(private, wire)
-        self.assertFalse(report.runtime_consumption_verified)
 
     def test_orphan_records_retired_profiles_and_global_secret_metadata_are_included(self) -> None:
         payload = _odoo_profile_payload_with_prod_lane("retired-site")

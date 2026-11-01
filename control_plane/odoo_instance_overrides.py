@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 import click
 from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings
+from control_plane.contracts.odoo_import_parameters import CONFIG_PARAMETER_SECRET_PREFIX
 
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
@@ -446,7 +447,7 @@ def config_parameter_secret_env_key(config_parameter_key: str) -> str:
     suffix = config_parameter_key.strip().upper().replace(".", "__")
     if not suffix:
         raise click.ClickException("Odoo config parameter override requires a non-empty key.")
-    return f"{ODOO_OVERRIDE_SECRET_ENV_PREFIX}CONFIG_PARAM__{suffix}"
+    return f"{CONFIG_PARAMETER_SECRET_PREFIX}{suffix}"
 
 
 def addon_setting_secret_env_key(*, addon_name: str, setting_name: str) -> str:

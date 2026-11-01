@@ -10,7 +10,11 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
-from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
+from control_plane.contracts.odoo_import_parameters import (
+    CONFIG_PARAMETER_RUNTIME_PREFIX,
+    CONFIG_PARAMETER_SECRET_PREFIX,
+    config_parameter_runtime_key,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import product_config_targets
 
@@ -244,6 +248,8 @@ class ProductSettingSourceInventory(BaseModel):
         "value_equality",
         "retained_operation_authority",
         "global_inclusive_legacy_resolvers",
+        "managed_secret_resolution",
+        "legacy_addon_environment_aliases",
     )
 
 
@@ -298,27 +304,7 @@ def product_setting_source_inventory(
         limit=limit,
     )
     consumers = list(inventory.consumers)
-    if profile.preview.context:
-        template_keys = set(profile.preview.copied_env_keys)
-        if profile.driver_id == "odoo":
-            template_keys.update(
-                key
-                for consumer in consumers
-                if consumer.context == profile.preview.context
-                and consumer.instance in {"", profile.preview.template_instance}
-                and consumer.kind in {"runtime_record", "target_overlay", "secret_binding"}
-                for key in consumer.selected_keys or ()
-            )
-        consumers.append(
-            SettingConsumer(
-                kind="preview_template",
-                product=profile.product,
-                context=profile.preview.context,
-                instance=profile.preview.template_instance,
-                scope="template_input_unverified",
-                selected_keys=tuple(sorted(template_keys)),
-            )
-        )
+    aliases: dict[str, str] = {}
     for override in overrides:
         if override.context not in contexts:
             continue
@@ -331,11 +317,13 @@ def product_setting_source_inventory(
             )
             groups.setdefault(f"config_parameter:{parameter.value.source}", set()).add(key)
         for setting in override.addon_settings:
-            key = (
-                addon_setting_secret_env_key(addon_name=setting.addon, setting_name=setting.setting)
-                if setting.value.source == "secret_binding"
-                else f"ENV_OVERRIDE_{setting.addon.upper()}__{setting.setting.upper()}"
+            identity = f"addon.{setting.addon}.{setting.setting}"
+            secret_key = addon_setting_secret_env_key(
+                addon_name=setting.addon,
+                setting_name=setting.setting,
             )
+            aliases[secret_key] = identity
+            key = secret_key if setting.value.source == "secret_binding" else identity
             groups.setdefault(f"addon:{setting.value.source}", set()).add(key)
         if override.website_bootstrap is not None:
             groups["website_bootstrap"] = {
@@ -356,6 +344,37 @@ def product_setting_source_inventory(
                 selected_keys=tuple(sorted(names)),
             )
             for scope, names in sorted(groups.items())
+        )
+    if profile.preview.context:
+        template_keys = set(profile.preview.copied_env_keys)
+        if profile.driver_id == "odoo":
+            template_keys.update(
+                key
+                for consumer in consumers
+                if consumer.context == profile.preview.context
+                and consumer.instance in {"", profile.preview.template_instance}
+                and consumer.kind
+                in {"runtime_record", "target_overlay", "secret_binding", "odoo_override"}
+                for key in consumer.selected_keys or ()
+            )
+        template_keys.difference_update(profile.preview.omitted_env_keys)
+        template_keys.difference_update(
+            key
+            for record in records
+            if record.scope == "instance"
+            and (record.context, record.instance)
+            == (profile.preview.context, profile.preview.template_instance)
+            for key in record.retired_provider_keys
+        )
+        consumers.append(
+            SettingConsumer(
+                kind="preview_template",
+                product=profile.product,
+                context=profile.preview.context,
+                instance=profile.preview.template_instance,
+                scope="template_input_unverified",
+                selected_keys=tuple(sorted(template_keys)),
+            )
         )
     sources_truncated = (
         inventory.truncated
@@ -393,12 +412,20 @@ def product_setting_source_inventory(
                 "target_overlay",
                 "secret_binding",
                 "odoo_override",
+                "preview_template",
             }:
                 continue
-            if source.kind == "odoo_override" and source.scope.endswith(":runtime_environment"):
+            if source.kind == "odoo_override" and source.scope.endswith(
+                (":runtime_environment", ":secret_binding")
+            ):
                 continue
             for key in source.selected_keys or ():
-                supplied[key] = supplied.get(key, 0) + 1
+                identity = aliases.get(key, key)
+                if identity.startswith(CONFIG_PARAMETER_SECRET_PREFIX):
+                    identity = CONFIG_PARAMETER_RUNTIME_PREFIX + identity.removeprefix(
+                        CONFIG_PARAMETER_SECRET_PREFIX
+                    )
+                supplied[identity] = supplied.get(identity, 0) + 1
         lanes.append(
             LaneSettingSources(
                 context=lane.context,

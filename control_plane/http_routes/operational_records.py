@@ -22,7 +22,8 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.product_profile_record import (
     product_config_targets,
-    product_target_owner_products,
+    product_context_owner_map,
+    is_exclusive_product_context,
 )
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentRecord,
@@ -885,7 +886,23 @@ def register_managed_secret_read_routes(
             )
             setting_sources = None
             if include_setting_sources:
-                if not copy_authorization_complete:
+                source_context_owners = product_context_owner_map(profiles, config_scopes=True)
+                if not universal_secret_reader and not all(
+                    dependencies.authorization_allows(
+                        identity=identity,
+                        action=action,
+                        product=product,
+                        context=lane.context,
+                        target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
+                        inherit_agent_read_role=False,
+                    )
+                    for lane in product_config_targets(profile)
+                    for action in (
+                        ("product_environment.read", "preview.read")
+                        if lane.instance == "preview"
+                        else ("product_environment.read",)
+                    )
+                ):
                     raise dependencies.http_error(
                         status_code=403,
                         trace_id=trace_id,
@@ -893,7 +910,11 @@ def register_managed_secret_read_routes(
                         message="The caller cannot read every configured setting source for this product.",
                     )
                 if any(
-                    product_target_owner_products(profiles, context=lane.context) != {product}
+                    not is_exclusive_product_context(
+                        context=lane.context,
+                        product=product,
+                        owners=source_context_owners,
+                    )
                     for lane in product_config_targets(profile)
                 ):
                     raise dependencies.http_error(
