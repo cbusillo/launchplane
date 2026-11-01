@@ -1381,7 +1381,7 @@ class GenericWebTestingRebuildExecution:
         if retained:
             error_message += (
                 " Retirement of previous testing copies is unverified. Testing can still be updated. "
-                "The next rebuild will check these copies again."
+                "A later testing rebuild checks these copies again while this copy is serving."
             )
         return OdooStableTargetReplacementApplyResult(
             product=self.operation.product,

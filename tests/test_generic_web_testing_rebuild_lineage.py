@@ -93,6 +93,19 @@ class PredecessorLineageTests(generic.GenericWebTestingRebuildFlowFixture):
             alias,
         )
         self.assertEqual(self.flow.normal("after-protected-ancestor").status, "completed")
+        corrected = alias.model_copy(update={"target_id": "another-owned-application"})
+        self.store.write_provider_target_record(corrected)
+        recovered = self.execute(3)
+        self.assertEqual(recovered.health_status, "pass")
+        self.assertEqual(recovered.post_deploy_status, "pass")
+        self.assertEqual(recovered.runtime_source["retained_predecessors"], "")
+        self.assertNotIn(self.flow.old_id, self.flow.payloads)
+        self.assertEqual(
+            self.store.read_provider_target_record(
+                context_name=corrected.context, instance_name=corrected.instance
+            ),
+            corrected,
+        )
 
     def test_third_rebuild_does_not_contact_a_previously_retired_ancestor_host(self) -> None:
         self.assertEqual(self.execute(1).health_status, "pass")

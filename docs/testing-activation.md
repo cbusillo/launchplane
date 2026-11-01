@@ -776,8 +776,8 @@ and route custody are verified, a known retirement refusal clears only this
 operation's hold so normal testing work can continue. Unknown own provider effects
 stay pending.
 
-The next rebuild checks its immediate predecessor and the unresolved copies
-recorded by the serving rebuild's finalization, with a separate durable child and
+While that copy is serving, the next rebuild checks its immediate predecessor and
+the unresolved copies recorded by the serving rebuild's finalization, with a separate durable child and
 delete checkpoint for each predecessor. Those records carry exact activation
 identities; already-retired copies are not carried forward, and ordinary activation
 history is not adopted. An older leftover's static refusal does not block a new
