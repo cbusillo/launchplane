@@ -14,6 +14,16 @@ inspection use the same source-connection predicate; upstream settings and other
 SSH settings still refuse sleep. Native inspection continues to require exclusive
 volumes, private application resources and no credential bind mounts.
 
+The gateway keeps ordinary HTTP and Odoo websocket traffic on separate
+listeners. The preview's host-scoped `/websocket` route uses Odoo's evented
+listener when workers are enabled and the HTTP listener in threaded mode.
+Both paths share the same activity and sleep accounting, so an open websocket
+prevents idle sleep. Neither listener publishes a host port. Existing previews
+adopt this source only through their next normal identity-bound rebuild; source
+delivery does not change a serving preview. Initial previews that still need a
+source connection route websockets directly to their web service using the same
+worker-mode selection; they retain their existing refusal of idle sleep.
+
 Product Ops shows each provider-observed preview's last sleep observation from
 the existing inventory collector: awake, asleep, cannot sleep with a reason,
 or unknown when observation is unavailable.

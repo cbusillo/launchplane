@@ -2,6 +2,7 @@ import hashlib
 
 
 PREVIEW_GATEWAY_SERVICE = "preview-router"
+PREVIEW_EVENTED_PORT = 8072
 PREVIEW_IDLE_SECONDS = 15 * 60
 PREVIEW_GATEWAY_SOCKET = "/tmp/launchplane-preview-control.sock"
 PREVIEW_BACKEND_ALIAS_PREFIX = "lp-preview-"
@@ -12,6 +13,7 @@ def preview_backend_alias(identity: str) -> str:
 
 
 PREVIEW_GATEWAY_PROGRAM = (
+    f"PREVIEW_EVENTED_PORT = {PREVIEW_EVENTED_PORT!r}\n"
     f"PREVIEW_IDLE_SECONDS = {PREVIEW_IDLE_SECONDS!r}\n"
     f"PREVIEW_GATEWAY_SOCKET = {PREVIEW_GATEWAY_SOCKET!r}\n"
     f"PREVIEW_BACKEND_ALIAS_PREFIX = {PREVIEW_BACKEND_ALIAS_PREFIX!r}\n"
@@ -193,11 +195,25 @@ class PreviewGateway:
                     with suppress(OSError):
                         await connection.wait_closed()
 
+    async def serve(self, backend_host: str, port: int, evented_backend_port: int) -> None:
+        async with (
+            await asyncio.start_server(
+                lambda reader, writer: self.connection(reader, writer, backend_host, port),
+                '0.0.0.0', port) as http,
+            await asyncio.start_server(
+                lambda reader, writer: self.connection(reader, writer, backend_host, evented_backend_port),
+                '0.0.0.0', PREVIEW_EVENTED_PORT) as evented,
+        ):
+            await asyncio.gather(http.serve_forever(), evented.serve_forever())
+
 
 async def run_gateway():
     port = int(sys.argv[1])
     if not 0 < port < 65536:
         raise ValueError('Invalid preview port')
+    evented_backend_port = int(sys.argv[2])
+    if evented_backend_port not in {port, PREVIEW_EVENTED_PORT} or port == PREVIEW_EVENTED_PORT:
+        raise ValueError('Invalid preview backend port configuration')
     identity = os.environ['LAUNCHPLANE_RUNTIME_IDENTITY_JSON']
     gateway = PreviewGateway(identity, '/tmp/launchplane-preview-state.json', idle_seconds=PREVIEW_IDLE_SECONDS)
     socket_path = Path(PREVIEW_GATEWAY_SOCKET)
@@ -206,10 +222,9 @@ async def run_gateway():
     socket_path.unlink(missing_ok=True)
     os.umask(0o077)
     control = await asyncio.start_unix_server(gateway.control_connection, path=socket_path, limit=4096)
-    server = await asyncio.start_server(
-        lambda reader, writer: gateway.connection(reader, writer, PREVIEW_BACKEND_ALIAS_PREFIX + gateway.identity[:32], port), '0.0.0.0', port)
-    async with control, server:
-        await asyncio.gather(control.serve_forever(), server.serve_forever())
+    async with control:
+        await asyncio.gather(control.serve_forever(),
+            gateway.serve(PREVIEW_BACKEND_ALIAS_PREFIX + gateway.identity[:32], port, evented_backend_port))
 
 
 if __name__ == '__main__':
@@ -218,6 +233,7 @@ if __name__ == '__main__':
 )
 
 PREVIEW_GATEWAY_INSPECTION_LIBRARY = (
+    f"PREVIEW_EVENTED_PORT = {PREVIEW_EVENTED_PORT!r}\n"
     f"PREVIEW_BACKEND_ALIAS_PREFIX = {PREVIEW_BACKEND_ALIAS_PREFIX!r}\n"
     + r"""
 import hashlib
@@ -233,9 +249,14 @@ def inspect_preview_gateway(container, web):
         or config.get('Entrypoint') != ['/venv/bin/python3', '-I', '-S', '-c']):
         raise RuntimeError('Preview gateway ownership differs')
     args = config.get('Cmd')
-    if not isinstance(args, list) or len(args) != 2 or not isinstance(args[0], str) or not 0 < len(args[0]) <= 65536 or not args[1].isdigit() or not 0 < int(args[1]) < 65536:
+    if not isinstance(args, list) or len(args) not in {2, 3} or not isinstance(args[0], str) or not 0 < len(args[0]) <= 65536 or not args[1].isdigit() or not 0 < int(args[1]) < 65536:
         raise RuntimeError('Preview gateway program differs')
     web_env = dict(item.split('=', 1) for item in web['Config'].get('Env', []) if '=' in item)
+    if len(args) == 3:
+        workers = int(web_env.get('ODOO_WORKERS', '-1'))
+        expected_port = PREVIEW_EVENTED_PORT if workers else int(args[1])
+        if workers < 0 or not args[2].isdigit() or int(args[2]) != expected_port:
+            raise RuntimeError('Preview gateway backend differs')
     identity = web_env.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON')
     base = json.loads(docker('image', 'inspect', container['Image']))[0]['Config'].get('Env', [])
     expected = dict(item.split('=', 1) for item in base if '=' in item)
