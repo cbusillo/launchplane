@@ -113,13 +113,15 @@ def _request_retired(store: object, request: ProductReconcileRequestRecord) -> b
 
 
 def preview_refresh_failure(request: ProductReconcileRequestRecord, *, store: object = None) -> str:
-    if current := preview_current_failure(request.last_plan):
-        return current
     if request.last_plan.get("action") == "destroy" or (
         "action" not in request.last_plan and "destroy_retry_key" in request.last_plan
     ):
         return ""
-    summary = request.last_plan.get(_FAILURE_SUMMARY_KEY) or request.last_error
+    summary = (
+        preview_current_failure(request.last_plan)
+        or request.last_error
+        or request.last_plan.get(_FAILURE_SUMMARY_KEY)
+    )
     if not isinstance(summary, str) or not summary.strip():
         return ""
     if _request_retired(store, request):
