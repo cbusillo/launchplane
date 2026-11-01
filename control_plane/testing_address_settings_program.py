@@ -6,6 +6,10 @@ spec=json.load(sys.stdin)
 def require_website(condition):
     if not condition:
         raise RuntimeError('Canonical website ownership is ambiguous')
+def website_host(value):
+    value=str(value or '')
+    host=urlsplit(value if '://' in value else 'https://'+value).hostname or ''
+    return host.encode('idna').decode('ascii').lower()
 connection=psycopg2.connect(host='database',port='5432',dbname=os.environ['ODOO_DB_NAME'],
     user=os.environ['ODOO_DB_USER'],password=os.environ['ODOO_DB_PASSWORD'],connect_timeout=5,
     options='-c default_transaction_read_only=on -c statement_timeout=10000')
@@ -20,12 +24,12 @@ try:
             require_website(not spec.get('primary_page_xmlid_set'))
             before=str(spec.get('before_url') or '')
             after=spec['canonical_url']
-            before_domains={before.rstrip('/'),urlsplit(before).netloc}-{''}
             after_domains={after.rstrip('/'),urlsplit(after).netloc}-{''}
-            owners=[row for row in websites if str(row[1] or '').rstrip('/') in before_domains|after_domains]
+            before_host,after_host=website_host(before),website_host(after)
+            owners=[row for row in websites if website_host(row[1]) in {before_host,after_host}-{''}]
             require_website(len(owners)==1)
             website=owners[0]
-            require_website(spec.get('website_id') or str(website[1] or '').rstrip('/') in before_domains)
+            require_website(spec.get('website_id') or website_host(website[1])==before_host)
             candidates=after_domains|{after}
             writer=next((row for row in websites if row[1] in candidates),None)
             if writer is None:

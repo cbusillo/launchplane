@@ -792,8 +792,15 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             "reviewed-id",
             "unowned",
             "reference-model",
+            "scheme",
+            "case",
+            "port",
+            "international",
         ):
             with self.subTest(refusal=refusal):
+                self.native.spec["canonical_settings"]["canonical_url"] = (
+                    "https://stable.example.invalid"
+                )
                 self.websites = [(1, "dated.example.invalid"), (2, "unrelated.example.invalid")]
                 self.website_defaults = [
                     (
@@ -820,6 +827,20 @@ class CanonicalAddressProgramTests(unittest.TestCase):
                         (1, "unrelated.example.invalid"),
                         (2, "stable.example.invalid"),
                     ]
+                elif refusal in {"scheme", "case", "port"}:
+                    self.websites[1] = (
+                        2,
+                        {
+                            "scheme": "http://stable.example.invalid",
+                            "case": "STABLE.EXAMPLE.INVALID",
+                            "port": "stable.example.invalid:443",
+                        }[refusal],
+                    )
+                elif refusal == "international":
+                    self.native.spec["canonical_settings"]["canonical_url"] = (
+                        "https://xn--bcher-kva.example.invalid"
+                    )
+                    self.websites[1] = (2, "https://bücher.example.invalid")
                 with self.assertRaises(RuntimeError):
                     self.database_read()
                 self.assertFalse(self.gate.exists())
