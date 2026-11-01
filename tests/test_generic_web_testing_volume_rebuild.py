@@ -307,6 +307,18 @@ class PrivateWebTestingVolumeRebuildTests(GenericWebTestingVolumeRebuildTests):
         response.assert_not_called()
         self.assertIn(self.original_volume, self.flow.storage.volumes)
 
+    def test_original_capability_settles_refusal_after_private_record_refresh(self) -> None:
+        from tests import test_generic_web_testing_rebuild_recovery as recovery
+
+        def refresh() -> None:
+            endpoint = self.store.list_private_health_endpoint_records()[0]
+            self.store.write_private_health_endpoint_record(
+                endpoint.model_copy(update={"updated_at": datetime.now(UTC).isoformat()})
+            )
+
+        recovery.assert_original_preparation_refusal(self, refresh)
+        self.assertIn(self.original_volume, self.flow.storage.volumes)
+
     def test_private_record_refresh_after_cutover_keeps_original_recovery_and_current_health(
         self,
     ) -> None:

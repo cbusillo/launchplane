@@ -91,6 +91,7 @@ from control_plane.testing_separation_resources import (
     SeparationResourcesAdapter,
     SeparationResourcesRequest,
     SeparationResourcesRefused,
+    preparation_binding,
 )
 
 
@@ -874,10 +875,19 @@ class GenericWebTestingRebuildExecution:
             raise NativeTestingRebuildPending("Continue the original " + name + " operation.")
         return result.response_payload
 
-    def prepare(self) -> None:
+    def prepare(self, *, settle_admission: bool = False) -> None:
         route = RESOURCES_ROUTE.format(product=self.operation.product)
         row = self.store.read_idempotency_record(
             scope=self.scope, route_path=route, idempotency_key=self.resources_key
+        )
+        original = self.store.read_original_mutation_intent(row) if row is not None else None
+        saved_profile = original.get("preparation_profile") if original else None
+        profile = (
+            LaunchplaneProductProfileRecord.model_validate(saved_profile)
+            if saved_profile is not None
+            else self.intent.profile
+            if settle_admission
+            else self.store.read_product_profile_record(self.operation.product)
         )
         request = SeparationResourcesRequest(
             context=self.operation.context,
@@ -891,8 +901,27 @@ class GenericWebTestingRebuildExecution:
             request,
             self.actor,
             self.operation.operation_id,
+            settle_admission=settle_admission,
+            preparation_profile=profile if settle_admission else None,
         )
         binding = row.reconciliation_key if row is not None else adapter.binding()[0]
+        if row is None:
+            if (
+                preparation_binding(
+                    self.store,
+                    self.operation.product,
+                    self.operation.context,
+                    self.actor,
+                    self.root,
+                    self.specification,
+                    profile_snapshot=profile,
+                )[0]
+                != binding
+            ):
+                raise NativeTestingRebuildAdmissionChanged(
+                    "Preparation inputs changed before capture."
+                )
+            original = {"preparation_profile": profile.model_dump(mode="json")}
         adapter.request = request.model_copy(
             update={"mode": "apply", "reviewed_plan_sha256": binding}
         )
@@ -902,13 +931,16 @@ class GenericWebTestingRebuildExecution:
             key=self.resources_key,
             request=adapter.request.model_dump(mode="json"),
             name="resources",
+            original_intent=original,
         )
         from control_plane.testing_separation_resources import (
             parse_preparation_receipt,
             SeparationResourcesRefusal,
         )
 
-        if isinstance(parse_preparation_receipt(result["result"]), SeparationResourcesRefusal):
+        if not settle_admission and isinstance(
+            parse_preparation_receipt(result["result"]), SeparationResourcesRefusal
+        ):
             raise NativeTestingRebuildAdmissionChanged("The original resource preparation refused.")
 
     def activate(self) -> tuple[GenericWebRebuildActivationAdapter, TestingActivationRecord]:
@@ -1520,6 +1552,13 @@ class GenericWebTestingRebuildExecution:
             if record.failure is None:
                 raise NativeTestingRebuildPending("Original candidate refusal remains unobserved.")
             return self.finalize(adapter, record)
+        resources = self.store.read_idempotency_record(
+            scope=self.scope,
+            route_path=RESOURCES_ROUTE.format(product=self.operation.product),
+            idempotency_key=self.resources_key,
+        )
+        if resources is not None and resources.state != "completed":
+            self.prepare(settle_admission=True)
         for route, key in (
             (RESOURCES_ROUTE.format(product=self.operation.product), self.resources_key),
             (ACTIVATION_ROUTE.format(product=self.operation.product), self.activation_key),

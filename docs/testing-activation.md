@@ -806,7 +806,14 @@ identity, captured-state, quiescence, health and absence requirements apply.
 Unverified health keeps the original operation pending.
 
 Known admission refusals before candidate dispatch clear only this operation's
-hold and finish as failed. Published or refused original operations can finalize
+hold and finish as failed. An interrupted preparation first settles its original
+child through read-only observation. Its captured profile reconstructs the
+original preparation hash while current recipient, configuration, reservations
+and placement still have to agree. Current-input inspection remains separate.
+An exact, disabled, completed capability program with its bound log and no
+storage dispatch can finish as an admission refusal. Dispatched storage requires
+its original readback. This path never triggers new preparation; active,
+ambiguous or unavailable original evidence stays pending. Published or refused original operations can finalize
 under their captured caller and recipient custody even if desired configuration
 changes later. New work still uses current configuration. New application receipts
 seal the delivered environment digest; legacy receipts keep their original strict
@@ -826,7 +833,11 @@ custody and uses actual candidate health instead of requiring an unchanged
 private-record timestamp. A missing endpoint, ingress receipt or edge record
 before dispatch is also a known refusal; unresolved ingress effects wait on the
 original key. Private recovery refuses health from a different origin, even if
-that origin serves the same candidate. Expired cleanup permits retain the volume
+that origin serves the same candidate. Continuation waits for the original
+endpoint authority to be restored through the existing
+[private endpoint setup](private-testing-transport.md) and for original-origin
+health to verify; a new rebuild key cannot replace that custody.
+Expired cleanup permits retain the volume
 without renewing the original permit.
 Non-application lanes remain pending. Existing Odoo preflight and execution
 continue through the same control.

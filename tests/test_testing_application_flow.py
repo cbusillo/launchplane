@@ -645,10 +645,16 @@ class ApplicationFlowTests(unittest.TestCase):
                 return deepcopy(self.projects)
             if path == "/api/schedule.list":
                 query = kwargs["query"]
+                owner = {
+                    "application": "applicationId",
+                    "server": "serverId",
+                    "dokploy-server": "userId",
+                }[query["scheduleType"]]
                 return [
                     deepcopy(row)
                     for row in self.schedules.values()
-                    if row.get("applicationId") == query.get("id")
+                    if row.get(owner) == query.get("id")
+                    and row.get("scheduleType", query["scheduleType"]) == query["scheduleType"]
                 ]
             if path == "/api/deployment.queueList":
                 return []
@@ -5426,7 +5432,7 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         from control_plane.dokploy import post_deploy
 
-        _, lookup, _, _ = post_deploy._resolve_dokploy_schedule_runtime(
+        kind, lookup, _, server = post_deploy._resolve_dokploy_schedule_runtime(
             host="https://provider.test",
             token="fixture-token",
             compose_id=self.old_id,
@@ -5437,7 +5443,9 @@ class ApplicationFlowTests(unittest.TestCase):
             "scheduleId": "original-capability",
             "name": RETAINED_CAPABILITY_PROGRAM_NAME,
             "appName": record.namespace,
-            "applicationId": lookup,
+            "scheduleType": kind,
+            "serverId": server,
+            "userId": lookup if kind == "dokploy-server" else None,
             "enabled": False,
             "script": retained_application_capability_program(spec),
         }
