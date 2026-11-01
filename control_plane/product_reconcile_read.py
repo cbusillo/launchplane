@@ -94,7 +94,6 @@ def product_preview_requests(
         and request.last_plan.get("action") != "destroy"
         and request.last_plan.get("reason") != "pull_request_not_open"
         and request.last_plan.get("feedback_recovery_closed_observed") is not True
-        and (preview_current_failure(request.last_plan) or not _request_retired(store, request))
     )
 
 
@@ -116,8 +115,6 @@ def _request_retired(store: object, request: ProductReconcileRequestRecord) -> b
 def preview_refresh_failure(request: ProductReconcileRequestRecord, *, store: object = None) -> str:
     if current := preview_current_failure(request.last_plan):
         return current
-    if _request_retired(store, request):
-        return ""
     if request.last_plan.get("action") == "destroy" or (
         "action" not in request.last_plan and "destroy_retry_key" in request.last_plan
     ):
@@ -125,12 +122,17 @@ def preview_refresh_failure(request: ProductReconcileRequestRecord, *, store: ob
     summary = request.last_plan.get(_FAILURE_SUMMARY_KEY) or request.last_error
     if not isinstance(summary, str) or not summary.strip():
         return ""
+    if _request_retired(store, request):
+        return ""
     return _safe_text(summary, maximum_length=140)
 
 
 def preview_current_failure(plan: Mapping[str, object]) -> str:
-    if plan.get("action") == "wait" and plan.get("reason") == "artifact_scan_refused":
-        return "artifact_scan_refused: The preview artifact scan was refused."
+    if plan.get("action") == "wait" and plan.get("held") is True:
+        reason = plan.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return _safe_text(f"Preview is blocked: {reason.replace('_', ' ')}", maximum_length=140)
+        return "The preview is blocked; inspect the current reconcile evidence."
     return ""
 
 

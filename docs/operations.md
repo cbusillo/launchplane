@@ -4879,14 +4879,17 @@ The authenticated Director `local_operator` can reconcile `destroyed` feedback
 without a new grant when the service verifies the exact completed native Odoo
 destroy original, its issued plan and matching destroyed lifecycle with no active
 or serving generation. Both dry run and apply retain a digest of that evidence;
-apply refuses a changed retirement or later reconcile, feedback or original
-operation. It cannot manufacture retirement, clear a later failure or alter a
+apply refuses a changed retirement or later failure, held wait, feedback or original
+operation. A harmless sweep does not renew a historical failure. Exact completed
+replays return their original response even after newer evidence arrives; they
+perform no new mutation. The operation cannot manufacture retirement, clear a later failure or alter a
 provider. Other terminal statuses and callers retain their existing policy checks.
 Current preview warnings derive the same supersession from original evidence;
 historical reconcile failures and provider receipts remain unchanged.
-An open PR can acquire a genuine later artifact-scan refusal. Current warnings
-and reconciler feedback report that refusal ahead of an older retained provenance
+An open PR can acquire a genuine later held wait, such as an artifact-scan refusal. Current warnings
+and reconciler feedback report that blocker ahead of an older retained provenance
 failure; retirement never clears the new blocker.
+Open PRs retain their normal event reconciliation, including subsequent builds.
 
 ### VeriReel Preview Evidence Handoff
 

@@ -9,12 +9,15 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_reconcile import ProductReconcileTarget
 from control_plane.odoo_preview_apply_execution import run_odoo_preview_apply_operation
 from control_plane.odoo_preview_apply_http import OdooPreviewApplyEnvelope
-from control_plane.product_reconcile_read import product_preview_requests, preview_refresh_failure
+from control_plane.product_reconcile_read import preview_refresh_failure
 from control_plane.product_reconcile_feedback import _preview_feedback
 from control_plane.contracts.product_environment_read_model import _preview_refresh_warnings
 from control_plane.preview_retirement import verified_preview_retirement_digest
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    LaunchplaneAuthzPolicy,
+    BearerIdentityConfig,
+)
 from tests.http_app_test_support import _AsgiResponse, _asgi_request, _local_operator_bearer_config
 from tests.support.auth import StubVerifier, identity
 from tests.test_http_app_preview_pr_feedback_remediation import _installation_token
@@ -86,7 +89,7 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
     def test_completed_native_retirement_supersedes_old_failure_without_rewriting_it(self) -> None:
         self.assertTrue(_preview_refresh_warnings(self.store, self.profile))
         self.retire()
-        self.assertEqual(product_preview_requests(self.store, product=self.profile.product), ())
+        self.assertFalse(preview_refresh_failure(self.failed, store=self.store))
         self.assertEqual(_preview_refresh_warnings(self.store, self.profile), ())
         self.assertEqual(
             self.store.read_product_reconcile_request(self.failed.target_key), self.failed
@@ -107,10 +110,7 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(changes=changes):
                 self.store.write_preview_record(preview.model_copy(update=changes))
-                self.assertEqual(
-                    product_preview_requests(self.store, product=self.profile.product),
-                    (self.failed,),
-                )
+                self.assertTrue(preview_refresh_failure(self.failed, store=self.store))
 
     def test_incomplete_or_conflicting_original_cannot_clear_failure(self) -> None:
         self.retire()
@@ -132,14 +132,9 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
                     return_value=(original.model_copy(update=changes),),
                 ),
             ):
-                self.assertEqual(
-                    product_preview_requests(self.store, product=self.profile.product),
-                    (self.failed,),
-                )
+                self.assertTrue(preview_refresh_failure(self.failed, store=self.store))
         with patch.object(self.store, "read_original_mutation_intent", return_value={}):
-            self.assertEqual(
-                product_preview_requests(self.store, product=self.profile.product), (self.failed,)
-            )
+            self.assertTrue(preview_refresh_failure(self.failed, store=self.store))
 
     def test_later_reconcile_failure_is_not_hidden(self) -> None:
         self.retire()
@@ -154,13 +149,9 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
             "New artifact scan refused",
             now=(datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(),
         )
-        self.assertEqual(
-            product_preview_requests(self.store, product=self.profile.product), (later,)
-        )
+        self.assertTrue(preview_refresh_failure(later, store=self.store))
 
-    def test_current_scan_refusal_supersedes_retained_provenance_in_warning_and_feedback(
-        self,
-    ) -> None:
+    def test_harmless_sweep_does_not_revive_a_superseded_failure(self) -> None:
         self.retire()
         self.store.request_product_reconcile(self.target, datetime.now(timezone.utc).isoformat())
         claimed = self.store.claim_next_product_reconcile_request("worker", 60)
@@ -169,22 +160,87 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
             claimed.target_key,
             "worker",
             "done",
-            {**self.failed.last_plan, "action": "wait", "reason": "artifact_scan_refused"},
+            {
+                **self.failed.last_plan,
+                "action": "wait",
+                "reason": "no_verified_build",
+                "held": False,
+            },
         )
-        failure = preview_refresh_failure(current, store=self.store)
-        self.assertIn(str(current.last_plan["reason"]), failure)
-        self.assertNotIn(str(self.failed.last_plan["last_failed_error_summary"]), failure)
-        self.assertTrue(_preview_refresh_warnings(self.store, self.profile))
-        feedback = _preview_feedback(
-            request=current,
-            profile=self.profile,
-            plan=dict(current.last_plan),
-            error="",
-            public_origin=lambda: "",
-        )
-        assert feedback is not None
-        self.assertEqual(feedback.failure_summary, failure)
-        self.assertEqual(feedback.status, "failed")
+        self.assertFalse(preview_refresh_failure(current, store=self.store))
+        self.assertFalse(_preview_refresh_warnings(self.store, self.profile))
+
+    def test_current_wait_supersedes_retained_failure_in_warning_and_feedback(self) -> None:
+        self.retire()
+        for reason in (
+            "artifact_scan_refused",
+            "preview_cleanup_pr_state_unknown",
+            "lane_movement_refused",
+        ):
+            with self.subTest(reason=reason):
+                self.store.request_product_reconcile(
+                    self.target, datetime.now(timezone.utc).isoformat()
+                )
+                claimed = self.store.claim_next_product_reconcile_request("worker", 60)
+                assert claimed is not None
+                current = self.store.complete_product_reconcile_request(
+                    claimed.target_key,
+                    "worker",
+                    "done",
+                    {**self.failed.last_plan, "action": "wait", "reason": reason, "held": True},
+                )
+                failure = preview_refresh_failure(current, store=self.store)
+                self.assertTrue(failure)
+                self.assertNotEqual(failure, self.failed.last_error)
+                self.assertTrue(_preview_refresh_warnings(self.store, self.profile))
+                feedback = _preview_feedback(
+                    request=current,
+                    profile=self.profile,
+                    plan=dict(current.last_plan),
+                    error="",
+                    public_origin=lambda: "",
+                )
+                assert feedback is not None
+                self.assertEqual(feedback.failure_summary, failure)
+                self.assertEqual(feedback.status, "failed")
+
+    async def test_other_machine_identities_do_not_inherit_terminal_reconciliation(self) -> None:
+        self.retire()
+        pr_url = f"https://github.com/{self.profile.repository}/pull/42"
+        for transport in ("local_admin", "terminal_agent"):
+            with self.subTest(transport=transport):
+                app = create_launchplane_fastapi_app(
+                    verifier=StubVerifier(identity()),
+                    bearer_identity_config=BearerIdentityConfig.model_validate(
+                        {
+                            f"{transport}_token": "machine-token",
+                            f"{transport}_subject": "other-machine",
+                            f"{transport}_token_label": "other-machine",
+                        }
+                    ),
+                    authz_policy=LaunchplaneAuthzPolicy(schema_version=3),
+                    control_plane_root_path=self.root,
+                    record_store_factory=lambda: self.store,
+                )
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/remediation",
+                    headers={"Authorization": "Bearer machine-token", "Idempotency-Key": "foreign"},
+                    payload={
+                        "product": self.profile.product,
+                        "context": self.profile.preview.context,
+                        "repository": self.profile.repository,
+                        "pull_request_url": pr_url,
+                        "terminal_status": "destroyed",
+                        "reason": "Reconcile verified retirement",
+                        "related_issue": "cbusillo/launchplane#5489",
+                        "mode": "apply",
+                        "confirmation": f"remediate preview feedback {pr_url} to destroyed",
+                    },
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+        self.assertFalse(self.store.list_preview_pr_feedback_records())
 
     async def test_director_reconciles_verified_terminal_feedback_without_grant_and_replays(
         self,
@@ -272,8 +328,26 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
             self.store.write_preview_record(preview)
             applied = await remediate("apply")
             self.assertEqual(applied.status_code, 202, applied.text)
+            self.store.request_product_reconcile(
+                self.target, datetime.now(timezone.utc).isoformat()
+            )
+            claimed = self.store.claim_next_product_reconcile_request("worker", 60)
+            assert claimed is not None
+            self.store.complete_product_reconcile_request(
+                claimed.target_key,
+                "worker",
+                "failed",
+                {"action": "apply"},
+                "Later deploy failure",
+                now=(datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(),
+            )
+            self.assertFalse(
+                verified_preview_retirement_digest(self.store, profile=self.profile, number=42)
+            )
             replay = await remediate("apply")
             self.assertTrue(replay.json()["replayed"], replay.text)
+            later = await remediate("apply", key="new-after-failure")
+            self.assertEqual(later.status_code, 403, later.text)
             denied = await remediate("apply", "cleared", "invented-clear")
             self.assertEqual(denied.status_code, 403, denied.text)
             update.assert_not_called()

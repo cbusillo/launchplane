@@ -7,12 +7,12 @@ from control_plane.contracts.idempotency_record import (
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_reconcile import product_reconcile_target_key
+from control_plane.contracts.preview_execution import odoo_preview_destroy_reason
 
 
 def verified_preview_retirement_digest(
     store: object, *, profile: LaunchplaneProductProfileRecord, number: int
 ) -> str:
-    from control_plane.odoo_preview_apply_http import _odoo_preview_destroy_reason
     from control_plane.preview_reservation_recovery import original_preview_intent
     from control_plane.storage.postgres import PostgresRecordStore
 
@@ -68,7 +68,7 @@ def verified_preview_retirement_digest(
             or result.get("compose_name") != issued.dry_run_plan.compose_name
             or result.get("preview_url") != preview.canonical_url
             or preview.destroy_reason
-            != _odoo_preview_destroy_reason(
+            != odoo_preview_destroy_reason(
                 plan_id=provenance.plan_id, issued_at=preview.destroyed_at
             )
             or preview.destroyed_at != format_launchplane_mutation_timestamp(provenance.issued_at)
@@ -91,8 +91,10 @@ def verified_preview_retirement_digest(
             )
         except FileNotFoundError:
             request = None
-        if request is not None and _timestamp(request.updated_at) >= _timestamp(
-            preview.destroyed_at
+        if (
+            request is not None
+            and _timestamp(request.updated_at) >= _timestamp(preview.destroyed_at)
+            and (request.last_error or request.last_plan.get("held") is True)
         ):
             return ""
         if any(

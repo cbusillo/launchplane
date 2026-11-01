@@ -68,7 +68,8 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_execution import (
-    ODOO_PREVIEW_DESTROY_REASON_PREFIX as _ODOO_PREVIEW_DESTROY_REASON_PREFIX,
+    odoo_preview_destroy_reason,
+    odoo_preview_operation_token as _odoo_preview_operation_token,
     odoo_preview_destroy_issued_at,
     matches_odoo_preview_service_destroy,
 )
@@ -1161,18 +1162,8 @@ def _odoo_preview_generation_id(*, preview_id: str, plan_id: str) -> str:
     return f"{preview_id}-odoo-{_odoo_preview_operation_token(plan_id)}"
 
 
-def _odoo_preview_operation_token(plan_id: str) -> str:
-    normalized_plan_id = plan_id.strip()
-    if not normalized_plan_id:
-        raise ValueError("Odoo preview lifecycle evidence requires plan_id.")
-    return hashlib.sha256(normalized_plan_id.encode("utf-8")).hexdigest()[:20]
-
-
 def _odoo_preview_destroy_reason(*, plan_id: str, issued_at: str) -> str:
-    return (
-        f"{_ODOO_PREVIEW_DESTROY_REASON_PREFIX}:"
-        f"{_odoo_preview_operation_token(plan_id)}:{issued_at}"
-    )
+    return odoo_preview_destroy_reason(plan_id=plan_id, issued_at=issued_at)
 
 
 def _odoo_preview_lifecycle_records(

@@ -25162,6 +25162,22 @@ def create_launchplane_fastapi_app(
                         code="idempotency_key_required",
                         message="Preview PR feedback remediation requires Idempotency-Key.",
                     )
+                if remediation_request.mode == "apply":
+                    (
+                        normalized_key,
+                        payload_fingerprint,
+                        replayed_response,
+                    ) = replay_apply_idempotency_payload(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
+                        idempotency_key=idempotency_key,
+                        trace_id=trace_id,
+                        check_replay=True,
+                        request_payload=request_payload,
+                    )
+                    if replayed_response is not None:
+                        return replayed_response
                 try:
                     remediation_store = require_preview_pr_feedback_remediation_write_store(
                         record_store
@@ -25238,21 +25254,6 @@ def create_launchplane_fastapi_app(
                         result=remediation_record.model_dump(mode="json"),
                     )
 
-                (
-                    normalized_key,
-                    payload_fingerprint,
-                    replayed_response,
-                ) = replay_apply_idempotency_payload(
-                    record_store=record_store,
-                    identity=identity,
-                    route_path=_PREVIEW_PR_FEEDBACK_REMEDIATION_ROUTE,
-                    idempotency_key=idempotency_key,
-                    trace_id=trace_id,
-                    check_replay=True,
-                    request_payload=request_payload,
-                )
-                if replayed_response is not None:
-                    return replayed_response
                 dry_run_record = matching_dry_run(
                     record_store=remediation_store,
                     actor=actor,
