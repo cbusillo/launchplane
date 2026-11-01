@@ -333,14 +333,13 @@ def plan_testing_address(
             for item in store._retained_disposable_hostname_reservations(session)
             if item.hostname == hostname
         )
-    if not reservations or any(
-        (item.product, item.context, item.operation_id)
-        != (product, context, reservation_operation_id)
-        or not item.target_id
-        for item in reservations
-    ):
-        raise ValueError("The hostname needs exact retained reservation custody in this lane.")
-    with store._session_factory() as session:
+        if not reservations or any(
+            (item.product, item.context, item.operation_id)
+            != (product, context, reservation_operation_id)
+            or not item.target_id
+            for item in reservations
+        ):
+            raise ValueError("The hostname needs exact retained reservation custody in this lane.")
         operations, retirement_digest = address_custody(
             session,
             product=product,
