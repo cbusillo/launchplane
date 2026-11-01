@@ -582,11 +582,11 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             assert end is not None
             self.assertTrue(any(node.lineno <= line <= end for line in failure.program_sites))
             if stage == "resource":
-                docker = functions["docker"]
-                docker_end = docker.end_lineno
-                assert docker_end is not None
-                self.assertLessEqual(docker.lineno, failure.program_sites[-1])
-                self.assertLessEqual(failure.program_sites[-1], docker_end)
+                command_node = functions["command"]
+                command_end = command_node.end_lineno
+                assert command_end is not None
+                self.assertLessEqual(command_node.lineno, failure.program_sites[-1])
+                self.assertLessEqual(failure.program_sites[-1], command_end)
             self.assertNotIn(private, json.dumps(frame))
             self.assertFalse(self.gate.exists())
             self.assertEqual(self.parameters, parameters)
