@@ -431,6 +431,73 @@ class GenericWebTestingRebuildTests(GenericWebTestingRebuildFixture):
                             "server",
                         )
 
+    def test_disabled_predecessor_schedule_requires_complete_terminal_execution_history(
+        self,
+    ) -> None:
+        payload = {
+            "applicationId": self.target_id.target_id,
+            "appName": "original",
+            "serverId": "server",
+            "autoDeploy": False,
+            "applicationStatus": "done",
+            "mounts": [],
+            "previewDeployments": [],
+        }
+        schedule = {
+            "scheduleId": "original-schedule",
+            "applicationId": self.target_id.target_id,
+            "enabled": False,
+        }
+        completed = {
+            "deploymentId": "scheduled-run",
+            "scheduleId": schedule["scheduleId"],
+            "status": "done",
+        }
+        executions: Any = []
+
+        def transport(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/deployment.queueList":
+                return []
+            if kwargs["path"] == "/api/schedule.list":
+                self.assertEqual(
+                    kwargs["query"],
+                    {"id": self.target_id.target_id, "scheduleType": "application"},
+                )
+                return [schedule]
+            self.assertEqual(kwargs["path"], "/api/deployment.allByType")
+            self.assertEqual(kwargs["query"], {"id": schedule["scheduleId"], "type": "schedule"})
+            return executions
+
+        with (
+            patch.object(api, "fetch_dokploy_target_payload", return_value=payload),
+            patch.object(api, "list_deployments_for_target", return_value=[]),
+            patch.object(api, "dokploy_request", side_effect=transport),
+        ):
+            for executions in ([], [completed], [{**completed, "status": "error"}]):
+                with self.subTest(executions=executions):
+                    self.execution.require_retirement_quiescent(
+                        "https://provider.test",
+                        "fixture-token",
+                        self.target_id.target_id,
+                        "original",
+                        "server",
+                    )
+            for executions in (
+                {"items": []},
+                [{**completed, "status": "running"}],
+                [{**completed, "scheduleId": "another-schedule"}],
+                [{"scheduleId": schedule["scheduleId"], "status": "done"}],
+            ):
+                with self.subTest(executions=executions):
+                    with self.assertRaises(NativeTestingRebuildPending):
+                        self.execution.require_retirement_quiescent(
+                            "https://provider.test",
+                            "fixture-token",
+                            self.target_id.target_id,
+                            "original",
+                            "server",
+                        )
+
     def test_parent_executor_fences_concurrent_attempts(self) -> None:
         with patch.object(
             self.store, "testing_replacement_execution_lock", return_value=nullcontext(None)
@@ -556,6 +623,7 @@ class GenericWebTestingRebuildHttpTests(
             "serverId": "fixture-server",
             "env": "",
             "mounts": [],
+            "previewDeployments": [],
             "environment": {"env": "", "project": {"env": ""}},
         }
         self.enterContext(
@@ -568,6 +636,7 @@ class GenericWebTestingRebuildHttpTests(
         self.enterContext(
             patch.object(api, "fetch_dokploy_target_payload", return_value=self.provider_payload)
         )
+        self.enterContext(patch.object(api, "dokploy_request", return_value=[]))
 
         def read_state(**kwargs: Any) -> None:
             fixture = ApplicationAbsenceTests()
@@ -647,6 +716,32 @@ class GenericWebTestingRebuildHttpTests(
     async def test_director_agent_queues_without_an_apply_rule(self) -> None:
         await self.assert_verified_queue({"Authorization": "Bearer local-operator-token"})
 
+    async def test_scoped_agent_cannot_queue_generic_testing_rebuild(self) -> None:
+        from tests import test_product_reconcile as builds
+        from tests.support.auth import scoped_agent_transport
+        from tests.support.http import request
+
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        with scoped_agent_transport():
+            response = await request(
+                self.app,
+                "POST",
+                f"/v1/products/{self.profile.product}/testing-rebuild",
+                headers={
+                    "Authorization": "Bearer local-operator-token",
+                    "Idempotency-Key": "scoped-rebuild",
+                },
+                payload={
+                    "data_source_mode": "empty",
+                    "artifact_id": self.image,
+                    "source_git_ref": builds.NEWEST,
+                    "reason": "Fresh disposable testing copy",
+                },
+            )
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.current_target(), self.target)
+
 
 class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
     with_unresolved_predecessor = False
@@ -706,6 +801,7 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
             )
         )
         self.expected_retirement = self.flow.old_id
+        self.retained_predecessors: set[str] = set()
         self.predecessors: dict[int, str] = {}
         self.deleted: list[str] = []
         self.keep_predecessor_service = False
@@ -725,7 +821,7 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
 
         def delete(**kwargs: Any) -> None:
             identifier = kwargs["application_id"]
-            self.assertEqual(identifier, self.expected_retirement)
+            self.assertIn(identifier, {self.expected_retirement, *self.retained_predecessors})
             payload = self.flow.payloads.pop(identifier)
             (self.routing.root / (payload["appName"] + ".yml")).unlink(missing_ok=True)
             self.reload_routes()
@@ -1034,7 +1130,16 @@ class GenericWebTestingRebuildFlowTests(GenericWebTestingRebuildFlowFixture):
         self.assertNotEqual(result.target_id, self.flow.old_id)
         self.assertIn(self.flow.old_id, self.flow.payloads)
         self.assertEqual(self.deleted, [])
+        self.assertIn(self.flow.old_id, result.error_message)
         self.assertEqual(self.flow.normal("repair-unhealthy-candidate").status, "completed")
+        self.retained_predecessors.add(self.flow.old_id)
+        repaired = self.execute(2)
+        self.assertEqual(repaired.health_status, "pass")
+        self.assertNotIn(self.flow.old_id, self.flow.payloads)
+        self.assertEqual(set(self.deleted), {result.target_id, self.flow.old_id})
+        self.assertEqual(
+            self.flow.normal("after-retained-predecessor-retirement").status, "completed"
+        )
 
     def test_lost_delete_reply_then_unhealthy_candidate_finishes_as_failed(self) -> None:
         from control_plane.contracts.promotion_record import HealthcheckEvidence

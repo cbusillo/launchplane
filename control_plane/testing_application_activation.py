@@ -59,6 +59,7 @@ from control_plane.testing_activation import (
     activation_record,
     configuration_digest,
     preparation_resources,
+    target_without_hold,
     verified_product_image,
 )
 from control_plane.workflows.ship import utc_now_timestamp
@@ -1014,6 +1015,52 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             raise TestingActivationRefusal("The application has an unrequested state mount.")
         self.verify_provider_options(record, live)
 
+    def require_recovery_custody(self, record: TestingActivationRecord) -> None:
+        target = self.require_recipient_custody(record, recovery=True)
+        if record.published and target_without_hold(target) != target_without_hold(
+            record.published_target
+        ):
+            raise TestingActivationRefusal("The original published target changed.")
+        if record.published:
+            from control_plane.testing_publication_storage import (
+                testing_binding_matches_retained_publication,
+            )
+
+            try:
+                binding = self.store.read_route_binding_record(
+                    product=record.product, context_name=record.context, instance_name="testing"
+                )
+            except FileNotFoundError:
+                binding = None
+            if not testing_binding_matches_retained_publication(
+                self.store, binding, record.published_route_binding
+            ):
+                raise TestingActivationRefusal("The original published route authority changed.")
+        self.require_recovery_unused(record)
+
+    def verify_recovery_provider(self, record: TestingActivationRecord) -> None:
+        specification = record.request.application
+        if not record.published or specification is None or specification.state.kind != "none":
+            raise TestingActivationRefusal(
+                "Original finalization requires its stateless recipient."
+            )
+        if not record.state_recipient.get("application_environment_sha256"):
+            ApplicationActivationAdapter.require_unchanged(self, record)
+            ApplicationActivationAdapter.verify_provider(self, record)
+            return
+        live = self.live(record)
+        self.verify_registry(record, live)
+        if (
+            live.get("sourceType") != "docker"
+            or live.get("dockerImage") != record.image_reference
+            or live.get("autoDeploy") is not False
+            or live.get("mounts") != []
+            or canonical_json_sha256(api.parse_dokploy_env_text(str(live.get("env") or "")))
+            != record.state_recipient.get("application_environment_sha256")
+        ):
+            raise TestingActivationRefusal("The original application configuration changed.")
+        self.verify_provider_options(record, live)
+
     def verify_registry(self, record: TestingActivationRecord, live: api.JsonObject) -> None:
         expected = record.state_recipient.get("application_registry_sha256")
         if expected is not None:
@@ -1228,7 +1275,13 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 env_text=api.serialize_dokploy_env_text(self.application_values(record)),
             )
             self.verify_provider(record)
-            record = self.save_state(record, application_configured="true")
+            record = self.save_state(
+                record,
+                application_configured="true",
+                application_environment_sha256=canonical_json_sha256(
+                    self.application_values(record)
+                ),
+            )
         record = self.configure_original_undeployed_endpoint(record, checkpoint)
         self.verify_provider(record)
         return record

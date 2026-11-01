@@ -1,4 +1,5 @@
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
+from control_plane.contracts.testing_rebuild import REBUILD_ROUTE, REBUILD_SCOPE
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
 )
@@ -70,9 +71,17 @@ def capture_director_testing_rebuild_authorization(
     context: str,
     store: object,
     authorized_at: str,
+    recovery_operation: OdooStableTargetReplacementOperationRecord | None = None,
 ) -> DurableOperationAuthorization:
     if not director_testing_rebuild_allowed(
         identity=identity, request=request, context=context, store=store
+    ) and not (
+        recovery_operation is not None
+        and recovery_operation.request == request
+        and recovery_operation.context == context
+        and director_testing_rebuild_recovery_allowed(
+            identity=identity, operation=recovery_operation, store=store
+        )
     ):
         raise DurableOperationAuthorizationCaptureError(
             "Standing native testing rebuild authority is unavailable."
@@ -104,8 +113,13 @@ def director_testing_rebuild_authorization_allows(
         and authorization.context == operation.context
         and authorization.instances == (operation.instance,) == ("testing",)
         and authorization.caller == durable_operation_caller_identity(identity)
-        and director_testing_rebuild_allowed(
-            identity=identity, request=operation.request, context=operation.context, store=store
+        and (
+            director_testing_rebuild_allowed(
+                identity=identity, request=operation.request, context=operation.context, store=store
+            )
+            or director_testing_rebuild_recovery_allowed(
+                identity=identity, operation=operation, store=store
+            )
         )
     )
 
@@ -121,7 +135,59 @@ def director_testing_rebuild_owner_allowed(
         authorization is not None
         and authorization.grant == "director_testing_rebuild"
         and authorization.caller == durable_operation_caller_identity(identity)
-        and director_testing_rebuild_allowed(
-            identity=identity, request=operation.request, context=operation.context, store=store
+        and (
+            director_testing_rebuild_allowed(
+                identity=identity, request=operation.request, context=operation.context, store=store
+            )
+            or director_testing_rebuild_recovery_allowed(
+                identity=identity, operation=operation, store=store
+            )
+        )
+    )
+
+
+def director_testing_rebuild_recovery_allowed(
+    *,
+    identity: LaunchplaneIdentity,
+    operation: OdooStableTargetReplacementOperationRecord,
+    store: object,
+) -> bool:
+    from control_plane.testing_rebuild_service import GenericWebTestingRebuildIntent
+
+    if (
+        not isinstance(identity, LocalOperatorIdentity)
+        or not director_agent_identity(identity)
+        or not isinstance(store, PostgresRecordStore)
+        or not operation.is_native_testing_rebuild
+        or operation.authorization is None
+        or operation.authorization.caller != durable_operation_caller_identity(identity)
+    ):
+        return False
+    found = store.lookup_existing_mutation_reservation(
+        route_path=REBUILD_ROUTE,
+        idempotency_key=operation.operation_id,
+        request_fingerprint=operation.request_fingerprint,
+    )
+    row = found.record
+    if row is None or found.status != "found" or row.scope != REBUILD_SCOPE:
+        return False
+    try:
+        original = GenericWebTestingRebuildIntent.model_validate(
+            store.read_original_mutation_intent(row)
+        )
+    except (ValueError, FileNotFoundError):
+        return False
+    return (
+        original.operation_id == operation.operation_id
+        and original.profile.product == operation.product
+        and original.profile.driver_id == "generic-web"
+        and original.before.target.context == operation.context
+        and original.before.target.target_type == "application"
+        and original.state.kind == "none"
+        and row.provider_target_key == f"testing-rebuild:{operation.product}:{operation.context}"
+        and is_exclusive_product_context(
+            context=operation.context,
+            product=operation.product,
+            owners=product_context_owner_map(store.list_product_profile_records()),
         )
     )

@@ -738,6 +738,8 @@ use protections, independent credential bindings and actual absence of mounted
 state. It performs no writes. A passing inspection admits the operation; candidate
 verification remains pending until the worker completes it. Generic-web builds
 keep their verified immutable image reference, without an Odoo manifest.
+Static predecessor placement, preview and disabled-schedule requirements are
+checked before setting the operation's hold, and checked again before retirement.
 
 The existing rebuild worker creates an operation-owned staging hold, prepares
 independent resources and runs the native application activation. The old copy
@@ -761,10 +763,25 @@ the same operation can remove only its captured service ID through the guarded
 host program, after observing metadata absence. It never removes volumes. Final
 health and absence checks precede clearing this operation's staging hold. A lost
 reply resumes the original receipts; a later staff hold or deployment is retained.
+The host program waits for Docker's asynchronous container teardown within a
+bounded interval. Metadata already deleted outside this operation permits only
+read-only absence verification; it does not authorize removal of a surviving service.
 Interruption after deletion can finish with a failed candidate health result
 instead of stranding the hold. A verified candidate failure before retirement
 retains the predecessor and clears this hold so an ordinary deployment can repair
-testing. Unverified health keeps the original operation pending.
+testing. Its result identifies the predecessor chain. The next successful rebuild
+checks and retires still-present predecessors from that exact completed activation
+chain, with a separate durable delete checkpoint for each predecessor. The same
+identity, empty-state, quiescence, health and absence requirements apply.
+Unverified health keeps the original operation pending.
+
+Known admission refusals before candidate dispatch clear only this operation's
+hold and finish as failed. Published or refused original operations can finalize
+under their captured caller and recipient custody even if desired configuration
+changes later. New work still uses current configuration. New application receipts
+seal the delivered environment digest; legacy receipts keep their original strict
+configuration verification without an invented digest. Recovery never restores
+old configuration or enables a changed binding.
 Direct provider changes outside Launchplane are
 not synchronized with this operation.
 

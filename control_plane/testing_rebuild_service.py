@@ -2711,7 +2711,8 @@ def _execute_native_testing_rebuild(
             rebuild_application_specification,
         )
 
-        resolve_testing_rebuild_driver(store, operation.product).require_execution()
+        if found.status == "missing":
+            resolve_testing_rebuild_driver(store, operation.product).require_execution()
         rebuild_application_specification(intent)
         adapter = GenericWebTestingRebuildAdapter(root, store, operation, intent, authorize)
     else:

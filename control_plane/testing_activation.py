@@ -16,6 +16,10 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.product_profile_record import (
+    is_exclusive_product_context,
+    product_context_owner_map,
+)
 from control_plane.contracts.testing_activation import (
     TestingActivationPlan,
     TestingActivationRefusal,
@@ -635,7 +639,13 @@ def completed_application_predecessor(
 
 
 def require_activation_hold_lift(
-    store: object, request: object, actor: str, root: Path, *, inspect_provider: bool = True
+    store: object,
+    request: object,
+    actor: str,
+    root: Path,
+    *,
+    inspect_provider: bool = True,
+    recovery: bool = False,
 ) -> bool:
     """Explicit same-caller lift of the unchanged interlock after fresh provider proof."""
     from control_plane.testing_lane_hold import TestingHoldApplyRequest
@@ -671,7 +681,14 @@ def require_activation_hold_lift(
         record.scope,
         "activation_hold_preflight",
     )
-    adapter.require_unchanged(record)
+    if recovery:
+        from control_plane.testing_application_activation import ApplicationActivationAdapter
+
+        if not isinstance(adapter, ApplicationActivationAdapter):
+            raise TestingActivationRefusal("Original recovery requires an application recipient.")
+        adapter.require_recovery_custody(record)
+    else:
+        adapter.require_unchanged(record)
     protection = store.read_disposable_lane_safety(record.product, record.context, "testing")
     if protection and protection.usage == "in_use":
         raise TestingActivationRefusal("Known staff use protects the testing recipient.")
@@ -685,9 +702,13 @@ def require_activation_hold_lift(
         # A lost post-clear receipt must still reach the writer's no-op/reconcile
         # recovery; the now-running recipient need not remain empty.
         return True
-    adapter.verify_provider(record)
-    resources, _ = preparation_resources(store, record.product, record.request, record.scope)
+    if recovery:
+        assert isinstance(adapter, ApplicationActivationAdapter)
+        adapter.verify_recovery_provider(record)
+    else:
+        adapter.verify_provider(record)
     if record.request.application is None:
+        resources, _ = preparation_resources(store, record.product, record.request, record.scope)
         inspect_new_resources(
             root,
             resources,
@@ -937,12 +958,52 @@ class TestingActivationAdapter:
                 code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
             )
 
-    def require_recipient_custody(self, record: TestingActivationRecord) -> DokployTargetRecord:
-        _, target, target_id, provider = self.bindings()
+    def require_recipient_custody(
+        self, record: TestingActivationRecord, *, recovery: bool = False
+    ) -> DokployTargetRecord:
+        if recovery:
+            if not is_exclusive_product_context(
+                context=record.context,
+                product=record.product,
+                owners=product_context_owner_map(self.store.list_product_profile_records()),
+            ):
+                raise TestingActivationRefusal("Original recovery requires exclusive lane custody.")
+            target = self.store.read_dokploy_target_record(
+                context_name=record.context, instance_name="testing"
+            )
+            target_id = self.store.read_dokploy_target_id_record(
+                context_name=record.context, instance_name="testing"
+            )
+            provider = self.store.read_provider_target_record(
+                context_name=record.context, instance_name="testing"
+            )
+            physical: tuple[ProviderTargetRecord | DokployTargetIdRecord, ...] = (
+                *self.store.list_provider_target_records(),
+                *self.store.list_dokploy_target_id_records(),
+            )
+            if any(
+                row.target_id in {record.target_id, record.retained_target_id.target_id}
+                and (row.context, row.instance) != (record.context, "testing")
+                for row in physical
+            ):
+                raise TestingActivationRefusal("An original recovery target aliases another lane.")
+        else:
+            _, target, target_id, provider = self.bindings()
         if record.published:
             if (
                 target_id.target_id != record.target_id
                 or provider.target_id != record.target_id
+                or recovery
+                and (
+                    provider.provider_id,
+                    provider.target_category,
+                    provider.provider_target_type,
+                )
+                != (
+                    record.retained_provider.provider_id,
+                    record.retained_provider.target_category,
+                    record.retained_provider.provider_target_type,
+                )
                 or record.published_target is None
                 or recipient_target_identity(target)
                 != recipient_target_identity(record.published_target)
@@ -971,7 +1032,7 @@ class TestingActivationAdapter:
                     "The retained original reservation changed.",
                     code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
                 )
-        return cast(DokployTargetRecord, target)
+        return target
 
     def save(self, record: TestingActivationRecord, **updates: Any) -> TestingActivationRecord:
         replacement = record.model_copy(update=updates)

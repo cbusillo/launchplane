@@ -27,20 +27,30 @@ class VerifiedApplicationRuntimeFailure(ValueError):
         self.evidence = evidence
 
 
-def require_application_runtime_absent(
-    docker: Callable[..., str], application: str, service_id: str
-) -> None:
-    nodes = single_local_swarm_node(docker)
+def application_service_inventory(
+    docker: Callable[..., str],
+) -> tuple[list[str], list[dict[str, Any]]]:
     services = docker("service", "ls", "-q", "--no-trunc").splitlines()
     rows = json.loads(docker("service", "inspect", *services)) if services else []
     if (
-        not application
-        or not service_id
-        or not isinstance(rows, list)
+        not isinstance(rows, list)
         or any(not isinstance(row, dict) for row in rows)
         or len(set(services)) != len(services)
         or len(rows) != len(services)
         or {row.get("ID") for row in rows} != set(services)
+    ):
+        raise ValueError("Application service inventory is incomplete.")
+    return services, rows
+
+
+def require_application_runtime_absent(
+    docker: Callable[..., str], application: str, service_id: str
+) -> None:
+    nodes = single_local_swarm_node(docker)
+    services, rows = application_service_inventory(docker)
+    if (
+        not application
+        or not service_id
         or any(
             row.get("ID") == service_id or row.get("Spec", {}).get("Name") == application
             for row in rows
@@ -81,16 +91,7 @@ def require_stateless_application_runtime(
     if not application:
         raise ValueError("The original application identity is required.")
     nodes = single_local_swarm_node(docker)
-    listed = docker("service", "ls", "-q", "--no-trunc").splitlines()
-    services = json.loads(docker("service", "inspect", *listed)) if listed else []
-    if (
-        not isinstance(services, list)
-        or len(services) != len(listed)
-        or any(not isinstance(row, dict) for row in services)
-        or len(set(listed)) != len(listed)
-        or {row.get("ID") for row in services} != set(listed)
-    ):
-        raise ValueError("Application service inventory is incomplete.")
+    _, services = application_service_inventory(docker)
     selected = [
         row
         for row in services
@@ -180,11 +181,27 @@ def inspect_application_state(
         raise ValueError("Physical predecessor state is unobserved.")
 
 
+def wait_for_application_runtime_absence(
+    docker: Callable[..., str], application: str, service_id: str
+) -> None:
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            require_application_runtime_absent(docker, application, service_id)
+            return
+        except ValueError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(1)
+
+
 APPLICATION_STATE_PROGRAM_HEADER = (
-    "import base64,json,subprocess,sys\nfrom collections.abc import Callable\nfrom typing import Any\n"
+    "import base64,json,subprocess,sys,time\nfrom collections.abc import Callable\nfrom typing import Any\n"
     + inspect.getsource(single_local_swarm_node)
+    + inspect.getsource(application_service_inventory)
     + inspect.getsource(require_application_runtime_absent)
     + inspect.getsource(require_stateless_application_runtime)
+    + inspect.getsource(wait_for_application_runtime_absence)
     + r"""
 def docker(*arguments):
     result=subprocess.run(['docker',*arguments],capture_output=True,text=True,timeout=45,check=True)
@@ -208,10 +225,11 @@ APPLICATION_RETIREMENT_PROGRAM = (
     APPLICATION_STATE_PROGRAM_HEADER
     + r"""
 if spec['mode']!='retire' or not spec['service_id']: raise ValueError('original predecessor identity required')
-require_stateless_application_runtime(docker,spec['application'],spec['service_id'])
-if spec['service_id'] in docker('service','ls','-q','--no-trunc').splitlines():
+_,services=application_service_inventory(docker)
+if any(row.get('ID')==spec['service_id'] or row.get('Spec',{}).get('Name')==spec['application'] for row in services):
+    require_stateless_application_runtime(docker,spec['application'],spec['service_id'])
     docker('service','rm',spec['service_id'])
-require_application_runtime_absent(docker,spec['application'],spec['service_id'])
+wait_for_application_runtime_absence(docker,spec['application'],spec['service_id'])
 print(sys.argv[2]+json.dumps({'type':'complete',**spec}))
 """
 )

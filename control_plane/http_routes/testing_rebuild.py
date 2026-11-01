@@ -647,6 +647,7 @@ def register_testing_rebuild_routes(
                     context=original.context,
                     store=record_store,
                     authorized_at=now,
+                    recovery_operation=original,
                 )
             else:
                 try:
