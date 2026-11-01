@@ -716,7 +716,10 @@ class OdooPreviewApplyOperation:
         reference = self.adapter._apply_request.preserve_original_reservation_id
         if not reference:
             return
-        from control_plane.preview_preservation import require_preview_preservation_admission
+        from control_plane.preview_preservation import (
+            require_preview_preservation_admission,
+            run_preview_preservation,
+        )
         from control_plane.storage.postgres import PostgresRecordStore
 
         try:
@@ -728,7 +731,20 @@ class OdooPreviewApplyOperation:
                 operation_record_id=self.adapter._deployment_record_id,
                 captured_schedule_binding=self.adapter.schedule_binding,
             )
-        except ValueError as error:
+            if self.adapter._issued_plan.operation == "refresh":
+                run_preview_preservation(
+                    store=cast(PostgresRecordStore, self.adapter._record_store),
+                    profile=self.adapter._profile,
+                    issued_plan=self.adapter._issued_plan,
+                    original_reservation_id=reference,
+                    operation_record_id=self.adapter._deployment_record_id,
+                    control_plane_root=self.adapter._control_plane_root,
+                    mode="preflight",
+                    timeout_seconds=self.adapter._apply_request.apply.timeout_seconds,
+                    check=self.adapter.execution_check,
+                    captured_schedule_binding=self.adapter.schedule_binding,
+                )
+        except (ValueError, FileNotFoundError, click.ClickException) as error:
             raise OdooPreviewPlanProvenanceError(
                 code="odoo_preview_preservation_unavailable", message=str(error)
             ) from error
@@ -955,12 +971,33 @@ def prepare_odoo_preview_apply_operation(
     )
 
     def qualified_supersession(reservation: object) -> bool:
+        from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+        from control_plane.preview_preservation import PREVIEW_PRESERVATION_PHASES
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        if (
+            isinstance(reservation, LaunchplaneIdempotencyRecord)
+            and reservation.provider_effect_phase in PREVIEW_PRESERVATION_PHASES
+        ):
+            return False
+        if (
+            isinstance(reservation, LaunchplaneIdempotencyRecord)
+            and reservation.provider_effect_started_at
+            and isinstance(record_store, PostgresRecordStore)
+        ):
+            retained = record_store.read_original_mutation_intent(reservation)
+            request = retained.get("apply_request")
+            plan = retained.get("issued_plan")
+            if (
+                isinstance(request, dict)
+                and request.get("preserve_original_reservation_id")
+                and isinstance(plan, dict)
+                and plan.get("operation") == "refresh"
+            ):
+                return False
         if pre_mutation_guard is not None:
             pre_mutation_guard()
         if adapter.fixture_cancellation is not None:
-            from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-            from control_plane.storage.postgres import PostgresRecordStore
-
             if not (
                 issued_plan.operation == "destroy"
                 and issued_plan.dry_run_plan.delete_volumes
@@ -983,7 +1020,6 @@ def prepare_odoo_preview_apply_operation(
                 carried=adapter.fixture_cancellation,
             )
         if disposable_cleanup:
-            from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
             from control_plane.preview_reservation_recovery import classify_preview_reservation
 
             if (
@@ -1002,8 +1038,6 @@ def prepare_odoo_preview_apply_operation(
                 != issued_plan.plan_request.pr_number
             ):
                 return False
-            from control_plane.storage.postgres import PostgresRecordStore
-
             if classification.get("original_action_available") or cast(
                 PostgresRecordStore, record_store
             ).read_original_mutation_intent(reservation):

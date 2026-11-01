@@ -364,11 +364,12 @@ def run_preview_preservation(
     original_reservation_id: str,
     operation_record_id: str,
     control_plane_root: Path,
-    mode: Literal["preserve", "verify", "inspect"],
+    mode: Literal["preserve", "verify", "inspect", "preflight"],
     timeout_seconds: int,
     check: Callable[[], None],
     effect_checkpoint: Callable[[str], None] | None = None,
     mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    captured_schedule_binding: dict[str, object] | None = None,
 ) -> dict[str, object]:
     from control_plane._preview_preservation_program import (
         PREVIEW_PRESERVATION_CLEANUP_SECONDS,
@@ -389,6 +390,7 @@ def run_preview_preservation(
         issued_plan=issued_plan,
         original_reservation_id=original_reservation_id,
         operation_record_id=operation_record_id,
+        captured_schedule_binding=captured_schedule_binding,
     )
     original = store.read_idempotency_record_by_id(original_reservation_id)
     if original is None:
@@ -406,7 +408,9 @@ def run_preview_preservation(
         control_plane_root=control_plane_root, database_url=store.database_url
     )
     budget = (
-        snapshot_storage_budget(profile, profile.preview.context) if mode == "preserve" else None
+        snapshot_storage_budget(profile, profile.preview.context)
+        if mode in {"preserve", "preflight"}
+        else None
     )
     continuation_applied = (
         authority.continuation
@@ -426,9 +430,7 @@ def run_preview_preservation(
             operation_record_id=operation_record_id,
         )
         if authority.continuation and (
-            operation is not None
-            and operation.attempt > 1
-            and operation.provider_effect_phase == PREVIEW_PRESERVATION_CAPTURE_PHASE
+            operation is not None and operation.provider_effect_phase in PREVIEW_PRESERVATION_PHASES
         ):
             inspection = run_preview_preservation(
                 store=store,
@@ -462,7 +464,11 @@ def run_preview_preservation(
         if current_source is not None:
             with mutation_guard() if mutation_guard else nullcontext():
                 check()
-                effect_checkpoint(PREVIEW_PRESERVATION_INSPECT_PHASE)
+                if (
+                    operation is None
+                    or operation.provider_effect_phase != PREVIEW_PRESERVATION_CAPTURE_PHASE
+                ):
+                    effect_checkpoint(PREVIEW_PRESERVATION_INSPECT_PHASE)
             binding = require_existing_preview_resources(
                 host=host,
                 token=token,

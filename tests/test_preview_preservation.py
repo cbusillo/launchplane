@@ -280,6 +280,10 @@ class PreviewPreservationProgramTests(unittest.TestCase):
             self.preserve()
         self.assertFalse(self.calls)
         alias.unlink()
+        preflight = self.namespace["preserve"](self.path, self.source, preflight_only=True)
+        self.assertEqual(preflight["volume_binding"], self.binding)
+        self.assertTrue(self.containers["web"]["State"]["Running"])
+        self.assertFalse(self.path.exists())
         self.restored.side_effect = RuntimeError("restore failed")
         with self.assertRaises(RuntimeError):
             self.preserve()
@@ -1161,6 +1165,143 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         first_record = first.record
         assert first_record is not None
         self.assertEqual(held[0].record_id, first_record.record_id)
+
+    def test_native_preflight_refusal_creates_no_reservation(self) -> None:
+        import click
+        from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+
+        self.record_serving_original()
+        self.destroy.apply.dry_run_plan.operation = "refresh"
+        self.issued = _issued_plan(self.destroy)
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=self.destroy,
+            issued_plan=self.issued,
+            reservation_scope="preflight-refusal",
+            idempotency_key="preflight-refusal",
+            request_fingerprint="preflight-refusal",
+            trace_id="preflight-refusal",
+        )
+        refusal = click.ClickException("native custody refused before stop")
+        with (
+            patch.object(operation.adapter, "capture_schedule_binding"),
+            patch(
+                "control_plane.preview_preservation.run_preview_preservation", side_effect=refusal
+            ),
+            self.assertRaises(OdooPreviewPlanProvenanceError) as rejected,
+        ):
+            operation.run(self.store)
+        self.assertIs(rejected.exception.__cause__, refusal)
+        self.assertIsNone(
+            self.store.read_idempotency_record_by_id(operation.adapter._deployment_record_id)
+        )
+
+    def test_captured_retry_never_regresses_phase_or_allows_another_key(self) -> None:
+        import click
+        from control_plane.preview_preservation import run_preview_preservation
+
+        self.record_serving_original()
+        self.destroy.apply.dry_run_plan.operation = "refresh"
+        self.issued = _issued_plan(self.destroy)
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=self.destroy,
+            issued_plan=self.issued,
+            reservation_scope="captured-retry",
+            idempotency_key="captured-retry",
+            request_fingerprint="captured-retry",
+            trace_id="captured-retry",
+            supersession_is_quiescent=Mock(return_value=True),
+        )
+        reserved = self.store.reserve_mutation(
+            scope=operation.reservation_scope,
+            route_path=operation.route_path,
+            idempotency_key=operation.idempotency_key,
+            request_fingerprint=operation.request_fingerprint,
+            lease_owner="fixture",
+            reconciliation_key=operation.adapter.reconciliation_key(),
+            provider_target_key=operation.adapter.target_key(),
+            original_intent=operation.adapter.original_intent(),
+        ).record
+        assert reserved is not None
+        self.store.checkpoint_mutation_provider_effect(
+            reservation=reserved, effect_phase=PREVIEW_PRESERVATION_CAPTURE_PHASE
+        )
+        current = self.store.read_idempotency_record_by_id(reserved.record_id)
+        assert current is not None
+        self.assertFalse(operation.target_supersession.quiescence_check(current))
+        self.assertFalse(
+            operation.target_supersession.quiescence_check(
+                current.model_copy(update={"provider_effect_phase": "compose_update"})
+            )
+        )
+        source = {"provider_binding_sha256": "fixture-binding"}
+        refusal = click.ClickException("provider resource inspection failed")
+
+        def remote(**kwargs: Any) -> None:
+            kwargs["dispatch_guard"](lambda: None)
+            kwargs["receive"](
+                {
+                    "type": "complete",
+                    "preservation_id": self.authority().preservation_id,
+                    "source": source,
+                    "volume_binding": {},
+                    "writers_stopped": True,
+                    "retry_safe": True,
+                }
+            )
+
+        def checkpoint(phase: str) -> None:
+            latest = self.store.read_idempotency_record_by_id(reserved.record_id)
+            assert latest is not None
+            self.store.checkpoint_mutation_provider_effect(reservation=latest, effect_phase=phase)
+
+        with (
+            patch(
+                "control_plane.preview_preservation.read_preview_preservation_source",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://fixture.invalid", "fixture"),
+            ),
+            patch(
+                "control_plane.clean_testing_snapshot.snapshot_storage_budget",
+                return_value=OdooTestingDrillStorageBudget(
+                    database_bytes=1024,
+                    filestore_bytes=1024,
+                    staging_bytes=1024,
+                    reserve_bytes=1024,
+                ),
+            ),
+            patch("control_plane.dokploy.native_copy_stream._read_remote", side_effect=remote),
+            patch(
+                "control_plane.odoo_preview_resources.require_existing_preview_resources",
+                side_effect=refusal,
+            ),
+            self.assertRaises(click.ClickException) as rejected,
+        ):
+            run_preview_preservation(
+                store=self.store,
+                profile=self.profile,
+                issued_plan=self.issued,
+                original_reservation_id=self.original.record_id,
+                operation_record_id=reserved.record_id,
+                control_plane_root=self.root,
+                mode="preserve",
+                timeout_seconds=30,
+                check=lambda: None,
+                effect_checkpoint=checkpoint,
+                mutation_guard=nullcontext,
+            )
+        self.assertIs(rejected.exception, refusal)
+        final = self.store.read_idempotency_record_by_id(reserved.record_id)
+        assert final is not None
+        self.assertEqual(final.provider_effect_phase, PREVIEW_PRESERVATION_CAPTURE_PHASE)
 
     def test_no_snapshot_original_uses_its_retained_server_without_changing_intent(self) -> None:
         binding = self.server_binding()

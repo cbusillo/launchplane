@@ -309,8 +309,8 @@ file store and never restores upstream or imports replacement data. Nonempty
 snapshot overlays remain unsupported and are retained without capture or refresh.
 
 Interrupted captures retain their original operation key, pending copy and
-provider checkpoint. Deterministic custody and capacity refusals run before
-stopping writers. After stopping, a failure keeps the recipient stopped and its
+provider checkpoint. Read-only native custody and capacity preflight runs before
+reserving the operation. After stopping, a failure keeps the recipient stopped and its
 data in place under that same operation's reconciliation fence; inspection is
 read-only and continuation resumes on the original key once its blocker clears.
 It does not restart the old application. Before the first refresh effect,

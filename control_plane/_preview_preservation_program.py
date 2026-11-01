@@ -341,7 +341,7 @@ def wait_database(identifier: str) -> None:
     raise RuntimeError('Preview preservation verification database did not start')
 
 
-def verification_resources(name: str, image: str) -> None:
+def verification_resources(name: str, image: str, *, cleanup: bool = True) -> None:
     identifiers = docker('ps', '-aq', '--filter', 'name=^/' + name + '$').decode().split()
     if identifiers:
         if len(identifiers) != 1:
@@ -364,6 +364,8 @@ def verification_resources(name: str, image: str) -> None:
             raise RuntimeError('Preview preservation verification storage has foreign custody')
     elif identifiers:
         raise RuntimeError('Preview preservation verification storage is missing')
+    if not cleanup:
+        return
     if identifiers:
         docker('rm', '-f', identifiers[0])
     if name in names:
@@ -475,7 +477,7 @@ def preservation_database(database: dict):
                 docker('stop', '-t', '30', database['Id'])
 
 
-def preserve(path: Path, source: dict) -> dict:
+def preserve(path: Path, source: dict, *, preflight_only: bool = False) -> dict:
     containers = preview_containers(source)
     continuation = spec.get('continuation', False)
     if spec.get('require_stopped_writers') and any(
@@ -510,15 +512,20 @@ def preserve(path: Path, source: dict) -> dict:
     if database['State']['Running']:
         require_preservation_databases(database, source)
     temporary = path.with_name('.pending-' + path.name)
-    if pending_preservation(temporary, source, binding, database['Image']):
+    pending = pending_preservation(temporary, source, binding, database['Image'])
+    verifier = 'lp-preview-preserve-' + spec['preservation_id'][:32]
+    if not pending and (docker('ps', '-aq', '--filter', 'name=^/' + verifier + '$').decode().split()
+        or verifier in docker('volume', 'ls', '--format', '{{.Name}}').decode().splitlines()):
+        raise RuntimeError('Preview preservation verifier lacks its pending custody')
+    if preflight_only:
+        if pending:
+            verification_resources(verifier, database['Image'], cleanup=False)
+        return {'source': source, 'volume_binding': binding}
+    if pending:
         verification_resources('lp-preview-preserve-' + spec['preservation_id'][:32], database['Image'])
         clear_owned_pending_preservation(temporary)
     elif temporary.exists():
         temporary.rmdir()
-    verifier = 'lp-preview-preserve-' + spec['preservation_id'][:32]
-    if (docker('ps', '-aq', '--filter', 'name=^/' + verifier + '$').decode().split()
-        or verifier in docker('volume', 'ls', '--format', '{{.Name}}').decode().splitlines()):
-        raise RuntimeError('Preview preservation verifier lacks its pending custody')
     if not continuation:
         require_unserved_web(containers['web'])
     for service in ('web', 'script-runner'):
@@ -631,6 +638,8 @@ def execute() -> dict:
             return {**receipt, 'writers_stopped': not spec.get('continuation_applied', False)}
         if spec['mode'] == 'inspect' and spec.get('source'):
             return inspect_pending_preservation(path, spec['source'])
+        if spec['mode'] == 'preflight' and spec.get('source'):
+            return preserve(path, spec['source'], preflight_only=True)
         if spec['mode'] != 'preserve' or not spec.get('source'):
             raise RuntimeError('Preview preservation is not complete')
         return preserve(path, spec['source'])
