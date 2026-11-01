@@ -16,6 +16,7 @@ from control_plane.contracts.production_recipient import (
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.dokploy import api, compose, source
+from control_plane.dokploy.compose_inventory import require_named_storage
 from control_plane.integration_allowances import canonical_sha256
 from control_plane.production_consumer_reads import (
     current_source,
@@ -304,21 +305,7 @@ def retained_manifest(root: Path, record: ProductionRecipientRecord) -> dict[str
         )
     )
     names = compose_volume_names(document, payload, set(record.request.volume_keys.values()))
-    declared = set(document.get("volumes", {}))
-    if document.get("configs") or document.get("secrets"):
-        raise ValueError("Old file-backed configuration requires separate retained custody.")
-    for service in document["services"].values():
-        for mount in service.get("volumes", []):
-            if isinstance(mount, str):
-                parts = mount.split(":")
-                if len(parts) not in {2, 3} or parts[0] not in declared:
-                    raise ValueError("Old bind or anonymous storage is unsupported.")
-            elif (
-                not isinstance(mount, dict)
-                or mount.get("type", "volume") != "volume"
-                or mount.get("source") not in declared
-            ):
-                raise ValueError("Only exact old named storage can be retired.")
+    require_named_storage(document)
     if payload.get("domains") or payload.get("serviceNetworks"):
         raise ValueError("The old Compose retains routing or shared network references.")
     if len(names) != len(set(names)) or not names:

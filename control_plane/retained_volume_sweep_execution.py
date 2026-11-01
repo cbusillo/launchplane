@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 
 import click
+import yaml
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -17,8 +18,11 @@ from control_plane.contracts.retained_volume_sweep import (
     RetainedVolumeSweepResponse,
 )
 from control_plane.dokploy import api, compose, native_copy_stream, source
+from control_plane.dokploy.compose_inventory import (
+    read_volume_documents,
+    standard_compose_environment,
+)
 from control_plane.dokploy_inventory import TARGET_COLLECTIONS
-from control_plane.production_recipient import read_provider_compose
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
@@ -94,13 +98,7 @@ def compose_volume_names(
     volumes = document.get("volumes", {})
     if not isinstance(volumes, dict):
         raise ValueError("Compose volume inventory is unavailable.")
-    standard_environment = (
-        payload.get("composeType") == "docker-compose"
-        and payload.get("createEnvFile") is True
-        and "command" in payload
-        and payload["command"] in (None, "")
-        and payload.get("randomize") is False
-    )
+    standard_environment = standard_compose_environment(payload)
     names = []
     for alias, definition in volumes.items():
         if not isinstance(alias, str) or not isinstance(definition, dict | type(None)):
@@ -223,18 +221,37 @@ def _inventory_clear(
                         return False
                     if target_type == "compose":
                         try:
-                            document = read_provider_compose(
-                                compose.fetch_dokploy_converted_compose_file(
+                            documents = read_volume_documents(
+                                host=host,
+                                token=token,
+                                payload=payload,
+                                raw=compose.fetch_dokploy_converted_compose_file(
                                     host=host, token=token, compose_id=target_id
+                                ),
+                                server_id=binding.server_id,
+                                exact=exact,
+                            )
+                            for document in documents:
+                                names = compose_volume_names(
+                                    document, payload if exact else {**payload, "env": ""}
                                 )
-                            )
-                            names = compose_volume_names(
-                                document, payload if exact else {**payload, "env": ""}
-                            )
-                        except ValueError:
+                                if binding.volume_name in names or _volume_referenced(
+                                    binding.volume_name, document, exact=exact
+                                ):
+                                    return False
+                        except native_copy_stream.NativeSourceAuthorizationDenied:
+                            raise
+                        except api.DokployRequestFailed as error:
+                            if error.status_code in {401, 403}:
+                                raise
                             return False
-                        if binding.volume_name in names or _volume_referenced(
-                            binding.volume_name, document, exact=exact
+                        except (
+                            ValueError,
+                            TypeError,
+                            KeyError,
+                            RecursionError,
+                            click.ClickException,
+                            yaml.YAMLError,
                         ):
                             return False
 
