@@ -1486,7 +1486,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             previous_route = restored_application_route(self.store, record)
             restored_history = previous_route is not None
         fresh_restored_history = restored_history and not (readiness and readiness.route)
-        original_route = (readiness.route if readiness else None) or previous_route
+        original_route = readiness.route if readiness else None
         if original_route is not None and original_route.application_file_name:
             old_spec["route_file_name"] = original_route.application_file_name
         host, token = source.read_dokploy_config(control_plane_root=self.root)
@@ -1547,7 +1547,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 if frame["application_file"] is not None
                 else None
             )
-            if not isinstance(document, dict):
+            if not isinstance(document, dict) and not (
+                document is None and previous_route is not None and frame["owned_file"] is not None
+            ):
                 raise ValueError("The actual retained application route file is unavailable.")
             points = testing_ingress_entrypoints(frame["raw"], hostname)
             arguments = dict(

@@ -1,4 +1,4 @@
-"""Fixed read-only qualification of a fresh single-replica application runtime."""
+"""Fixed qualification and bounded retirement of single-replica application runtimes."""
 
 import hashlib
 import inspect
@@ -180,7 +180,7 @@ def inspect_application_state(
         raise ValueError("Physical predecessor state is unobserved.")
 
 
-APPLICATION_STATE_PROGRAM = (
+APPLICATION_STATE_PROGRAM_HEADER = (
     "import base64,json,subprocess,sys\nfrom collections.abc import Callable\nfrom typing import Any\n"
     + inspect.getsource(single_local_swarm_node)
     + inspect.getsource(require_application_runtime_absent)
@@ -191,12 +191,59 @@ def docker(*arguments):
     if len(result.stdout)>4*1024*1024: raise ValueError('bounded inventory unavailable')
     return result.stdout
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
+"""
+)
+
+APPLICATION_STATE_PROGRAM = (
+    APPLICATION_STATE_PROGRAM_HEADER
+    + r"""
 if spec['mode']=='absent': require_application_runtime_absent(docker,spec['application'],spec['service_id'])
 elif spec['mode']=='stateless': require_stateless_application_runtime(docker,spec['application'],spec['service_id'])
 else: raise ValueError('unsupported application state observation')
 print(sys.argv[2]+json.dumps({'type':'complete',**spec}))
 """
 )
+
+APPLICATION_RETIREMENT_PROGRAM = (
+    APPLICATION_STATE_PROGRAM_HEADER
+    + r"""
+if spec['mode']!='retire' or not spec['service_id']: raise ValueError('original predecessor identity required')
+require_stateless_application_runtime(docker,spec['application'],spec['service_id'])
+if spec['service_id'] in docker('service','ls','-q','--no-trunc').splitlines():
+    docker('service','rm',spec['service_id'])
+require_application_runtime_absent(docker,spec['application'],spec['service_id'])
+print(sys.argv[2]+json.dumps({'type':'complete',**spec}))
+"""
+)
+
+
+def retire_application_runtime(
+    *,
+    host: str,
+    token: str,
+    server_id: str,
+    application: str,
+    service_id: str,
+    dispatch_guard: Callable[[Callable[[], None]], None],
+) -> None:
+    frames: list[dict[str, object]] = []
+    payload: dict[str, object] = {
+        "application": application,
+        "service_id": service_id,
+        "mode": "retire",
+    }
+    _read_remote(
+        host=host,
+        token=token,
+        server_id=server_id,
+        program=APPLICATION_RETIREMENT_PROGRAM,
+        payload=payload,
+        receive=frames.append,
+        timeout_seconds=120,
+        dispatch_guard=dispatch_guard,
+    )
+    if frames != [{"type": "complete", **payload}]:
+        raise ValueError("The original predecessor retirement is unobserved.")
 
 
 def inspect_application_runtime(

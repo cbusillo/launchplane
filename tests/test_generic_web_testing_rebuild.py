@@ -70,9 +70,14 @@ class ApplicationAbsenceTests(unittest.TestCase):
         self.services: dict[str, Any] = {}
         self.containers: dict[str, Any] = {}
         self.tasks: dict[str, Any] = {}
+        self.removed: list[str] = []
 
     def docker(self, *arguments: str) -> str:
         match arguments:
+            case ("service", "rm", identifier):
+                self.removed.append(identifier)
+                self.services.pop(identifier)
+                return identifier
             case ("node", "ls", "--format", "json"):
                 return "\n".join(json.dumps(row) for row in self.nodes)
             case ("service", "ls", "-q", "--no-trunc"):
@@ -97,9 +102,47 @@ class ApplicationAbsenceTests(unittest.TestCase):
             return subprocess.CompletedProcess(arguments, 0, self.docker(*arguments[1:]), "")
 
         frame = observe_application_state_program(
-            application_runtime.APPLICATION_STATE_PROGRAM, payload, command
+            application_runtime.APPLICATION_RETIREMENT_PROGRAM
+            if mode == "retire"
+            else application_runtime.APPLICATION_STATE_PROGRAM,
+            payload,
+            command,
         )
         self.assertEqual(frame, {"type": "complete", **payload})
+
+    def test_retirement_program_removes_only_the_original_stateless_service(self) -> None:
+        self.services = {
+            "original-service": {
+                "ID": "original-service",
+                "Spec": {"Name": "original-app", "TaskTemplate": {"ContainerSpec": {"Mounts": []}}},
+            },
+            "other": {"ID": "other", "Spec": {"Name": "other-app"}},
+        }
+        self.observe("retire")
+        self.assertEqual(self.removed, ["original-service"])
+        self.assertEqual(set(self.services), {"other"})
+        self.observe("retire")
+        self.assertEqual(self.removed, ["original-service"])
+
+    def test_retirement_program_refuses_changed_identity_or_persistent_mounts(self) -> None:
+        for identifier, name, mounts in (
+            ("original-service", "renamed-app", []),
+            ("new-service", "original-app", []),
+            ("original-service", "original-app", [{"Source": "retained-data"}]),
+        ):
+            with self.subTest(identifier=identifier, name=name, mounts=mounts):
+                self.services = {
+                    identifier: {
+                        "ID": identifier,
+                        "Spec": {
+                            "Name": name,
+                            "TaskTemplate": {"ContainerSpec": {"Mounts": mounts}},
+                        },
+                    }
+                }
+                with self.assertRaises(ValueError):
+                    self.observe("retire")
+                self.assertEqual(self.removed, [])
 
     def test_stateless_proof_checks_service_tasks_and_implicit_container_mounts(self) -> None:
         service: dict[str, Any] = {
@@ -300,13 +343,93 @@ class GenericWebTestingRebuildTests(GenericWebTestingRebuildFixture):
                     self.execution.interlock(hold=True)
                 self.assertEqual(self.current_target(), target)
 
-    def test_admission_refuses_a_target_shared_with_any_production_lane(self) -> None:
-        self.store.write_dokploy_target_id_record(
-            self.target_id.model_copy(update={"context": "other-product", "instance": "prod"})
-        )
-        with self.assertRaises(NativeTestingRebuildPending):
-            self.execution.interlock(hold=True)
-        self.assertEqual(self.current_target(), self.target)
+    def test_admission_refuses_a_target_shared_with_another_lane(self) -> None:
+        for instance in ("prod", "testing", "preview"):
+            with self.subTest(instance=instance):
+                self.store.write_dokploy_target_id_record(
+                    self.target_id.model_copy(
+                        update={"context": "other-product", "instance": instance}
+                    )
+                )
+                with self.assertRaises(NativeTestingRebuildPending):
+                    self.execution.interlock(hold=True)
+                self.assertEqual(self.current_target(), self.target)
+
+    def test_retirement_requires_idle_bound_metadata_terminal_history_and_an_empty_queue(
+        self,
+    ) -> None:
+        original = {
+            "applicationId": self.target_id.target_id,
+            "appName": "original",
+            "serverId": "server",
+            "autoDeploy": False,
+            "applicationStatus": "done",
+            "mounts": [],
+            "previewDeployments": [],
+        }
+        terminal = {
+            "deploymentId": "old-run",
+            "applicationId": self.target_id.target_id,
+            "status": "done",
+        }
+        active = {"data": {"applicationId": self.target_id.target_id}, "state": "active"}
+        cases: list[tuple[dict[str, Any], list[dict[str, Any]], Any, list[dict[str, Any]]]] = [
+            ({}, [terminal], [], []),
+            ({"applicationStatus": "running"}, [terminal], [], []),
+            ({"autoDeploy": True}, [terminal], [], []),
+            ({"appName": "another-application"}, [terminal], [], []),
+            ({"serverId": "another-server"}, [terminal], [], []),
+            ({"previewDeployments": [{"previewDeploymentId": "child"}]}, [terminal], [], []),
+            ({}, [{**terminal, "status": "running"}], [], []),
+            ({}, [{**terminal, "status": "unknown"}], [], []),
+            ({}, [terminal], [active], []),
+            ({}, [terminal], {"items": []}, []),
+            ({}, [terminal], [{"data": None, "state": "active"}], []),
+            (
+                {},
+                [terminal],
+                [],
+                [
+                    {
+                        "scheduleId": "old-schedule",
+                        "applicationId": self.target_id.target_id,
+                        "enabled": True,
+                    }
+                ],
+            ),
+        ]
+        for index, (changes, history, queue, schedules) in enumerate(cases):
+            with (
+                self.subTest(index=index),
+                patch.object(
+                    api, "fetch_dokploy_target_payload", return_value={**original, **changes}
+                ),
+                patch.object(api, "list_deployments_for_target", return_value=history),
+                patch.object(
+                    api,
+                    "dokploy_request",
+                    side_effect=lambda **kw: (
+                        queue if kw["path"] == "/api/deployment.queueList" else schedules
+                    ),
+                ),
+            ):
+                if index == 0:
+                    self.execution.require_retirement_quiescent(
+                        "https://provider.test",
+                        "fixture-token",
+                        self.target_id.target_id,
+                        "original",
+                        "server",
+                    )
+                else:
+                    with self.assertRaises(NativeTestingRebuildPending):
+                        self.execution.require_retirement_quiescent(
+                            "https://provider.test",
+                            "fixture-token",
+                            self.target_id.target_id,
+                            "original",
+                            "server",
+                        )
 
     def test_parent_executor_fences_concurrent_attempts(self) -> None:
         with patch.object(
@@ -525,15 +648,35 @@ class GenericWebTestingRebuildHttpTests(
         await self.assert_verified_queue({"Authorization": "Bearer local-operator-token"})
 
 
-class GenericWebTestingRebuildFlowTests(unittest.TestCase):
+class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
+    with_unresolved_predecessor = False
+
     def setUp(self) -> None:
         from tests import test_testing_application_flow as activation
 
         self.flow = activation.ApplicationFlowTests()
-        self.flow.no_original = True
+        self.flow.no_original = not self.with_unresolved_predecessor
         self.flow.setUp()
         self.addCleanup(self.flow.doCleanups)
         self.routing = self.flow.addressed()
+        document = json.loads((self.routing.root / "old-app.yml").read_text())
+        document["http"]["routers"]["old-app-router-fixture"]["middlewares"] = ["redirect-to-https"]
+        document["http"].pop("middlewares")
+        (self.routing.root / "old-app.yml").write_text(json.dumps(document))
+        (self.routing.root / "middlewares.yml").write_text(
+            json.dumps(
+                {
+                    "http": {
+                        "middlewares": {
+                            "redirect-to-https": {
+                                "redirectScheme": {"scheme": "https", "permanent": True}
+                            }
+                        }
+                    }
+                }
+            )
+        )
+        self.reload_routes()
         self.store = self.flow.store
         self.flow.payloads[self.flow.old_id]["mounts"] = []
         for service in self.flow.services.values():
@@ -563,7 +706,10 @@ class GenericWebTestingRebuildFlowTests(unittest.TestCase):
             )
         )
         self.expected_retirement = self.flow.old_id
+        self.predecessors: dict[int, str] = {}
         self.deleted: list[str] = []
+        self.keep_predecessor_service = False
+        self.lose_delete_reply = False
         self.after_retirement: Callable[[], None] | None = None
         self.authorize = Mock()
 
@@ -582,30 +728,34 @@ class GenericWebTestingRebuildFlowTests(unittest.TestCase):
             self.assertEqual(identifier, self.expected_retirement)
             payload = self.flow.payloads.pop(identifier)
             (self.routing.root / (payload["appName"] + ".yml")).unlink(missing_ok=True)
-            service = self.flow.services.pop(payload["appName"])
-            self.flow.tasks = {
-                key: row
-                for key, row in self.flow.tasks.items()
-                if row["ServiceID"] != service["ID"]
-            }
-            for key, row in tuple(self.flow.containers.items()):
-                labels = row.get("Config", {}).get("Labels") or {}
-                if (
-                    labels.get("com.docker.swarm.service.id") == service["ID"]
-                    or labels.get("com.docker.swarm.service.name") == payload["appName"]
-                ):
-                    self.flow.containers.pop(key)
+            self.reload_routes()
+            if not self.keep_predecessor_service:
+                self.remove_runtime(payload["appName"])
             self.deleted.append(identifier)
             if self.after_retirement is not None:
                 self.after_retirement()
+            if self.lose_delete_reply:
+                self.lose_delete_reply = False
+                raise OSError("Lost application delete reply after effects")
 
         def read_state(**kwargs: Any) -> None:
-            if kwargs["program"] != application_runtime.APPLICATION_STATE_PROGRAM:
+            if kwargs["program"] not in {
+                application_runtime.APPLICATION_STATE_PROGRAM,
+                application_runtime.APPLICATION_RETIREMENT_PROGRAM,
+            }:
                 self.flow.read_runtime(**kwargs)
                 return
 
             def command(arguments: list[str], **_options: Any) -> subprocess.CompletedProcess[str]:
                 match arguments[1:]:
+                    case ["service", "rm", identifier]:
+                        application = next(
+                            name
+                            for name, row in self.flow.services.items()
+                            if row["ID"] == identifier
+                        )
+                        self.remove_runtime(application)
+                        value = identifier
                     case ["node", "ls", "--format", "json"]:
                         value = "\n".join(json.dumps(row) for row in self.flow.nodes)
                     case ["service", "ls", "-q", "--no-trunc"]:
@@ -639,9 +789,15 @@ class GenericWebTestingRebuildFlowTests(unittest.TestCase):
                         raise AssertionError(arguments)
                 return subprocess.CompletedProcess(arguments, 0, value, "")
 
-            kwargs["receive"](
-                observe_application_state_program(kwargs["program"], kwargs["payload"], command)
-            )
+            def run() -> None:
+                kwargs["receive"](
+                    observe_application_state_program(kwargs["program"], kwargs["payload"], command)
+                )
+
+            if "dispatch_guard" in kwargs:
+                kwargs["dispatch_guard"](run)
+            else:
+                run()
 
         def storage(**kwargs: Any) -> dict[str, str]:
             kwargs["before_effect"]("fresh-storage")
@@ -663,6 +819,44 @@ class GenericWebTestingRebuildFlowTests(unittest.TestCase):
                 side_effect=storage,
             )
         )
+
+    def reload_routes(self) -> None:
+        from copy import deepcopy
+
+        self.routing.raw = {"routers": {}, "services": {}, "middlewares": {}}
+        for file in self.routing.root.glob("*.yml"):
+            document = json.loads(file.read_text()).get("http", {})
+            for section in self.routing.raw:
+                for name, value in document.get(section, {}).items():
+                    applied = deepcopy(value)
+                    if section == "routers":
+                        applied["service"] = applied["service"].removesuffix("@file") + "@file"
+                        applied["priority"] = applied.get("priority") or len(
+                            applied["rule"].encode()
+                        )
+                        if "middlewares" in applied:
+                            applied["middlewares"] = [
+                                reference if "@" in reference else reference + "@file"
+                                for reference in applied["middlewares"]
+                            ]
+                    elif section == "services":
+                        applied["loadBalancer"].update(
+                            strategy="wrr", responseForwarding={"flushInterval": "100ms"}
+                        )
+                    self.routing.raw[section][name + "@file"] = {**applied, "status": "enabled"}
+
+    def remove_runtime(self, application: str) -> None:
+        service = self.flow.services.pop(application)
+        self.flow.tasks = {
+            key: row for key, row in self.flow.tasks.items() if row["ServiceID"] != service["ID"]
+        }
+        for key, row in tuple(self.flow.containers.items()):
+            labels = row.get("Config", {}).get("Labels") or {}
+            if (
+                labels.get("com.docker.swarm.service.id") == service["ID"]
+                or labels.get("com.docker.swarm.service.name") == application
+            ):
+                self.flow.containers.pop(key)
 
     def execute(self, attempt: int) -> Any:
         from control_plane.testing_rebuild_service import execute_native_testing_rebuild
@@ -706,9 +900,12 @@ class GenericWebTestingRebuildFlowTests(unittest.TestCase):
             )
         except FileNotFoundError:
             self.store.write_odoo_stable_target_replacement_operation_record(operation)
-        self.expected_retirement = self.store.read_dokploy_target_id_record(
-            context_name=self.flow.context, instance_name="testing"
-        ).target_id
+        self.expected_retirement = self.predecessors.setdefault(
+            attempt,
+            self.store.read_dokploy_target_id_record(
+                context_name=self.flow.context, instance_name="testing"
+            ).target_id,
+        )
         result = execute_native_testing_rebuild(
             root=self.flow.root,
             store=self.store,
@@ -719,14 +916,41 @@ class GenericWebTestingRebuildFlowTests(unittest.TestCase):
         self.store.write_odoo_stable_target_replacement_operation_record(
             operation.model_copy(
                 update={
-                    "status": "pass" if result.deploy_status == "pass" else "fail",
-                    "phase": "completed" if result.deploy_status == "pass" else "failed",
+                    "status": "pass"
+                    if result.deploy_status == result.health_status == "pass"
+                    else "fail",
+                    "phase": "completed"
+                    if result.deploy_status == result.health_status == "pass"
+                    else "failed",
                     "result": result,
                     "finished_at": datetime.now(UTC).isoformat(),
                 }
             )
         )
         return result
+
+
+class GenericWebTestingRebuildFlowTests(GenericWebTestingRebuildFlowFixture):
+    def test_predecessor_owned_authentication_refuses_before_candidate_creation(self) -> None:
+        document = json.loads((self.routing.root / "old-app.yml").read_text())
+        document["http"]["routers"]["old-app-router-websecure-fixture"]["middlewares"] = [
+            "auth-old-app"
+        ]
+        (self.routing.root / "old-app.yml").write_text(json.dumps(document))
+        middlewares = json.loads((self.routing.root / "middlewares.yml").read_text())
+        middlewares["http"]["middlewares"]["auth-old-app"] = {"basicAuth": {"users": ["fixture"]}}
+        (self.routing.root / "middlewares.yml").write_text(json.dumps(middlewares))
+        self.reload_routes()
+        result = self.execute(1)
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(result.target_id, self.flow.old_id)
+        self.assertEqual(self.flow.projects, [])
+        self.assertEqual(self.deleted, [])
+        self.assertIsNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.flow.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
 
     def test_two_rebuilds_and_the_next_ordinary_deployment_preserve_the_address(self) -> None:
         for attempt in (1, 2):
@@ -745,6 +969,106 @@ class GenericWebTestingRebuildFlowTests(unittest.TestCase):
             )
             self.assertEqual(self.flow.normal(f"after-rebuild-{attempt}").status, "completed")
         self.assertEqual((self.flow.old_backing / "keep").read_text(), "Retained original data")
+
+    def test_provider_metadata_delete_with_failed_service_cleanup_recovers_original(self) -> None:
+        self.keep_predecessor_service = True
+        result = self.execute(1)
+        self.assertEqual(result.deploy_status, "pass", result.error_code)
+        self.assertEqual(result.health_status, "pass")
+        self.assertNotIn("old-app", self.flow.services)
+        self.assertEqual(self.flow.normal("after-cleanup").status, "completed")
+
+    def test_active_old_provider_job_retains_predecessor_and_resumes_the_original(self) -> None:
+        active = True
+        provider = api.dokploy_request
+
+        def transport(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/deployment.queueList" and active:
+                return [{"data": {"applicationId": self.flow.old_id}, "state": "active"}]
+            return provider(**kwargs)
+
+        with patch.object(api, "dokploy_request", side_effect=transport):
+            with self.assertRaises(NativeTestingRebuildPending):
+                self.execute(1)
+            self.assertEqual(self.deleted, [])
+            self.assertIn(self.flow.old_id, self.flow.payloads)
+            self.assertFalse(self.flow.payloads[self.flow.old_id]["autoDeploy"])
+            self.assertNotEqual(
+                self.store.read_dokploy_target_id_record(
+                    context_name=self.flow.context, instance_name="testing"
+                ).target_id,
+                self.flow.old_id,
+            )
+            active = False
+            with patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+            ):
+                result = self.execute(1)
+        self.assertEqual(result.health_status, "pass")
+        self.assertEqual(self.deleted, [self.flow.old_id])
+
+    def test_verified_candidate_failure_before_retirement_allows_ordinary_repair(self) -> None:
+        from control_plane.contracts.promotion_record import HealthcheckEvidence
+
+        read = rebuild.GenericWebRebuildActivationAdapter.read_edge_health
+
+        def observed(adapter: Any, record: Any, **kwargs: Any) -> Any:
+            if record.published:
+                return HealthcheckEvidence(
+                    verified=True,
+                    status="fail",
+                    urls=("https://testing.example.invalid/health",),
+                    timeout_seconds=5,
+                    runtime_identity_status="match",
+                    observed_runtime_identity=kwargs.get("expected"),
+                )
+            return read(adapter, record, **kwargs)
+
+        with patch.object(
+            rebuild.GenericWebRebuildActivationAdapter, "read_edge_health", new=observed
+        ):
+            result = self.execute(1)
+        self.assertEqual(result.health_status, "fail")
+        self.assertNotEqual(result.target_id, self.flow.old_id)
+        self.assertIn(self.flow.old_id, self.flow.payloads)
+        self.assertEqual(self.deleted, [])
+        self.assertEqual(self.flow.normal("repair-unhealthy-candidate").status, "completed")
+
+    def test_lost_delete_reply_then_unhealthy_candidate_finishes_as_failed(self) -> None:
+        from control_plane.contracts.promotion_record import HealthcheckEvidence
+
+        self.lose_delete_reply = True
+        with self.assertRaises(NativeTestingRebuildPending):
+            self.execute(1)
+        with (
+            patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+            ),
+            patch.object(
+                rebuild.GenericWebRebuildActivationAdapter,
+                "read_edge_health",
+                return_value=HealthcheckEvidence(
+                    verified=True,
+                    status="fail",
+                    urls=("https://testing.example.invalid/health",),
+                    timeout_seconds=5,
+                    runtime_identity_status="match",
+                ),
+            ),
+        ):
+            result = self.execute(1)
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(result.health_status, "fail")
+        self.assertEqual(self.deleted, [self.flow.old_id])
+        self.assertIsNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.flow.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
 
     def test_lost_interlock_clear_reply_settles_after_the_next_ordinary_deployment(self) -> None:
         apply = apply_testing_hold_plan
@@ -825,4 +1149,70 @@ class GenericWebTestingRebuildFlowTests(unittest.TestCase):
                 context_name=self.flow.context, instance_name="testing"
             ).target_id,
             self.flow.old_id,
+        )
+
+
+class GenericWebTestingRebuildUnknownPredecessorTests(GenericWebTestingRebuildFlowFixture):
+    with_unresolved_predecessor = True
+
+    def test_original_unknown_fence_survives_cutover_retirement_and_two_rebuilds(self) -> None:
+        original = self.flow.original
+        with self.assertRaises(NativeTestingRebuildPending):
+            self.execute(1)
+        self.assertIn(self.flow.old_id, self.flow.payloads)
+        self.assertNotEqual(
+            self.store.read_dokploy_target_id_record(
+                context_name=self.flow.context, instance_name="testing"
+            ).target_id,
+            self.flow.old_id,
+        )
+        for history in self.flow.schedule_history.values():
+            for row in history:
+                if row.get("applicationId") == self.flow.old_id:
+                    row.update(status="done", finishedAt=datetime.now(UTC).isoformat())
+        with patch.object(
+            self.store,
+            "_database_mutation_timestamp",
+            return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+        ):
+            self.assertEqual(self.execute(1).health_status, "pass")
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=original.scope,
+                route_path=original.route_path,
+                idempotency_key=original.idempotency_key,
+            ),
+            original,
+        )
+        from control_plane.generic_web_testing_exclusion import (
+            require_retained_application_custody,
+            TestingExclusionRefused,
+        )
+
+        held = self.store.list_held_provider_target_reservations()
+        foreign = original.model_copy(
+            update={
+                "record_id": "unattributed-writer",
+                "scope": "foreign-writer",
+                "idempotency_key": "foreign-writer",
+                "provider_target_key": "unknown-provider-target",
+                "reconciliation_key": "unattributed-original",
+            }
+        )
+        with patch.object(
+            self.store, "list_held_provider_target_reservations", return_value=(*held, foreign)
+        ):
+            with self.assertRaises(TestingExclusionRefused):
+                require_retained_application_custody(
+                    self.store, product=self.flow.product, context=self.flow.context, check=Mock()
+                )
+        self.assertEqual(self.flow.normal("after-retired-unknown").status, "completed")
+        self.assertEqual(self.execute(2).health_status, "pass")
+        self.assertEqual(
+            self.store.read_idempotency_record(
+                scope=original.scope,
+                route_path=original.route_path,
+                idempotency_key=original.idempotency_key,
+            ),
+            original,
         )

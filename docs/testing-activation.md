@@ -720,7 +720,7 @@ restores the original route without calling the original application healthy.
 Completed negative preparation receipts preserve the same optional source and
 location evidence, including stable replay; historical receipts remain unchanged.
 
-## One-action rebuild admission
+## One-action testing rebuild
 
 The testing rebuild control reads an explicit
 `lanes[].generic_web_testing_state` from the managed product profile.
@@ -730,20 +730,49 @@ A missing declaration refuses admission. `postgresql` records the
 still-deferred independent PostgreSQL prerequisite and refuses before provider work.
 These declarations apply only to generic-web testing lanes.
 
-The first delivery slice exposes the same signed-in inspection and its control
-for declared none/volume lanes. Inspection checks exclusive product/context
-ownership, the selected verified build, stored target agreement and recorded
-holds, use and custody protections. It reads verified source-control build
-information without deployment-provider calls or writes. Generic-web builds keep
-their verified immutable image reference; no Odoo manifest is invented or stored.
-It returns `status: pending`, a reason and pending candidate verification.
-This is state admission, not proof of current usage, resource
-isolation, candidate readiness or a completed rebuild. Submission and the native
-worker both refuse generic-web execution until the shared activation continuation
-is connected. The button remains disabled. Existing Odoo preflight and execution
-continue through the same control.
+The signed-in control and native product rebuild routes admit stateless
+application targets with a public testing address. The existing Director-agent
+testing rebuild authority also covers these routes. Inspection verifies the
+immutable build, exclusive product/context ownership, target agreement, holds,
+use protections, independent credential bindings and actual absence of mounted
+state. It performs no writes. A passing inspection admits the operation; candidate
+verification remains pending until the worker completes it. Generic-web builds
+keep their verified immutable image reference, without an Odoo manifest.
 
-Generic-web production/upstream restore is not admitted by this slice. Its
+The existing rebuild worker creates an operation-owned staging hold, prepares
+independent resources and runs the native application activation. The old copy
+keeps serving until the candidate passes readiness and health at the unchanged
+address. Candidate failure retains the old copy. Retirement first disables the
+old application's automatic deploys and verifies its placement, empty mounts,
+absence of other lane references or provider previews, terminal deployments and
+quiescent jobs and schedules. An active or unobserved old job keeps the same
+operation pending. Existing unresolved Launchplane reservations remain fenced;
+they are not cleared or adopted as successful deployments.
+
+The owned route carries its HTTPS redirect, so deleting the predecessor cannot
+remove a middleware it needs. Other predecessor-owned middleware or TLS options
+refuse before candidate effects. Later activations use the completed owned route
+and its current applied configuration, without requiring a retired predecessor's
+route file. Foreign or changed routers still refuse.
+
+Provider metadata deletion is followed by physical service/container absence
+verification. If provider cleanup leaves the original stateless service behind,
+the same operation can remove only its captured service ID through the guarded
+host program, after observing metadata absence. It never removes volumes. Final
+health and absence checks precede clearing this operation's staging hold. A lost
+reply resumes the original receipts; a later staff hold or deployment is retained.
+Interruption after deletion can finish with a failed candidate health result
+instead of stranding the hold. A verified candidate failure before retirement
+retains the predecessor and clears this hold so an ordinary deployment can repair
+testing. Unverified health keeps the original operation pending.
+Direct provider changes outside Launchplane are
+not synchronized with this operation.
+
+Volume, private-address and non-application lanes remain pending in this slice.
+Existing Odoo preflight and execution continue through the same control.
+
+Stateless lanes have no saved data to restore. Generic-web production/upstream
+restore for volume lanes is not admitted by this slice. Its
 continuation must bind a supported sanitized source before any candidate runs.
 The generic-web one-action rebuild, restore and predecessor retirement finish
 line remains open on [#4023](https://github.com/cbusillo/launchplane/issues/4023),

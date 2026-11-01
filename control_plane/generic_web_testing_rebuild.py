@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -19,6 +19,8 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.contracts.testing_activation import (
     TestingActivationRecord,
     TestingActivationRequest,
+    TestingActivationFailure,
+    TestingActivationRefusal,
 )
 from control_plane.contracts.testing_application import TestingApplicationSpecification
 from control_plane.dokploy import api, source
@@ -30,6 +32,7 @@ from control_plane.provider_operations import (
     DurableProviderMutationAdapter,
     ProviderEvidenceLease,
     ProviderMutationOutcome,
+    ProviderMutationRejectedError,
     ProviderObservation,
     ProviderOperationLease,
     run_durable_provider_operation,
@@ -42,10 +45,16 @@ from control_plane.testing_activation import (
     require_activation_hold_lift,
     target_without_hold,
 )
-from control_plane.testing_application_activation import ApplicationActivationAdapter
+from control_plane.testing_application_activation import (
+    ApplicationActivationAdapter,
+    undispatched_application_recipient,
+)
 from control_plane.testing_application_capabilities import retained_application_capability_spec
 from control_plane.testing_application_credentials import credential_binding_names
-from control_plane.testing_application_runtime import inspect_application_state
+from control_plane.testing_application_runtime import (
+    inspect_application_state,
+    retire_application_runtime,
+)
 from control_plane.testing_lane_hold import (
     TestingHoldApplyRequest,
     apply_testing_hold_plan,
@@ -67,6 +76,52 @@ from control_plane.testing_separation_resources import (
     SeparationResourcesAdapter,
     SeparationResourcesRequest,
 )
+
+
+class RebuildRouteUnsupported(TestingActivationRefusal):
+    pass
+
+
+class GenericWebRebuildActivationAdapter(ApplicationActivationAdapter):
+    def route_admission(self, record: TestingActivationRecord) -> tuple[Any, dict[str, Any]] | None:
+        from control_plane.dokploy.testing_route import admit_testing_route_predecessor
+
+        admission = super().route_admission(record)
+        if admission is not None:
+            transport, arguments = admission
+            arguments["require_owned_middlewares"] = True
+            try:
+                admit_testing_route_predecessor(**arguments)
+            except ValueError as error:
+                raise RebuildRouteUnsupported(
+                    "The testing route depends on predecessor-owned configuration."
+                ) from error
+            return transport, arguments
+        return None
+
+    def apply(self, key: str, lease: ProviderOperationLease) -> ProviderMutationOutcome:
+        try:
+            return super().apply(key, lease)
+        except ProviderMutationRejectedError as error:
+            if not isinstance(error.cause, RebuildRouteUnsupported) or not isinstance(
+                lease, ProviderEvidenceLease
+            ):
+                raise
+            record = self.current()
+            reservation = lease.evidence_reservation()
+            if reservation.provider_effect_started_at or not undispatched_application_recipient(
+                record, reservation
+            ):
+                raise
+            with self.evidence(lease):
+                lease.assert_current()
+                self.require_unchanged(record)
+                self.require_recovery_unused(record)
+                outcome = self.refuse(
+                    record, TestingActivationFailure(kind="authority_refused_before_recipient")
+                )
+                return replace(outcome, provider_effect_performed=False)
+
 
 FINALIZATION_CLEAR_PHASE = "clear_interlock"
 FINALIZATION_HEALTH_FAILED_CLEAR_PHASE = "clear_interlock_after_health_failure"
@@ -107,13 +162,14 @@ def inspect_generic_web_testing_rebuild(
         payload.get("applicationId") != intent.before.target_id.target_id
         or payload.get("mounts") != []
         or any(
-            row.instance == "prod" and row.target_id == intent.before.target_id.target_id
+            (row.context, row.instance) != (intent.before.target.context, "testing")
+            and row.target_id == intent.before.target_id.target_id
             for row in store.list_dokploy_target_id_records()
         )
     ):
         raise TestingRebuildRefused(
             "testing_rebuild_state_unverified",
-            "The testing application must have no persistent mounts or production target sharing.",
+            "The testing application must have no persistent mounts or shared target.",
         )
     credential_binding_names(
         store, intent.profile.product, intent.before.target.context, specification
@@ -238,8 +294,7 @@ class GenericWebTestingRebuildFinalizer:
                     response_payload={
                         "result": self.execution.result(
                             self.record,
-                            post_retirement_health_failed=phase
-                            == FINALIZATION_HEALTH_FAILED_CLEAR_PHASE,
+                            candidate_health_failed=phase == FINALIZATION_HEALTH_FAILED_CLEAR_PHASE,
                         ).model_dump(mode="json")
                     },
                 )
@@ -247,12 +302,13 @@ class GenericWebTestingRebuildFinalizer:
 
     def apply(self, key: str, lease: ProviderOperationLease) -> ProviderMutationOutcome:
         health_failed = False
+        retired = False
         if self.record.failure is None:
             if not self.record.published or self.record.application_readiness is None:
                 raise NativeTestingRebuildPending(
                     "The original candidate is not qualified for retirement."
                 )
-            self.execution.retire(self.activation, self.record, checkpoint=lease.checkpoint_effect)
+            retired = self.execution.retire(self.activation, self.record, lease=lease)
             health = self.activation.read_edge_health(
                 self.record, expected=self.record.application_readiness.runtime_identity
             )
@@ -260,9 +316,13 @@ class GenericWebTestingRebuildFinalizer:
                 raise NativeTestingRebuildPending(
                     "The final same-address health remains unobserved."
                 )
-            health_failed = health.status == "fail" or health.runtime_identity_status != "match"
+            health_failed = (
+                not retired or health.status == "fail" or health.runtime_identity_status != "match"
+            )
 
         def checkpoint(phase: str) -> None:
+            if phase == FINALIZATION_CLEAR_PHASE and retired:
+                self.execution.require_predecessor_absent(self.record)
             lease.checkpoint_effect(
                 FINALIZATION_HEALTH_FAILED_CLEAR_PHASE
                 if phase == FINALIZATION_CLEAR_PHASE and health_failed
@@ -278,7 +338,7 @@ class GenericWebTestingRebuildFinalizer:
             200,
             {
                 "result": self.execution.result(
-                    self.record, post_retirement_health_failed=health_failed
+                    self.record, candidate_health_failed=health_failed
                 ).model_dump(mode="json")
             },
         )
@@ -337,11 +397,11 @@ class GenericWebTestingRebuildExecution:
         if target_id.target_id != expected_id:
             raise NativeTestingRebuildPending("The testing recipient changed outside this rebuild.")
         if any(
-            row.instance == "prod"
+            (row.context, row.instance) != (self.operation.context, "testing")
             and row.target_id in {expected_id, self.intent.before.target_id.target_id}
             for row in self.store.list_dokploy_target_id_records()
         ):
-            raise NativeTestingRebuildPending("A production target is protected from this rebuild.")
+            raise NativeTestingRebuildPending("A shared target is protected from this rebuild.")
         target = self.store.read_dokploy_target_record(
             context_name=self.operation.context, instance_name="testing"
         )
@@ -466,7 +526,7 @@ class GenericWebTestingRebuildExecution:
             name="resources",
         )
 
-    def activate(self) -> tuple[ApplicationActivationAdapter, TestingActivationRecord]:
+    def activate(self) -> tuple[GenericWebRebuildActivationAdapter, TestingActivationRecord]:
         route = ACTIVATION_ROUTE.format(product=self.operation.product)
         row = self.store.read_idempotency_record(
             scope=self.scope, route_path=route, idempotency_key=self.activation_key
@@ -491,7 +551,7 @@ class GenericWebTestingRebuildExecution:
                 reason=self.operation.request.reason,
                 application=self.specification,
             )
-        adapter = ApplicationActivationAdapter(
+        adapter = GenericWebRebuildActivationAdapter(
             self.root,
             self.store,
             self.operation.product,
@@ -523,23 +583,13 @@ class GenericWebTestingRebuildExecution:
         adapter: ApplicationActivationAdapter,
         record: TestingActivationRecord,
         *,
-        checkpoint: Callable[[str], None] | None = None,
-    ) -> None:
+        lease: ProviderOperationLease,
+    ) -> bool:
         self.guard("testing_rebuild_retirement")
         adapter.require_unchanged(record)
-        adapter.verify_provider(record)
         readiness = record.application_readiness
         if not record.published or readiness is None:
             raise NativeTestingRebuildPending("The original candidate has not been published.")
-        health = adapter.read_edge_health(record, expected=readiness.runtime_identity)
-        if (
-            not health.verified
-            or health.status != "pass"
-            or health.runtime_identity_status != "match"
-        ):
-            raise NativeTestingRebuildPending(
-                "Current same-address candidate health is unavailable."
-            )
         old_id = record.retained_target_id.target_id
         if old_id != self.intent.before.target_id.target_id or old_id == record.target_id:
             raise ValueError("Retirement must identify the original independent predecessor.")
@@ -554,17 +604,54 @@ class GenericWebTestingRebuildExecution:
             )
         application = urlsplit(readiness.route.old_backend).hostname or ""
         host, token = source.read_dokploy_config(control_plane_root=self.root)
-        present = True
+        payload = None
         try:
-            api.fetch_dokploy_target_payload(
+            payload = api.fetch_dokploy_target_payload(
                 host=host, token=token, target_type="application", target_id=old_id
             )
         except api.DokployRequestFailed as error:
             if error.status_code == 404:
-                present = False
+                pass
             else:
                 raise
-        if present:
+        if payload is not None:
+            adapter.verify_provider(record)
+            health = adapter.read_edge_health(record, expected=readiness.runtime_identity)
+            if (
+                health.verified
+                and health.status == "fail"
+                and health.runtime_identity_status == "match"
+            ):
+                return False
+            if (
+                not health.verified
+                or health.status != "pass"
+                or health.runtime_identity_status != "match"
+            ):
+                raise NativeTestingRebuildPending(
+                    "Current same-address candidate health is unavailable."
+                )
+            if (
+                payload.get("appName") != application
+                or str(payload.get("serverId") or "") != readiness.route_execution.server_id
+                or payload.get("previewDeployments") not in (None, [])
+            ):
+                raise NativeTestingRebuildPending(
+                    "The original predecessor placement or previews changed."
+                )
+            if payload.get("autoDeploy") is not False:
+                self.guard("testing_rebuild_disable_old_deploys")
+                lease.checkpoint_effect("disable_old_deploys")
+                api.dokploy_request(
+                    host=host,
+                    token=token,
+                    method="POST",
+                    path="/api/application.update",
+                    payload={"applicationId": old_id, "autoDeploy": False},
+                )
+            self.require_retirement_quiescent(
+                host, token, old_id, application, readiness.route_execution.server_id
+            )
             require_unmounted_retirement_application(control_plane_root=self.root, target_id=old_id)
             inspect_application_state(
                 host=host,
@@ -575,7 +662,7 @@ class GenericWebTestingRebuildExecution:
                 mode="stateless",
             )
             self.guard("testing_rebuild_retire_predecessor")
-            (checkpoint or self.lease.checkpoint_effect)("retire_predecessor")
+            lease.checkpoint_effect("retire_predecessor")
             try:
                 api.delete_dokploy_application(host=host, token=token, application_id=old_id)
             except api.DokployRequestFailed as error:
@@ -590,14 +677,166 @@ class GenericWebTestingRebuildExecution:
                 raise
         else:
             raise NativeTestingRebuildPending("Original predecessor retirement remains unobserved.")
-        inspect_application_state(
+        if not isinstance(
+            lease, ProviderEvidenceLease
+        ) or lease.evidence_reservation().provider_effect_phase not in {
+            "retire_predecessor",
+            "remove_retired_service",
+            FINALIZATION_CLEAR_PHASE,
+            FINALIZATION_HEALTH_FAILED_CLEAR_PHASE,
+        }:
+            raise NativeTestingRebuildPending(
+                "The original predecessor deletion authority is unobserved."
+            )
+
+        def dispatch(remove: Callable[[], None]) -> None:
+            self.guard("testing_rebuild_remove_retired_service")
+            try:
+                api.fetch_dokploy_target_payload(
+                    host=host, token=token, target_type="application", target_id=old_id
+                )
+            except api.DokployRequestFailed as error:
+                if error.status_code != 404:
+                    raise
+            else:
+                raise NativeTestingRebuildPending("The predecessor metadata reappeared.")
+            lease.checkpoint_effect("remove_retired_service")
+            remove()
+
+        retire_application_runtime(
             host=host,
             token=token,
             server_id=readiness.route_execution.server_id,
             application=application,
             service_id=record.predecessor.service_id,
+            dispatch_guard=dispatch,
+        )
+        self.require_predecessor_absent(record)
+        return True
+
+    def require_predecessor_absent(self, record: TestingActivationRecord) -> None:
+        readiness = record.application_readiness
+        assert readiness is not None and readiness.route is not None
+        assert readiness.route_execution is not None and record.predecessor is not None
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        inspect_application_state(
+            host=host,
+            token=token,
+            server_id=readiness.route_execution.server_id,
+            application=urlsplit(readiness.route.old_backend or "").hostname or "",
+            service_id=record.predecessor.service_id,
             mode="absent",
         )
+
+    def require_retirement_quiescent(
+        self, host: str, token: str, target_id: str, application: str, server_id: str
+    ) -> None:
+        payload = api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="application", target_id=target_id
+        )
+        if (
+            payload.get("applicationId") != target_id
+            or payload.get("appName") != application
+            or str(payload.get("serverId") or "") != server_id
+            or payload.get("autoDeploy") is not False
+            or payload.get("applicationStatus") not in {"idle", "done", "error"}
+            or payload.get("mounts") != []
+            or payload.get("previewDeployments") != []
+        ):
+            raise NativeTestingRebuildPending(
+                "The original predecessor is still active or changed."
+            )
+        history = api.list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type="application",
+            target_id=target_id,
+            require_complete=True,
+        )
+        if any(
+            row.get("applicationId") != target_id
+            or api.deployment_status(row)
+            not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
+            for row in history
+        ):
+            raise NativeTestingRebuildPending(
+                "An original predecessor deployment remains unsettled."
+            )
+        queue = api.dokploy_request(host=host, token=token, path="/api/deployment.queueList")
+        schedules = api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/schedule.list",
+            query={"id": target_id, "scheduleType": "application"},
+        )
+        if (
+            not isinstance(queue, list)
+            or len(queue) > 10000
+            or not isinstance(schedules, list)
+            or len(schedules) > 10000
+        ):
+            raise NativeTestingRebuildPending(
+                "Original predecessor jobs or schedules are unobserved."
+            )
+        schedule_ids: set[str] = set()
+        for schedule in schedules:
+            if not isinstance(schedule, dict) or (
+                schedule.get("applicationId") != target_id
+                or schedule.get("enabled") is not False
+                or not isinstance(schedule.get("scheduleId"), str)
+                or not schedule["scheduleId"]
+                or schedule["scheduleId"] in schedule_ids
+            ):
+                raise NativeTestingRebuildPending(
+                    "An original predecessor schedule remains active or unobserved."
+                )
+            identifier = schedule["scheduleId"]
+            assert isinstance(identifier, str)
+            schedule_ids.add(identifier)
+            executions = api.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/deployment.allByType",
+                query={"id": identifier, "type": "schedule"},
+            )
+            if (
+                not isinstance(executions, list)
+                or len(executions) > 10000
+                or any(
+                    not isinstance(row, dict)
+                    or row.get("scheduleId") != identifier
+                    or not api.deployment_key(row)
+                    or api.deployment_status(row)
+                    not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
+                    for row in executions
+                )
+            ):
+                raise NativeTestingRebuildPending(
+                    "An original predecessor schedule execution remains unsettled."
+                )
+        for row in queue:
+            if not isinstance(row, dict):
+                raise NativeTestingRebuildPending("The provider deployment queue is incomplete.")
+            data = row.get("data")
+            if not isinstance(data, dict):
+                raise NativeTestingRebuildPending("The provider deployment queue is incomplete.")
+            schedule_id = data.get("scheduleId")
+            if (
+                (schedule_id is not None and not isinstance(schedule_id, str))
+                or not isinstance(row.get("state"), str)
+                or not any(
+                    isinstance(data.get(name), str) and data[name]
+                    for name in ("applicationId", "composeId", "scheduleId")
+                )
+            ):
+                raise NativeTestingRebuildPending("The provider deployment queue is incomplete.")
+            if (data.get("applicationId") == target_id or schedule_id in schedule_ids) and row[
+                "state"
+            ] not in {
+                "completed",
+                "failed",
+            }:
+                raise NativeTestingRebuildPending("An original predecessor job remains active.")
 
     def finalize(
         self,
@@ -644,7 +883,7 @@ class GenericWebTestingRebuildExecution:
             record = self.activation()
             if record is None:
                 raise NativeTestingRebuildPending("The original activation custody is unavailable.")
-            adapter = ApplicationActivationAdapter(
+            adapter = GenericWebRebuildActivationAdapter(
                 self.root,
                 self.store,
                 self.operation.product,
@@ -665,7 +904,7 @@ class GenericWebTestingRebuildExecution:
         return self.finalize(adapter, record)
 
     def result(
-        self, record: TestingActivationRecord, *, post_retirement_health_failed: bool = False
+        self, record: TestingActivationRecord, *, candidate_health_failed: bool = False
     ) -> OdooStableTargetReplacementApplyResult:
         ready = record.published and record.failure is None
         readiness = record.application_readiness
@@ -675,7 +914,7 @@ class GenericWebTestingRebuildExecution:
             instance="testing",
             strategy="replace-and-cutover",
             deploy_status="pass" if ready else "fail",
-            health_status="pass" if ready and not post_retirement_health_failed else "fail",
+            health_status="pass" if ready and not candidate_health_failed else "fail",
             post_deploy_status="pass" if ready else "fail",
             deployment_record_id=readiness.runtime_identity.deployment_record_id
             if ready and readiness is not None
@@ -695,12 +934,12 @@ class GenericWebTestingRebuildExecution:
             },
             error_code=record.failure.kind
             if record.failure is not None
-            else "candidate_public_health_failed_after_retirement"
-            if post_retirement_health_failed
+            else "candidate_public_health_failed"
+            if candidate_health_failed
             else "",
             error_message="The candidate failed; the original testing copy remains selected."
             if not ready
-            else "The new testing copy failed its final health check and remains selected."
-            if post_retirement_health_failed
+            else "The new testing copy failed its final health check. You can deploy a fix to testing."
+            if candidate_health_failed
             else "",
         )

@@ -50,6 +50,7 @@ from control_plane.dokploy.testing_route import (
     router_configuration,
     testing_route_static_sha256,
     testing_route_rule,
+    testing_route_https_redirect,
     amend_testing_route_address,
     possible_lane_routers,
 )
@@ -100,6 +101,7 @@ def testing_route_host_program() -> str:
         + inspect.getsource(host_rule_may_match)
         + "\n"
         + inspect.getsource(redirects_to_https)
+        + inspect.getsource(testing_route_https_redirect)
         + inspect.getsource(router_configuration)
         + inspect.getsource(canonical_acme_challenge)
         + inspect.getsource(select_testing_route_raw)
@@ -651,7 +653,13 @@ def main(spec):
                 raise RuntimeError('The retained hostname routing priority changed')
         if not http.get('routers') or spec['desired_backend'] not in spec['allowed_backends'] or http['services'][spec['route_id']].get('loadBalancer',{}).get('servers')!=[{'url':spec['desired_backend']}]:
             raise RuntimeError('Testing publication selected an unbound backend')
-        if http.get('middlewares',{}) not in ({},{spec['route_id']+'-connections':{'headers':{'contentSecurityPolicy':CSP}}}) or any(not redirects_to_https(raw,item) and spec['route_id']+'-connections@file' not in item.get('middlewares',[]) for item in http['routers'].values()):
+        middleware=http.get('middlewares',{})
+        connection=spec['route_id']+'-connections'
+        redirect=spec['route_id']+'-https'
+        if not isinstance(middleware,dict) or set(middleware)-{connection,redirect} or (connection in middleware and middleware[connection]!={'headers':{'contentSecurityPolicy':CSP}}) or (redirect in middleware and not testing_route_https_redirect(middleware[redirect])):
+            raise RuntimeError('Testing publication contains unbound middleware')
+        owned_redirect={'middlewares':{name+'@file':value for name,value in middleware.items()}}
+        if any(not redirects_to_https(raw,item) and not redirects_to_https(owned_redirect,item) and connection+'@file' not in item.get('middlewares',[]) for item in http['routers'].values()):
             raise RuntimeError('Testing publication contains unbound middleware')
         if spec['expected_static_sha256']!=hashlib.sha256(static.encode()).hexdigest() or spec['expected_state_sha256']!=hashlib.sha256(json.dumps(raw,sort_keys=True,separators=(',',':')).encode()).hexdigest() or spec['expected_file_sha256']!=digest:
             raise RuntimeError('Testing route authority changed before publication')

@@ -519,6 +519,21 @@ def retained_fence_is_separated(store: object, reservation: object) -> bool:
             _profile, current, target_id, target = bind_testing_recipient(
                 store, record.product, record.context, "testing"
             )
+            candidates = [
+                TestingActivationRecord.model_validate(value)
+                for value in store.list_testing_application_activations(
+                    record.product, record.context
+                )
+            ]
+            serving = [
+                value
+                for value in candidates
+                if value.target_id == target_id.target_id
+                and completed_application_activation(store, value)
+            ]
+            if len(serving) != 1:
+                return False
+            record = serving[0]
             seen: set[str] = set()
             while record.target_id not in seen:
                 seen.add(record.target_id)
@@ -533,12 +548,6 @@ def retained_fence_is_separated(store: object, reservation: object) -> bool:
                         and current.target_type == target.provider_target_type == "application"
                         and target_id.target_id != snapshot.target_id
                     )
-                candidates = [
-                    TestingActivationRecord.model_validate(value)
-                    for value in store.list_testing_application_activations(
-                        record.product, record.context
-                    )
-                ]
                 predecessors = [
                     value
                     for value in candidates
