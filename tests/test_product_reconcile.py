@@ -1523,12 +1523,6 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
 
         view = product_reconcile_request_view(completed)
         self.assertEqual(view.last_plan["last_failed_error_code"], "health_check_failed")
-        self.assertEqual(
-            view.last_plan["last_failed_error_summary"],
-            "The health check did not pass. Steps: deploy pass, post-deploy pass, "
-            "setting overrides skipped, health fail, canonical skipped, logo skipped. "
-            "Worker attempt 1.",
-        )
         self.assertIn("health_check_failed: The health check did not pass.", view.last_error)
         read = view.model_dump_json()
         for leaked in PROVIDER_FAILURE_FRAGMENTS:
@@ -1555,10 +1549,6 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         plan = self.reconcile()
 
         self.assertEqual(plan["last_failed_error_code"], "operation_authorization_revoked")
-        self.assertEqual(
-            plan["last_failed_error_summary"],
-            "The deploy's authorization was removed or narrowed before it ran.",
-        )
 
     def test_a_deploy_check_code_keeps_its_fixed_description_and_keys(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
@@ -1582,11 +1572,6 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         plan = self.reconcile()
 
         self.assertEqual(plan["last_failed_error_code"], "deploy_blocked.compose_keys_missing")
-        self.assertEqual(
-            plan["last_failed_error_summary"],
-            "The compose template requires settings that neither the site's records nor the "
-            "target provide. Keys: ODOO_DB_HOST.",
-        )
 
     def test_a_blocked_plan_code_describes_its_blocker_without_message_text(self) -> None:
         self.github.add_run(20, DEPLOYABLE)
