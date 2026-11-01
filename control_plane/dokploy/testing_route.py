@@ -465,9 +465,7 @@ def application_load_balancer_configuration(value: Any) -> Any:
     return configuration
 
 
-def application_router_configuration(
-    router: dict[str, Any], static_configuration: str
-) -> dict[str, Any]:
+def router_with_listener_tls(router: dict[str, Any], static_configuration: str) -> dict[str, Any]:
     configuration = router_configuration(router)
     if configuration.get("tls") is not None or not static_configuration:
         return configuration
@@ -476,31 +474,26 @@ def application_router_configuration(
     if (
         not isinstance(static, dict)
         or not isinstance(static.get("entryPoints"), dict)
-        or not isinstance(points, list)
-        or not points
+        or not isinstance(points, (list, tuple))
+        or len(points) != 1
     ):
         raise ValueError("The application listener TLS configuration is unavailable.")
-    defaults = []
-    for point in points:
-        entrypoint = static["entryPoints"].get(point)
-        if not isinstance(entrypoint, dict):
-            raise ValueError("The application listener TLS configuration is unavailable.")
-        http = entrypoint.get("http")
-        if http is None:
-            http = {}
-        if (
-            not isinstance(http, dict)
-            or http.get("tls") is not None
-            and not isinstance(http["tls"], dict)
-        ):
-            raise ValueError("The application listener TLS configuration is unavailable.")
-        defaults.append(http.get("tls"))
-    if any(value != defaults[0] for value in defaults):
-        raise ValueError("The application listeners have different inherited TLS configurations.")
-    if defaults[0] is None:
+    entrypoint = static["entryPoints"].get(points[0])
+    if not isinstance(entrypoint, dict):
+        raise ValueError("The application listener TLS configuration is unavailable.")
+    http = entrypoint.get("http")
+    if http is None:
+        http = {}
+    if (
+        not isinstance(http, dict)
+        or http.get("tls") is not None
+        and not isinstance(http["tls"], dict)
+    ):
+        raise ValueError("The application listener TLS configuration is unavailable.")
+    if http.get("tls") is None:
         configuration.pop("tls", None)
     else:
-        configuration["tls"] = deepcopy(defaults[0])
+        configuration["tls"] = deepcopy(http["tls"])
     return configuration
 
 
@@ -602,7 +595,7 @@ def _compile_testing_route(
             expected = router_configuration(http["routers"][name.removesuffix("@file")])
             observed = router_configuration(router)
             if expected.get("tls") is None and observed.get("tls") is not None:
-                expected = application_router_configuration(
+                expected = router_with_listener_tls(
                     http["routers"][name.removesuffix("@file")], static_configuration
                 )
             for configuration in (expected, observed):
@@ -1017,11 +1010,12 @@ def compile_unavailable_testing_route(
                 host=host,
                 entrypoints=points,
                 backend=new_backend,
-                tls=tls == "true",
+                tls=tls == "true" or bool(resolver),
                 certificate_resolver=resolver,
                 middlewares=tuple(references),
             )
             router = document["http"]["routers"][identifier]
+            router = router_with_listener_tls(router, static_configuration)
             router["priority"] = priority + 1
             if "rulesyntax" in fields:
                 router["ruleSyntax"] = fields["rulesyntax"]

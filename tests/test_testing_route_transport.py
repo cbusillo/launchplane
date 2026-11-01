@@ -1460,6 +1460,53 @@ class TestingRouteTransportTests(unittest.TestCase):
             )
         self.assertEqual(self.effect_count, 0)
 
+    def test_unavailable_router_materializes_listener_tls_before_publication(self) -> None:
+        self.unavailable_route()
+        static = yaml.safe_load(self.static)
+        inherited_tls = {"certResolver": "listener"}
+        static["entryPoints"]["websecure"]["http"] = {"tls": inherited_tls}
+        static["certificatesResolvers"] = {"listener": {}, "declared": {}}
+        frame = self.client.read()
+        for tls_fields, expected_tls in (
+            ({}, inherited_tls),
+            ({"tls": "false"}, inherited_tls),
+            ({"tls.certresolver": "declared"}, {"certResolver": "declared"}),
+            ({"tls": "true"}, {}),
+        ):
+            with self.subTest(tls_fields=tls_fields):
+                labels = {
+                    "traefik.enable": "true",
+                    "traefik.docker.network": "dokploy-network",
+                    "traefik.http.routers.testing.rule": f"Host(`{self.plan.host}`)",
+                    "traefik.http.routers.testing.entrypoints": "websecure",
+                    **{
+                        "traefik.http.routers.testing." + key: value
+                        for key, value in tls_fields.items()
+                    },
+                }
+                plan = compile_unavailable_testing_route(
+                    product=self.plan.product,
+                    context=self.plan.context,
+                    host=self.plan.host,
+                    new_backend=self.plan.new_backend,
+                    raw=frame["raw"],
+                    file_content=None,
+                    observation_sha256="c" * 64,
+                    static_configuration=yaml.safe_dump(static),
+                    configured_compose=yaml.safe_dump({"services": {"web": {"labels": labels}}}),
+                )
+                document = route_document(plan, plan.new_backend)
+                applied = deepcopy(frame["raw"])
+                for section, values in document["http"].items():
+                    for name, value in values.items():
+                        applied[section][name + "@file"] = {**deepcopy(value), "status": "enabled"}
+                        if section == "routers":
+                            applied[section][name + "@file"].setdefault("tls", inherited_tls)
+                self.assertEqual(observe_testing_route(plan, applied, document), plan.new_backend)
+                for router in document["http"]["routers"].values():
+                    self.assertEqual(router["tls"], expected_tls)
+        self.assertEqual(self.effect_count, 0)
+
     def test_recorded_unavailable_template_needs_its_current_tls_resolver(self) -> None:
         for router in self.plan.template["http"]["routers"].values():
             if "tls" in router:
