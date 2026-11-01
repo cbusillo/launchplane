@@ -14,6 +14,7 @@ class SyncCycleHealth(BaseModel):
     status: Literal["idle", "running", "success", "failed", "unknown", "unavailable"]
     mode: Literal["full", "incremental"] | None = None
     cycle_id: str | None = Field(default=None, max_length=36)
+    unrecovered_full_cycle_id: str | None = Field(default=None, max_length=36)
     cycle_started_at: str | None = Field(default=None, max_length=64)
     cycle_finished_at: str | None = Field(default=None, max_length=64)
     last_heartbeat: str | None = Field(default=None, max_length=64)
@@ -24,9 +25,11 @@ class SyncCycleHealth(BaseModel):
 
     @model_validator(mode="after")
     def validate_cycle(self) -> "SyncCycleHealth":
-        if self.cycle_id is not None:
-            identity = UUID(self.cycle_id)
-            if self.cycle_id not in {identity.hex, str(identity)}:
+        for cycle_id in (self.cycle_id, self.unrecovered_full_cycle_id):
+            if cycle_id is None:
+                continue
+            identity = UUID(cycle_id)
+            if cycle_id not in {identity.hex, str(identity)}:
                 raise ValueError("Cycle identity must be a canonical UUID.")
         started = _timestamp(self.cycle_started_at)
         finished = _timestamp(self.cycle_finished_at)
