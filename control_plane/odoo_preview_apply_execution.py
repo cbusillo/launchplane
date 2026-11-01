@@ -300,6 +300,43 @@ class OdooPreviewProviderMutationAdapter:
             compose_name=self._apply_request.apply.dry_run_plan.compose_name,
         )
 
+    def require_original_preservation(self) -> None:
+        reference = self._apply_request.preserve_original_reservation_id
+        if not reference:
+            return
+        from control_plane.preview_preservation import (
+            require_preview_preservation_admission,
+            run_preview_preservation,
+        )
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        try:
+            require_preview_preservation_admission(
+                store=cast(PostgresRecordStore, self._record_store),
+                profile=self._profile,
+                issued_plan=self._issued_plan,
+                original_reservation_id=reference,
+                operation_record_id=self._deployment_record_id,
+                captured_schedule_binding=self.schedule_binding,
+            )
+            if self._issued_plan.operation == "refresh":
+                run_preview_preservation(
+                    store=cast(PostgresRecordStore, self._record_store),
+                    profile=self._profile,
+                    issued_plan=self._issued_plan,
+                    original_reservation_id=reference,
+                    operation_record_id=self._deployment_record_id,
+                    control_plane_root=self._control_plane_root,
+                    mode="preflight",
+                    timeout_seconds=self._apply_request.apply.timeout_seconds,
+                    check=self.execution_check,
+                    captured_schedule_binding=self.schedule_binding,
+                )
+        except (ValueError, FileNotFoundError, click.ClickException) as error:
+            raise OdooPreviewPlanProvenanceError(
+                code="odoo_preview_preservation_unavailable", message=str(error)
+            ) from error
+
     def _finalize_successful_result(
         self,
         driver_result: dict[str, object],
@@ -712,43 +749,6 @@ class OdooPreviewApplyOperation:
     disposable_cleanup: bool = False
     route_path: str = ODOO_PREVIEW_APPLY_ROUTE
 
-    def require_original_preservation(self) -> None:
-        reference = self.adapter._apply_request.preserve_original_reservation_id
-        if not reference:
-            return
-        from control_plane.preview_preservation import (
-            require_preview_preservation_admission,
-            run_preview_preservation,
-        )
-        from control_plane.storage.postgres import PostgresRecordStore
-
-        try:
-            require_preview_preservation_admission(
-                store=cast(PostgresRecordStore, self.adapter._record_store),
-                profile=self.adapter._profile,
-                issued_plan=self.adapter._issued_plan,
-                original_reservation_id=reference,
-                operation_record_id=self.adapter._deployment_record_id,
-                captured_schedule_binding=self.adapter.schedule_binding,
-            )
-            if self.adapter._issued_plan.operation == "refresh":
-                run_preview_preservation(
-                    store=cast(PostgresRecordStore, self.adapter._record_store),
-                    profile=self.adapter._profile,
-                    issued_plan=self.adapter._issued_plan,
-                    original_reservation_id=reference,
-                    operation_record_id=self.adapter._deployment_record_id,
-                    control_plane_root=self.adapter._control_plane_root,
-                    mode="preflight",
-                    timeout_seconds=self.adapter._apply_request.apply.timeout_seconds,
-                    check=self.adapter.execution_check,
-                    captured_schedule_binding=self.adapter.schedule_binding,
-                )
-        except (ValueError, FileNotFoundError, click.ClickException) as error:
-            raise OdooPreviewPlanProvenanceError(
-                code="odoo_preview_preservation_unavailable", message=str(error)
-            ) from error
-
     def run(
         self, store: DurableProviderOperationStore, *, allow_mutation: bool = True
     ) -> DurableProviderOperationResult:
@@ -893,7 +893,7 @@ class OdooPreviewApplyOperation:
                 )
                 is None
             ):
-                self.require_original_preservation()
+                self.adapter.require_original_preservation()
                 if self.adapter._pre_mutation_guard is not None:
                     self.adapter._pre_mutation_guard()
                 self.adapter.capture_source_decision()
