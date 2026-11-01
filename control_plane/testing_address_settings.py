@@ -434,12 +434,12 @@ class CanonicalAddressEffect(DurableProviderMutationAdapter):
                 try:
                     self.frame("observe")
                     break
-                except NativeSourceUnavailable:
+                except NativeSourceUnavailable as error:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise NativeSourceUnavailable(
                             "The original canonical deployment has no qualified runtime proof."
-                        ) from None
+                        ) from error
                     time.sleep(min(2, remaining))
             return ProviderMutationOutcome(200, {"canonical_deployment_verified": True})
         frame = self.frame("gate", dispatch_guard=checkpoint)
