@@ -937,11 +937,16 @@ def build_product_environment_detail(
         if warning
     )
     from control_plane.odoo_testing_drill import testing_drill_evidence
-    from control_plane.testing_rebuild_driver import testing_rebuild_driver, TestingRebuildRefused
+    from control_plane.testing_rebuild_driver import (
+        resolve_testing_rebuild_driver,
+        TestingRebuildRefused,
+    )
 
     try:
-        testing_rebuild_driver(profile, declared_lane)
-        rebuild_supported = True
+        rebuild_supported = (
+            declared_lane.instance == "testing"
+            and resolve_testing_rebuild_driver(record_store, product).lane == declared_lane
+        )
     except TestingRebuildRefused:
         rebuild_supported = False
 

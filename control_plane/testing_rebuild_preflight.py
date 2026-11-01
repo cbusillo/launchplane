@@ -7,10 +7,7 @@ from uuid import uuid4
 import click
 from pydantic import BaseModel, ConfigDict, Field
 
-from control_plane.contracts.artifact_identity import (
-    ArtifactIdentityManifest,
-    artifact_manifest_matches_image_repository,
-)
+from control_plane.build_provenance import VerifiedBuildArtifact, VerifiedGenericWebBuild
 from control_plane.clean_testing_snapshot import snapshot_storage_budget
 from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -26,6 +23,7 @@ from control_plane.odoo_target_replacement_apply_http import (
 from control_plane.testing_rebuild_driver import (
     resolve_testing_rebuild_driver,
     TESTING_REBUILD_EXECUTION_UNAVAILABLE,
+    testing_rebuild_build_identity,
 )
 from control_plane.odoo_testing_native_source import native_testing_source_authority
 from control_plane.testing_candidate_runtime import candidate_credential_authority
@@ -73,7 +71,7 @@ def inspect_testing_rebuild(
     root: Path,
     store: PostgresRecordStore,
     request: OdooStableTargetReplacementRequest,
-    verified_manifest: ArtifactIdentityManifest | None = None,
+    verified_build: VerifiedBuildArtifact | VerifiedGenericWebBuild | None = None,
     actor: str = "",
 ) -> TestingRebuildPreflight:
     if request.strategy != "replace-and-cutover":
@@ -84,24 +82,28 @@ def inspect_testing_rebuild(
     if apply.instance != "testing":
         raise ValueError("Testing rebuild preflight cannot inspect production.")
     if driver.execution_available:
+        if verified_build is not None and not isinstance(verified_build, VerifiedBuildArtifact):
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified", "The selected build is not an Odoo artifact."
+            )
         _validate_target_replacement_apply_artifact_authority(
             operation_store=store,
             replacement_request=apply,
             context=lane.context,
-            verified_manifest=verified_manifest,
+            verified_manifest=verified_build.manifest if verified_build is not None else None,
         )
     else:
-        try:
-            manifest = verified_manifest or store.read_artifact_manifest(apply.artifact_id)
-        except FileNotFoundError as error:
+        if not isinstance(verified_build, VerifiedGenericWebBuild):
             raise TestingRebuildRefused(
-                "testing_rebuild_inputs_unverified", "The selected build is unavailable."
-            ) from error
-        if (manifest.artifact_id, manifest.source_commit) != (
-            apply.artifact_id,
-            apply.source_git_ref,
-        ) or not artifact_manifest_matches_image_repository(
-            manifest, expected_repository=driver.profile.image.repository
+                "testing_rebuild_inputs_unverified", "A verified generic-web build is required."
+            )
+        if (
+            testing_rebuild_build_identity(verified_build)
+            != (
+                apply.artifact_id,
+                apply.source_git_ref,
+            )
+            or verified_build.manifest.image.repository != driver.profile.image.repository
         ):
             raise TestingRebuildRefused(
                 "testing_rebuild_inputs_unverified", "The selected build differs from its product."

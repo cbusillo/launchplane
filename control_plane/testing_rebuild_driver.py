@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Protocol
 
+from control_plane.build_provenance import VerifiedBuildArtifact, VerifiedGenericWebBuild
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -13,6 +14,17 @@ TESTING_REBUILD_EXECUTION_UNAVAILABLE = (
     "Rebuilding this testing lane is not available yet. No changes have been made."
 )
 TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE = "testing_rebuild_execution_unavailable"
+
+
+def testing_rebuild_build_identity(
+    verified: VerifiedBuildArtifact | VerifiedGenericWebBuild,
+) -> tuple[str, str]:
+    artifact_id = (
+        verified.image_reference
+        if isinstance(verified, VerifiedGenericWebBuild)
+        else verified.manifest.artifact_id
+    )
+    return artifact_id, verified.manifest.source_commit
 
 
 class TestingRebuildRefused(ValueError):

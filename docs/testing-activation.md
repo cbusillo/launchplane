@@ -733,8 +733,11 @@ These declarations apply only to generic-web testing lanes.
 The first delivery slice exposes the same signed-in inspection and its control
 for declared none/volume lanes. Inspection checks exclusive product/context
 ownership, the selected verified build, stored target agreement and recorded
-holds, use and custody protections. It performs no provider calls or writes.
-It returns `status: pending`, a reason and pending candidate verification. This is state admission, not proof of current usage, resource
+holds, use and custody protections. It reads verified source-control build
+information without deployment-provider calls or writes. Generic-web builds keep
+their verified immutable image reference; no Odoo manifest is invented or stored.
+It returns `status: pending`, a reason and pending candidate verification.
+This is state admission, not proof of current usage, resource
 isolation, candidate readiness or a completed rebuild. Submission and the native
 worker both refuse generic-web execution until the shared activation continuation
 is connected. The button remains disabled. Existing Odoo preflight and execution

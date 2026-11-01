@@ -75,7 +75,7 @@ class TestingRebuildHttpFixture(unittest.TestCase):
         self.latest = self.enterContext(
             patch.object(
                 routes,
-                "latest_verified_testing_build",
+                "latest_verified_testing_release",
                 return_value=VerifiedBuildArtifact(manifest=self.manifest),
             )
         )
@@ -1218,8 +1218,39 @@ class GenericWebTestingRebuildHttpTests(
 ):
     def setUp(self) -> None:
         super().setUp()
-        self.profile = self.fixture.intent.profile.model_copy(update={"driver_id": "generic-web"})
+        from control_plane import product_reconcile
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests import test_product_reconcile as build_tests
+
+        payload = self.fixture.intent.profile.model_dump(mode="json")
+        payload.update(
+            driver_id="generic-web",
+            repository=build_tests.REPOSITORY,
+            repository_id=build_tests.REPOSITORY_ID,
+            repository_owner_id="1",
+            image={"repository": build_tests.IMAGE_REPOSITORY},
+        )
+        self.profile = LaunchplaneProductProfileRecord.model_validate(payload)
         self.declare_state({"kind": "none"})
+        self.store.write_repository_inventory_record(build_tests._inventory())
+        self.github = build_tests.FakeGenericWebGitHub()
+        self.github.add_run(30, build_tests.NEWEST)
+        self.enterContext(
+            patch.object(
+                product_reconcile, "resolve_build_provenance_transport", return_value=self.github
+            )
+        )
+        self.enterContext(
+            patch.object(
+                routes,
+                "latest_verified_testing_release",
+                product_reconcile.latest_verified_testing_release,
+            )
+        )
+        self.artifact_id = (
+            f"{build_tests.IMAGE_REPOSITORY}@{build_tests._digest(build_tests.NEWEST)}"
+        )
+        self.payload.update(artifact_id=self.artifact_id, source_git_ref=build_tests.NEWEST)
         self.enterContext(
             patch.object(
                 preflight,
@@ -1246,6 +1277,7 @@ class GenericWebTestingRebuildHttpTests(
         from control_plane.testing_rebuild_driver import TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE
 
         before = self.store.list_odoo_stable_target_replacement_operation_records()
+        before_reservations = self.store.list_held_provider_target_reservations()
         for state in ({"kind": "none"}, {"kind": "volume", "container_path": "/app/data"}):
             with self.subTest(state=state), patch.object(source, "read_dokploy_config") as provider:
                 self.declare_state(state)
@@ -1253,7 +1285,8 @@ class GenericWebTestingRebuildHttpTests(
                 self.assertEqual(response.status_code, 200, response.text)
                 inspected = response.json()
                 self.assertNotEqual(inspected["status"], "pass")
-                self.assertEqual(inspected["artifact_id"], self.manifest.artifact_id)
+                self.assertEqual(inspected["artifact_id"], self.payload["artifact_id"])
+                self.assertEqual(inspected["source_git_ref"], self.payload["source_git_ref"])
                 self.assertEqual(inspected["context"], self.fixture.operation.context)
                 submitted = await self.call("POST", self.payload)
                 self.assertEqual(submitted.status_code, 409, submitted.text)
@@ -1263,6 +1296,9 @@ class GenericWebTestingRebuildHttpTests(
                 provider.assert_not_called()
         self.provider_config.assert_not_called()
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), before_reservations)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read_artifact_manifest(self.artifact_id)
         self.assertEqual(self.fixture.effects, [])
 
     async def test_unknown_postgresql_and_restore_refuse_before_provider_reads(self) -> None:
@@ -1386,4 +1422,53 @@ class GenericWebTestingRebuildHttpTests(
         self.assertEqual(refused.exception.code, TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE)
         provider.assert_not_called()
         self.assertEqual(self.store.list_held_provider_target_reservations(), before)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_real_build_verifier_refuses_wrong_image_repository_without_effects(self) -> None:
+        from control_plane.dokploy import source
+
+        changed = self.profile.model_copy(
+            update={
+                "image": self.profile.image.model_copy(
+                    update={"repository": "ghcr.io/example/different"}
+                )
+            }
+        )
+        self.store.write_product_profile_record(changed)
+        with (
+            patch.object(self.github, "get_bytes", wraps=self.github.get_bytes) as manifest_read,
+            patch.object(source, "read_dokploy_config") as provider,
+        ):
+            response = await self.call("GET", path=self.url + "/inputs")
+        self.assertEqual(response.status_code, 409, response.text)
+        manifest_read.assert_called()
+        provider.assert_not_called()
+        self.provider_config.assert_not_called()
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_director_agent_reads_real_generic_web_build_without_mutation(self) -> None:
+        from control_plane.service_auth import BearerIdentityConfig
+        from control_plane.dokploy import source
+
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.policy,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="fixture-director",
+                local_operator_subject="fixture-agent",
+                local_operator_token_label="generic-read",
+            ),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.root,
+        )
+        with patch.object(source, "read_dokploy_config") as provider:
+            response = await request(
+                app,
+                "GET",
+                self.url + "/inputs",
+                headers={"Authorization": "Bearer fixture-director"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["artifact_id"], self.payload["artifact_id"])
+        provider.assert_not_called()
         self.assertEqual(self.fixture.effects, [])
