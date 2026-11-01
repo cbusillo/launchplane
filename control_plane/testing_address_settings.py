@@ -168,6 +168,9 @@ def canonical_settings_frame(
         if settings
         else environment.get(PAYLOAD_KEY, "")
     )
+    bootstrap = OdooPostDeployPayload.model_validate_json(
+        base64.b64decode(payload, validate=True)
+    ).website_bootstrap
     spec: dict[str, object] = {
         "generation": plan.before.generation.model_dump(mode="json")
         if plan.before.generation
@@ -200,6 +203,8 @@ def canonical_settings_frame(
             "payload": payload,
             "runtime_identity": identity.model_dump(mode="json", exclude={"deployed_at"}),
             "canonical_url": "https://" + plan.route_after.host,
+            "before_url": "https://" + plan.route_before.host,
+            "primary_page_xmlid_set": bool(bootstrap and bootstrap.primary_page_xmlid),
             "website_id": settings.website_id if settings else 0,
             "database_values_sha256": settings.database_values_sha256 if settings else "",
             "copy_witness_parameter": TESTING_COPY_COMPLETION_PARAMETER,

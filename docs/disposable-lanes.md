@@ -1630,8 +1630,15 @@ keeping the existing message and payload bounds, guarded dispatch and
 original-program diagnostics. The plans preserve the
 current provider payload and change only its canonical URL and freeze parameter,
 including the existing website bootstrap URL. The plan binds the remaining
-provider environment, the sole native website and its database values. Planning
+provider environment, the reviewed native website and its database values. Planning
 uses the native copy's storage/network inspection and a read-only database probe.
+An unrelated website does not prevent address qualification. In a plural
+database, the probe requires a unique owner of the original canonical domain
+and proves the unchanged bootstrap selector will write that same website after
+the address changes. A primary-page selector it cannot prove, competing original
+or new domains, or a different default writer refuse before effects. Later
+phases retain the reviewed website ID and recheck ownership; unrelated sites are
+not selected or changed. Single-site plans retain their original value digest.
 Failed canonical-address `docker exec` reads and writers retain bounded
 stdout/stderr in the existing private host failure archive; the service logs
 only its validated opaque reference.
