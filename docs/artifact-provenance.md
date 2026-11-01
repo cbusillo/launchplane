@@ -139,3 +139,22 @@ sweep) is in [event-driven deploys](event-driven-deploys.md).
 Verified Odoo artifacts may carry the additive complete input/module inventory
 for [release database compatibility](release-database-compatibility.md). That
 page owns its producer contract and conservative missing-evidence behavior.
+
+## GitHub read failure evidence
+
+The shared build reader retains a bounded JSON diagnostic in its existing
+`github_read_failed` error. Reconciliation keeps it in the existing failure log
+and `last_error`, beside the existing testing failure trace. It includes an HTTP
+status, a fixed route category, a validated provider request id, and valid
+numeric quota remaining/limit/reset and retry-after seconds when supplied.
+URLs, repository/branch values, response bodies, arbitrary headers and upstream
+exception messages are excluded. JSON and archive read failures share this path;
+the original exception cause stays available to existing refusal/retry consumers.
+
+Classification records rate-limit evidence (429, or 403 with zero remaining
+quota or numeric retry-after), 401 unauthorized, 403 forbidden, server errors,
+or an unclassified HTTP/transport failure. Forbidden alone does not establish
+missing permissions: absent or malformed metadata remains absent, and a secondary
+throttle without those headers cannot be distinguished without further evidence.
+No retry or credential decision changes. The October 31 history-read event's
+cause remains UNKNOWN because its missing headers were not recovered.

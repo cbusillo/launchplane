@@ -1,13 +1,16 @@
 import io
+from email.message import Message
 import json
 import unittest
 import zipfile
 from unittest.mock import MagicMock, Mock, patch
+from urllib.error import HTTPError, URLError
 
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     MAX_MANIFEST_BYTES,
     BuildProvenanceError,
+    GitHubBuildProvenanceTransport,
     VerifiedBuildArtifact,
     record_verified_build_artifact,
     verify_build_artifact,
@@ -111,6 +114,83 @@ def _verify(
 
 
 class BuildProvenanceTests(unittest.TestCase):
+    def test_http_metadata_is_bounded_and_exception_cause_survives_all_read_paths(self) -> None:
+        for stage in ("json", "archive", "redirect"):
+            for unsafe in ("private-secret\nInjected: value", "9" * 200):
+                with self.subTest(stage=stage, unsafe=unsafe):
+                    headers = Message()
+                    for name in (
+                        "X-GitHub-Request-Id",
+                        "X-RateLimit-Remaining",
+                        "X-RateLimit-Reset",
+                        "Retry-After",
+                    ):
+                        headers[name] = unsafe
+                    body = Mock()
+                    failure = HTTPError(
+                        "https://storage.test/private-secret", 403, unsafe, headers, body
+                    )
+                    self.addCleanup(failure.close)
+                    opener = MagicMock()
+                    if stage == "redirect":
+                        redirect_headers = Message()
+                        redirect_headers["Location"] = "https://storage.test/private-secret"
+                        redirect = HTTPError(
+                            "https://api.github.com", 302, "Found", redirect_headers, None
+                        )
+                        self.addCleanup(redirect.close)
+                        opener.open.side_effect = redirect
+                    else:
+                        opener.open.side_effect = failure
+                    transport = GitHubBuildProvenanceTransport(token="private-secret")
+                    path = "/repos/private/secret/actions/artifacts/1/zip?token=private-secret"
+                    with (
+                        patch(
+                            "control_plane.build_provenance.urlopen", side_effect=failure
+                        ) as download,
+                        patch("control_plane.build_provenance.build_opener", return_value=opener),
+                        self.assertRaises(BuildProvenanceError) as caught,
+                    ):
+                        if stage == "json":
+                            transport.get_json(path)
+                        else:
+                            transport.get_bytes(path)
+                    self.assertIs(caught.exception.__cause__, failure)
+                    evidence = json.loads(str(caught.exception).split(": ", 1)[1])
+                    self.assertEqual(
+                        evidence,
+                        {
+                            "status": 403,
+                            "route": "artifact_download",
+                            "classification": "forbidden",
+                        },
+                    )
+                    body.read.assert_not_called()
+                    if stage == "redirect":
+                        self.assertNotIn("Authorization", download.call_args.args[0].headers)
+
+    def test_missing_http_headers_and_connection_failures_keep_unknown_evidence(self) -> None:
+        failure = HTTPError(
+            "https://api.github.com/private-secret", 403, "private-secret", Message(), None
+        )
+        setattr(failure, "headers", None)
+        self.addCleanup(failure.close)
+        for error in (failure, URLError("private-secret")):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch("control_plane.build_provenance.urlopen", side_effect=error),
+                self.assertRaises(BuildProvenanceError) as caught,
+            ):
+                GitHubBuildProvenanceTransport(token="private-secret").get_json("/private-secret")
+            evidence = json.loads(str(caught.exception).split(": ", 1)[1])
+            self.assertEqual(evidence["route"], "unknown")
+            self.assertEqual(
+                evidence["classification"], "forbidden" if error is failure else "transport_error"
+            )
+            self.assertNotIn("request_id", evidence)
+            self.assertNotIn("private-secret", str(caught.exception))
+            self.assertIs(caught.exception.__cause__, error)
+
     def test_json_and_manifest_body_connection_drops_are_wrapped(self) -> None:
         from http.client import IncompleteRead
         from control_plane.build_provenance import GitHubBuildProvenanceTransport
