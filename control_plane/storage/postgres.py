@@ -30229,7 +30229,7 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
 
     def retained_volume_recovery_payloads(self) -> Generator[PayloadDict, None, None]:
-        from control_plane.application_state_volume import state_volume_allocation_names
+        from control_plane.application_state_volume import ROUTE, state_volume_allocation_names
 
         with self._session_factory() as session:
             for row_type in (
@@ -30248,7 +30248,7 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             allocations = session.scalars(
                 select(LaunchplaneIdempotencyRow.payload)
-                .where(LaunchplaneIdempotencyRow.route_path.startswith("/v1/dokploy-targets/setup"))
+                .where(LaunchplaneIdempotencyRow.route_path == ROUTE)
                 .execution_options(yield_per=1000)
             )
             for allocation in allocations:
