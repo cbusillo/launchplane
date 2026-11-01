@@ -242,7 +242,7 @@ lifecycle contracts and are not covered by this planner validation.
 
 For authorized runner label changes, use the catalog's
 [owner-admin helper](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#verified-repository-owner-administration)
-as the verified repository owner: save and review the exact runner's plan,
+using the Director's verified GitHub login: save and review the exact runner's plan,
 apply its digest, then independently read it back. Preserve prior custom labels
 for undo.
 
