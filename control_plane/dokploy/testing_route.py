@@ -465,14 +465,29 @@ def application_load_balancer_configuration(value: Any) -> Any:
     return configuration
 
 
-def require_independent_listener_middlewares(static: Any, points: tuple[str, ...]) -> None:
-    if not isinstance(static, dict) or not isinstance(static.get("entryPoints"), dict):
+def listener_http_configuration(static: Any, point: str) -> dict[str, Any]:
+    if (
+        not isinstance(static, dict)
+        or not isinstance(static.get("entryPoints"), dict)
+        or point not in static["entryPoints"]
+    ):
         raise ValueError("The managed proxy's listener configuration is unavailable.")
+    listener = static["entryPoints"][point]
+    if listener is None:
+        return {}
+    if not isinstance(listener, dict):
+        raise ValueError("The managed proxy's listener configuration is unavailable.")
+    http = listener.get("http")
+    if http is None:
+        return {}
+    if not isinstance(http, dict):
+        raise ValueError("The managed proxy's listener configuration is unavailable.")
+    return http
+
+
+def require_independent_listener_middlewares(static: Any, points: tuple[str, ...]) -> None:
     for point in points:
-        listener = static["entryPoints"].get(point)
-        if not isinstance(listener, dict) or not isinstance(listener.get("http", {}), dict):
-            raise ValueError("The managed proxy's listener configuration is unavailable.")
-        if listener.get("http", {}).get("middlewares"):
+        if listener_http_configuration(static, point).get("middlewares"):
             raise ValueError("The testing listener uses unsupported middleware.")
 
 
@@ -480,6 +495,8 @@ def router_with_listener_defaults(
     router: dict[str, Any], static_configuration: str
 ) -> dict[str, Any]:
     configuration = router_configuration(router)
+    if not configuration.get("ruleSyntax"):
+        configuration.pop("ruleSyntax", None)
     if not static_configuration:
         return configuration
     static = yaml.safe_load(static_configuration)
@@ -496,20 +513,9 @@ def router_with_listener_defaults(
     if configuration.get("tls") is not None:
         return configuration
     points = configuration.get("entryPoints")
-    if (
-        not isinstance(static.get("entryPoints"), dict)
-        or not isinstance(points, (list, tuple))
-        or len(points) != 1
-    ):
+    if not isinstance(points, (list, tuple)) or len(points) != 1:
         raise ValueError("The application listener TLS configuration is unavailable.")
-    entrypoint = static["entryPoints"].get(points[0])
-    if not isinstance(entrypoint, dict):
-        raise ValueError("The application listener TLS configuration is unavailable.")
-    http = entrypoint.get("http")
-    if http is None:
-        http = {}
-    if not isinstance(http, dict):
-        raise ValueError("The application listener TLS configuration is unavailable.")
+    http = listener_http_configuration(static, points[0])
     if "tls" not in http:
         configuration.pop("tls", None)
     else:
@@ -1162,12 +1168,19 @@ def testing_route_static_sha256(static_configuration: str, template: dict[str, A
     configured_resolvers = static.get("certificatesResolvers", {})
     if not isinstance(configured_resolvers, dict):
         raise ValueError("The managed proxy's certificate configuration is unavailable.")
+    core = static.get("core")
+    syntax = core.get("defaultRuleSyntax") if isinstance(core, dict) else None
     return canonical_json_sha256(
         {
             "entryPoints": {name: static["entryPoints"].get(name) for name in sorted(points)},
             "certificatesResolvers": {
                 name: configured_resolvers.get(name) for name in sorted(resolvers)
             },
+            **(
+                {"defaultRuleSyntax": syntax}
+                if syntax and any(not router.get("ruleSyntax") for router in routers)
+                else {}
+            ),
         }
     )
 

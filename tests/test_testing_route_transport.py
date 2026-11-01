@@ -1211,7 +1211,11 @@ class TestingRouteTransportTests(unittest.TestCase):
 
     def test_unavailable_forward_ignores_unrelated_static_configuration(self) -> None:
         self.unavailable_route()
-        self.static += "\nlog:\n  level: INFO\n"
+        payload = self.plan.model_dump(mode="json")
+        for router in payload["template"]["http"]["routers"].values():
+            router["ruleSyntax"] = "v3"
+        self.plan = TestingLaneRoute.model_validate(payload)
+        self.static += "\nlog:\n  level: INFO\ncore:\n  defaultRuleSyntax: v2\n"
         self.publish(self.plan.new_backend, None)
         self.assertTrue(self.route_file.exists())
 
@@ -1244,9 +1248,15 @@ class TestingRouteTransportTests(unittest.TestCase):
     def test_changed_unavailable_listener_excludes_forward_before_writer_dispatch(self) -> None:
         self.unavailable_route()
         attempt = self.fenced_attempt(self.plan.new_backend)
+        original_static = self.static
         self.static = self.static.replace(":443", ":444")
         with self.assertRaises(transport.TestingRouteWriteNotStarted):
             self.publish_attempt(attempt, None)
+        sends = self.effect_count
+        self.static = original_static + "\ncore:\n  defaultRuleSyntax: v2\n"
+        with self.assertRaises(transport.TestingRouteWriteNotStarted):
+            self.publish(self.plan.new_backend, None)
+        self.assertEqual(self.effect_count, sends)
         self.assertFalse(self.route_file.exists())
 
     def test_unavailable_redirect_drift_remains_visible_in_scoped_host_reads(self) -> None:
@@ -1533,9 +1543,20 @@ class TestingRouteTransportTests(unittest.TestCase):
                 configured_compose=yaml.safe_dump({"services": {"web": {"labels": labels}}}),
             )
 
-        for tls, syntax in ((None, None), (False, None), (True, None), (None, "v2"), (True, "v3")):
+        for tls, syntax in (
+            (None, None),
+            (False, None),
+            (True, None),
+            (None, "v2"),
+            (True, "v3"),
+            (None, ""),
+        ):
             with self.subTest(tls=tls, syntax=syntax):
                 static = deepcopy(original_static)
+                if syntax == "":
+                    labels["traefik.http.routers.testing.rulesyntax"] = syntax
+                else:
+                    labels.pop("traefik.http.routers.testing.rulesyntax", None)
                 if tls is not None:
                     static["entryPoints"]["websecure"]["http"] = {"tls": {}}
                 if tls:
@@ -1551,6 +1572,8 @@ class TestingRouteTransportTests(unittest.TestCase):
                     for name, value in values.items():
                         applied[section][name + "@file"] = {**deepcopy(value), "status": "enabled"}
                         if section == "routers":
+                            if not applied[section][name + "@file"].get("ruleSyntax"):
+                                applied[section][name + "@file"].pop("ruleSyntax", None)
                             if syntax:
                                 applied[section][name + "@file"].setdefault("ruleSyntax", syntax)
                             modeled = [
@@ -1601,6 +1624,15 @@ class TestingRouteTransportTests(unittest.TestCase):
             compile_route(static)
         labels.pop("traefik.http.routers.testing.tls", None)
         labels["traefik.http.routers.testing.entrypoints"] = "websecure"
+        labels.pop("traefik.http.routers.testing.rulesyntax", None)
+        for listener in (None, {"http": None}):
+            static = deepcopy(original_static)
+            static["entryPoints"]["websecure"] = listener
+            plan = compile_route(static)
+            self.assertEqual(
+                plan.public_entrypoints,
+                tuple(labels["traefik.http.routers.testing.entrypoints"].split(",")),
+            )
         for inherited in (None, {"domains": []}, {"certresolver": "listener"}):
             with self.subTest(inherited=inherited), self.assertRaises(ValueError):
                 static = deepcopy(original_static)
