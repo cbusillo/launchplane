@@ -189,7 +189,7 @@ def main() -> int:
         return 0 if collection.status == "collected" else 1
     except HTTPError as error:
         print(json.dumps({"status": "delivery_failed", "http_status": error.code}))
-    # noinspection PyBroadException: Keep imported transport failures out of CLI output.
+    # noinspection PyBroadExceptionInspection: Keep imported transport failures out of CLI output.
     except Exception:
         print(json.dumps({"status": "delivery_failed"}))
     return 2
