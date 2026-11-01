@@ -189,6 +189,69 @@ class TestingGenerationRetirementTests(unittest.TestCase):
             product=self.product, request=self.apply_body, mutation=self.mutation
         )
 
+    def test_inspection_without_retirement_reads_custody_without_writing(self) -> None:
+        import asyncio
+        from tests.support.http import request
+        from tests.support.auth import scoped_agent_transport
+
+        from control_plane.storage.postgres import LaunchplaneDisposableTestingResourceAllocationRow
+
+        with self.store._session_factory() as session:
+            row = session.get(
+                LaunchplaneDisposableTestingResourceAllocationRow, self.gen.operation_id
+            )
+            assert row is not None
+            row.payload = {
+                **row.payload,
+                "retained_target_record": self.store._payload_dict(
+                    retirement_snapshot(self.store, self.product, self.body).target
+                ),
+            }
+            session.commit()
+        reservations = self.store.read_retained_testing_hostname_reservations(self.context)
+        self.assertTrue(reservations)
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(
+            self.operation.operation_id
+        )
+
+        def inspect(product: str, **changes: object) -> Any:
+            return asyncio.run(
+                request(
+                    self.fixture.fixture.app,
+                    "POST",
+                    ROUTE.format(product=product),
+                    headers={"Authorization": "Bearer local-operator-token"},
+                    payload={**self.body.model_dump(mode="json"), "mode": "inspect", **changes},
+                )
+            )
+
+        with patch("control_plane.dokploy.api._dokploy_request") as provider:
+            response = inspect(self.product)
+            self.assertEqual(response.status_code, 202, response.text)
+            result = response.json()["result"]
+            self.assertIsNone(result["plan"])
+            self.assertEqual(result["product"], self.product)
+            self.assertEqual(result["context"], self.context)
+            self.assertEqual(
+                result["reservations"], [item.model_dump(mode="json") for item in reservations]
+            )
+            self.assertFalse(result["hostname_release_authorized"])
+            self.assertIn(self.gen.operation_id, result["initial_allocations"])
+            self.assertEqual(inspect(self.product, mode="readback").status_code, 409)
+            self.assertEqual(inspect("foreign-product").status_code, 409)
+            self.assertEqual(inspect(self.product, context="foreign-context").status_code, 409)
+            with scoped_agent_transport():
+                self.assertEqual(inspect(self.product).status_code, 403)
+            provider.assert_not_called()
+        self.assertIsNone(self.store.read_retained_testing_generation(self.operation.operation_id))
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+            operation,
+        )
+        self.assertEqual(
+            self.store.read_retained_testing_hostname_reservations(self.context), reservations
+        )
+
     def test_custody_inspection_reads_original_targets_without_releasing_hosts(self) -> None:
         import asyncio
         from tests.support.http import request

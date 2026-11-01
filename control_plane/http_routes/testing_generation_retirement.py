@@ -19,6 +19,7 @@ from control_plane.testing_generation_retirement import (
     ROUTE,
     TestingGenerationRetirementRequest,
     inspect_retained_testing_custody,
+    inspect_testing_hostname_custody,
     retirement_snapshot,
 )
 
@@ -85,7 +86,15 @@ def register_testing_generation_retirement_routes(
                 if body.mode == "dry-run":
                     raise ValueError("The generation is already retained; use readback.")
             else:
-                if body.mode in {"readback", "inspect"}:
+                if body.mode == "inspect":
+                    return accepted_evidence_response(
+                        trace_id=trace,
+                        records={},
+                        result=inspect_testing_hostname_custody(
+                            record_store, product, body
+                        ).model_dump(mode="json"),
+                    )
+                if body.mode == "readback":
                     raise ValueError("No retirement receipt is available.")
                 with record_store.testing_replacement_execution_lock(body.operation_id) as check:
                     if check is None:

@@ -82,13 +82,75 @@ class RetainedTestingHostnameReservation(BaseModel):
     custody_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class TestingInitialAllocationInspection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    initial_request_recorded: bool
+    initial_apply_started_at: str
+    initial_reconcile_requested_at: str
+    initial_released_at: str
+    retained_target_bound: bool
+
+
 class TestingGenerationCustodyInspection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    plan: TestingGenerationRetirementPlan
+    plan: TestingGenerationRetirementPlan | None = None
+    product: str = Field(default="", exclude_if=lambda value: not value)
+    context: str = Field(default="", exclude_if=lambda value: not value)
+    operation_id: str = Field(default="", exclude_if=lambda value: not value)
     reservations: tuple[RetainedTestingHostnameReservation, ...] = Field(max_length=1000)
+    initial_allocations: dict[str, TestingInitialAllocationInspection] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
     qualification: Literal["not_evaluated"] = "not_evaluated"
     hostname_release_authorized: Literal[False] = False
+
+
+def inspect_testing_hostname_custody(
+    store: "PostgresRecordStore", product: str, request: TestingGenerationRetirementRequest
+) -> TestingGenerationCustodyInspection:
+    profile = store.read_product_profile_record(product)
+    if (
+        not profile.is_active
+        or profile.driver_id != "odoo"
+        or not is_exclusive_product_context(
+            context=request.context,
+            product=product,
+            owners=product_context_owner_map(store.list_product_profile_records()),
+        )
+        or not any(
+            (lane.context, lane.instance) == (request.context, "testing") for lane in profile.lanes
+        )
+    ):
+        raise ValueError("Hostname inspection requires its exclusive Odoo testing context.")
+    reservations = store.read_retained_testing_hostname_reservations(request.context)
+    bound_targets = {item.target_id for item in store.list_dokploy_target_id_records()} | {
+        item.target_id
+        for item in store.list_physical_provider_target_records()
+        if item.provider_id == "dokploy"
+    }
+    allocations = {}
+    for operation_id in sorted(
+        {item.operation_id for item in reservations if item.source_kind == "retained_allocation"}
+    ):
+        allocation = store.read_disposable_resource_preparation(operation_id)
+        if allocation is None:
+            continue
+        allocations[operation_id] = TestingInitialAllocationInspection(
+            initial_request_recorded=bool(allocation.initial_request_sha256),
+            initial_apply_started_at=allocation.initial_apply_started_at,
+            initial_reconcile_requested_at=allocation.initial_reconcile_requested_at,
+            initial_released_at=allocation.initial_released_at,
+            retained_target_bound=allocation.retained_target_id in bound_targets,
+        )
+    return TestingGenerationCustodyInspection(
+        product=product,
+        context=request.context,
+        operation_id=request.operation_id,
+        reservations=reservations,
+        initial_allocations=allocations,
+    )
 
 
 def inspect_retained_testing_custody(
