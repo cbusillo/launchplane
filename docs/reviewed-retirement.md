@@ -15,18 +15,21 @@ For a values-free comparison before selecting a removal, request
 `GET /v1/products/{product}/secret-bindings?include_setting_sources=true`.
 It reuses product/environment and preview read permissions and refuses incomplete
 scope authority or shared context ownership. The additive `setting_sources`
-inventory groups configured key names by lane and source, reports overlapping
-names and retirement intent, and enumerates retained preview records separately.
+inventory groups configured key names by lane and source, reports retirement
+intent, and enumerates retained preview records separately.
 It reads no secret versions, decrypts nothing, calls no provider, and saves no
 review or configuration. A name overlap is not a value disagreement or proof of
-delivery. Odoo runtime references remain references, rather than competing literal
-copies; secret record names and delivered binding keys remain distinct identities.
-Template policies describe possible inputs, with effective provider and retained
-generation settings explicitly unqualified. Bounds report truncation; the tables
+delivery. Odoo overrides report native parameter/addon names, reference scope and
+apply phases without their literal values or binding ids. A reference reports
+the configured binding's key/context/instance when it is inside this product;
+missing, disabled or outside-product pointers remain `unresolved_or_out_of_scope`.
+These metadata observations do not validate secret resolution. Secret record names
+and delivered binding keys remain distinct identities. Preview policies describe
+configured key names; these tables cannot reconstruct provider inputs, exact-preview overrides,
+or retained generation settings. Bounds report truncation; the tables
 are read independently, so this is an observation, not an atomic migration plan.
-Plain and secret config-parameter transport names are grouped under their common
-parameter identity for overlaps; the source lists retain their original names.
-Addon literals use the addon and setting names, without inventing an env name.
+The read does not score overlaps or implement a second resolver. Comparisons use
+these source names and the existing canonical mapping helpers as task evidence.
 Preview targets are enumerated, not compared to their running generations.
 
 Use the repository's bounded reader with the installed operator transport:

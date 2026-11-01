@@ -25,6 +25,7 @@ def main() -> int:
     transport["validate_service_url"](settings["service_url"])
     if not settings["token"]:
         parser.error("The existing operator credential is unavailable.")
+    trace = ""
     try:
         raw = transport["request_launchplane_read"](
             service_url=settings["service_url"],
@@ -33,12 +34,13 @@ def main() -> int:
             query={"include_setting_sources": True},
             timeout=120,
         )
+        trace = transport["public_trace_id"](raw.get("trace_id"))
         report = ProductSettingSourceInventory.model_validate(raw.get("setting_sources"))
         if report.product != args.product:
             raise ValueError("Product binding mismatch")
         output = {
             "status": "ok",
-            "trace_id": transport["public_trace_id"](raw.get("trace_id")),
+            "trace_id": trace,
             "result": report.model_dump(mode="json"),
         }
         transport["assert_public_safe_shape"](output)
@@ -66,8 +68,16 @@ def main() -> int:
             )
         )
         return 1
-    except (ValueError, TypeError, urllib.error.URLError, TimeoutError):
-        print(json.dumps({"status": "unavailable", "error_code": "settings_sources_unavailable"}))
+    except (ValueError, TypeError, AttributeError, urllib.error.URLError, TimeoutError):
+        print(
+            json.dumps(
+                {
+                    "status": "unavailable",
+                    "error_code": "settings_sources_unavailable",
+                    "trace_id": trace,
+                }
+            )
+        )
         return 1
 
 

@@ -3,20 +3,30 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
-from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
-from control_plane.contracts.odoo_import_parameters import (
-    CONFIG_PARAMETER_RUNTIME_PREFIX,
-    CONFIG_PARAMETER_SECRET_PREFIX,
-    config_parameter_runtime_key,
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    OdooOverrideValue,
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import product_config_targets
+
+SETTING_SOURCE_LIMIT = 500
+
+
+class SettingReference(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    status: Literal["in_lane", "other_lane", "unresolved_or_out_of_scope"]
+    binding_key: str = ""
+    context: str = ""
+    instance: str = ""
 
 
 class SettingConsumer(BaseModel):
@@ -32,13 +42,22 @@ class SettingConsumer(BaseModel):
         "target_overlay",
         "secret_binding",
         "odoo_override",
-        "preview_template",
     ]
     product: str = ""
     context: str = ""
     instance: str = ""
     scope: str = ""
     selected_keys: tuple[str, ...] | None = None
+    phases: tuple[str, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    references: tuple[SettingReference, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class SettingConsumerInventory(BaseModel):
@@ -84,7 +103,7 @@ def setting_consumer_inventory(
     targets: Iterable[DokployTargetRecord],
     bindings: Iterable[SecretBinding],
     authority_records: Iterable[SettingAuthorityConsumer] = (),
-    limit: int = 500,
+    limit: int = SETTING_SOURCE_LIMIT,
 ) -> SettingConsumerInventory:
     if limit < 1:
         raise ValueError("A positive inventory limit is required.")
@@ -220,7 +239,6 @@ class LaneSettingSources(BaseModel):
     context: str
     instance: str
     sources: tuple[SettingConsumer, ...]
-    overlapping_keys: tuple[str, ...]
     retired_keys: tuple[str, ...]
 
 
@@ -250,7 +268,83 @@ class ProductSettingSourceInventory(BaseModel):
         "global_inclusive_legacy_resolvers",
         "managed_secret_resolution",
         "legacy_addon_environment_aliases",
+        "exact_preview_override_records",
     )
+
+
+def _override_reference(
+    name: str,
+    value: OdooOverrideValue,
+    record: OdooInstanceOverrideRecord,
+    bindings: dict[str, SecretBinding],
+) -> SettingReference:
+    binding = bindings.get(value.secret_binding_id)
+    if binding is None:
+        return SettingReference(name=name, status="unresolved_or_out_of_scope")
+    in_lane = binding.context == record.context and binding.instance in {"", record.instance}
+    return SettingReference(
+        name=name,
+        status="in_lane" if in_lane else "other_lane",
+        binding_key=binding.binding_key,
+        context=binding.context,
+        instance=binding.instance,
+    )
+
+
+def _override_sources(
+    record: OdooInstanceOverrideRecord,
+    product: str,
+    bindings: dict[str, SecretBinding],
+) -> tuple[SettingConsumer, ...]:
+    groups: dict[str, list[tuple[str, OdooOverrideValue]]] = {}
+    for parameter in record.config_parameters:
+        groups.setdefault(f"config_parameter:{parameter.value.source}", []).append(
+            (parameter.key, parameter.value)
+        )
+    for setting in record.addon_settings:
+        groups.setdefault(f"addon:{setting.value.source}", []).append(
+            (f"{setting.addon}.{setting.setting}", setting.value)
+        )
+    sources = [
+        SettingConsumer(
+            kind="odoo_override",
+            product=product,
+            context=record.context,
+            instance=record.instance,
+            scope=scope,
+            selected_keys=tuple(sorted(name for name, _value in items)),
+            phases=record.apply_on,
+            references=tuple(
+                _override_reference(name, value, record, bindings)
+                for name, value in items
+                if value.source == "secret_binding"
+            ),
+        )
+        for scope, items in sorted(groups.items())
+    ]
+    for scope, fields in (
+        (
+            "website_bootstrap",
+            record.website_bootstrap.model_fields_set if record.website_bootstrap else (),
+        ),
+        (
+            "website_settings",
+            record.website_settings.settings.model_fields_set if record.website_settings else (),
+        ),
+    ):
+        if fields:
+            sources.append(
+                SettingConsumer(
+                    kind="odoo_override",
+                    product=product,
+                    context=record.context,
+                    instance=record.instance,
+                    scope=scope,
+                    selected_keys=tuple(sorted(fields)),
+                    phases=record.apply_on,
+                )
+            )
+    return tuple(sources)
 
 
 def product_setting_source_inventory(
@@ -261,23 +355,28 @@ def product_setting_source_inventory(
     bindings: Iterable[SecretBinding],
     overrides: Iterable[OdooInstanceOverrideRecord],
     previews: Iterable[PreviewRecord],
-    limit: int = 500,
+    limit: int = SETTING_SOURCE_LIMIT,
 ) -> ProductSettingSourceInventory:
-    from control_plane.odoo_instance_overrides import (
-        addon_setting_secret_env_key,
-        config_parameter_secret_env_key,
-    )
+    from control_plane.workflows.generic_web_preview import generic_web_preview_anchor_repo
 
     if limit < 1:
         raise ValueError("A positive inventory limit is required.")
     lane_targets = product_config_targets(profile)
     contexts = {lane.context for lane in lane_targets}
-    records = tuple(record for record in records if record.context in contexts)
-    targets = tuple(target for target in targets if target.context in contexts)
+    pairs = {(lane.context, lane.instance) for lane in lane_targets}
+    records = tuple(
+        record
+        for record in records
+        if record.context in contexts
+        and (not record.instance or (record.context, record.instance) in pairs)
+    )
+    targets = tuple(target for target in targets if (target.context, target.instance) in pairs)
     bindings = tuple(
         binding
         for binding in bindings
-        if binding.context in contexts and binding.status == "configured"
+        if binding.context in contexts
+        and binding.status == "configured"
+        and (not binding.instance or (binding.context, binding.instance) in pairs)
     )
     keys = tuple(
         sorted(
@@ -287,6 +386,7 @@ def product_setting_source_inventory(
                 *(binding.binding_key for binding in bindings),
                 *(item.key for item in profile.expected_config.runtime_environment_keys),
                 *(item.binding_key for item in profile.expected_config.managed_secret_bindings),
+                *profile.preview.override_env,
                 *profile.preview.copied_env_keys,
                 *profile.preview.required_template_env_keys,
                 *profile.preview.omitted_env_keys,
@@ -304,82 +404,21 @@ def product_setting_source_inventory(
         limit=limit,
     )
     consumers = list(inventory.consumers)
-    aliases: dict[str, str] = {}
-    for override in overrides:
-        if override.context not in contexts:
-            continue
-        groups: dict[str, set[str]] = {}
-        for parameter in override.config_parameters:
-            key = (
-                config_parameter_secret_env_key(parameter.key)
-                if parameter.value.source == "secret_binding"
-                else config_parameter_runtime_key(parameter.key)
-            )
-            groups.setdefault(f"config_parameter:{parameter.value.source}", set()).add(key)
-        for setting in override.addon_settings:
-            identity = f"addon.{setting.addon}.{setting.setting}"
-            secret_key = addon_setting_secret_env_key(
-                addon_name=setting.addon,
-                setting_name=setting.setting,
-            )
-            aliases[secret_key] = identity
-            key = secret_key if setting.value.source == "secret_binding" else identity
-            groups.setdefault(f"addon:{setting.value.source}", set()).add(key)
-        if override.website_bootstrap is not None:
-            groups["website_bootstrap"] = {
-                f"website_bootstrap.{key}" for key in override.website_bootstrap.model_fields_set
-            }
-        if override.website_settings is not None:
-            groups["website_settings"] = {
-                f"website_settings.{key}"
-                for key in override.website_settings.settings.model_fields_set
-            }
-        consumers.extend(
-            SettingConsumer(
-                kind="odoo_override",
-                product=profile.product,
-                context=override.context,
-                instance=override.instance,
-                scope=scope,
-                selected_keys=tuple(sorted(names)),
-            )
-            for scope, names in sorted(groups.items())
-        )
-    if profile.preview.context:
-        template_keys = set(profile.preview.copied_env_keys)
-        if profile.driver_id == "odoo":
-            template_keys.update(
-                key
-                for consumer in consumers
-                if consumer.context == profile.preview.context
-                and consumer.instance in {"", profile.preview.template_instance}
-                and consumer.kind
-                in {"runtime_record", "target_overlay", "secret_binding", "odoo_override"}
-                for key in consumer.selected_keys or ()
-            )
-        template_keys.difference_update(profile.preview.omitted_env_keys)
-        template_keys.difference_update(
-            key
-            for record in records
-            if record.scope == "instance"
-            and (record.context, record.instance)
-            == (profile.preview.context, profile.preview.template_instance)
-            for key in record.retired_provider_keys
-        )
-        consumers.append(
-            SettingConsumer(
-                kind="preview_template",
-                product=profile.product,
-                context=profile.preview.context,
-                instance=profile.preview.template_instance,
-                scope="template_input_unverified",
-                selected_keys=tuple(sorted(template_keys)),
-            )
-        )
+    bindings_by_id = {binding.binding_id: binding for binding in bindings}
+    consumers.extend(
+        source
+        for record in overrides
+        if (record.context, record.instance) in pairs
+        for source in _override_sources(record, profile.product, bindings_by_id)
+    )
     sources_truncated = (
         inventory.truncated
         or len(consumers) > limit
-        or any(len(consumer.selected_keys or ()) > limit for consumer in consumers)
+        or any(
+            len(consumer.selected_keys or ()) > limit or len(consumer.references) > limit
+            for consumer in consumers
+        )
+        or any(len(record.retired_provider_keys) > limit for record in records)
     )
     consumers = [
         consumer.model_copy(
@@ -387,77 +426,56 @@ def product_setting_source_inventory(
                 "selected_keys": consumer.selected_keys[:limit]
                 if consumer.selected_keys is not None
                 else None,
+                "references": consumer.references[:limit],
             }
         )
         for consumer in consumers[:limit]
     ]
-    lanes = []
-    for lane in lane_targets:
-        sources = tuple(
-            consumer
-            for consumer in consumers
-            if consumer.context in {"", lane.context}
-            and consumer.kind != "lane"
-            and (
-                lane.instance == "preview"
-                if consumer.kind in {"preview_template", "preview_policy", "preview_profile"}
-                else consumer.instance in {"", lane.instance}
-                and (lane.instance != "preview" or consumer.instance == "preview")
-            )
+    lanes = tuple(
+        LaneSettingSources(
+            context=lane.context,
+            instance=lane.instance,
+            sources=tuple(
+                consumer
+                for consumer in consumers
+                if consumer.context in {"", lane.context}
+                and consumer.kind != "lane"
+                and (
+                    lane.instance == "preview"
+                    if consumer.kind in {"preview_policy", "preview_profile"}
+                    else consumer.instance in {"", lane.instance}
+                    and (lane.instance != "preview" or consumer.instance == "preview")
+                )
+            ),
+            retired_keys=tuple(
+                sorted(
+                    {
+                        key
+                        for record in records
+                        if record.scope == "instance"
+                        and (record.context, record.instance) == (lane.context, lane.instance)
+                        for key in record.retired_provider_keys
+                    }
+                )
+            )[:limit],
         )
-        supplied: dict[str, int] = {}
-        for source in sources:
-            if source.kind not in {
-                "runtime_record",
-                "target_overlay",
-                "secret_binding",
-                "odoo_override",
-                "preview_template",
-            }:
-                continue
-            if source.kind == "odoo_override" and source.scope.endswith(
-                (":runtime_environment", ":secret_binding")
-            ):
-                continue
-            for key in source.selected_keys or ():
-                identity = aliases.get(key, key)
-                if identity.startswith(CONFIG_PARAMETER_SECRET_PREFIX):
-                    identity = CONFIG_PARAMETER_RUNTIME_PREFIX + identity.removeprefix(
-                        CONFIG_PARAMETER_SECRET_PREFIX
-                    )
-                supplied[identity] = supplied.get(identity, 0) + 1
-        lanes.append(
-            LaneSettingSources(
-                context=lane.context,
-                instance=lane.instance,
-                sources=sources,
-                overlapping_keys=tuple(sorted(key for key, count in supplied.items() if count > 1)),
-                retired_keys=tuple(
-                    sorted(
-                        {
-                            key
-                            for record in records
-                            if record.scope == "instance"
-                            and (record.context, record.instance) == (lane.context, lane.instance)
-                            for key in record.retired_provider_keys
-                        }
-                    )
-                ),
-            )
-        )
+        for lane in lane_targets[:limit]
+    )
+    previews = tuple(previews)
+    anchor_repo = generic_web_preview_anchor_repo(profile.repository)
     preview_targets = tuple(
         PreviewSettingSourceTarget(
             preview_id=preview.preview_id, context=preview.context, state=preview.state
         )
         for preview in previews
         if preview.context == profile.preview.context
-        and preview.anchor_repo == profile.repository.split("/")[-1]
+        and preview.anchor_repo == anchor_repo
         and preview.state != "destroyed"
     )
     return ProductSettingSourceInventory(
         product=profile.product,
-        lanes=tuple(lanes),
+        lanes=lanes,
         preview_targets=preview_targets[:limit],
-        preview_targets_truncated=len(preview_targets) > limit,
+        preview_targets_truncated=len(previews) > limit,
         sources_truncated=sources_truncated,
     )

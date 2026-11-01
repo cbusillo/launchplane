@@ -446,7 +446,11 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
     def _environment_read_app(
-        self, *, products: tuple[str, ...], instances: tuple[str, ...] = ("prod", "testing")
+        self,
+        *,
+        products: tuple[str, ...],
+        instances: tuple[str, ...] = ("prod", "testing"),
+        context_actions: tuple[str, ...] = (),
     ) -> FastAPI:
         """No secret actions: the standing environment read for ``products`` only."""
         profile_rule = _local_operator_policy(actions=("product_profile.read",)).local_operators[0]
@@ -463,7 +467,21 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=LaunchplaneAuthzPolicy(
-                schema_version=2, local_operators=(profile_rule, config_rule, read_rule)
+                schema_version=2,
+                local_operators=(
+                    profile_rule,
+                    config_rule,
+                    read_rule,
+                    *(
+                        (
+                            _local_operator_policy(
+                                actions=context_actions, products=products
+                            ).local_operators[0],
+                        )
+                        if context_actions
+                        else ()
+                    ),
+                ),
             ),
             record_store_factory=lambda: self.store,
             bearer_identity_config=BearerIdentityConfig(
@@ -822,6 +840,26 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 403, response.text)
         self.assertNotIn(self.source.name, response.text)
+
+    @scoped_agent_test
+    async def test_setting_sources_require_context_and_instance_environment_reads(self) -> None:
+        for context_actions, expected_status in (
+            (("preview.read",), 403),
+            (("preview.read", "product_environment.read"), 200),
+        ):
+            with self.subTest(context_actions=context_actions):
+                app = self._environment_read_app(
+                    products=(self.profile.product,),
+                    instances=("*",),
+                    context_actions=context_actions,
+                )
+                response = await _asgi_request(
+                    app,
+                    "GET",
+                    f"/v1/products/{self.profile.product}/secret-bindings?include_setting_sources=true",
+                    headers={"Authorization": "Bearer test-operator-token"},
+                )
+                self.assertEqual(response.status_code, expected_status, response.text)
 
     async def test_selection_reports_global_context_and_instance_sources_without_values(
         self,

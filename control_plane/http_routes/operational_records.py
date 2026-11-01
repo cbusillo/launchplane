@@ -52,6 +52,7 @@ from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.storage.factory import storage_backend_name
 from control_plane.outbox_inspection import OutboxInspection, OutboxInspectionStore, inspect_outbox
 from control_plane.runtime_setting_inventory import (
+    SETTING_SOURCE_LIMIT,
     ProductSettingSourceInventory,
     product_setting_source_inventory,
 )
@@ -855,18 +856,22 @@ def register_managed_secret_read_routes(
                 instance: str,
                 *,
                 environment_read: bool,
+                secret_read: bool = True,
             ) -> bool:
                 target = AuthorizationTarget(
                     scope="instance" if instance else "context",
                     instances=(instance,) if instance else (),
                 )
-                return dependencies.authorization_allows(
-                    identity=identity,
-                    action="secret.list",
-                    product=LAUNCHPLANE_SERVICE_CONTEXT,
-                    context=context,
-                    target=target,
-                    inherit_agent_read_role=False,
+                return (
+                    secret_read
+                    and dependencies.authorization_allows(
+                        identity=identity,
+                        action="secret.list",
+                        product=LAUNCHPLANE_SERVICE_CONTEXT,
+                        context=context,
+                        target=target,
+                        inherit_agent_read_role=False,
+                    )
                 ) or (
                     environment_read
                     and dependencies.authorization_allows(
@@ -886,23 +891,30 @@ def register_managed_secret_read_routes(
             )
             setting_sources = None
             if include_setting_sources:
+                from control_plane.workflows.generic_web_preview import (
+                    generic_web_preview_anchor_repo,
+                )
+
                 source_context_owners = product_context_owner_map(profiles, config_scopes=True)
-                if not universal_secret_reader and not all(
-                    dependencies.authorization_allows(
-                        identity=identity,
-                        action=action,
-                        product=product,
-                        context=lane.context,
-                        target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
-                        inherit_agent_read_role=False,
+                source_scopes_readable = universal_secret_reader or all(
+                    metadata_scope_read_allowed(
+                        lane.context, instance, environment_read=True, secret_read=False
                     )
                     for lane in product_config_targets(profile)
-                    for action in (
-                        ("product_environment.read", "preview.read")
-                        if lane.instance == "preview"
-                        else ("product_environment.read",)
+                    for instance in ("", lane.instance)
+                )
+                previews_readable = (
+                    universal_secret_reader
+                    or not profile.preview.context
+                    or dependencies.authorization_allows(
+                        identity=identity,
+                        action="preview.read",
+                        product=product,
+                        context=profile.preview.context,
+                        inherit_agent_read_role=False,
                     )
-                ):
+                )
+                if not source_scopes_readable or not previews_readable:
                     raise dependencies.http_error(
                         status_code=403,
                         trace_id=trace_id,
@@ -941,7 +953,8 @@ def register_managed_secret_read_routes(
                     overrides=getattr(record_store, "list_odoo_instance_override_records")(),
                     previews=getattr(record_store, "list_preview_records")(
                         context_name=profile.preview.context,
-                        anchor_repo=profile.repository.split("/")[-1],
+                        anchor_repo=generic_web_preview_anchor_repo(profile.repository),
+                        limit=SETTING_SOURCE_LIMIT + 1,
                     ),
                 )
             bindings = product_secret_copy.product_secret_binding_metadata(store, product=product)
