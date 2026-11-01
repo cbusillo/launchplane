@@ -550,6 +550,7 @@ def capture_rebuild_intent(
                 new_backend=f"http://{namespace}:{profile.runtime_port}",
                 raw=raw,
                 public_entrypoints=points,
+                static_configuration=frame["static_configuration"],
                 owned_document=owned,
                 recorded_template=template,
                 aliases=aliases,
@@ -938,6 +939,7 @@ class NativeTestingRebuildExecution:
             new_backend=f"http://{self.adapter.namespace}:{self.intent.profile.runtime_port}",
             raw=frame["raw"],
             public_entrypoints=self.intent.public_entrypoints,
+            static_configuration=frame["static_configuration"],
             owned_document=json.loads(frame["owned_file"])
             if frame["owned_file"] is not None
             else None,
@@ -1631,6 +1633,7 @@ class NativeTestingRebuildExecution:
                 new_backend=self.plan.new.private_url,
                 raw=frame["raw"],
                 public_entrypoints=self.intent.public_entrypoints,
+                static_configuration=frame["static_configuration"],
                 owned_document=json.loads(frame["owned_file"])
                 if frame["owned_file"] is not None
                 else None,

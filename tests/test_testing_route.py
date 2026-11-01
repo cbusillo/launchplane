@@ -241,12 +241,21 @@ class TestingRouteTests(unittest.TestCase):
                     )
                 applied[section][name + "@file"] = {**observed, "status": "enabled"}
 
-        def plan(previous: TestingLaneRoute | None = None) -> TestingLaneRoute:
+        listener_tls = deepcopy(applied["routers"]["old-https@file"]["tls"])
+        static: dict[str, Any] = {
+            "entryPoints": {"web": {}, "websecure": {"http": {"tls": listener_tls}}}
+        }
+        document["http"]["routers"]["old-https"].pop("tls")
+
+        def plan(
+            previous: TestingLaneRoute | None = None, *, configuration: str | None = None
+        ) -> TestingLaneRoute:
             self.raw = applied
             return self.plan(
                 application_document=document,
                 application_file_name="old-app.yml",
                 application_file_sha256=hashlib.sha256(json.dumps(document).encode()).hexdigest(),
+                static_configuration=json.dumps(static) if configuration is None else configuration,
                 **(
                     {
                         "recorded_template": previous.template,
@@ -260,6 +269,30 @@ class TestingRouteTests(unittest.TestCase):
 
         recorded = plan()
         self.assertEqual(recorded.legacy_backend, self.old_address)
+        static["core"] = {"defaultRuleSyntax": "v2"}
+        for router in applied["routers"].values():
+            router["ruleSyntax"] = static["core"]["defaultRuleSyntax"]
+        self.assertEqual(plan().legacy_backend, self.old_address)
+        document["http"]["routers"]["old-https"]["ruleSyntax"] = "v3"
+        with self.assertRaises(ValueError):
+            plan()
+        document["http"]["routers"]["old-https"].pop("ruleSyntax")
+        static.pop("core")
+        for router in applied["routers"].values():
+            router.pop("ruleSyntax")
+        with self.assertRaises(ValueError):
+            plan(configuration="")
+        document["http"]["routers"]["old-https"]["tls"] = {"certResolver": "different"}
+        with self.assertRaises(ValueError):
+            plan()
+        document["http"]["routers"]["old-https"].pop("tls")
+        static["entryPoints"]["websecure"]["http"] = {}
+        with self.assertRaises(ValueError):
+            plan()
+        document["http"]["routers"]["old-https"]["tls"] = deepcopy(listener_tls)
+        self.assertEqual(plan().legacy_backend, self.old_address)
+        document["http"]["routers"]["old-https"].pop("tls")
+        static["entryPoints"]["websecure"]["http"] = {"tls": listener_tls}
         physical_applied = deepcopy(applied)
         applied = self.apply(recorded, self.old)
         self.assertEqual(plan(recorded).legacy_routers, recorded.legacy_routers)
@@ -463,6 +496,14 @@ class TestingRouteTests(unittest.TestCase):
         self.raw["routers"]["old-http@docker"]["middlewares"] = [redirect]
         tls = {"certResolver": "fixture-resolver", "options": "default@file"}
         self.raw["routers"]["old-https@docker"]["tls"] = tls
+        with self.assertRaises(ValueError):
+            self.plan(
+                static_configuration=(
+                    "entryPoints:\n  web:\n    http:\n      middlewares: ["
+                    + redirect
+                    + "]\n  websecure: {}\n"
+                )
+            )
         plan = self.plan()
         document = route_document(plan, self.new)
         for router in document["http"]["routers"].values():
