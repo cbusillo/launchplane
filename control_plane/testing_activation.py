@@ -981,8 +981,13 @@ class TestingActivationAdapter:
                 *self.store.list_provider_target_records(),
                 *self.store.list_dokploy_target_id_records(),
             )
+            protected_ids = (
+                {record.target_id}
+                if record.published
+                else {record.target_id, record.retained_target_id.target_id}
+            )
             if any(
-                row.target_id in {record.target_id, record.retained_target_id.target_id}
+                row.target_id in protected_ids
                 and (row.context, row.instance) != (record.context, "testing")
                 for row in physical
             ):

@@ -776,11 +776,12 @@ and route custody are verified, a known retirement refusal clears only this
 operation's hold so normal testing work can continue. Unknown own provider effects
 stay pending.
 
-The next successful rebuild checks still-retained predecessors from its own exact
-completed rebuild chain, with a separate durable child and delete checkpoint for
-each predecessor. It stops at an earlier finalization that already proved its
-chain absent, and does not adopt ordinary activation history. Static prerequisites
-for still-present ancestors are checked before the new hold. The same
+The next rebuild checks its immediate predecessor and the unresolved copies
+recorded by the serving rebuild's finalization, with a separate durable child and
+delete checkpoint for each predecessor. Those records carry exact activation
+identities; already-retired copies are not carried forward, and ordinary activation
+history is not adopted. An older leftover's static refusal does not block a new
+independent testing copy. The same
 identity, empty-state, quiescence, health and absence requirements apply.
 Unverified health keeps the original operation pending.
 

@@ -200,32 +200,8 @@ def inspect_generic_web_testing_rebuild(
         mode="stateless",
     )
     serving = activation_record(store, intent.profile.product, intent.before.target.context)
-    if serving is not None and rebuild_operation(store, serving) is not None:
-        ancestors = (
-            []
-            if completed_rebuild_retirement(store, serving)
-            else retirement_lineage(store, serving)
-        )
-        for ancestor in ancestors:
-            readiness = ancestor.application_readiness
-            assert readiness is not None and readiness.route is not None
-            assert readiness.route_execution is not None
-            identifier = ancestor.retained_target_id.target_id
-            try:
-                previous = api.fetch_dokploy_target_payload(
-                    host=host, token=token, target_type="application", target_id=identifier
-                )
-            except api.DokployRequestFailed as error:
-                if error.status_code == 404:
-                    continue
-                raise
-            require_predecessor_metadata(
-                previous,
-                target_id=identifier,
-                application=urlsplit(readiness.route.old_backend or "").hostname or "",
-                server_id=readiness.route_execution.server_id,
-            )
-            require_disabled_predecessor_schedules(host, token, identifier)
+    if serving is not None:
+        unresolved_predecessors(store, serving)
     return specification
 
 
@@ -275,18 +251,6 @@ def rebuild_finalization(
     return None
 
 
-def completed_rebuild_retirement(
-    store: PostgresRecordStore, record: TestingActivationRecord
-) -> bool:
-    row = rebuild_finalization(store, record)
-    if row is None or row.provider_effect_phase != FINALIZATION_CLEAR_PHASE:
-        return False
-    result = row.response_payload["result"]
-    return result.get("health_status") == result.get(
-        "post_deploy_status"
-    ) == "pass" and not result.get("error_code")
-
-
 def predecessor_retirement_binding(
     successor: TestingActivationRecord, predecessor: TestingActivationRecord
 ) -> str:
@@ -295,67 +259,76 @@ def predecessor_retirement_binding(
     )
 
 
-def completed_predecessor_retirement(
-    store: PostgresRecordStore, record: TestingActivationRecord
-) -> bool:
-    finalization = rebuild_finalization(store, record)
-    if finalization is None:
-        return False
-    row = store.read_idempotency_record(
-        scope=record.scope,
-        route_path=REBUILD_ROUTE + ":retirement",
-        idempotency_key=finalization.idempotency_key.removesuffix(":finalization")
-        + ":retirement:"
-        + record.plan_sha256,
-    )
-    return (
-        row is not None
-        and row.state == "completed"
-        and row.reconciliation_key == predecessor_retirement_binding(record, record)
-        and row.response_payload.get("retired") is True
-        and row.response_payload.get("target_id") == record.retained_target_id.target_id
-    )
-
-
-def retirement_lineage(
+def unresolved_predecessors(
     store: PostgresRecordStore, record: TestingActivationRecord
 ) -> list[TestingActivationRecord]:
+    if rebuild_operation(store, record) is None:
+        return []
+    if not completed_application_activation(store, record):
+        raise NativeTestingRebuildPending("The previous serving activation is not complete.")
+    finalization = rebuild_finalization(store, record)
+    if finalization is None:
+        raise NativeTestingRebuildPending("The previous rebuild finalization is unavailable.")
+    source = finalization.response_payload["result"]["runtime_source"]
+    raw_identifiers = source.get("retained_predecessors")
+    raw_plans = source.get("retained_predecessor_plans")
+    if not isinstance(raw_identifiers, str) or not isinstance(raw_plans, str):
+        raise NativeTestingRebuildPending(
+            "The previous unresolved predecessor evidence is unavailable."
+        )
+    identifiers = raw_identifiers.split(",") if raw_identifiers else []
+    plans = raw_plans.split(",") if raw_plans else []
+    if (
+        len(identifiers) != len(plans)
+        or len(set(plans)) != len(plans)
+        or len(set(identifiers)) != len(identifiers)
+    ):
+        raise NativeTestingRebuildPending(
+            "The previous unresolved predecessor evidence is ambiguous."
+        )
     candidates = [
         TestingActivationRecord.model_validate(value)
         for value in store.list_testing_application_activations(record.product, record.context)
     ]
-    lineage = [record]
-    current = record
-    seen = {record.target_id}
-    while True:
-        retained = current.retained_target_id.target_id
-        if retained in seen:
-            raise NativeTestingRebuildPending("The recorded predecessor chain is ambiguous.")
-        seen.add(retained)
-        predecessors = [
-            value for value in candidates if value.target_id == retained and value.published
+    unresolved = []
+    for plan, identifier in zip(plans, identifiers, strict=True):
+        matches = [
+            value
+            for value in candidates
+            if value.plan_sha256 == plan
+            and value.retained_target_id.target_id == identifier
+            and completed_application_activation(store, value)
+            and rebuild_operation(store, value) is not None
         ]
-        if not predecessors:
-            return lineage
-        if len(predecessors) != 1:
-            raise NativeTestingRebuildPending("The recorded predecessor chain is ambiguous.")
-        previous = predecessors[0]
-        readiness = previous.application_readiness
-        if (
-            rebuild_operation(store, previous) is None
-            or completed_rebuild_retirement(store, previous)
-            or not completed_application_activation(store, previous)
-            or previous.request.application is None
-            or previous.request.application.state.kind != "none"
-            or readiness is None
-            or readiness.route is None
-            or readiness.route_execution is None
-            or previous.predecessor is None
-        ):
-            return lineage
-        if not completed_predecessor_retirement(store, previous):
-            lineage.append(previous)
-        current = previous
+        if len(matches) != 1:
+            raise NativeTestingRebuildPending(
+                "An unresolved predecessor has no exact completed activation."
+            )
+        unresolved.append(matches[0])
+    return unresolved
+
+
+def rebuild_predecessors(
+    store: PostgresRecordStore, record: TestingActivationRecord
+) -> list[TestingActivationRecord]:
+    previous = [
+        TestingActivationRecord.model_validate(value)
+        for value in store.list_testing_application_activations(record.product, record.context)
+        if value.get("target_id") == record.retained_target_id.target_id
+        and value.get("published") is True
+    ]
+    if len(previous) > 1:
+        raise NativeTestingRebuildPending("The previous serving activation is ambiguous.")
+    carried = unresolved_predecessors(store, previous[0]) if previous else []
+    if any(
+        value.retained_target_id.target_id
+        in {record.target_id, record.retained_target_id.target_id}
+        for value in carried
+    ):
+        raise NativeTestingRebuildPending(
+            "The unresolved predecessor set aliases the current generation."
+        )
+    return [record, *carried]
 
 
 def require_predecessor_metadata(
@@ -538,7 +511,7 @@ class GenericWebTestingRebuildFinalizer:
                 raise NativeTestingRebuildPending(
                     "The original candidate is not qualified for retirement."
                 )
-            for predecessor in retirement_lineage(self.execution.store, self.record):
+            for predecessor in rebuild_predecessors(self.execution.store, self.record):
                 self.execution.retire_predecessor(self.activation, self.record, predecessor)
             self.activation.require_unchanged(self.record)
             self.activation.verify_provider(self.record)
@@ -684,7 +657,7 @@ class GenericWebTestingRebuildExecution:
             raise NativeTestingRebuildPending("The testing recipient changed outside this rebuild.")
         if any(
             (row.context, row.instance) != (self.operation.context, "testing")
-            and row.target_id in {expected_id, self.intent.before.target_id.target_id}
+            and row.target_id == expected_id
             for row in self.store.list_dokploy_target_id_records()
         ):
             raise NativeTestingRebuildPending("A shared target is protected from this rebuild.")
@@ -900,7 +873,7 @@ class GenericWebTestingRebuildExecution:
         self, record: TestingActivationRecord
     ) -> list[tuple[TestingActivationRecord, bool]]:
         results = []
-        for predecessor in retirement_lineage(self.store, record):
+        for predecessor in rebuild_predecessors(self.store, record):
             child = self.store.read_idempotency_record(
                 scope=self.scope,
                 route_path=REBUILD_ROUTE + ":retirement",
@@ -939,11 +912,12 @@ class GenericWebTestingRebuildExecution:
         removal_started = original_phase in {"retire_predecessor", "remove_retired_service"}
         deploy_setting_unobserved = original_phase == "disable_old_deploys"
 
-        def retain_predecessor() -> bool:
+        def retain_predecessor(cause: ValueError | None = None) -> bool:
             if removal_started or deploy_setting_unobserved:
                 raise NativeTestingRebuildPending(
-                    "The original predecessor removal remains unsettled."
-                )
+                    "The original predecessor effect remains unsettled. "
+                    + (str(cause) if cause else "")
+                ) from cause
             return False
 
         successor_readiness = record.application_readiness
@@ -951,10 +925,10 @@ class GenericWebTestingRebuildExecution:
             raise NativeTestingRebuildPending("The original candidate has not been published.")
         if (
             predecessor is not None
-            and predecessor not in retirement_lineage(self.store, record)[1:]
+            and predecessor not in rebuild_predecessors(self.store, record)[1:]
         ):
             raise NativeTestingRebuildPending(
-                "The earlier predecessor is outside the original chain."
+                "The earlier predecessor is outside the original unresolved set."
             )
         retained = predecessor or record
         readiness = retained.application_readiness
@@ -980,8 +954,7 @@ class GenericWebTestingRebuildExecution:
             self.require_retirement_custody(retained)
         except NativeTestingRebuildPending:
             if (
-                predecessor is not None
-                and isinstance(lease, ProviderEvidenceLease)
+                isinstance(lease, ProviderEvidenceLease)
                 and not lease.evidence_reservation().provider_effect_started_at
             ):
                 return False
@@ -994,7 +967,7 @@ class GenericWebTestingRebuildExecution:
             )
         except api.DokployRequestFailed as error:
             if error.status_code == 404:
-                pass
+                deploy_setting_unobserved = False
             else:
                 raise
         if payload is not None:
@@ -1025,8 +998,8 @@ class GenericWebTestingRebuildExecution:
                     server_id=readiness.route_execution.server_id,
                 )
                 require_disabled_predecessor_schedules(host, token, old_id)
-            except TestingRebuildRefused:
-                return retain_predecessor()
+            except TestingRebuildRefused as error:
+                return retain_predecessor(error)
             if payload.get("autoDeploy") is not False:
                 if removal_started:
                     raise NativeTestingRebuildPending(
@@ -1045,9 +1018,9 @@ class GenericWebTestingRebuildExecution:
                 self.require_retirement_quiescent(
                     host, token, old_id, application, readiness.route_execution.server_id
                 )
-            except NativeTestingRebuildPending:
+            except NativeTestingRebuildPending as error:
                 if predecessor is not None:
-                    return retain_predecessor()
+                    return retain_predecessor(error)
                 raise
             deploy_setting_unobserved = False
             require_unmounted_retirement_application(control_plane_root=self.root, target_id=old_id)
@@ -1394,15 +1367,12 @@ class GenericWebTestingRebuildExecution:
     ) -> OdooStableTargetReplacementApplyResult:
         ready = record.published and record.failure is None
         readiness = record.application_readiness
-        retained = (
-            [
-                predecessor.retained_target_id.target_id
-                for predecessor, retired in self.retirement_results(record)
-                if not retired
-            ]
+        retained_records = (
+            [predecessor for predecessor, retired in self.retirement_results(record) if not retired]
             if ready
             else []
         )
+        retained = [value.retained_target_id.target_id for value in retained_records]
         error_message = ""
         if not ready:
             error_message = "The candidate failed; the original testing copy remains selected."
@@ -1436,7 +1406,10 @@ class GenericWebTestingRebuildExecution:
                 "testing_rebuild": self.operation.operation_id,
                 "testing_activation": record.plan_sha256,
                 "copy_source": "empty",
-                **({"retained_predecessors": ",".join(retained)} if retained else {}),
+                "retained_predecessors": ",".join(retained),
+                "retained_predecessor_plans": ",".join(
+                    value.plan_sha256 for value in retained_records
+                ),
             },
             error_code=record.failure.kind
             if record.failure is not None

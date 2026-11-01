@@ -9,6 +9,7 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.dokploy import api
 from control_plane import testing_application_activation as activation
 from control_plane.testing_rebuild_service import NativeTestingRebuildPending
+from control_plane.testing_rebuild_driver import TestingRebuildRefused
 from control_plane.testing_separation_resources import SeparationResourcesAdapter
 from control_plane.service_auth import BearerIdentityConfig
 from tests import test_generic_web_testing_rebuild as flows
@@ -222,10 +223,12 @@ class GenericWebTestingRebuildRecoveryTests(flows.GenericWebTestingRebuildFlowFi
             "_database_mutation_timestamp",
             return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
         ):
-            with self.assertRaises(NativeTestingRebuildPending):
+            with self.assertRaises(NativeTestingRebuildPending) as pending:
                 self.execute(1)
             self.assertIsNotNone(self.hold())
             self.assertEqual(self.deleted, [])
+            self.assertIsInstance(pending.exception.__cause__, TestingRebuildRefused)
+            self.assertIn(str(pending.exception.__cause__), str(pending.exception))
             self.flow.payloads[self.flow.old_id]["previewDeployments"] = []
             self.assertEqual(self.execute(1).post_deploy_status, "pass")
         self.assertIsNone(self.hold())
@@ -253,10 +256,12 @@ class GenericWebTestingRebuildRecoveryTests(flows.GenericWebTestingRebuildFlowFi
             "_database_mutation_timestamp",
             return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
         ):
-            with self.assertRaises(NativeTestingRebuildPending):
+            with self.assertRaises(NativeTestingRebuildPending) as pending:
                 self.execute(1)
             self.assertIsNotNone(self.hold())
             self.assertTrue(self.flow.payloads[self.flow.old_id]["autoDeploy"])
+            self.assertIsInstance(pending.exception.__cause__, TestingRebuildRefused)
+            self.assertIn(str(pending.exception.__cause__), str(pending.exception))
             self.flow.payloads[self.flow.old_id]["autoDeploy"] = False
             result = self.execute(1)
         self.assertEqual(result.health_status, "pass")
@@ -277,6 +282,33 @@ class GenericWebTestingRebuildRecoveryTests(flows.GenericWebTestingRebuildFlowFi
         self.assertEqual(self.deleted, [])
         self.assertEqual(result.target_id, self.flow.old_id)
         self.assertEqual(len(self.flow.projects), 1)
+
+    def test_external_metadata_absence_settles_an_unanswered_deploy_disable(self) -> None:
+        request = api.dokploy_request
+
+        def unanswered(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/application.update" and kwargs.get("payload") == {
+                "applicationId": self.flow.old_id,
+                "autoDeploy": False,
+            }:
+                raise OSError("Unanswered automatic deployment edit")
+            return request(**kwargs)
+
+        with patch.object(api, "dokploy_request", side_effect=unanswered):
+            with self.assertRaises(NativeTestingRebuildPending):
+                self.execute(1)
+        self.remove_provider_metadata(self.flow.old_id)
+        with patch.object(
+            self.store,
+            "_database_mutation_timestamp",
+            return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+        ):
+            result = self.execute(1)
+        self.assertEqual(result.health_status, "pass")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertIsNone(self.hold())
+        self.assertIn("old-app", self.flow.services)
+        self.assertEqual(self.deleted, [])
 
     def test_real_worker_recovers_published_original_after_state_change(self) -> None:
         from control_plane import service_agent_identities, service_bootstrap

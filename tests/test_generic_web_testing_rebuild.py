@@ -822,14 +822,7 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
         def delete(**kwargs: Any) -> None:
             identifier = kwargs["application_id"]
             self.assertIn(identifier, {self.expected_retirement, *self.retained_predecessors})
-            payload = self.flow.payloads.pop(identifier)
-            for project in self.flow.projects:
-                for environment in project["environments"]:
-                    environment["applications"] = [
-                        row
-                        for row in environment["applications"]
-                        if row["applicationId"] != identifier
-                    ]
+            payload = self.remove_provider_metadata(identifier)
             (self.routing.root / (payload["appName"] + ".yml")).unlink(missing_ok=True)
             self.reload_routes()
             if not self.keep_predecessor_service:
@@ -960,6 +953,15 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
                 or labels.get("com.docker.swarm.service.name") == application
             ):
                 self.flow.containers.pop(key)
+
+    def remove_provider_metadata(self, identifier: str) -> dict[str, Any]:
+        payload = self.flow.payloads.pop(identifier)
+        for project in self.flow.projects:
+            for environment in project["environments"]:
+                environment["applications"] = [
+                    row for row in environment["applications"] if row["applicationId"] != identifier
+                ]
+        return payload
 
     def execute(self, attempt: int) -> Any:
         from control_plane.testing_rebuild_service import execute_native_testing_rebuild

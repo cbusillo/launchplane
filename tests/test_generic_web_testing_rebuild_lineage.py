@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from copy import deepcopy
 from typing import Any
 from unittest.mock import patch
 
@@ -117,16 +118,17 @@ class PredecessorLineageTests(generic.GenericWebTestingRebuildFlowFixture):
         self.assertEqual(result.post_deploy_status, "pass")
         self.assertIsNone(self.hold())
 
-    def test_retained_ancestor_preview_refuses_before_the_next_hold(self) -> None:
+    def test_retained_ancestor_preview_does_not_block_rebuilding_testing(self) -> None:
         serving = self.retain_original()
         self.flow.payloads[self.flow.old_id]["previewDeployments"] = [{"id": "preview"}]
         result = self.execute(2)
-        self.assertEqual(result.deploy_status, "fail")
-        self.assertEqual(result.target_id, serving)
+        self.assertEqual(result.health_status, "pass")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertEqual(result.runtime_source["retained_predecessors"], self.flow.old_id)
         self.assertIsNone(self.hold())
-        self.assertEqual(self.deleted, [])
+        self.assertEqual(self.deleted, [serving])
 
-    def test_retained_ancestor_schedule_refuses_before_the_next_hold(self) -> None:
+    def test_retained_ancestor_schedule_does_not_block_rebuilding_testing(self) -> None:
         serving = self.retain_original()
         request = api.dokploy_request
 
@@ -137,10 +139,11 @@ class PredecessorLineageTests(generic.GenericWebTestingRebuildFlowFixture):
 
         with patch.object(api, "dokploy_request", side_effect=schedule):
             result = self.execute(2)
-        self.assertEqual(result.deploy_status, "fail")
-        self.assertEqual(result.target_id, serving)
+        self.assertEqual(result.health_status, "pass")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertEqual(result.runtime_source["retained_predecessors"], self.flow.old_id)
         self.assertIsNone(self.hold())
-        self.assertEqual(self.deleted, [])
+        self.assertEqual(self.deleted, [serving])
 
     def assert_late_prerequisite_is_reported(self, *, preview: bool) -> None:
         previous = self.retain_original()
@@ -240,3 +243,113 @@ class PredecessorLineageTests(generic.GenericWebTestingRebuildFlowFixture):
         self.assertIsNone(self.hold())
         self.assertEqual(self.deleted, [first.target_id, second.target_id])
         self.assertIn("old-app", self.flow.services)
+
+    def test_newer_unresolved_copy_does_not_revive_an_older_completed_retirement(self) -> None:
+        previous = self.retain_original()
+
+        def transferred(phase: str) -> None:
+            if phase == "testing_rebuild_finalization":
+                current = self.store.read_provider_target_record(
+                    context_name=self.flow.context, instance_name="testing"
+                )
+                self.store.write_provider_target_record(
+                    current.model_copy(update={"context": "another-lane", "target_id": previous})
+                )
+
+        self.authorize.side_effect = transferred
+        second = self.execute(2)
+        self.assertEqual(second.runtime_source["retained_predecessors"], previous)
+        self.assertEqual(self.deleted, [self.flow.old_id])
+        observe = inspect_application_state
+        obsolete_observations: list[str] = []
+
+        def obsolete_host(**kwargs: Any) -> Any:
+            if kwargs["application"] == "old-app":
+                obsolete_observations.append(kwargs["application"])
+                raise ValueError("The retired older host no longer exists")
+            return observe(**kwargs)
+
+        with patch.object(rebuild, "inspect_application_state", side_effect=obsolete_host):
+            third = self.execute(3)
+        self.assertEqual(obsolete_observations, [])
+        self.assertEqual(third.runtime_source["retained_predecessors"], previous)
+
+    def assert_published_predecessor_alias_is_retained(self, *, provider_only: bool) -> None:
+        def transferred(phase: str) -> None:
+            if phase == "testing_rebuild_finalization":
+                if provider_only:
+                    current = self.store.read_provider_target_record(
+                        context_name=self.flow.context, instance_name="testing"
+                    )
+                    self.store.write_provider_target_record(
+                        current.model_copy(
+                            update={"context": "another-lane", "target_id": self.flow.old_id}
+                        )
+                    )
+                else:
+                    target = self.store.read_dokploy_target_id_record(
+                        context_name=self.flow.context, instance_name="testing"
+                    )
+                    self.store.write_dokploy_target_id_record(
+                        target.model_copy(
+                            update={"context": "another-lane", "target_id": self.flow.old_id}
+                        )
+                    )
+
+        self.authorize.side_effect = transferred
+        result = self.execute(1)
+        self.assertEqual(result.health_status, "pass")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertEqual(result.runtime_source["retained_predecessors"], self.flow.old_id)
+        self.assertIsNone(self.hold())
+        self.assertEqual(self.deleted, [])
+        self.assertIn(self.flow.old_id, self.flow.payloads)
+        self.assertEqual(self.flow.normal("after-old-target-transfer").status, "completed")
+
+    def test_published_immediate_predecessor_provider_alias_reports_not_retired(self) -> None:
+        self.assert_published_predecessor_alias_is_retained(provider_only=True)
+
+    def test_published_immediate_predecessor_target_alias_reports_not_retired(self) -> None:
+        self.assert_published_predecessor_alias_is_retained(provider_only=False)
+
+    def test_published_current_recipient_alias_stays_protected(self) -> None:
+        def shared(phase: str) -> None:
+            if phase == "testing_rebuild_finalization":
+                current = self.store.read_provider_target_record(
+                    context_name=self.flow.context, instance_name="testing"
+                )
+                self.store.write_provider_target_record(
+                    current.model_copy(update={"context": "another-lane"})
+                )
+
+        self.authorize.side_effect = shared
+        with self.assertRaises(NativeTestingRebuildPending):
+            self.execute(1)
+        self.assertIsNotNone(self.hold())
+        self.assertEqual(self.deleted, [])
+
+    def test_missing_unresolved_plan_evidence_keeps_the_next_rebuild_fenced(self) -> None:
+        self.retain_original()
+        read = self.store.read_idempotency_record
+        projects = len(self.flow.projects)
+
+        def incomplete(**kwargs: Any) -> Any:
+            row = read(**kwargs)
+            if row is not None and row.idempotency_key == "generic-cycle-1:finalization":
+                response = deepcopy(row.response_payload)
+                response["result"]["runtime_source"].pop("retained_predecessor_plans")
+                return row.model_copy(update={"response_payload": response})
+            return row
+
+        with patch.object(self.store, "read_idempotency_record", side_effect=incomplete):
+            with self.assertRaises(NativeTestingRebuildPending):
+                self.execute(2)
+        self.assertIsNone(self.hold())
+        self.assertEqual(len(self.flow.projects), projects)
+        self.assertEqual(self.deleted, [])
+        with patch.object(
+            self.store,
+            "_database_mutation_timestamp",
+            return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+        ):
+            self.assertEqual(self.execute(2).post_deploy_status, "pass")
