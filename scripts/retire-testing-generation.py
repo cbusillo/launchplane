@@ -88,7 +88,13 @@ def main() -> int:
             inspection = TestingGenerationCustodyInspection.model_validate(
                 response["result"], extra="ignore"
             )
-            if (
+            if inspection.plan is None:
+                if (inspection.product, inspection.context) != (
+                    args.product,
+                    draft.context,
+                ):
+                    raise ValueError("Hostname inspection belongs to another request.")
+            elif (
                 inspection.plan.product,
                 inspection.plan.context,
                 inspection.plan.operation_id,
