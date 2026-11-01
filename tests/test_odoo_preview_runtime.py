@@ -1620,6 +1620,38 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             restore_upstream=True,
         )
 
+    def test_invalid_worker_count_refuses_before_provider_reads_or_effects(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        for workers in ("auto", " ", "-1"):
+            with (
+                self.subTest(workers=workers),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
+                    side_effect=AssertionError("Provider read reached before worker validation"),
+                ) as fetch,
+            ):
+                result = execute_odoo_preview_dokploy_apply(
+                    control_plane_root=ANY,
+                    request=OdooPreviewDokployApplyRequest(
+                        dry_run_plan=dry_run,
+                        manifest=artifact_manifest_v2(),
+                        environment_values={**_environment_values(), "ODOO_WORKERS": workers},
+                    ),
+                )
+                self.assertEqual(result.status, "fail")
+                self.assertFalse(result.provider_effect_attempted)
+                self.assertFalse(result.created_compose)
+                fetch.assert_not_called()
+
     def test_preview_refuses_incomplete_or_root_upstream_before_provider_effects(self) -> None:
         source = {
             "ODOO_UPSTREAM_HOST": "source.example.test",
