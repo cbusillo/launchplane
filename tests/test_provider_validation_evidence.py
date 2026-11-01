@@ -121,3 +121,30 @@ class ProviderValidationEvidenceTests(unittest.TestCase):
             all(row["loc"][0] in npmplus.NpmplusProxyHost.model_fields for row in validation)
         )
         self.assertNotIn(private, failure.text)
+
+    def test_native_failure_without_sites_retains_only_validated_diagnostic(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+
+        private = "private-native-failure-sentinel"
+        original = NativeProgramFailed(
+            private, predicate=ReadbackPredicate.SETTINGS, kind="refused", program=private
+        )
+        wrapped = ValueError(private)
+        wrapped.__cause__ = original
+        with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+            http_error_evidence.log_handled_error_cause(wrapped, "native-predicate-test")
+        text = logs.records[-1].getMessage()
+        self.assertEqual(json.loads(text)["native_programs"], [original.evidence])
+        self.assertNotIn(private, text)
+
+    def test_unknown_native_diagnostic_without_sites_is_not_logged(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+
+        private = "private-unknown-native-sentinel"
+        original = NativeProgramFailed(private, predicate=private, kind=private, program=private)
+        with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+            http_error_evidence.log_handled_error_cause(original, "native-unknown-test")
+        text = logs.records[-1].getMessage()
+        self.assertNotIn("native_programs", json.loads(text))
+        self.assertNotIn(private, text)
