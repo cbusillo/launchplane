@@ -1130,6 +1130,22 @@ def compile_unavailable_testing_route(
             recorded_template=recorded_template,
             aliases=aliases,
         )
+    if recorded_template is not None:
+        require_independent_listener_middlewares(static, points)
+        projected_routers = []
+        for router in template["http"]["routers"].values():
+            for point in dict.fromkeys(router["entryPoints"]):
+                projected = {**router, "entryPoints": [point]}
+                if router_with_listener_defaults(
+                    projected, static_configuration
+                ) != router_configuration(projected):
+                    raise ValueError("The recorded testing route's listener defaults changed.")
+                projected_routers.append(projected)
+        if any(len(router["entryPoints"]) > 1 for router in template["http"]["routers"].values()):
+            template["http"]["routers"] = {
+                identifier + "-" + str(index): router
+                for index, router in enumerate(projected_routers)
+            }
     return TestingLaneRoute(
         product=product,
         context=context,

@@ -1530,7 +1530,9 @@ class TestingRouteTransportTests(unittest.TestCase):
             "traefik.http.routers.testing.entrypoints": "web,websecure",
         }
 
-        def compile_route(static: dict[str, Any]) -> TestingLaneRoute:
+        def compile_route(
+            static: dict[str, Any], recorded: dict[str, Any] | None = None
+        ) -> TestingLaneRoute:
             return compile_unavailable_testing_route(
                 product=self.plan.product,
                 context=self.plan.context,
@@ -1541,17 +1543,20 @@ class TestingRouteTransportTests(unittest.TestCase):
                 observation_sha256="c" * 64,
                 static_configuration=yaml.safe_dump(static),
                 configured_compose=yaml.safe_dump({"services": {"web": {"labels": labels}}}),
+                recorded_template=recorded,
             )
 
-        for tls, syntax in (
-            (None, None),
-            (False, None),
-            (True, None),
-            (None, "v2"),
-            (True, "v3"),
-            (None, ""),
+        for tls, syntax, recorded in (
+            (None, None, False),
+            (False, None, False),
+            (True, None, False),
+            (None, "v2", False),
+            (True, "v3", False),
+            (None, "", False),
+            (None, None, True),
+            (None, "v2", True),
         ):
-            with self.subTest(tls=tls, syntax=syntax):
+            with self.subTest(tls=tls, syntax=syntax, recorded=recorded):
                 static = deepcopy(original_static)
                 if syntax == "":
                     labels["traefik.http.routers.testing.rulesyntax"] = syntax
@@ -1565,7 +1570,12 @@ class TestingRouteTransportTests(unittest.TestCase):
                     labels.pop("traefik.http.routers.testing.tls", None)
                 if syntax:
                     static["core"] = {"defaultRuleSyntax": syntax}
-                plan = compile_route(static)
+                template = deepcopy(self.plan.template) if recorded else None
+                if template is not None:
+                    for router in template["http"]["routers"].values():
+                        router["entryPoints"] = list(original_static["entryPoints"])
+                        router["ruleSyntax"] = "v3"
+                plan = compile_route(static, template)
                 document = route_document(plan, plan.new_backend)
                 applied = deepcopy(frame["raw"])
                 for section, values in document["http"].items():
@@ -1638,6 +1648,20 @@ class TestingRouteTransportTests(unittest.TestCase):
                 static = deepcopy(original_static)
                 static["entryPoints"]["websecure"]["http"] = {"tls": inherited}
                 compile_route(static)
+        for default in ("syntax", "tls", "middleware"):
+            with self.subTest(recorded_default=default):
+                static = deepcopy(original_static)
+                template = deepcopy(self.plan.template)
+                if default == "syntax":
+                    static["core"] = {"defaultRuleSyntax": "v2"}
+                elif default == "tls":
+                    for router in template["http"]["routers"].values():
+                        router.pop("tls", None)
+                    static["entryPoints"]["websecure"]["http"] = {"tls": {}}
+                else:
+                    static["entryPoints"]["websecure"]["http"] = {"middlewares": ["headers@file"]}
+                with self.assertRaises(ValueError):
+                    compile_route(static, template)
         self.assertEqual(self.effect_count, 0)
 
     def test_recorded_unavailable_template_needs_its_current_tls_resolver(self) -> None:
