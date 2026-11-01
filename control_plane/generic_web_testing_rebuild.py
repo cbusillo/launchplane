@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
 
-from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.canonical_json import (
+    canonical_json_sha256,
+    nonvalidating_compact_sorted_json_sha256,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 from control_plane.contracts.testing_rebuild import REBUILD_ROUTE, REBUILD_SCOPE
@@ -490,7 +493,7 @@ class GenericWebTestingRebuildAdapter:
         return f"testing-rebuild:{self.operation.product}:{self.operation.context}"
 
     def reconciliation_key(self) -> str:
-        return canonical_json_sha256(self.intent.model_dump(mode="json"))
+        return nonvalidating_compact_sorted_json_sha256(self.intent.model_dump(mode="json"))
 
     def observe(self, key: str, phase: str, reconciliation_key: str) -> ProviderObservation:
         if reconciliation_key != self.reconciliation_key():
