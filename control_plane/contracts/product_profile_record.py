@@ -9,6 +9,7 @@ from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverLane
 from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+from control_plane.contracts.testing_application import TestingApplicationState
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
@@ -331,8 +332,29 @@ def product_lane_monitoring_incident_eligible(
     return check_kind not in {"public_http", "tls"} or monitoring_intent == "public"
 
 
+class ProductGenericWebTestingState(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["none", "volume", "postgresql"]
+    container_path: str = ""
+
+    @model_validator(mode="after")
+    def validate_application_state(self) -> "ProductGenericWebTestingState":
+        if self.kind in {"none", "volume"}:
+            TestingApplicationState.model_validate(self.model_dump())
+        elif self.container_path:
+            raise ValueError("Only a local volume can declare an application state path.")
+        return self
+
+
 class ProductLaneProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    generic_web_testing_state: ProductGenericWebTestingState | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     odoo_testing_drill_enabled: bool = Field(
         default=False,
         exclude_if=lambda value: not value,
@@ -376,6 +398,8 @@ class ProductLaneProfile(BaseModel):
 
     @model_validator(mode="after")
     def _validate_lane(self) -> "ProductLaneProfile":
+        if self.generic_web_testing_state is not None and self.instance != "testing":
+            raise ValueError("Testing state declarations require the testing instance.")
         if (
             self.odoo_testing_drill_enabled or self.odoo_testing_drill_storage
         ) and self.instance != "testing":
@@ -847,6 +871,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "LaunchplaneProductProfileRecord":
+        if self.driver_id != "generic-web" and any(
+            lane.generic_web_testing_state is not None for lane in self.lanes
+        ):
+            raise ValueError("Generic-web testing state requires the generic-web driver.")
         if not self.driver_id.strip():
             raise ValueError("product profile requires driver_id")
         if "image" not in self.model_fields_set:

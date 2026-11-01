@@ -10,7 +10,11 @@ import click
 from fastapi import Depends, Header, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from control_plane.build_provenance import BuildProvenanceError, record_verified_build_artifact
+from control_plane.build_provenance import (
+    BuildProvenanceError,
+    VerifiedBuildArtifact,
+    record_verified_build_artifact,
+)
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
@@ -39,10 +43,11 @@ from control_plane.odoo_target_replacement_apply_http import (
     enqueue_odoo_target_replacement_apply_operation,
     find_odoo_target_replacement_apply_operation_by_idempotency_key,
 )
-from control_plane.odoo_target_replacement_plan_http import (
-    resolve_odoo_target_replacement_plan_lane,
+from control_plane.testing_rebuild_driver import (
+    resolve_testing_rebuild_driver,
+    testing_rebuild_build_identity,
 )
-from control_plane.product_reconcile import ProductReconcileError, latest_verified_testing_build
+from control_plane.product_reconcile import ProductReconcileError, latest_verified_testing_release
 from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneIdentity,
@@ -272,17 +277,16 @@ def register_testing_rebuild_routes(
         trace_id = common.next_trace_id()
         store = require_admin(identity, record_store, trace_id, read_only=True)
         try:
-            profile = store.read_product_profile_record(product)
-            lane = resolve_odoo_target_replacement_plan_lane(
-                record_store=store, product=product, instance="testing"
-            )
-            verified = latest_verified_testing_build(store, profile, lane)
+            driver = resolve_testing_rebuild_driver(store, product)
+            profile, lane = driver.profile, driver.lane
+            verified = latest_verified_testing_release(store, profile, lane)
+            artifact_id, source_git_ref = testing_rebuild_build_identity(verified)
             request = replacement(
                 product,
                 TestingRebuildSubmit(
                     data_source_mode=data_source_mode,
-                    artifact_id=verified.manifest.artifact_id,
-                    source_git_ref=verified.manifest.source_commit,
+                    artifact_id=artifact_id,
+                    source_git_ref=source_git_ref,
                     reason="Inspect testing rebuild",
                 ),
             )
@@ -290,7 +294,7 @@ def register_testing_rebuild_routes(
                 root=dependencies.root,
                 store=store,
                 request=request,
-                verified_manifest=verified.manifest,
+                verified_build=verified,
                 actor=launchplane_identity_actor(identity),
             )
             return TestingRebuildInspection(
@@ -344,9 +348,9 @@ def register_testing_rebuild_routes(
                 )
             return response(existing, trace_id)
         try:
-            lane = resolve_odoo_target_replacement_plan_lane(
-                record_store=store, product=product, instance="testing"
-            )
+            driver = resolve_testing_rebuild_driver(store, product)
+            lane = driver.lane
+            driver.require_execution()
             now = utc_now_timestamp()
             authorization = capture_durable_operation_authorization(
                 identity=identity,
@@ -358,10 +362,12 @@ def register_testing_rebuild_routes(
                 authorized_at=now,
             )
             request = replacement(product, payload)
-            verified = latest_verified_testing_build(
+            verified = latest_verified_testing_release(
                 store, store.read_product_profile_record(product), lane
             )
-            if (verified.manifest.artifact_id, verified.manifest.source_commit) != (
+            if not isinstance(verified, VerifiedBuildArtifact):
+                raise ValueError("The selected Odoo build changed its manifest kind.")
+            if testing_rebuild_build_identity(verified) != (
                 payload.artifact_id,
                 payload.source_git_ref,
             ):
@@ -370,7 +376,7 @@ def register_testing_rebuild_routes(
                 root=dependencies.root,
                 store=store,
                 request=request,
-                verified_manifest=verified.manifest,
+                verified_build=verified,
                 actor=launchplane_identity_actor(identity),
             )
             record_verified_build_artifact(record_store=store, verified=verified)

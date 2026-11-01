@@ -155,6 +155,11 @@ from control_plane.testing_publication_storage import (
     serving_snapshot_matches,
 )
 from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
+from control_plane.testing_rebuild_driver import (
+    TestingRebuildRefused as TestingRebuildRefused,
+    resolve_testing_rebuild_driver,
+)
+from control_plane.contracts.testing_application import TestingApplicationState
 from control_plane.testing_replacement_resources import IncompleteTestingResources
 from control_plane.testing_serving_copy import published_testing_copy
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
@@ -172,14 +177,6 @@ class NativeTestingRebuildPending(ValueError):
 
 class NativeTestingRebuildAdmissionChanged(ValueError):
     """A source-defined admission refusal with a safe, useful operator cause."""
-
-
-class TestingRebuildRefused(ValueError):
-    """A fixed operator-facing prerequisite, without provider or secret text."""
-
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        super().__init__(message)
 
 
 class NativeTestingRebuildIntent(FrozenRecord):
@@ -306,34 +303,50 @@ def unavailable_ingress_declaration(
     )
 
 
+class GenericWebTestingRebuildIntent(FrozenRecord):
+    operation_id: str
+    profile: LaunchplaneProductProfileRecord
+    before: TestingServingSnapshot
+    state: TestingApplicationState
+
+
 def capture_rebuild_intent(
     root: Path, store: PostgresRecordStore, operation: OdooStableTargetReplacementOperationRecord
-) -> NativeTestingRebuildIntent:
+) -> NativeTestingRebuildIntent | GenericWebTestingRebuildIntent:
     rebuild_source(operation)
-    profile = store.read_product_profile_record(operation.product)
-    if (
-        not profile.is_active
-        or profile.driver_id != "odoo"
-        or not is_exclusive_product_context(
-            context=operation.context,
-            product=operation.product,
-            owners=product_context_owner_map(store.list_product_profile_records()),
-        )
-    ):
-        raise ValueError("Rebuild requires an exclusive active Odoo testing context.")
-    lane = next(
-        (
-            item
-            for item in profile.lanes
-            if (item.context, item.instance) == (operation.context, "testing")
-        ),
-        None,
-    )
-    if lane is None:
+    driver = resolve_testing_rebuild_driver(store, operation.product)
+    profile, lane = driver.profile, driver.lane
+    if lane.context != operation.context:
         raise TestingRebuildRefused(
             "testing_rebuild_inputs_unverified", "The original testing lane is unavailable."
         )
     before = read_snapshot(store, product=operation.product, context=operation.context)
+    if driver.state is not None:
+        if operation.request.data_source_mode != "empty":
+            raise TestingRebuildRefused(
+                "testing_restore_source_unconfigured",
+                "Generic-web restore requires a supported sanitized state source.",
+            )
+        target_type = before.target.target_type
+        if (
+            target_type not in {"application", "compose"}
+            or (before.target.context, before.target.instance) != (operation.context, "testing")
+            or (before.target_id.context, before.target_id.instance)
+            != (operation.context, "testing")
+            or (before.provider.context, before.provider.instance) != (operation.context, "testing")
+            or (
+                before.provider.provider_id,
+                before.provider.target_category,
+                before.provider.target_id,
+            )
+            != ("dokploy", target_type, before.target_id.target_id)
+        ):
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified", "The testing target records disagree."
+            )
+        return GenericWebTestingRebuildIntent(
+            operation_id=operation.operation_id, profile=profile, before=before, state=driver.state
+        )
     if (before.target.context, before.target.instance, before.target.target_type) != (
         operation.context,
         "testing",
@@ -569,7 +582,7 @@ def capture_rebuild_intent(
 
 def testing_rebuild_hold_allows(
     operation: OdooStableTargetReplacementOperationRecord,
-    intent: NativeTestingRebuildIntent,
+    intent: NativeTestingRebuildIntent | GenericWebTestingRebuildIntent,
     target: DokployTargetRecord,
     *,
     actor: str = "",
@@ -597,7 +610,7 @@ def check_testing_rebuild_protection(
     root: Path,
     store: PostgresRecordStore,
     operation: OdooStableTargetReplacementOperationRecord,
-    intent: NativeTestingRebuildIntent,
+    intent: NativeTestingRebuildIntent | GenericWebTestingRebuildIntent,
     *,
     actor: str = "",
     retiring: bool = False,
@@ -618,6 +631,10 @@ def check_testing_rebuild_protection(
                 "testing_production_resources_shared",
                 "Testing must be separated from its shared production resources before rebuilding.",
             )
+    if isinstance(intent, GenericWebTestingRebuildIntent):
+        if safety is not None and safety.usage == "in_use":
+            raise TestingRebuildRefused("testing_in_use", "Someone is using this testing lane.")
+        return
     usage = read_odoo_testing_usage(
         target=intent.before.target,
         target_id=intent.before.target_id,
@@ -2671,6 +2688,9 @@ def _execute_native_testing_rebuild(
         )
     else:
         raise ValueError("The original testing rebuild reservation is unavailable or conflicts.")
+    if not isinstance(intent, NativeTestingRebuildIntent):
+        resolve_testing_rebuild_driver(store, operation.product).require_execution()
+        raise ValueError("The selected driver returned an incompatible rebuild intent.")
     if intent.operation_id != operation.operation_id or intent.profile.product != operation.product:
         raise ValueError("The original testing rebuild intent belongs to another operation.")
     adapter = NativeTestingRebuildAdapter(root, store, operation, intent, authorize)
