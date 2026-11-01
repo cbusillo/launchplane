@@ -30,6 +30,9 @@ state.setdefault('calls',[]).append(args);state_path.write_text(json.dumps(state
 if state.get('fail') and args[:2] not in (['volume','rm'],):
     print('access denied',file=sys.stderr);raise SystemExit(1)
 root=state['root'];name=state['name']
+def service_id(value):
+    suffix=state.get('service_suffix','')
+    return value if not suffix or value.endswith(suffix) else value+suffix
 def volume(value,point=None):
     return {'Name':value,'CreatedAt':'2026-01-01T00:00:00Z','Driver':'local','Labels':state.get('volume_labels',{}),'Mountpoint':point or root+'/volumes/'+value+'/_data','Options':{}}
 if args[:2]==['info','--format']:
@@ -54,7 +57,7 @@ elif args==['service','ls','-q']:
     sys.stdout.write('\n'.join(state.get('services',[])))
 elif args[:3]==['inspect','--type','service']:
     mounts=[{'Type':'volume','Source':name}] if state.get('service_ref') else []
-    print(json.dumps([{'ID':identifier,'Spec':{'TaskTemplate':{'ContainerSpec':{'Mounts':mounts}}}} for identifier in args[3:]]))
+    print(json.dumps([{'ID':service_id(identifier),'Spec':{'TaskTemplate':{'ContainerSpec':{'Mounts':mounts}}}} for identifier in args[3:]]))
 elif args[:4]==['service','ps','-q','--no-trunc']:
     if state.get('task_per_service'):
         print('\n'.join('task-'+service for service in args[4:]))
@@ -62,8 +65,8 @@ elif args[:4]==['service','ps','-q','--no-trunc']:
         print('task-one' if state.get('task') else '')
 elif args[:3]==['inspect','--type','task']:
     mounts=[{'Type':'volume','Source':name}] if state.get('task_ref') else []
-    print(json.dumps([{'ID':identifier,'ServiceID':identifier.removeprefix('task-') if state.get('task_per_service') else 'service-one','NodeID':'','Spec':{'ContainerSpec':{'Mounts':mounts}}} for identifier in args[3:]]))
-elif args[:3]==['node','ls','-q']:
+    print(json.dumps([{'ID':identifier,'ServiceID':service_id(identifier.removeprefix('task-') if state.get('task_per_service') else 'service-one'),'NodeID':'','Spec':{'ContainerSpec':{'Mounts':mounts}}} for identifier in args[3:]]))
+elif args==['node','ls','-q']:
     print('node-one')
 elif args==['node','ls','--format','json']:
     print(json.dumps({'ID':'node-one','Self':True}))
@@ -314,13 +317,14 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
 
     def test_large_full_inventory_is_batched_and_complete_before_removal(self) -> None:
         containers = [f"stopped-{index}" for index in range(300)]
-        services = [f"service-{index}" for index in range(200)]
+        services = [f"s{index:011x}" for index in range(200)]
         extra_volumes = [f"other-{index}" for index in range(200)]
         for name in extra_volumes:
             (self.docker_root / "volumes" / name / "_data").mkdir(parents=True)
         self.state.update(
             containers=containers,
             services=services,
+            service_suffix="x" * 13,
             task_per_service=True,
             extra_volumes=extra_volumes,
         )

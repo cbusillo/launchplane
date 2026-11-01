@@ -229,7 +229,7 @@ def inventory(backing,root):
     if state=='active':
         if swarm.get('ControlAvailable') is not True:
             raise Held()
-        nodes=identifiers('node','ls','-q','--no-trunc')
+        nodes=identifiers('node','ls','-q')
         if len(nodes)!=1:
             raise Held()
     else:
