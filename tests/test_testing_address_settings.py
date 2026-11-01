@@ -399,6 +399,8 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             TESTING_COPY_COMPLETION_PARAMETER: "fixture-copy",
         }
         self.websites = [(1, "dated.example.invalid")]
+        self.website_defaults = [("website", "website", 1)]
+        self.website_sequences: dict[int, int | None] = {}
         self.gate = self.native.root / "canonical-gate"
         self.integration_ok = True
         self.foreign_network_member = False
@@ -418,6 +420,8 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             "payload": "fixture-payload",
             "runtime_identity": self.identity,
             "canonical_url": "https://stable.example.invalid",
+            "before_url": "https://dated.example.invalid",
+            "primary_page_xmlid_set": False,
             "website_id": 1,
             "copy_witness_parameter": TESTING_COPY_COMPLETION_PARAMETER,
         }
@@ -452,11 +456,14 @@ class CanonicalAddressProgramTests(unittest.TestCase):
                 self.query = query
 
             def fetchall(self) -> list[Any]:
-                return (
-                    list(fixture.websites)
-                    if "FROM WEBSITE" in self.query.upper()
-                    else list(fixture.parameters.items())
-                )
+                if "FROM WEBSITE" in self.query.upper():
+                    return [
+                        (identity, domain, fixture.website_sequences.get(identity, 10))
+                        for identity, domain in sorted(fixture.websites)
+                    ]
+                if "FROM IR_MODEL_DATA" in self.query.upper():
+                    return list(fixture.website_defaults)
+                return list(fixture.parameters.items())
 
         return Cursor()
 
@@ -758,6 +765,114 @@ class CanonicalAddressProgramTests(unittest.TestCase):
         self.assertTrue(frame["canonical_gate_released"])
         self.assertFalse(frame["canonical_settings_verified"])
 
+    def test_unrelated_websites_preserve_the_reviewed_owner_and_digest(self) -> None:
+        for owner, defaults in (
+            (1, [("website", "website", 1)]),
+            (2, [("base", "website", 2), ("website", "website", 1)]),
+            (1, []),
+        ):
+            with self.subTest(owner=owner, defaults=defaults):
+                self.websites = [(owner, "dated.example.invalid")]
+                self.website_sequences = {}
+                self.website_defaults = defaults
+                self.parameters["web.base.url"] = "https://dated.example.invalid"
+                self.native.spec["canonical_settings"]["website_id"] = 0
+                original = self.database_read()["database_values_sha256"]
+                self.websites.append((3 if owner == 1 else 1, "unrelated.example.invalid"))
+                observed = self.database_read()
+                self.assertEqual(observed["website_id"], owner)
+                self.assertEqual(observed["database_values_sha256"], original)
+                self.native.spec["canonical_settings"]["website_id"] = observed["website_id"]
+                self.websites[0] = (owner, "stable.example.invalid")
+                self.parameters["web.base.url"] = "https://stable.example.invalid"
+                self.website_sequences[owner] = 0
+                self.assertTrue(self.database_read()["canonical_settings_verified"])
+
+    def test_dated_alias_retains_the_reviewed_routing_fallback(self) -> None:
+        self.websites = [(1, "unrelated.example.invalid"), (2, "dated.example.invalid")]
+        self.website_defaults = [("website", "website", 2)]
+        self.website_sequences = {1: 0, 2: 10}
+        self.native.spec["canonical_settings"]["website_id"] = 0
+        with self.assertRaises(RuntimeError):
+            self.database_read()
+        self.website_sequences[1] = 10
+        observed = self.database_read()
+        self.assertEqual(observed["website_id"], 2)
+        self.native.spec["canonical_settings"]["website_id"] = observed["website_id"]
+        self.websites[1] = (2, "stable.example.invalid")
+        self.parameters["web.base.url"] = "https://stable.example.invalid"
+        self.website_sequences[1] = 5
+        self.assertFalse(self.database_read()["canonical_settings_verified"])
+        self.website_sequences[2] = 0
+        self.assertTrue(self.database_read()["canonical_settings_verified"])
+        self.website_sequences[1] = -1
+        with self.assertRaises(RuntimeError):
+            self.database_read()
+        self.assertFalse(self.gate.exists())
+
+    def test_plural_selection_refuses_conflicts_and_a_different_bootstrap_writer(self) -> None:
+        for refusal in (
+            "empty",
+            "before",
+            "after",
+            "writer",
+            "page",
+            "reviewed-id",
+            "unowned",
+            "reference-model",
+            "scheme",
+            "case",
+            "port",
+            "international",
+        ):
+            with self.subTest(refusal=refusal):
+                self.native.spec["canonical_settings"]["canonical_url"] = (
+                    "https://stable.example.invalid"
+                )
+                self.websites = [(1, "dated.example.invalid"), (2, "unrelated.example.invalid")]
+                self.website_defaults = [
+                    (
+                        "website",
+                        "res.company" if refusal == "reference-model" else "website",
+                        2 if refusal == "writer" else 1,
+                    )
+                ]
+                self.native.spec["canonical_settings"]["primary_page_xmlid_set"] = refusal == "page"
+                self.native.spec["canonical_settings"]["website_id"] = (
+                    2 if refusal == "reviewed-id" else 0
+                )
+                if refusal == "empty":
+                    self.websites = []
+                elif refusal in {"before", "after"}:
+                    self.websites[1] = (
+                        2,
+                        "dated.example.invalid"
+                        if refusal == "before"
+                        else "https://stable.example.invalid/",
+                    )
+                elif refusal == "unowned":
+                    self.websites = [
+                        (1, "unrelated.example.invalid"),
+                        (2, "stable.example.invalid"),
+                    ]
+                elif refusal in {"scheme", "case", "port"}:
+                    self.websites[1] = (
+                        2,
+                        {
+                            "scheme": "http://stable.example.invalid",
+                            "case": "STABLE.EXAMPLE.INVALID",
+                            "port": "stable.example.invalid:443",
+                        }[refusal],
+                    )
+                elif refusal == "international":
+                    self.native.spec["canonical_settings"]["canonical_url"] = (
+                        "https://xn--bcher-kva.example.invalid"
+                    )
+                    self.websites[1] = (2, "https://bücher.example.invalid")
+                with self.assertRaises(RuntimeError):
+                    self.database_read()
+                self.assertFalse(self.gate.exists())
+
     def test_unqualified_copy_or_connections_never_release_the_gate(self) -> None:
         for refusal in ("network", "integration", "copy", "website", "read-route"):
             with self.subTest(refusal=refusal):
@@ -767,7 +882,7 @@ class CanonicalAddressProgramTests(unittest.TestCase):
                     "other" if refusal == "copy" else "fixture-copy"
                 )
                 self.websites = (
-                    [(1, "dated.example.invalid"), (2, "foreign.example.invalid")]
+                    [(1, "dated.example.invalid"), (2, "stable.example.invalid")]
                     if refusal == "website"
                     else [(1, "dated.example.invalid")]
                 )
@@ -798,6 +913,7 @@ class CanonicalAddressProgramTests(unittest.TestCase):
         self.assertFalse(self.gate.exists())
 
     def test_real_service_spec_reaches_the_qualified_native_gate(self) -> None:
+        self.websites.append((2, "unrelated.example.invalid"))
         identity = RuntimeIdentity(
             product=self.native.gen.product,
             context=self.native.gen.context,
