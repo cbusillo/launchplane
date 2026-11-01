@@ -32,10 +32,12 @@ from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.testing_lane_hold import apply_testing_hold_plan
 from tests import test_generic_web_testing_rebuild as rebuild
 from tests import test_retained_volume_sweep_program as sweep_program
+from tests import test_testing_application_activation as activation_checks
 
 
 class GenericWebTestingVolumeRebuildFixture(rebuild.GenericWebTestingRebuildFlowFixture):
     with_unresolved_predecessor = True
+    with_external_rate_limit = False
 
     def configure_serving_application(self) -> None:
         self.sweep = sweep_program.RetainedVolumeSweepProgramTests()
@@ -53,7 +55,25 @@ class GenericWebTestingVolumeRebuildFixture(rebuild.GenericWebTestingRebuildFlow
             return read_text(path, *args, **kwargs)
 
         self.enterContext(patch.object(Path, "read_text", read))
-        self.flow.prepare()
+        if self.with_external_rate_limit:
+            self.flow.prepare_external_discord()
+            responses = activation_checks.ApplicationCredentialTests()
+            throttled = False
+
+            def discord(url: str, **kwargs: Any) -> PublicHttpResponse:
+                nonlocal throttled
+                if not throttled:
+                    throttled = True
+                    return PublicHttpResponse(
+                        429, "", 0, (), json.dumps({"retry_after": 0.125}).encode()
+                    )
+                return responses.discord_response(url, **kwargs)
+
+            self.enterContext(
+                patch("control_plane.discord_external_resources.request_public_http", discord)
+            )
+        else:
+            self.flow.prepare()
         self.assertEqual(self.flow.activate().status, "completed")
         current = activation_record(self.store, self.flow.product, self.flow.context)
         assert current is not None and current.request.application is not None
@@ -215,6 +235,10 @@ class GenericWebTestingVolumeRebuildTests(GenericWebTestingVolumeRebuildFixture)
                 self.flow.normal(f"after-volume-rebuild-{attempt}").status, "completed"
             )
             previous, volume = current, current_mount["volumeName"]
+
+
+class ExternalCredentialVolumeRebuildTests(GenericWebTestingVolumeRebuildTests):
+    with_external_rate_limit = True
 
 
 class PrivateWebTestingVolumeRebuildTests(GenericWebTestingVolumeRebuildTests):
