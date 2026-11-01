@@ -557,6 +557,8 @@ class CanonicalAddressProgramTests(unittest.TestCase):
                     and CANONICAL_ADDRESS_DATABASE_READ in arguments
                 ):
                     reached.append(stage)
+                    if stage == "resource":
+                        raise subprocess.TimeoutExpired(private, 1)
                     return subprocess.CompletedProcess(
                         arguments, 1, stdout=b"", stderr=private.encode()
                     )
@@ -579,6 +581,12 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             end = node.end_lineno
             assert end is not None
             self.assertTrue(any(node.lineno <= line <= end for line in failure.program_sites))
+            if stage == "resource":
+                docker = functions["docker"]
+                docker_end = docker.end_lineno
+                assert docker_end is not None
+                self.assertLessEqual(docker.lineno, failure.program_sites[-1])
+                self.assertLessEqual(failure.program_sites[-1], docker_end)
             self.assertNotIn(private, json.dumps(frame))
             self.assertFalse(self.gate.exists())
             self.assertEqual(self.parameters, parameters)
