@@ -23,6 +23,7 @@ from control_plane.contracts.testing_activation import (
 )
 from control_plane.contracts.testing_application import TestingApplicationSpecification
 from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
     is_exclusive_product_context,
     product_context_owner_map,
 )
@@ -135,6 +136,42 @@ FINALIZATION_CLEAR_PHASE = "clear_interlock"
 FINALIZATION_HEALTH_FAILED_CLEAR_PHASE = "clear_interlock_after_health_failure"
 
 
+def capture_rebuild_application_specification(
+    store: PostgresRecordStore, intent: GenericWebTestingRebuildIntent
+) -> TestingApplicationSpecification:
+    previous = activation_record(store, intent.profile.product, intent.before.target.context)
+    if (
+        previous is None
+        or previous.target_id != intent.before.target_id.target_id
+        or previous.request.application is None
+    ):
+        return default_rebuild_application_specification(intent)
+    if not completed_application_activation(store, previous):
+        raise TestingRebuildRefused(
+            "testing_rebuild_application_unverified",
+            "The testing application needs its completed current activation.",
+        )
+    return TestingApplicationSpecification.model_validate(
+        previous.request.application.model_dump(mode="json")
+        | {
+            "runtime_port": intent.profile.runtime_port,
+            "health_path": intent.profile.health_path,
+            "state": intent.state.model_dump(mode="json"),
+        }
+    )
+
+
+def default_rebuild_application_specification(
+    intent: GenericWebTestingRebuildIntent,
+) -> TestingApplicationSpecification:
+    return TestingApplicationSpecification(
+        runtime_port=intent.profile.runtime_port,
+        health_path=intent.profile.health_path,
+        network_name=DOKPLOY_INGRESS_NETWORK,
+        state=intent.state,
+    )
+
+
 def rebuild_application_specification(
     intent: GenericWebTestingRebuildIntent,
 ) -> TestingApplicationSpecification:
@@ -143,12 +180,7 @@ def rebuild_application_specification(
             TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE,
             "This rebuild currently supports applications without persistent state.",
         )
-    return TestingApplicationSpecification(
-        runtime_port=intent.profile.runtime_port,
-        health_path=intent.profile.health_path,
-        network_name=DOKPLOY_INGRESS_NETWORK,
-        state=intent.state,
-    )
+    return intent.application or default_rebuild_application_specification(intent)
 
 
 def inspect_generic_web_testing_rebuild(
@@ -619,6 +651,26 @@ class GenericWebTestingRebuildExecution:
             preparation_key=self.resources_key,
         )
 
+    def external_comparison_profiles(self) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        self.guard("testing_rebuild_external_comparison", recovery=self.recovering)
+        return self.store.list_product_profile_records()
+
+    def application_adapter(
+        self, request: TestingActivationRequest
+    ) -> GenericWebRebuildActivationAdapter:
+        adapter = GenericWebRebuildActivationAdapter(
+            self.root,
+            self.store,
+            self.operation.product,
+            request,
+            self.actor,
+            self.scope,
+            self.operation.operation_id,
+        )
+        adapter.recovering = self.recovering
+        adapter.authorize_external = self.external_comparison_profiles
+        return adapter
+
     def guard(self, phase: str, *, recovery: bool = False) -> None:
         self.check()
         self.lease.assert_current()
@@ -819,16 +871,7 @@ class GenericWebTestingRebuildExecution:
                 reason=self.operation.request.reason,
                 application=self.specification,
             )
-        adapter = GenericWebRebuildActivationAdapter(
-            self.root,
-            self.store,
-            self.operation.product,
-            request,
-            self.actor,
-            self.scope,
-            self.operation.operation_id,
-        )
-        adapter.recovering = self.recovering
+        adapter = self.application_adapter(request)
         if original is None:
             captured = adapter.current()
             if captured.image_reference != self.operation.request.artifact_id:
@@ -1280,15 +1323,7 @@ class GenericWebTestingRebuildExecution:
         ):
             if record is None:
                 raise NativeTestingRebuildPending("The original activation custody is unavailable.")
-            adapter = GenericWebRebuildActivationAdapter(
-                self.root,
-                self.store,
-                self.operation.product,
-                record.request,
-                self.actor,
-                self.scope,
-                self.operation.operation_id,
-            )
+            adapter = self.application_adapter(record.request)
             self.recovering = adapter.recovering = True
             return self.finalize(adapter, record)
         try:
