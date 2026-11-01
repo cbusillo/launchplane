@@ -235,7 +235,7 @@ def _preview_review_unavailability(
     )
     if serving.preview_url and head_sha and serving.head_sha == head_sha.lower():
         return ""
-    failure = preview_refresh_failure(request) if request is not None else ""
+    failure = preview_refresh_failure(request, store=store) if request is not None else ""
     if failure:
         if not head_sha:
             return f"Preview refresh failed: {failure}; current review availability is unknown"

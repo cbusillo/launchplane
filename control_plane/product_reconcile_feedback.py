@@ -37,6 +37,7 @@ from control_plane.preview_pr_feedback_notifications import (
     deliver_preview_pr_feedback_notifications,
 )
 from control_plane.product_review_status import OwnerReviewStatus, owner_review_reference_url
+from control_plane.product_reconcile_read import preview_current_failure
 from control_plane.testing_lane_hold import STAFF_TESTING_HOLD_REASON
 from control_plane.workflows.launchplane import (
     delete_github_issue_comment,
@@ -264,6 +265,8 @@ def _preview_feedback(
     ):
         status = "failed"
         failure_summary = _failure_summary(error)
+    elif current_failure := preview_current_failure(plan):
+        status, failure_summary = "failed", current_failure
     elif action == "wait" and plan.get("reason") == "client_test_notes_required":
         status = "pending"
         waiting_for = CLIENT_REVIEW_NOTES_PENDING

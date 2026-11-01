@@ -990,6 +990,7 @@ from control_plane.preview_pr_feedback_remediation import (
     observe_managed_preview_pr_feedback,
     resolve_remediation_token,
 )
+from control_plane.preview_retirement import verified_preview_retirement_digest
 from control_plane.workflows.launchplane_self_deploy import (
     LaunchplaneSelfDeployResult,
     execute_launchplane_self_deploy,
@@ -25136,12 +25137,18 @@ def create_launchplane_fastapi_app(
                     if remediation_request.mode == "dry-run"
                     else "preview_pr_feedback_remediation.apply"
                 )
-                if not resolved_authz_policy_runtime.allows(
+                policy_allowed = resolved_authz_policy_runtime.allows(
                     identity=identity,
                     action=action,
                     product=remediation_request.product,
                     context=remediation_request.context,
-                ):
+                )
+                standing_retirement = (
+                    isinstance(identity, LocalOperatorIdentity)
+                    and director_agent_identity(identity)
+                    and remediation_request.terminal_status == "destroyed"
+                )
+                if not policy_allowed and not standing_retirement:
                     raise _launchplane_http_error(
                         status_code=403,
                         trace_id=trace_id,
@@ -25163,6 +25170,20 @@ def create_launchplane_fastapi_app(
                         record_store=remediation_store,
                         request=remediation_request,
                     )
+                    retirement_digest = (
+                        verified_preview_retirement_digest(
+                            record_store, profile=target.profile, number=target.pr_number
+                        )
+                        if standing_retirement
+                        else ""
+                    )
+                    if not policy_allowed and not retirement_digest:
+                        raise _launchplane_http_error(
+                            status_code=403,
+                            trace_id=trace_id,
+                            code="authorization_denied",
+                            message="Terminal feedback requires verified native retirement evidence.",
+                        )
                     feedback_credentials = credentials.enter_context(
                         resolve_remediation_token(
                             control_plane_root=resolved_control_plane_root,
@@ -25178,7 +25199,7 @@ def create_launchplane_fastapi_app(
                             feedback_credentials.actor_id,
                             feedback_credentials.actor_login,
                         ),
-                    )
+                    ).model_copy(update={"retirement_sha256": retirement_digest})
                 except FileNotFoundError as error:
                     raise _launchplane_http_error(
                         status_code=404,
@@ -25244,6 +25265,19 @@ def create_launchplane_fastapi_app(
                         trace_id=trace_id,
                         code="matching_dry_run_required",
                         message="Preview PR feedback remediation apply requires a prior matching dry-run.",
+                    )
+                if dry_run_record.observation.retirement_sha256 != retirement_digest or (
+                    retirement_digest
+                    and verified_preview_retirement_digest(
+                        record_store, profile=target.profile, number=target.pr_number
+                    )
+                    != retirement_digest
+                ):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="preview_pr_feedback_remediation_observation_changed",
+                        message="Native preview retirement changed after the reviewed dry-run.",
                     )
                 if (
                     dry_run_record.observation.state == "absent" and observation.state != "absent"

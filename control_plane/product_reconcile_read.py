@@ -24,6 +24,7 @@ from control_plane.contracts.product_reconcile import (
     ProductReconcileTargetKind,
     product_reconcile_target_key,
 )
+from control_plane.preview_retirement import verified_preview_retirement_digest
 
 _MAX_TEXT_LENGTH = 400
 _MAX_FAILURE_SUMMARY_LENGTH = 1500
@@ -93,10 +94,30 @@ def product_preview_requests(
         and request.last_plan.get("action") != "destroy"
         and request.last_plan.get("reason") != "pull_request_not_open"
         and request.last_plan.get("feedback_recovery_closed_observed") is not True
+        and (preview_current_failure(request.last_plan) or not _request_retired(store, request))
     )
 
 
-def preview_refresh_failure(request: ProductReconcileRequestRecord) -> str:
+def _request_retired(store: object, request: ProductReconcileRequestRecord) -> bool:
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if not isinstance(store, PostgresRecordStore) or request.pull_request_number is None:
+        return False
+    return (
+        verified_preview_retirement_digest(
+            store,
+            profile=store.read_product_profile_record(request.product),
+            number=request.pull_request_number,
+        )
+        != ""
+    )
+
+
+def preview_refresh_failure(request: ProductReconcileRequestRecord, *, store: object = None) -> str:
+    if current := preview_current_failure(request.last_plan):
+        return current
+    if _request_retired(store, request):
+        return ""
     if request.last_plan.get("action") == "destroy" or (
         "action" not in request.last_plan and "destroy_retry_key" in request.last_plan
     ):
@@ -105,6 +126,12 @@ def preview_refresh_failure(request: ProductReconcileRequestRecord) -> str:
     if not isinstance(summary, str) or not summary.strip():
         return ""
     return _safe_text(summary, maximum_length=140)
+
+
+def preview_current_failure(plan: Mapping[str, object]) -> str:
+    if plan.get("action") == "wait" and plan.get("reason") == "artifact_scan_refused":
+        return "artifact_scan_refused: The preview artifact scan was refused."
+    return ""
 
 
 class ProductReconcileRequestView(BaseModel):
