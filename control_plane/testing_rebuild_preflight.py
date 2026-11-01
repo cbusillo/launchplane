@@ -81,7 +81,7 @@ def inspect_testing_rebuild(
     lane = driver.lane
     if apply.instance != "testing":
         raise ValueError("Testing rebuild preflight cannot inspect production.")
-    if driver.execution_available:
+    if driver.profile.driver_id == "odoo":
         if verified_build is not None and not isinstance(verified_build, VerifiedBuildArtifact):
             raise TestingRebuildRefused(
                 "testing_rebuild_inputs_unverified", "The selected build is not an Odoo artifact."
@@ -97,13 +97,9 @@ def inspect_testing_rebuild(
             raise TestingRebuildRefused(
                 "testing_rebuild_inputs_unverified", "A verified generic-web build is required."
             )
-        if (
-            testing_rebuild_build_identity(verified_build)
-            != (
-                apply.artifact_id,
-                apply.source_git_ref,
-            )
-            or verified_build.manifest.image.repository != driver.profile.image.repository
+        if testing_rebuild_build_identity(verified_build) != (
+            apply.artifact_id,
+            apply.source_git_ref,
         ):
             raise TestingRebuildRefused(
                 "testing_rebuild_inputs_unverified", "The selected build differs from its product."

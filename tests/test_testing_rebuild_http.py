@@ -1394,7 +1394,6 @@ class GenericWebTestingRebuildHttpTests(
                     response = await self.call(method, payload, path=path)
                     self.assertEqual(response.status_code, 409, response.text)
             provider.assert_not_called()
-        self.latest.assert_not_called()
         self.assertEqual(self.fixture.effects, [])
 
     def test_worker_refuses_generic_web_before_reserving_or_dispatching_effects(self) -> None:

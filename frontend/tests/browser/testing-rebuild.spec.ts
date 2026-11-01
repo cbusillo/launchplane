@@ -23,7 +23,6 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     if (outcome === "generic-pending") {
       environment.driver_id = "generic-web";
       environment.driver_extensions.odoo = undefined;
-      environment.testing_rebuild_supported = true;
     }
     const writes: { key: string; body: Record<string, unknown> }[] = [];
     const selectedCommit = "c".repeat(40);
