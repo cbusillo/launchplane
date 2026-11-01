@@ -256,6 +256,7 @@ class OdooPreviewProviderMutationAdapter:
                 profile=self._profile,
                 issued_plan=self._issued_plan,
                 environment=environment,
+                preserve_original_reservation_id=self._apply_request.preserve_original_reservation_id,
             )
         except (ValueError, FileNotFoundError, click.ClickException) as error:
             raise OdooPreviewPlanProvenanceError(
@@ -490,13 +491,27 @@ class OdooPreviewProviderMutationAdapter:
                 )
             )
         try:
-            require_source_free_preview_history(
-                self._record_store,
-                profile=self._profile,
-                issued_plan=self._issued_plan,
-                operation_record_id=self._deployment_record_id,
-                effective_source=self.source_decision,
-            )
+            if self._apply_request.preserve_original_reservation_id:
+                from control_plane.preview_preservation import (
+                    require_preview_preservation_admission,
+                )
+                from control_plane.storage.postgres import PostgresRecordStore
+
+                require_preview_preservation_admission(
+                    store=cast(PostgresRecordStore, self._record_store),
+                    profile=self._profile,
+                    issued_plan=self._issued_plan,
+                    original_reservation_id=self._apply_request.preserve_original_reservation_id,
+                    operation_record_id=self._deployment_record_id,
+                )
+            else:
+                require_source_free_preview_history(
+                    self._record_store,
+                    profile=self._profile,
+                    issued_plan=self._issued_plan,
+                    operation_record_id=self._deployment_record_id,
+                    effective_source=self.source_decision,
+                )
         except ValueError as error:
             raise ProviderMutationRejectedError(
                 OdooPreviewPlanProvenanceError(

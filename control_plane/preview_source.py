@@ -56,6 +56,8 @@ def require_source_free_preview_history(
     plan = issued_plan.dry_run_plan
     if (
         issued_plan.operation != "refresh"
+        or effective_source is not None
+        and effective_source.source == "retained"
         or profile.preview.clean_testing_snapshot
         or (
             profile.preview.data_transport_mode != "none"

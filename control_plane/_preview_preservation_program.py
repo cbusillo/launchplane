@@ -284,7 +284,10 @@ def preserve_empty_overlay(path: Path, source: dict, containers: dict) -> dict:
 
 
 def verify_preservation_source(receipt: dict, source: dict, *, inspect_only: bool = False) -> None:
-    if receipt['source'] != source:
+    continuation = spec.get('continuation_applied', False)
+    compared = lambda value: {key: item for key, item in value.items()
+        if not continuation or key != 'provider_binding_sha256'}
+    if compared(receipt['source']) != compared(source):
         raise RuntimeError('Preview preservation provider source changed')
     containers = preview_containers(source)
     if receipt.get('empty_overlay_verified') is True:
@@ -293,7 +296,7 @@ def verify_preservation_source(receipt: dict, source: dict, *, inspect_only: boo
         if not inspect_only:
             qualify_empty_overlay_database(containers['database'])
         return
-    if any(containers[service]['State']['Running'] for service in ('web', 'script-runner')):
+    if not continuation and any(containers[service]['State']['Running'] for service in ('web', 'script-runner')):
         raise RuntimeError('Preview preservation source was reopened')
     binding = preview_attempt_binding(source['compose_project'], source['database_name'],
         source['preview_volumes'], spec['authority'])
@@ -302,8 +305,10 @@ def verify_preservation_source(receipt: dict, source: dict, *, inspect_only: boo
     database = containers['database']
     if database.get('ExecIDs', 'unknown') not in (None, []):
         raise RuntimeError('Preview preservation database execution is active')
-    filestore = Path(binding['volume_backings']['data']['path']) / 'filestore'
-    if tree_manifest(filestore) != receipt['filestore_manifest']:
+    filestore = Path(binding['volume_backings']['data']['path'])
+    if not spec.get('continuation', False):
+        filestore = filestore / 'filestore'
+    if not continuation and tree_manifest(filestore) != receipt['filestore_manifest']:
         raise RuntimeError('Preview preservation original filestore changed')
 
 
@@ -465,7 +470,10 @@ def preservation_database(database: dict):
 
 def preserve(path: Path, source: dict) -> dict:
     containers = preview_containers(source)
+    continuation = spec.get('continuation', False)
     if has_overlay_mount(source, containers):
+        if continuation:
+            raise RuntimeError('Preserving continuation requires a plain retained data volume')
         return preserve_empty_overlay(path, source, containers)
     database = containers['database']
     if database.get('ExecIDs', 'unknown') not in (None, []):
@@ -473,17 +481,16 @@ def preserve(path: Path, source: dict) -> dict:
     binding = preview_attempt_binding(source['compose_project'], source['database_name'],
         source['preview_volumes'], spec['authority'])
     paths = {role: Path(value['path']) for role, value in binding['volume_backings'].items()}
-    if any(entry.name not in {'filestore', 'addons'} for entry in paths['data'].iterdir()):
+    if not continuation and any(entry.name not in {'filestore', 'addons'} for entry in paths['data'].iterdir()):
         raise RuntimeError('Preview preservation has additional data custody')
     addons = paths['data'] / 'addons'
-    if addons.is_symlink() or addons.exists() and any(
-        entry.is_symlink() or not entry.is_dir() for entry in addons.rglob('*')):
+    if not continuation and (addons.is_symlink() or addons.exists() and any(
+        entry.is_symlink() or not entry.is_dir() for entry in addons.rglob('*'))):
         raise RuntimeError('Preview preservation has additional addon custody')
-    if any(paths['logs'].iterdir()):
+    if not continuation and any(paths['logs'].iterdir()):
         raise RuntimeError('Preview preservation has additional log custody')
-    filestore = paths['data'] / 'filestore'
-    manifest = tree_manifest(filestore)
-    total = sum(entry.get('bytes', 0) for entry in manifest.values())
+    filestore = paths['data'] if continuation else paths['data'] / 'filestore'
+    total = sum(path.stat().st_size for path in filestore.rglob('*') if path.is_file())
     space = os.statvfs(path.parent)
     budget = spec['storage_budget']
     require_preservation_memory()
@@ -501,9 +508,17 @@ def preserve(path: Path, source: dict) -> dict:
     if (docker('ps', '-aq', '--filter', 'name=^/' + verifier + '$').decode().split()
         or verifier in docker('volume', 'ls', '--format', '{{.Name}}').decode().splitlines()):
         raise RuntimeError('Preview preservation verifier lacks its pending custody')
-    require_unserved_web(containers['web'])
+    if not continuation:
+        require_unserved_web(containers['web'])
     for service in ('web', 'script-runner'):
         docker('stop', '-t', '30', containers[service]['Id'])
+    current = preview_containers(source)
+    if any(current[service]['State']['Running'] for service in ('web', 'script-runner')):
+        raise RuntimeError('Preview preservation writers did not stop')
+    manifest = tree_manifest(filestore)
+    total = sum(entry.get('bytes', 0) for entry in manifest.values())
+    if total > budget['filestore_bytes']:
+        raise RuntimeError('Preview preservation data exceeds reviewed storage')
     with preservation_database(database):
         require_preservation_databases(database, source)
         other_connections = database_query(database['Id'], source['database_name'],

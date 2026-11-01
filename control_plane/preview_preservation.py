@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import click
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -79,6 +79,7 @@ class PreviewPreservationAuthority(BaseModel):
     compose_id: str
     compose_name: str
     server_id: str
+    continuation: bool = Field(default=False, exclude_if=lambda value: not value)
 
     @property
     def preservation_id(self) -> str:
@@ -105,7 +106,7 @@ def read_preview_preservation_authority(
     target = issued_plan.dry_run_plan
     snapshot = old_target.clean_snapshot
     if (
-        issued_plan.operation != "destroy"
+        issued_plan.operation not in {"destroy", "refresh"}
         or old.operation != "refresh"
         or issued_plan.product != profile.product
         or issued_plan.repository != profile.repository
@@ -121,7 +122,7 @@ def read_preview_preservation_authority(
             and old_target.compose_ref != target.compose_ref
         )
     ):
-        raise ValueError("Original preview preservation does not match this destroy target.")
+        raise ValueError("Original preview preservation does not match this target.")
     stable_identity = original.model_dump(
         include={
             "record_id",
@@ -155,6 +156,7 @@ def read_preview_preservation_authority(
             operation_record_id=operation_record_id,
             captured_schedule_binding=captured_schedule_binding,
         ),
+        continuation=issued_plan.operation == "refresh",
     )
 
 
@@ -260,7 +262,20 @@ def require_preview_preservation_admission(
         if profile.preview.slug_template.format(number=preview.anchor_pr_number)
         == issued_plan.preview_slug
     ]
-    if preview_matches:
+    if authority.continuation:
+        from control_plane.odoo_preview_qualification import read_preview_inspection_authority
+
+        if len(preview_matches) != 1 or preview_matches[0].state == "destroyed":
+            raise ValueError("Preserving continuation requires its recorded serving preview.")
+        serving = read_preview_inspection_authority(store, preview_matches[0])
+        if (
+            serving.selection.identity.deployment_record_id != original.record_id
+            or serving.target_id.target_id != authority.compose_id
+        ):
+            raise ValueError("Preserving continuation requires the current serving original.")
+        if issued_plan.plan_request.fishbowl_source is not None:
+            raise ValueError("Preserving continuation cannot import replacement data.")
+    elif preview_matches:
         raise ValueError("Original-only preservation requires an unrecorded preview.")
     if any(
         other.product != profile.product
@@ -290,6 +305,7 @@ def require_preview_preservation_admission(
     if report is not None and (
         report.usage == "in_use"
         or report.data == "only_copy"
+        and not authority.continuation
         or report.production_resources in {"shared", "separation_ready"}
     ):
         raise ValueError("Original preview preservation has a protected use or resource.")
@@ -377,12 +393,15 @@ def run_preview_preservation(
     original = store.read_idempotency_record_by_id(original_reservation_id)
     if original is None:
         raise ValueError("Original preview preservation authority disappeared.")
+    operation = store.read_idempotency_record_by_id(operation_record_id)
     snapshot = original_preview_intent(
         original, profile=profile, store=store
     ).issued_plan.dry_run_plan.clean_snapshot
     current_source = read_preview_preservation_source(
         authority=authority, control_plane_root=control_plane_root, database_url=store.database_url
     )
+    if authority.continuation and current_source is None:
+        raise ValueError("Preserving continuation requires its existing provider recipient.")
     host, token = source.read_dokploy_config(
         control_plane_root=control_plane_root, database_url=store.database_url
     )
@@ -399,6 +418,27 @@ def run_preview_preservation(
             original_reservation_id=original_reservation_id,
             operation_record_id=operation_record_id,
         )
+        if authority.continuation and not (
+            operation is not None
+            and operation.attempt > 1
+            and operation.provider_effect_phase == PREVIEW_PRESERVATION_CAPTURE_PHASE
+        ):
+            from control_plane.odoo_preview_qualification import collect_odoo_preview_qualification
+            from control_plane.workflows.launchplane import find_preview_record
+
+            preview = find_preview_record(
+                record_store=store,
+                context_name=authority.context,
+                anchor_repo=profile.repository.partition("/")[2],
+                anchor_pr_number=authority.pull_request_number,
+            )
+            if preview is None:
+                raise ValueError("Preserving continuation preview disappeared.")
+            qualification = collect_odoo_preview_qualification(
+                store, preview=preview, root=control_plane_root
+            )
+            if qualification.usage.usage != "unused" or not qualification.usage.resources_qualified:
+                raise ValueError("Preserving continuation requires an unused isolated preview.")
         if current_source is not None:
             with mutation_guard() if mutation_guard else nullcontext():
                 check()
@@ -466,6 +506,11 @@ def run_preview_preservation(
         program=PREVIEW_PRESERVATION_PROGRAM,
         payload={
             "mode": mode,
+            "continuation": authority.continuation,
+            "continuation_applied": authority.continuation
+            and operation is not None
+            and bool(operation.provider_effect_phase)
+            and operation.provider_effect_phase not in PREVIEW_PRESERVATION_PHASES,
             "provider_effect_phase": dispatch_phase,
             "authority": authority.model_dump(mode="json"),
             "preservation_id": authority.preservation_id,
@@ -487,7 +532,11 @@ def run_preview_preservation(
         or frames[0].get("preservation_id") != authority.preservation_id
         or not isinstance(frames[0].get("source"), dict)
         or not isinstance(frames[0].get("volume_binding"), dict)
-        or (current_source is not None and frames[0]["source"] != current_source)
+        or (
+            current_source is not None
+            and frames[0]["source"] != current_source
+            and not authority.continuation
+        )
         or (mode == "inspect" and frames[0].get("retry_safe") is not True)
     ):
         raise click.ClickException("Original preview preservation is unavailable or incomplete.")

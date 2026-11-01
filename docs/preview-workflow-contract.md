@@ -292,6 +292,30 @@ They do not report successful preparation or authorize a restore. Generic failed
 frames, incomplete streams and unknown dispositions remain unavailable evidence.
 The missing-start disposition keeps the original reservation fenced.
 
+A recorded plain-volume preview with unknown historical source can continue on
+the same PR through the existing service-issued refresh plan and preview-apply
+route. Set `preserve_original_reservation_id` to its authentic completed serving
+original. Admission binds the recorded serving generation, original intent,
+provider recipient and execution server; an unrelated or superseded original
+cannot authorize continuation. It does not fill in the historical source.
+
+Before capture, the service freshly qualifies non-use, resource isolation and
+production credential separation. Under the existing preview execution exclusion,
+the host stops the application writers, captures the database and complete data
+directory, verifies the archive contents and restores the database into isolated
+verification storage. Only a completed private receipt permits refresh. Logs and
+all recipient volumes remain in place. Refresh retains the current database and
+file store and never restores upstream or imports replacement data. Nonempty
+snapshot overlays remain unsupported and are retained without capture or refresh.
+
+Interrupted captures retain their original operation key, pending copy and
+provider checkpoint. Before the first refresh effect, receipt verification still
+requires stopped writers and unchanged data. After refresh starts, verification
+checks the immutable archive and exact physical volumes while allowing the new
+application's writes. Unknown refresh effects retain the ordinary reconciliation
+fence. A successful continuation records its new source decision as retained;
+later ordinary refreshes retain that recipient without rewriting older originals.
+
 For that qualified case, the reconciler issues the ordinary destroy plan/apply and
 rechecks native custody under the execution lock. Current usage, needed-copy,
 staff-testing and shared-resource protections are checked at every provider effect.

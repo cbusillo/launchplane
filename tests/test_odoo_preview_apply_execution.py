@@ -275,13 +275,17 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         )
         self.assertEqual(restored.preserve_original_reservation_id, reference)
 
-    def test_preservation_reference_cannot_authorize_a_refresh(self) -> None:
+    def test_preservation_reference_cannot_mix_with_unrecorded_recovery(self) -> None:
         reference = build_launchplane_mutation_reservation_id(
             scope="original-preview", route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key="donor"
         )
         with self.assertRaises(ValueError):
             OdooPreviewApplyEnvelope.model_validate(
-                {**_refresh_payload(), "preserve_original_reservation_id": reference}
+                {
+                    **_refresh_payload(),
+                    "preserve_original_reservation_id": reference,
+                    "unrecorded_original_reservation_id": reference,
+                }
             )
 
     def test_qualified_snapshot_preview_refresh_needs_no_first_snapshot(self) -> None:
