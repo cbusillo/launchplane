@@ -173,6 +173,9 @@ class RecipientRetirementTests(unittest.TestCase):
         fixture.provider[fixture.old_id.target_id].update(
             appName=project,
             composeType="docker-compose",
+            createEnvFile=True,
+            command=None,
+            randomize=False,
             autoDeploy=False,
             backups=[],
             mounts=[],
@@ -416,6 +419,19 @@ class RecipientRetirementTests(unittest.TestCase):
         self.assertEqual(
             set(compose_volume_names(document, payload)), {row["name"] for row in self.resources}
         )
+        defaulted = deepcopy(document)
+        for volume in defaulted["volumes"].values():
+            volume["name"] = volume["name"][:-1] + ":-fallback}"
+        with self.assertRaises(ValueError):
+            compose_volume_names(defaulted, payload, set(self.record.request.volume_keys.values()))
+        for change in (
+            {"createEnvFile": False},
+            {"command": "compose --env-file other.env up"},
+            {"composeType": "stack"},
+            {"randomize": True},
+        ):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                compose_volume_names(document, {**payload, **change})
         for environment in (
             "DB_VOLUME=old-database",
             "DB_VOLUME=old-database\nCONFIG_VOLUME=one\nCONFIG_VOLUME=two",
