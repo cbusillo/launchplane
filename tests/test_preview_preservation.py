@@ -272,7 +272,7 @@ class PreviewPreservationProgramTests(unittest.TestCase):
         unserved.assert_not_called()
         self.assertEqual((self.paths["logs"] / "odoo.log").read_bytes(), b"retained log")
 
-    def test_continuation_preflight_and_capture_failures_keep_original_available(self) -> None:
+    def test_continuation_preflight_and_capture_failures_keep_original_data(self) -> None:
         self.spec["continuation"] = True
         alias = self.paths["data"] / "alias"
         alias.symlink_to(self.filestore, target_is_directory=True)
@@ -284,8 +284,37 @@ class PreviewPreservationProgramTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.preserve()
         for service in ("web", "script-runner"):
-            self.assertTrue(self.containers[service]["State"]["Running"])
+            self.assertFalse(self.containers[service]["State"]["Running"])
+        self.assertEqual((self.filestore / "ab/attachment").read_bytes(), b"attachment bytes")
         self.assertFalse(self.path.exists())
+        self.restored.side_effect = None
+        self.namespace["verification_resources"] = Mock()
+        self.assertTrue(self.preserve()["database_restore_verified"])
+
+    def test_interruption_before_capture_or_after_publication_keeps_stopped_custody(self) -> None:
+        self.spec["continuation"] = True
+        capture = self.namespace["capture_preservation"]
+        self.namespace["capture_preservation"] = Mock(side_effect=RuntimeError("interrupted"))
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.namespace["capture_preservation"] = capture
+        inspection = self.namespace["inspect_pending_preservation"](self.path, self.source)
+        self.assertTrue(inspection["writers_stopped"])
+        synchronize = self.namespace["sync_preservation_parent"]
+
+        def fail_published(path: Path) -> None:
+            synchronize(path)
+            if path == self.path:
+                raise OSError("reply interrupted after rename")
+
+        self.namespace["sync_preservation_parent"] = fail_published
+        with self.assertRaises(OSError):
+            self.preserve()
+        for service in ("web", "script-runner"):
+            self.assertFalse(self.containers[service]["State"]["Running"])
+        receipt = self.namespace["verify_preservation"](self.path)
+        self.namespace["verify_preservation_source"](receipt, self.source)
+        self.assertEqual((self.filestore / "ab/attachment").read_bytes(), b"attachment bytes")
 
     def test_interrupted_pre_stop_continuation_requalifies_running_source(self) -> None:
         self.spec["continuation"] = True
@@ -1074,7 +1103,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         with patch(
             "control_plane.preview_reservation_recovery.original_preview_intent",
             side_effect=ValueError("legacy intent unavailable"),
-        ) as validate:
+        ):
             decision = resolve_preview_source_decision(
                 record_store=self.store,
                 profile=self.profile,
@@ -1082,7 +1111,56 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                 environment={},
             )
         self.assertEqual(decision.source, "none")
-        validate.assert_not_called()
+
+    def test_post_capture_refusals_keep_same_key_and_prevent_idle_wake(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        self.record_serving_original()
+        self.destroy.apply.dry_run_plan.operation = "refresh"
+        request = OdooPreviewApplyEnvelope.model_validate(self.destroy.model_dump(mode="json"))
+        self.issued = _issued_plan(request)
+        captured = False
+
+        def refuse(**kwargs: Any) -> dict[str, object]:
+            nonlocal captured
+            if captured:
+                raise LaneMovementRefused("older_artifact")
+            kwargs["provider_effect_checkpoint"](PREVIEW_PRESERVATION_CAPTURE_PHASE)
+            captured = True
+            return {"status": "fail", "provider_effect_attempted": False}
+
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=request,
+            issued_plan=self.issued,
+            reservation_scope="captured-refusal",
+            idempotency_key="captured-refusal",
+            request_fingerprint="captured-refusal",
+            trace_id="captured-refusal",
+            execute_apply=refuse,
+            observe_apply=Mock(return_value=("absent", None, True)),
+        )
+        with (
+            patch.object(operation.adapter, "capture_schedule_binding"),
+            patch("control_plane.preview_preservation.run_preview_preservation"),
+        ):
+            first = operation.run(self.store)
+            second = operation.run(self.store)
+        for outcome in (first, second):
+            self.assertEqual(outcome.status, "reconcile_required")
+            record = outcome.record
+            assert record is not None
+            self.assertEqual(record.idempotency_key, operation.idempotency_key)
+            self.assertEqual(record.provider_effect_phase, PREVIEW_PRESERVATION_CAPTURE_PHASE)
+        held = self.store.list_held_provider_target_reservations(
+            provider_target_key=operation.adapter.target_key()
+        )
+        self.assertEqual(len(held), 1)
+        first_record = first.record
+        assert first_record is not None
+        self.assertEqual(held[0].record_id, first_record.record_id)
 
     def test_no_snapshot_original_uses_its_retained_server_without_changing_intent(self) -> None:
         binding = self.server_binding()

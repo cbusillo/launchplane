@@ -309,7 +309,12 @@ file store and never restores upstream or imports replacement data. Nonempty
 snapshot overlays remain unsupported and are retained without capture or refresh.
 
 Interrupted captures retain their original operation key, pending copy and
-provider checkpoint. Before the first refresh effect, receipt verification still
+provider checkpoint. Deterministic custody and capacity refusals run before
+stopping writers. After stopping, a failure keeps the recipient stopped and its
+data in place under that same operation's reconciliation fence; inspection is
+read-only and continuation resumes on the original key once its blocker clears.
+It does not restart the old application. Before the first refresh effect,
+receipt verification still
 requires stopped writers and unchanged data. After refresh starts, verification
 checks the immutable archive and exact physical volumes while allowing the new
 application's writes. Unknown refresh effects retain the ordinary reconciliation

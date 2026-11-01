@@ -57,7 +57,7 @@ def require_idle_container(container: dict) -> dict:
     raise RuntimeError('Preview preservation execution custody is active')
 
 
-def tree_manifest(root: Path) -> dict:
+def tree_manifest(root: Path, *, hash_files: bool = True) -> dict:
     if root.is_symlink() or not root.is_dir() or root.resolve() != root.absolute():
         raise RuntimeError('Preview preservation filestore is aliased')
     entries = {}
@@ -65,14 +65,21 @@ def tree_manifest(root: Path) -> dict:
     for path in root.rglob('*'):
         if len(entries) >= 8192:
             raise RuntimeError('Preview preservation inventory exceeds its bound')
-        metadata = path.lstat()
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            if hash_files:
+                raise
+            continue
         if path.is_symlink() or path.resolve() != path.absolute():
             raise RuntimeError('Preview preservation contains an aliased entry')
         name = str(path.relative_to(root))
         if stat.S_ISDIR(metadata.st_mode):
             entries[name] = {'directory': True}
         elif stat.S_ISREG(metadata.st_mode):
-            entries[name] = {'bytes': metadata.st_size, 'sha256': snapshot_file_digest(path)}
+            entries[name] = {'bytes': metadata.st_size}
+            if hash_files:
+                entries[name]['sha256'] = snapshot_file_digest(path)
         else:
             raise RuntimeError('Preview preservation contains an unsupported entry')
         manifest_bytes += len(json.dumps({name: entries[name]}).encode())
@@ -468,28 +475,6 @@ def preservation_database(database: dict):
                 docker('stop', '-t', '30', database['Id'])
 
 
-@contextmanager
-def preservation_writers(source: dict, containers: dict):
-    completed = False
-    running = [service for service in ('web', 'script-runner') if containers[service]['State']['Running']]
-    try:
-        for service in running:
-            docker('stop', '-t', '30', containers[service]['Id'])
-        yield
-        completed = True
-    finally:
-        if not completed and spec.get('continuation', False):
-            with preservation_cleanup():
-                current = preview_containers(source)
-                if any(current[service]['Id'] != containers[service]['Id']
-                    or current[service]['Image'] != containers[service]['Image']
-                    for service in ('database', 'web', 'script-runner')):
-                    raise RuntimeError('Preview preservation cannot recover changed writers')
-                for service in running:
-                    if not current[service]['State']['Running']:
-                        docker('start', current[service]['Id'])
-
-
 def preserve(path: Path, source: dict) -> dict:
     containers = preview_containers(source)
     continuation = spec.get('continuation', False)
@@ -515,7 +500,7 @@ def preserve(path: Path, source: dict) -> dict:
     if not continuation and any(paths['logs'].iterdir()):
         raise RuntimeError('Preview preservation has additional log custody')
     filestore = paths['data'] if continuation else paths['data'] / 'filestore'
-    initial_manifest = tree_manifest(filestore)
+    initial_manifest = tree_manifest(filestore, hash_files=False)
     total = sum(entry.get('bytes', 0) for entry in initial_manifest.values())
     space = os.statvfs(path.parent)
     budget = spec['storage_budget']
@@ -536,8 +521,10 @@ def preserve(path: Path, source: dict) -> dict:
         raise RuntimeError('Preview preservation verifier lacks its pending custody')
     if not continuation:
         require_unserved_web(containers['web'])
-    with preservation_writers(source, containers):
-        return capture_preservation(path, source, containers, binding, filestore, addons, budget)
+    for service in ('web', 'script-runner'):
+        if containers[service]['State']['Running']:
+            docker('stop', '-t', '30', containers[service]['Id'])
+    return capture_preservation(path, source, containers, binding, filestore, addons, budget)
 
 
 def capture_preservation(path: Path, source: dict, containers: dict, binding: dict,

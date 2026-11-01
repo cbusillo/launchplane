@@ -685,14 +685,7 @@ def resolve_preview_source_decision(
     environment: dict[str, str],
     preserve_original_reservation_id: str = "",
 ) -> PreviewSourceDecision:
-    if issued_plan.operation == "refresh" and (
-        preserve_original_reservation_id
-        or preview_has_completed_retained_source(
-            record_store=record_store, profile=profile, issued_plan=issued_plan
-        )
-    ):
-        if issued_plan.plan_request.fishbowl_source is not None:
-            raise ValueError("A retained preview cannot import replacement data.")
+    if issued_plan.operation == "refresh" and preserve_original_reservation_id:
         return PreviewSourceDecision(source="retained", fishbowl_import=False)
     upstream = preview_uses_upstream_restore(profile, environment)
     snapshot = profile.preview.clean_testing_snapshot and issued_plan.operation == "refresh"
@@ -702,6 +695,10 @@ def resolve_preview_source_decision(
         plan=issued_plan.dry_run_plan,
         pr_number=issued_plan.plan_request.pr_number,
     )
+    if not upstream and not snapshot and issued_plan.operation == "refresh":
+        retained = preview_has_completed_retained_source(
+            record_store=record_store, profile=profile, issued_plan=issued_plan
+        )
     return PreviewSourceDecision(
         source="retained"
         if retained
@@ -757,11 +754,10 @@ def preview_has_completed_retained_source(
     )
     if original is None or original.state != "completed":
         return False
-    decision = PreviewSourceDecision(source="retained", fishbowl_import=False).model_dump(
-        mode="json"
-    )
-    if record_store.read_original_mutation_intent(original).get("effective_source") != decision:
+    decision = record_store.read_original_mutation_intent(original).get("effective_source")
+    if not isinstance(decision, dict) or decision.get("source") != "retained":
         return False
+    PreviewSourceDecision.model_validate(decision)
     original_preview_intent(original, profile=profile, store=record_store)
     from control_plane.odoo_preview_qualification import read_preview_inspection_authority
 

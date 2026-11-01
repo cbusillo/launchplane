@@ -641,7 +641,15 @@ class OdooPreviewProviderMutationAdapter:
                         "provider_effect_attempted": False,
                     },
                 ),
-                durable=error.code != "source_order_unavailable",
+                durable=error.code != "source_order_unavailable"
+                and not (
+                    self._apply_request.preserve_original_reservation_id
+                    and (
+                        effect_started
+                        or isinstance(lease, ProviderEvidenceLease)
+                        and bool(lease.evidence_reservation().provider_effect_started_at)
+                    )
+                ),
                 provider_effect_performed=False,
             )
         except (
