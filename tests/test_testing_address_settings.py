@@ -366,6 +366,27 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         self.assertFalse(pause.called)
         self.assertEqual(self.events, ["environment", "deployment"])
 
+    def test_deployment_observation_timeout_preserves_the_native_failure(self) -> None:
+        import uuid
+
+        failure = transport.NativeProgramFailed("fixture", failure_evidence_id=uuid.uuid4().hex)
+        original = settings.CanonicalAddressEffect.frame
+
+        def frame(effect: Any, *args: Any, **kwargs: Any) -> Any:
+            if effect.phase == "deployment":
+                raise failure
+            return original(effect, *args, **kwargs)
+
+        with (
+            patch.object(settings.CanonicalAddressEffect, "frame", frame),
+            patch.object(time, "monotonic", side_effect=itertools.count(0, 3600)),
+            patch.object(time, "sleep"),
+            self.assertRaises(NativeSourceUnavailable) as caught,
+        ):
+            self.run_address(False)
+        self.assertIs(caught.exception.__cause__, failure)
+        self.assertEqual(self.events, ["environment", "deployment"])
+
 
 class CanonicalAddressProgramTests(unittest.TestCase):
     def setUp(self) -> None:

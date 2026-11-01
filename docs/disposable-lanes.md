@@ -1632,8 +1632,9 @@ current provider payload and change only its canonical URL and freeze parameter,
 including the existing website bootstrap URL. The plan binds the remaining
 provider environment, the sole native website and its database values. Planning
 uses the native copy's storage/network inspection and a read-only database probe.
-Failed canonical commands retain bounded stdout/stderr in the existing private
-host failure archive; the service logs only its validated opaque reference.
+Failed canonical-address `docker exec` reads and writers retain bounded
+stdout/stderr in the existing private host failure archive; the service logs
+only its validated opaque reference.
 This diagnostic evidence changes no lane data or operation state. Use the
 [private failure-evidence reader](host-program-package.md#private-copy-failure-evidence)
 with the trace, program digest and registered execution server.

@@ -76,8 +76,8 @@ private (0700), each new file is 0600, and aliases or unsafe permissions
 refuse retention. Storage failure reports `unavailable` without replacing the
 original copy failure or its recovery classification.
 
-Failed canonical-address commands use this same private archive, including
-read-only native inspections. Their failure frame and the trace's
+Failed canonical-address `docker exec` reads and writers use this same private
+archive, including read-only native inspections. Their failure frame and the trace's
 `handled_error_cause` log retain only the validated opaque reference and program
 digest, with source sites when available. This diagnostic file is the only added
 persistent effect of a failed inspection; it changes no lane or operation state.
