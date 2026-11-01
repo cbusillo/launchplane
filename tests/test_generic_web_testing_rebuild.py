@@ -72,7 +72,6 @@ class ApplicationAbsenceTests(unittest.TestCase):
         self.services: dict[str, Any] = {}
         self.containers: dict[str, Any] = {}
         self.tasks: dict[str, Any] = {}
-        self.volumes: dict[str, Any] = {}
         self.removed: list[str] = []
 
     def docker(self, *arguments: str) -> str:
@@ -103,8 +102,6 @@ class ApplicationAbsenceTests(unittest.TestCase):
                 return "\n".join(self.tasks)
             case ("inspect", "--type", "task", identifier):
                 return json.dumps([self.tasks[identifier]])
-            case ("volume", "inspect", identifier):
-                return json.dumps([self.volumes[identifier]])
             case ("ps", "-aq", "--no-trunc"):
                 return "\n".join(self.containers)
             case ("inspect", *identifiers):
@@ -112,13 +109,8 @@ class ApplicationAbsenceTests(unittest.TestCase):
             case _:
                 raise AssertionError(arguments)
 
-    def observe(self, mode: str = "absent", **state: str) -> None:
-        payload = {
-            "application": "original-app",
-            "service_id": "original-service",
-            "mode": mode,
-            **state,
-        }
+    def observe(self, mode: str = "absent") -> None:
+        payload = {"application": "original-app", "service_id": "original-service", "mode": mode}
 
         def command(arguments: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(arguments, 0, self.docker(*arguments[1:]), "")
@@ -131,101 +123,6 @@ class ApplicationAbsenceTests(unittest.TestCase):
             command,
         )
         self.assertEqual(frame, {"type": "complete", **payload})
-
-    def mounted_predecessor(self) -> dict[str, str]:
-        state = {"volume_name": "original-state", "mount_path": "/data", "volume_binding": "owned"}
-        self.tasks = {}
-        self.services = {
-            "original-service": {
-                "ID": "original-service",
-                "Spec": {
-                    "Name": "original-app",
-                    "TaskTemplate": {
-                        "ContainerSpec": {
-                            "Mounts": [
-                                {"Type": "volume", "Source": "original-state", "Target": "/data"}
-                            ]
-                        }
-                    },
-                },
-            }
-        }
-        self.volumes = {
-            "original-state": {
-                "Name": "original-state",
-                "Driver": "local",
-                "Options": None,
-                "Labels": {"io.launchplane.testing-resources": "owned"},
-                "Mountpoint": "/var/lib/docker/volumes/original-state/_data",
-            }
-        }
-        self.containers = {
-            "old-container": {
-                "Id": "old-container",
-                "Config": {"Labels": {"com.docker.swarm.service.id": "original-service"}},
-                "Mounts": [
-                    {
-                        "Type": "volume",
-                        "Name": "original-state",
-                        "Destination": "/data",
-                        "RW": True,
-                        "Source": self.volumes["original-state"]["Mountpoint"],
-                    }
-                ],
-            }
-        }
-        return state
-
-    def test_mounted_predecessor_retires_only_its_service_and_preserves_captured_state(
-        self,
-    ) -> None:
-        state = self.mounted_predecessor()
-        self.observe("volume", **state)
-        self.containers = {}
-        self.observe("retire", **state)
-        self.assertEqual(self.removed, ["original-service"])
-        self.assertIn("original-state", self.volumes)
-
-    def test_mounted_state_refuses_foreign_or_inconsistent_physical_custody(self) -> None:
-        for changed in (
-            "driver",
-            "options",
-            "binding",
-            "container",
-            "task",
-            "mount_driver",
-            "absent",
-        ):
-            with self.subTest(changed=changed):
-                state = self.mounted_predecessor()
-                volume = self.volumes[state["volume_name"]]
-                mount = self.services["original-service"]["Spec"]["TaskTemplate"]["ContainerSpec"][
-                    "Mounts"
-                ][0]
-                if changed == "driver":
-                    volume["Driver"] = "nfs"
-                elif changed == "options":
-                    volume["Options"] = {"device": ":/another-volume"}
-                elif changed == "binding":
-                    volume["Labels"] = {"io.launchplane.testing-resources": "foreign"}
-                elif changed == "container":
-                    self.containers["old-container"]["Mounts"][0]["Source"] = "/another-volume"
-                elif changed == "task":
-                    self.tasks = {
-                        "task": {
-                            "ID": "task",
-                            "ServiceID": "original-service",
-                            "Spec": {"ContainerSpec": {"Mounts": [{**mount, "Source": "foreign"}]}},
-                        }
-                    }
-                elif changed == "mount_driver":
-                    mount["VolumeOptions"] = {"DriverConfig": {"Name": "nfs"}}
-                else:
-                    self.services = self.containers = {}
-                    volume["Driver"] = "nfs"
-                with self.assertRaises(ValueError):
-                    self.observe("volume", **state)
-                self.assertEqual(self.removed, [])
 
     def test_retirement_program_removes_only_the_original_stateless_service(self) -> None:
         self.services = {

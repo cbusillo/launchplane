@@ -140,13 +140,13 @@ def capture_rebuild_application_specification(
     store: PostgresRecordStore, intent: GenericWebTestingRebuildIntent
 ) -> TestingApplicationSpecification:
     previous = activation_record(store, intent.profile.product, intent.before.target.context)
-    if previous is None:
-        return rebuild_application_specification(intent)
     if (
-        previous.target_id != intent.before.target_id.target_id
-        or not completed_application_activation(store, previous)
+        previous is None
+        or previous.target_id != intent.before.target_id.target_id
         or previous.request.application is None
     ):
+        return default_rebuild_application_specification(intent)
+    if not completed_application_activation(store, previous):
         raise TestingRebuildRefused(
             "testing_rebuild_application_unverified",
             "The testing application needs its completed current activation.",
@@ -158,6 +158,17 @@ def capture_rebuild_application_specification(
             "health_path": intent.profile.health_path,
             "state": intent.state.model_dump(mode="json"),
         }
+    )
+
+
+def default_rebuild_application_specification(
+    intent: GenericWebTestingRebuildIntent,
+) -> TestingApplicationSpecification:
+    return TestingApplicationSpecification(
+        runtime_port=intent.profile.runtime_port,
+        health_path=intent.profile.health_path,
+        network_name=DOKPLOY_INGRESS_NETWORK,
+        state=intent.state,
     )
 
 
@@ -180,12 +191,7 @@ def rebuild_application_specification(
                 "The original testing application specification differs from its admitted profile.",
             )
         return intent.application
-    return TestingApplicationSpecification(
-        runtime_port=intent.profile.runtime_port,
-        health_path=intent.profile.health_path,
-        network_name=DOKPLOY_INGRESS_NETWORK,
-        state=intent.state,
-    )
+    return default_rebuild_application_specification(intent)
 
 
 def inspect_generic_web_testing_rebuild(

@@ -804,7 +804,9 @@ Existing Odoo preflight and execution continue through the same control.
 Rebuild admission retains the completed current activation's application recipe,
 including its network and local and external credential intent. Current profile
 port, health path and declared state remain authoritative. A recipe from another
-recipient or an incomplete activation cannot supply that intent. External
+recipient cannot supply that intent; lanes without a native application recipe
+keep the default recipe. An incomplete current application activation refuses.
+Capturing a recipe does not enable execution for a pending lane. External
 credential comparisons use fresh profiles internally under the original rebuild
 authority; they do not expose other products' settings to the caller.
 
