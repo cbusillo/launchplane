@@ -580,6 +580,23 @@ project argument determines unnamed volumes; unsupported expressions, sources
 and unreadable documents stay held. Production retirement keeps its reviewed
 sole-variable keys and every removal custody check.
 
+A raw target's existing root-file command can use the same inventory when its
+project, file and generated environment are equivalent to the provider command;
+other commands remain unqualified. Cached Git include wrappers are read through
+the registered server transport without executing Compose. The supported shape
+is one level of local regular source files, with named storage, no separate
+included-directory environment and no file inheritance. Source bytes stay in
+memory. Changed, linked, excessive or unsupported source observations stay held.
+
+For these cached files, volume expressions can use flat defaults only when every
+occurrence is defaulted, the input is not provider-injected, and its absence is
+proved both in the complete provider environment and the actual generated
+environment file. Present, empty, duplicated or uncertain inputs remain held.
+A null converted document is empty inventory only after complete unconfigured
+source, no scheduled or active deployment work, and absence of the entire
+canonical cached project are proved. Neither rule changes removal custody,
+physical reference checks, the original permit or recovery.
+
 Dokploy can add an unused `dokploy-network: {external: true}` root declaration
 to a domainless render. Qualification ignores only that exact provider-added
 declaration when the reviewed source did not declare it and no service joins

@@ -49,38 +49,40 @@ def require_empty_compose_source(payload: JsonObject, compose_id: str) -> None:
     require_empty_target_source(payload)
 
 
+COMPOSE_SOURCE_FIELDS = (
+    "customGitUrl",
+    "customGitBranch",
+    "customGitSSHKeyId",
+    "repository",
+    "owner",
+    "githubId",
+    "gitlabId",
+    "gitlabRepository",
+    "gitlabOwner",
+    "bitbucketId",
+    "bitbucketRepository",
+    "bitbucketOwner",
+    "giteaId",
+    "giteaRepository",
+    "giteaOwner",
+    "composeFile",
+    "branch",
+    "gitlabBranch",
+    "bitbucketBranch",
+    "giteaBranch",
+    "gitlabProjectId",
+    "gitlabPathNamespace",
+    "bitbucketRepositorySlug",
+)
+
+
 def require_empty_target_source(payload: JsonObject) -> None:
     """An unconfigured provider default is not a partial repository or image source."""
     if payload.get("sourceType") not in (None, "", "github", "git", "raw"):
         raise ValueError("Target already has a different source type.")
     # A provider's default sourceType/composePath is not a configured source.
     # Reject partial source and credential bindings as well as complete sources.
-    for key in (
-        "customGitUrl",
-        "customGitBranch",
-        "customGitSSHKeyId",
-        "repository",
-        "owner",
-        "githubId",
-        "gitlabId",
-        "gitlabRepository",
-        "gitlabOwner",
-        "bitbucketId",
-        "bitbucketRepository",
-        "bitbucketOwner",
-        "giteaId",
-        "giteaRepository",
-        "giteaOwner",
-        "composeFile",
-        "dockerImage",
-        "repositoryId",
-        "branch",
-        "gitlabBranch",
-        "bitbucketBranch",
-        "giteaBranch",
-        "gitlabProjectId",
-        "gitlabPathNamespace",
-    ):
+    for key in (*COMPOSE_SOURCE_FIELDS, "dockerImage", "repositoryId"):
         if payload.get(key):
             raise ValueError("Target already has a configured or partial source.")
 
