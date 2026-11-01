@@ -306,6 +306,7 @@ class GenericWebTestingStateCopy(BaseModel):
     def validate_command(self) -> Self:
         if (
             not PurePosixPath(self.command[0]).is_absolute()
+            or not PurePosixPath(self.command[0]).name
             or any("\x00" in argument for argument in self.command)
             or sum(len(argument.encode("utf-8")) for argument in self.command) > 4096
         ):

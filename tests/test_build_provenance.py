@@ -476,23 +476,24 @@ class GenericWebBuildProvenanceTests(unittest.TestCase):
         self.assertNotIn("testing_state_copy", manifest.model_dump(mode="json"))
 
     def test_malformed_state_copy_commands_refuse_the_manifest(self) -> None:
-        for command in (
-            [],
-            ["relative-command"],
-            ["/app/bin/copy", "bad\x00argument"],
-            "shell command",
-            ["/app/bin/copy", "x" * 100000],
+        for case, command in (
+            ("empty", []),
+            ("relative", ["relative-command"]),
+            ("directory", ["/"]),
+            ("nul", ["/app/bin/copy", "bad\x00argument"]),
+            ("shell-text", "shell command"),
+            ("argument-budget", ["/app/bin/copy", "x" * 100000]),
+            ("total-byte-budget", ["/app/bin/copy", *["é" * 600] * 4]),
         ):
-            with (
-                self.subTest(command_type=type(command).__name__),
-                self.assertRaises(BuildProvenanceError),
-            ):
-                self.verify(
-                    FakeGitHub(
-                        runs=[_run()],
-                        manifest=_generic_web_manifest(testing_state_copy={"command": command}),
+            with self.subTest(case=case):
+                with self.assertRaises(BuildProvenanceError) as caught:
+                    self.verify(
+                        FakeGitHub(
+                            runs=[_run()],
+                            manifest=_generic_web_manifest(testing_state_copy={"command": command}),
+                        )
                     )
-                )
+                self.assertEqual(caught.exception.code, "manifest_invalid")
 
     def test_historical_preview_proof_requires_the_exact_recorded_image(self) -> None:
         image = f"{IMAGE_REPOSITORY}@sha256:{'c' * 64}"

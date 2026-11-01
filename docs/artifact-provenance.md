@@ -46,6 +46,8 @@ image labels and site settings cannot supply it. Omitted declarations keep the
 existing manifest shape. This declaration grants no execution or source access;
 testing restore remains unavailable until native source, custody and execution
 qualification are implemented.
+Deploy this Launchplane support before a product starts emitting the field.
+An older reader refuses manifests carrying the declaration after a rollback.
 
 ## What Launchplane records per product
 
