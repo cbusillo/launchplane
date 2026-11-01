@@ -487,6 +487,8 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             "appName": "other-stack",
             "env": "STATE_VOLUME=unrelated-state",
             "composeType": "docker-compose",
+            "sourceType": "raw",
+            "composePath": "./docker-compose.yml",
             "createEnvFile": True,
             "command": None,
             "randomize": False,
@@ -497,6 +499,18 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         }
         for changes, exact, clear in (
             ({}, True, True),
+            (
+                {"command": "compose -p other-stack -f docker-compose.yml up -d --remove-orphans"},
+                True,
+                True,
+            ),
+            (
+                {
+                    "command": "compose -p another-stack -f docker-compose.yml up -d --remove-orphans"
+                },
+                True,
+                False,
+            ),
             (
                 {"env": "STATE_VOLUME=" + self.binding.volume_name.removesuffix("-data")},
                 True,
