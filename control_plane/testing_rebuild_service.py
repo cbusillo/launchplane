@@ -2689,10 +2689,8 @@ def _execute_native_testing_rebuild(
     else:
         raise ValueError("The original testing rebuild reservation is unavailable or conflicts.")
     if not isinstance(intent, NativeTestingRebuildIntent):
-        raise TestingRebuildRefused(
-            "testing_rebuild_execution_unavailable",
-            "Rebuilding this testing lane is not available yet. No changes have been made.",
-        )
+        resolve_testing_rebuild_driver(store, operation.product).require_execution()
+        raise ValueError("The selected driver returned an incompatible rebuild intent.")
     if intent.operation_id != operation.operation_id or intent.profile.product != operation.product:
         raise ValueError("The original testing rebuild intent belongs to another operation.")
     adapter = NativeTestingRebuildAdapter(root, store, operation, intent, authorize)

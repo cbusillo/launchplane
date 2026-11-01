@@ -1237,12 +1237,13 @@ class GenericWebTestingRebuildHttpTests(
         payload = self.profile.model_dump(mode="json")
         for lane in payload["lanes"]:
             if lane["instance"] == "testing":
-                lane["generic_web_extensions"] = {"testing_state": state}
+                lane["generic_web_testing_state"] = state
         self.profile = LaunchplaneProductProfileRecord.model_validate(payload)
         self.store.write_product_profile_record(self.profile)
 
     async def test_none_and_volume_admission_remain_read_only_until_execution_exists(self) -> None:
         from control_plane.dokploy import source
+        from control_plane.testing_rebuild_driver import TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE
 
         before = self.store.list_odoo_stable_target_replacement_operation_records()
         for state in ({"kind": "none"}, {"kind": "volume", "container_path": "/app/data"}):
@@ -1251,12 +1252,14 @@ class GenericWebTestingRebuildHttpTests(
                 response = await self.call("GET", path=self.url + "/inputs")
                 self.assertEqual(response.status_code, 200, response.text)
                 inspected = response.json()
-                self.assertFalse(inspected["execution_available"])
                 self.assertNotEqual(inspected["status"], "pass")
                 self.assertEqual(inspected["artifact_id"], self.manifest.artifact_id)
                 self.assertEqual(inspected["context"], self.fixture.operation.context)
                 submitted = await self.call("POST", self.payload)
                 self.assertEqual(submitted.status_code, 409, submitted.text)
+                self.assertEqual(
+                    submitted.json()["error"]["reason"], TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE
+                )
                 provider.assert_not_called()
         self.provider_config.assert_not_called()
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
@@ -1267,7 +1270,6 @@ class GenericWebTestingRebuildHttpTests(
 
         for state, source_mode in (
             (None, "empty"),
-            ({"kind": "unknown"}, "empty"),
             ({"kind": "postgresql"}, "empty"),
             ({"kind": "none"}, "production_restore"),
             ({"kind": "volume", "container_path": "/app/data"}, "upstream_restore"),
@@ -1342,3 +1344,46 @@ class GenericWebTestingRebuildHttpTests(
                         action_allowed=lambda *_: True,
                     )
                 self.assertEqual(detail.testing_rebuild_supported, supported)
+
+    async def test_missing_product_is_a_bounded_preflight_and_submission_refusal(self) -> None:
+        from control_plane.dokploy import source
+
+        missing = "/v1/products/absent-product/testing-rebuild"
+        with patch.object(source, "read_dokploy_config") as provider:
+            for method, path, payload in (
+                ("GET", missing + "/inputs", None),
+                ("POST", missing, self.payload),
+            ):
+                with self.subTest(method=method):
+                    response = await self.call(method, payload, path=path)
+                    self.assertEqual(response.status_code, 409, response.text)
+            provider.assert_not_called()
+        self.latest.assert_not_called()
+        self.assertEqual(self.fixture.effects, [])
+
+    def test_worker_refuses_generic_web_before_reserving_or_dispatching_effects(self) -> None:
+        from unittest.mock import Mock
+        from control_plane import testing_rebuild_service as service
+        from control_plane.dokploy import source
+        from control_plane.testing_rebuild_driver import TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE
+
+        operation = self.fixture.operation.model_copy(update={"operation_id": "generic-fence"})
+        before = self.store.list_held_provider_target_reservations()
+        with (
+            patch.object(
+                service, "capture_rebuild_intent", side_effect=self.fixture.capture_driver_function
+            ),
+            patch.object(source, "read_dokploy_config") as provider,
+            self.assertRaises(service.TestingRebuildRefused) as refused,
+        ):
+            service.execute_native_testing_rebuild(
+                root=self.fixture.root,
+                store=self.store,
+                operation=operation,
+                authorize=Mock(),
+                lease_owner="test-worker",
+            )
+        self.assertEqual(refused.exception.code, TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE)
+        provider.assert_not_called()
+        self.assertEqual(self.store.list_held_provider_target_reservations(), before)
+        self.assertEqual(self.fixture.effects, [])

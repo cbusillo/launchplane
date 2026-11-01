@@ -723,10 +723,10 @@ location evidence, including stable replay; historical receipts remain unchanged
 ## One-action rebuild admission
 
 The testing rebuild control reads an explicit
-`lanes[].generic_web_extensions.testing_state` from the managed product profile.
+`lanes[].generic_web_testing_state` from the managed product profile.
 `kind: none` declares no persistent data. `kind: volume` also requires the
 application's safe `container_path`, using the activation state contract above.
-A missing or `unknown` declaration refuses admission. `postgresql` records the
+A missing declaration refuses admission. `postgresql` records the
 still-deferred independent PostgreSQL prerequisite and refuses before provider work.
 These declarations apply only to generic-web testing lanes.
 
@@ -734,8 +734,7 @@ The first delivery slice exposes the same signed-in inspection and its control
 for declared none/volume lanes. Inspection checks exclusive product/context
 ownership, the selected verified build, stored target agreement and recorded
 holds, use and custody protections. It performs no provider calls or writes.
-It returns `status: pending`, `execution_available: false` and pending candidate
-verification. This is state admission, not proof of current usage, resource
+It returns `status: pending`, a reason and pending candidate verification. This is state admission, not proof of current usage, resource
 isolation, candidate readiness or a completed rebuild. Submission and the native
 worker both refuse generic-web execution until the shared activation continuation
 is connected. The button remains disabled. Existing Odoo preflight and execution

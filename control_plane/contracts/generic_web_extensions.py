@@ -4,22 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.cron import validate_cron_expression
-from control_plane.contracts.testing_application import TestingApplicationState
-
-
-class GenericWebTestingState(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    kind: Literal["none", "volume", "postgresql", "unknown"]
-    container_path: str = ""
-
-    @model_validator(mode="after")
-    def validate_application_state(self) -> "GenericWebTestingState":
-        if self.kind in {"none", "volume"}:
-            TestingApplicationState.model_validate(self.model_dump())
-        elif self.container_path:
-            raise ValueError("Only a local volume can declare an application state path.")
-        return self
 
 
 class GenericWebMaintenanceCommand(BaseModel):
@@ -55,12 +39,6 @@ class GenericWebApplicationSchedule(GenericWebMaintenanceCommand):
 class GenericWebLaneExtensions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    testing_state: GenericWebTestingState | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
-
     verification_extension: Literal["", "verireel-testing"] = Field(
         default="",
         exclude_if=lambda value: not value,
@@ -78,6 +56,4 @@ class GenericWebLaneExtensions(BaseModel):
 
     @property
     def configured(self) -> bool:
-        return bool(
-            self.testing_state or self.maintenance or self.schedules or self.verification_extension
-        )
+        return bool(self.maintenance or self.schedules or self.verification_extension)

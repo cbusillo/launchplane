@@ -23,7 +23,10 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.odoo_target_replacement_apply_http import (
     _validate_target_replacement_apply_artifact_authority,
 )
-from control_plane.testing_rebuild_driver import resolve_testing_rebuild_driver
+from control_plane.testing_rebuild_driver import (
+    resolve_testing_rebuild_driver,
+    TESTING_REBUILD_EXECUTION_UNAVAILABLE,
+)
 from control_plane.odoo_testing_native_source import native_testing_source_authority
 from control_plane.testing_candidate_runtime import candidate_credential_authority
 from control_plane.runtime_environments import resolve_site_runtime_environment
@@ -47,9 +50,9 @@ class TestingRebuildPreflight(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["pass", "pending"] = "pass"
-    execution_available: bool = Field(
-        default=True,
-        exclude_if=lambda value: value,
+    message: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
     product: str
@@ -88,7 +91,12 @@ def inspect_testing_rebuild(
             verified_manifest=verified_manifest,
         )
     else:
-        manifest = verified_manifest or store.read_artifact_manifest(apply.artifact_id)
+        try:
+            manifest = verified_manifest or store.read_artifact_manifest(apply.artifact_id)
+        except FileNotFoundError as error:
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified", "The selected build is unavailable."
+            ) from error
         if (manifest.artifact_id, manifest.source_commit) != (
             apply.artifact_id,
             apply.source_git_ref,
@@ -138,7 +146,7 @@ def inspect_testing_rebuild(
     if isinstance(intent, GenericWebTestingRebuildIntent):
         return TestingRebuildPreflight(
             status="pending",
-            execution_available=False,
+            message=TESTING_REBUILD_EXECUTION_UNAVAILABLE,
             product=apply.product,
             context=lane.context,
             base_url=lane.base_url,

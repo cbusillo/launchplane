@@ -13,6 +13,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       return readTestingRebuildAttempt(product);
     }, environment.product);
     environment.driver_id = "odoo";
+    environment.testing_rebuild_supported = true;
     environment.driver_extensions.odoo = {
       allowed_rebuild_sources: ["empty", "production_restore", "upstream_restore"], data_authority: "disposable",
       destructive_replacement_proof_required: false, prelaunch_rebuild_allowed: true,
@@ -26,6 +27,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     }
     const writes: { key: string; body: Record<string, unknown> }[] = [];
     const selectedCommit = "c".repeat(40);
+    const pendingMessage = "This testing lane is not ready to rebuild.";
     const csrfToken = "fixture-csrf";
     const rebuildDenialMessage = outcome === "recovery-denied"
       ? "The retained request needs its original administrator." : "This request is denied.";
@@ -50,7 +52,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     await page.route("**/v1/products/atlas-commerce/testing-rebuild/inputs?*", route => outcome === "preflight-unavailable"
       ? route.fulfill({ status: 503, json: { trace_id: "preflight-unavailable", error: { code: "testing_preflight_unavailable", message: "Testing inspection is unavailable." } } })
       : route.fulfill({ json: {
-      status: outcome === "generic-pending" ? "pending" : "pass", execution_available: outcome !== "generic-pending", product: environment.product, context: environment.context, instance: "testing", base_url: environment.base_url,
+      status: outcome === "generic-pending" ? "pending" : "pass", message: outcome === "generic-pending" ? pendingMessage : "", product: environment.product, context: environment.context, instance: "testing", base_url: environment.base_url,
       artifact_id: "current-verified-build", source_git_ref: selectedCommit, data_source_mode: new URL(route.request().url()).searchParams.get("data_source_mode"),
       observed_at: new Date().toISOString(), candidate_verification: "pending",
       original_scope: originalScope,
@@ -141,7 +143,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     }
     if (outcome === "generic-pending") {
       await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeDisabled();
-      await expect(panel).toContainText("No changes have been made.");
+      await expect(panel).toContainText(pendingMessage);
       expect(writes.length).toBe(0);
       await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-pending.png") });
       return;

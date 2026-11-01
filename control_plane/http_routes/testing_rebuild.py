@@ -270,8 +270,8 @@ def register_testing_rebuild_routes(
         trace_id = common.next_trace_id()
         store = require_admin(identity, record_store, trace_id, read_only=True)
         try:
-            profile = store.read_product_profile_record(product)
-            lane = resolve_testing_rebuild_driver(store, product).lane
+            driver = resolve_testing_rebuild_driver(store, product)
+            profile, lane = driver.profile, driver.lane
             verified = latest_verified_testing_build(store, profile, lane)
             request = replacement(
                 product,
@@ -342,11 +342,7 @@ def register_testing_rebuild_routes(
         try:
             driver = resolve_testing_rebuild_driver(store, product)
             lane = driver.lane
-            if not driver.execution_available:
-                raise TestingRebuildRefused(
-                    "testing_rebuild_execution_unavailable",
-                    "Rebuilding this testing lane is not available yet. No changes have been made.",
-                )
+            driver.require_execution()
             now = utc_now_timestamp()
             authorization = capture_durable_operation_authorization(
                 identity=identity,
