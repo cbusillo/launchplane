@@ -161,8 +161,8 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
         _validate_driver_envelope_product(self.product, label="Odoo preview apply")
         if self.product.strip() != self.apply.dry_run_plan.product.strip():
             raise ValueError("Odoo preview apply requires matching product values.")
-        if self.preserve_original_reservation_id and self.apply.dry_run_plan.operation != "destroy":
-            raise ValueError("Original preview preservation requires a destroy operation.")
+        if self.preserve_original_reservation_id and self.unrecorded_original_reservation_id:
+            raise ValueError("Preview preservation and unrecorded recovery cannot be combined.")
         if (
             self.unrecorded_original_reservation_id
             and self.apply.dry_run_plan.operation != "refresh"
@@ -583,6 +583,7 @@ def execute_odoo_preview_apply_result(
         profile=profile,
         issued_plan=issued_plan,
         environment=resolved_environment_values,
+        preserve_original_reservation_id=current_request.preserve_original_reservation_id,
     )
     if expected_source_decision is not None and decision != expected_source_decision:
         raise ValueError("Preview effective source changed before execution; plan again.")
@@ -682,7 +683,10 @@ def resolve_preview_source_decision(
     profile: LaunchplaneProductProfileRecord,
     issued_plan: OdooPreviewApplyInputsResult,
     environment: dict[str, str],
+    preserve_original_reservation_id: str = "",
 ) -> PreviewSourceDecision:
+    if issued_plan.operation == "refresh" and preserve_original_reservation_id:
+        return PreviewSourceDecision(source="retained", fishbowl_import=False)
     upstream = preview_uses_upstream_restore(profile, environment)
     snapshot = profile.preview.clean_testing_snapshot and issued_plan.operation == "refresh"
     retained = (upstream or snapshot) and preview_has_completed_restore(
@@ -691,6 +695,10 @@ def resolve_preview_source_decision(
         plan=issued_plan.dry_run_plan,
         pr_number=issued_plan.plan_request.pr_number,
     )
+    if not upstream and not snapshot and issued_plan.operation == "refresh":
+        retained = preview_has_completed_retained_source(
+            record_store=record_store, profile=profile, issued_plan=issued_plan
+        )
     return PreviewSourceDecision(
         source="retained"
         if retained
@@ -713,6 +721,48 @@ def preview_uses_upstream_restore(
             key.startswith("ODOO_UPSTREAM_") and value.strip() for key, value in environment.items()
         )
     )
+
+
+def preview_has_completed_retained_source(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: OdooPreviewApplyInputsResult,
+) -> bool:
+    from control_plane.preview_reservation_recovery import original_preview_intent
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if not isinstance(record_store, PostgresRecordStore):
+        return False
+    preview = find_preview_record(
+        record_store=record_store,
+        context_name=profile.preview.context,
+        anchor_repo=_odoo_preview_anchor_repo(profile.repository),
+        anchor_pr_number=issued_plan.plan_request.pr_number,
+    )
+    if preview is None or not preview.serving_generation_id or preview.state == "destroyed":
+        return False
+    try:
+        generation = record_store.read_preview_generation_record(preview.serving_generation_id)
+    except FileNotFoundError:
+        return False
+    identity = generation.runtime_identity
+    original = (
+        record_store.read_idempotency_record_by_id(identity.deployment_record_id)
+        if identity is not None
+        else None
+    )
+    if original is None or original.state != "completed":
+        return False
+    decision = record_store.read_original_mutation_intent(original).get("effective_source")
+    if not isinstance(decision, dict) or decision.get("source") != "retained":
+        return False
+    PreviewSourceDecision.model_validate(decision)
+    original_preview_intent(original, profile=profile, store=record_store)
+    from control_plane.odoo_preview_qualification import read_preview_inspection_authority
+
+    authority = read_preview_inspection_authority(record_store, preview)
+    return authority.target_id.target_id == issued_plan.dry_run_plan.compose_ref
 
 
 def preview_has_completed_restore(
