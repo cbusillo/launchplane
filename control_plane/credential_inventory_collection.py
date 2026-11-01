@@ -48,7 +48,7 @@ def collect_inventory(
             if not collector.is_file():
                 raise FileNotFoundError
             completed = subprocess.run(
-                command, capture_output=True, timeout=COLLECTOR_TIMEOUT_SECONDS, check=False
+                command, capture_output=True, timeout=COLLECTOR_TIMEOUT_SECONDS
             )
             if completed.returncode not in (0, 1, 2):
                 failure_reason = "collector_failed"
@@ -189,6 +189,7 @@ def main() -> int:
         return 0 if collection.status == "collected" else 1
     except HTTPError as error:
         print(json.dumps({"status": "delivery_failed", "http_status": error.code}))
+    # noinspection PyBroadException: Keep imported transport failures out of CLI output.
     except Exception:
         print(json.dumps({"status": "delivery_failed"}))
     return 2

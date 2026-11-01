@@ -37,6 +37,10 @@ from tests.test_authz_administration_read import (
 from control_plane.service_auth import GitHubHumanIdentity
 
 
+def patch_attr(target: object, name: str, **kwargs: Any) -> Any:
+    return patch.object(target, name, **kwargs)
+
+
 def collection_payload(now: datetime) -> dict[str, object]:
     return {
         "attempted_at": now.isoformat(),
@@ -218,13 +222,13 @@ class CredentialInventoryTests(unittest.TestCase):
         helper = ModuleType("operator_fixture")
         receipt = collection_receipt_id(collection)
         with (
-            patch.object(
+            patch_attr(
                 helper,
                 "resolve_settings",
                 return_value={"service_url": "https://fixture.invalid"},
                 create=True,
-            ),
-            patch.object(
+            ) as settings,
+            patch_attr(
                 helper,
                 "request_launchplane",
                 return_value={"status": "ok", "receipt_id": receipt},
@@ -236,16 +240,8 @@ class CredentialInventoryTests(unittest.TestCase):
             request.return_value = {"status": "ok", "receipt_id": "private-fixture"}
             with self.assertRaises(ValueError):
                 collector.publish_inventory(collection, helper=helper)
-            with patch.object(
-                helper, "resolve_settings", return_value={"service_url": "https://fixture.invalid"}
-            ) as settings:
-                request.return_value = {"status": "ok", "receipt_id": receipt}
-                collector.publish_inventory(
-                    collection,
-                    helper=helper,
-                )
-                self.assertIsNone(settings.call_args.args[0].env_config)
-                self.assertIsNone(settings.call_args.args[0].config)
+            self.assertIsNone(settings.call_args.args[0].env_config)
+            self.assertIsNone(settings.call_args.args[0].config)
         with TemporaryDirectory() as directory:
             root = Path(directory)
             args = argparse.Namespace(
