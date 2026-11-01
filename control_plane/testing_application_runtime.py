@@ -1,5 +1,3 @@
-"""Fixed qualification and bounded retirement of single-replica application runtimes."""
-
 import hashlib
 import inspect
 import json
