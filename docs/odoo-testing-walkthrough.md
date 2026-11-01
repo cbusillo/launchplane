@@ -383,9 +383,11 @@ The product defines the exact models and record rules. Fix missing menu access
 in its read-only role, without granting full inventory operations. An absent
 PrintNode credential or empty printer list is expected.
 
-The product server guard is the read-only authority. The browser adds a small
-blocklist for known business-write RPCs, object buttons, server actions,
-reports/downloads, mail posting, external requests and websockets. It leaves
+The product server guard is the read-only authority. The browser applies the
+same known-business-write method filter to ordinary and button RPCs. Pure
+button openers still require the product's read-only routing and SQL guard.
+The browser blocks server actions, reports/downloads, mail posting, external
+requests and websockets. It leaves
 localization, ordinary read methods and menu loading to the product web client,
 without maintaining a second list of every Odoo read. Menu clicks remain
 available within this transport. `sign_out` and `sign_in`

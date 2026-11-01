@@ -196,32 +196,47 @@ class OpaqueBrowserTests(unittest.TestCase):
         self.assertTrue(
             readonly_browser_request("POST", "/web/action/load", {"params": {"context": {}}})
         )
-        for method in ("web_read", "web_search_read", "get_views", "default_get"):
-            self.assertTrue(
-                readonly_browser_request(
-                    "POST",
-                    "/web/dataset/call_kw/product.product/" + method,
-                    {"params": {"model": "product.product", "method": method}},
+        payload: object
+        for path in (
+            "/web/dataset/call_kw",
+            "/web/dataset/call_kw/product.product/web_read",
+            "/web/dataset/call_button",
+            "/web/dataset/call_button/product.product/action_open_label_layout",
+        ):
+            for method in (
+                "web_read",
+                "web_search_read",
+                "get_views",
+                "default_get",
+                "action_open_label_layout",
+            ):
+                self.assertTrue(
+                    readonly_browser_request(
+                        "POST", path, {"params": {"model": "product.product", "method": method}}
+                    )
                 )
-            )
-        for method in ("write", "create", "unlink", "button_validate", "action_print"):
-            self.assertFalse(
-                readonly_browser_request(
-                    "POST",
-                    "/web/dataset/call_kw/product.product/read",
-                    {"params": {"model": "product.product", "method": method}},
+            for method in (
+                "write",
+                "create",
+                "unlink",
+                "button_validate",
+                "action_print",
+                "web_save",
+            ):
+                self.assertFalse(
+                    readonly_browser_request(
+                        "POST", path, {"params": {"model": "product.product", "method": method}}
+                    )
                 )
-            )
+            for payload in (None, {}, {"params": []}, {"params": {"method": 1}}):
+                self.assertFalse(readonly_browser_request("POST", path, payload))
         for verb, path in (
             ("GET", "/report/pdf/product.label/1"),
-            ("POST", "/web/dataset/call_button"),
-            ("POST", "/web/dataset/call_button/stock.picking/button_validate"),
             ("POST", "/web/session/change_password"),
             ("GET", "/web/content/1?download=true"),
             ("POST", "/mail/message/post"),
         ):
             self.assertFalse(readonly_browser_request(verb, path, {}))
-        self.assertFalse(readonly_browser_request("POST", "/web/dataset/call_kw", {}))
         self.assertTrue(readonly_browser_request("GET", "/web/assets/client.js", None))
 
     def test_preview_browser_requires_readonly_and_rejects_fill_before_signin(self) -> None:
@@ -288,7 +303,7 @@ class OpaqueBrowserTests(unittest.TestCase):
             self.run_browser(WalkthroughStep(action="visible", selector=".missing"), read_only=True)
         self.assertNotIsInstance(failed.exception, ReadonlyBrowserCheckFailed)
 
-    def test_readonly_route_aborts_malformed_rpc_and_allows_my_printers(self) -> None:
+    def test_readonly_route_filters_payloads_and_allows_pure_openers(self) -> None:
         self.run_browser(read_only=True)
         handle = self.context.route.call_args.args[1]
         route = MagicMock()
@@ -303,6 +318,16 @@ class OpaqueBrowserTests(unittest.TestCase):
                 "POST", "/web/dataset/call_kw", {"params": {"method": "action_my_printers"}}
             )
         )
+
+        route = MagicMock()
+        route.request.url = "https://testing.example/web/dataset/call_button/product.product/action_open_label_layout"
+        route.request.method = "POST"
+        route.request.post_data_json = {
+            "params": {"model": "product.product", "method": "action_open_label_layout"}
+        }
+        handle(route)
+        route.continue_.assert_called_once()
+        route.abort.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -15,6 +15,9 @@ from control_plane.odoo_runtime_reads import require_runtime_identity
 from control_plane.testing_browser import launch_testing_browser
 
 
+_MODEL_RPC_PATH_PREFIXES = ("/web/dataset/call_kw", "/web/dataset/call_button")
+
+
 class ReadonlyBrowserCheckFailed(ValueError):
     def __init__(self, steps_passed: int = 0) -> None:
         self.steps_passed = steps_passed
@@ -26,25 +29,19 @@ def readonly_browser_request(method: str, path: str, payload: object) -> bool:
         return False
     if method == "GET":
         return True
-    if (
-        method != "POST"
-        or path.startswith("/web/dataset/call_button/")
-        or path
-        in {
-            "/web/dataset/call_button",
-            "/web/action/run",
-            "/mail/message/post",
-            "/web/binary/upload",
-            "/web/binary/upload_attachment",
-            "/mail/attachment/upload",
-            "/mail/message/update_content",
-            "/mail/message/reaction",
-        }
-    ):
+    if method != "POST" or path in {
+        "/web/action/run",
+        "/mail/message/post",
+        "/web/binary/upload",
+        "/web/binary/upload_attachment",
+        "/mail/attachment/upload",
+        "/mail/message/update_content",
+        "/mail/message/reaction",
+    }:
         return False
     if path.startswith("/web/session/") and path != "/web/session/get_session_info":
         return False
-    if path == "/web/dataset/call_kw" or path.startswith("/web/dataset/call_kw/"):
+    if path.startswith(_MODEL_RPC_PATH_PREFIXES):
         params = payload.get("params") if isinstance(payload, dict) else None
         if not isinstance(params, dict) or not isinstance(params.get("method"), str):
             return False
@@ -156,7 +153,7 @@ def run_walkthrough_browser(
                     else:
                         if read_only:
                             payload = None
-                            if request_url.path.startswith("/web/dataset/call_kw"):
+                            if request_url.path.startswith(_MODEL_RPC_PATH_PREFIXES):
                                 try:
                                     payload = route.request.post_data_json
                                 except (ValueError, PlaywrightError):
