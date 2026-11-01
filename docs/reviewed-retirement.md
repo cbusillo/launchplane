@@ -11,6 +11,31 @@ Neither path calls a provider, syncs a runtime, deploys, or restarts a lane.
 
 ## Plain stored settings
 
+For a values-free comparison before selecting a removal, request
+`GET /v1/products/{product}/secret-bindings?include_setting_sources=true`.
+It reuses the product's existing metadata read permissions and refuses incomplete
+scope authority or shared context ownership. The additive `setting_sources`
+inventory groups configured key names by lane and source, reports overlapping
+names and retirement intent, and enumerates retained preview records separately.
+It reads no secret versions, decrypts nothing, calls no provider, and saves no
+review or configuration. A name overlap is not a value disagreement or proof of
+delivery. Odoo runtime references remain references, rather than competing literal
+copies; secret record names and delivered binding keys remain distinct identities.
+Template policies describe possible inputs, with effective provider and retained
+generation settings explicitly unqualified. Bounds report truncation; the tables
+are read independently, so this is an observation, not an atomic migration plan.
+
+Use the repository's bounded reader with the installed operator transport:
+
+```bash
+uv run python scripts/read-setting-sources.py --product <product> \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py
+```
+
+The reader prints only the source inventory and trace. An older service that
+omits the inventory is unavailable, never an empty result. This read does not
+authorize a setting fold, a production release, or removal of retained authority.
+
 `POST /v1/admin/runtime-settings/removal` accepts `mode: dry-run`, `apply`, or
 `readback`, an exact `product`, `scope` (`global`, `context`, `instance`),
 `context`, `instance`, `keys`, and `reason`. Global scope requires

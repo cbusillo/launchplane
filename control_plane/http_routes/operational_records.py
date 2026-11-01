@@ -20,7 +20,10 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
-from control_plane.contracts.product_profile_record import product_config_targets
+from control_plane.contracts.product_profile_record import (
+    product_config_targets,
+    product_target_owner_products,
+)
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentRecord,
     RuntimeEnvironmentScope,
@@ -47,6 +50,10 @@ from control_plane.service_auth import (
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.storage.factory import storage_backend_name
 from control_plane.outbox_inspection import OutboxInspection, OutboxInspectionStore, inspect_outbox
+from control_plane.runtime_setting_inventory import (
+    ProductSettingSourceInventory,
+    product_setting_source_inventory,
+)
 
 
 class DeploymentRecordResponse(BaseModel):
@@ -123,6 +130,11 @@ class ProductSecretBindingsResponse(BaseModel):
     bindings: list[product_secret_copy.ProductSecretBindingMetadata]
     coverage: ReadCoverage
     lane_binding_resolution: ProductBindingResolution | None = None
+    setting_sources: ProductSettingSourceInventory | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class SecretStatusAuditEvent(BaseModel):
@@ -795,6 +807,7 @@ def register_managed_secret_read_routes(
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
         include_resolution: bool = False,
+        include_setting_sources: bool = False,
         integration: Annotated[str, Query(min_length=1, max_length=256, pattern=r"^\S+$")] = (
             control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
         ),
@@ -870,6 +883,46 @@ def register_managed_secret_read_routes(
                 for lane in product_config_targets(profile)
                 for instance in ("", lane.instance)
             )
+            setting_sources = None
+            if include_setting_sources:
+                if not copy_authorization_complete:
+                    raise dependencies.http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message="The caller cannot read every configured setting source for this product.",
+                    )
+                if any(
+                    product_target_owner_products(profiles, context=lane.context) != {product}
+                    for lane in product_config_targets(profile)
+                ):
+                    raise dependencies.http_error(
+                        status_code=503,
+                        trace_id=trace_id,
+                        code="settings_sources_unavailable",
+                        message="Setting source inventory requires exclusive product contexts.",
+                    )
+                if not all(
+                    callable(getattr(record_store, name, None))
+                    for name in (
+                        "list_runtime_environment_records",
+                        "list_dokploy_target_records",
+                        "list_odoo_instance_override_records",
+                        "list_preview_records",
+                    )
+                ):
+                    raise TypeError("Setting source storage unavailable")
+                setting_sources = product_setting_source_inventory(
+                    profile=profile,
+                    records=getattr(record_store, "list_runtime_environment_records")(),
+                    targets=getattr(record_store, "list_dokploy_target_records")(),
+                    bindings=store.list_secret_bindings(integration="runtime_environment"),
+                    overrides=getattr(record_store, "list_odoo_instance_override_records")(),
+                    previews=getattr(record_store, "list_preview_records")(
+                        context_name=profile.preview.context,
+                        anchor_repo=profile.repository.split("/")[-1],
+                    ),
+                )
             bindings = product_secret_copy.product_secret_binding_metadata(store, product=product)
             visible_bindings = []
             for binding in bindings:
@@ -949,6 +1002,7 @@ def register_managed_secret_read_routes(
                 ),
             ),
             lane_binding_resolution=resolution,
+            setting_sources=setting_sources,
         )
 
     app.add_api_route(
