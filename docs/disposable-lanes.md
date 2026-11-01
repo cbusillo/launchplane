@@ -1633,7 +1633,7 @@ including the existing website bootstrap URL. The plan binds the remaining
 provider environment, the reviewed native website and its database values. Planning
 uses the native copy's storage/network inspection and a read-only database probe.
 An unrelated website does not prevent address qualification. In a plural
-database, the probe requires a unique owner of the original canonical domain
+database, the probe requires exactly one website for the original canonical hostname
 and proves the unchanged bootstrap selector will write that same website after
 the address changes. A primary-page selector it cannot prove, competing original
 or new hostnames (including scheme, case, port and IDNA variants), or a different
