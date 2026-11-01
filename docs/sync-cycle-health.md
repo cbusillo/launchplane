@@ -31,6 +31,18 @@ an older passing record. Reading a record does not renew its time. Sync evidence
 does not override HTTP, identity or dependency failures or introduce a new alert
 rule.
 
+The optional `unrecovered_full_cycle_id` is a canonical UUID reported by the
+product that executes imports. It identifies a full import that failed or was
+proved interrupted after exclusive database ownership was obtained. The product
+retains it through restart and retry, and clears it only after full recovery.
+Launchplane preserves this field in the existing projection and treats it as
+`health_status_error` even when the endpoint responds with HTTP 200. Existing
+HTTP, runtime-identity and dependency failures retain their precedence. Existing
+incidents stay open until the producer clears the field and the configured
+healthy-observation threshold is met; Launchplane adds no cycle ledger or alert
+rule. Older payloads without this field retain their existing behavior. A new
+cycle ID or a missed poll does not establish an interruption.
+
 `recorded` means that the product supplied well-formed facts. It does not prove
 current freshness, checkpoint advancement, complete data, consumer queries,
 successful cutover or retirement eligibility. A source can be running and ready

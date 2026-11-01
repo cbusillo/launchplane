@@ -3034,21 +3034,25 @@ def _check_url(
                 dependency_health=dependency_health,
                 sync=sync,
             )
-    dependency_failure: PublicIngressFailureCode | None = None
+    health_failure: PublicIngressFailureCode | None = None
     summary = _successful_target_summary(target)
     if dependency_health is not None:
         if dependency_health.status == "fail":
-            dependency_failure = "dependency_failed"
+            health_failure = "dependency_failed"
             summary = "A declared runtime dependency failed."
         elif dependency_health.status == "not_covered":
             summary += " Dependency health: not covered."
             if dependency_health.mode == "required":
-                dependency_failure = "dependency_not_covered"
+                health_failure = "dependency_not_covered"
+    if health_failure is None and sync is not None and sync.cycle is not None:
+        if sync.cycle.unrecovered_full_cycle_id is not None:
+            health_failure = "health_status_error"
+            summary = "A full sync has not recovered."
     return PublicIngressTargetObservation(
         target=target_kind,
         url=url,
-        status="fail" if dependency_failure else "pass",
-        failure_code=dependency_failure,
+        status="fail" if health_failure else "pass",
+        failure_code=health_failure,
         http_status=observation.status_code,
         final_url=observation.final_url,
         redirect_count=observation.redirect_count,
