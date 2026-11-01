@@ -28,6 +28,11 @@ the new-product contract rather than duplicating it here.
 
 ## Retained Preview Safety
 
+Odoo preview creation and refresh omit `ODOO_KEY`, the optional workflow
+service-user provisioning input, from the application environment. An existing
+preview drops it through its normal guarded refresh; runtime sync does not
+remove it.
+
 Generic-web lifecycle cleanup uses the repository-name anchor from the product
 profile for stored-preview lookup and terminal evidence; the product key need
 not equal the repository name. Historical callers without a profile retain

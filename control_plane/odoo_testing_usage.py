@@ -21,6 +21,7 @@ from control_plane.dokploy.compose import (
     ODOO_WEB_CONFIG_PATH,
     ODOO_WEB_START_COMMAND,
 )
+from control_plane.dokploy.cutover_writer_capabilities import SUPPORTED_SERVER_WIDE_MODULES
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceAuthorizationDenied
 
 
@@ -115,10 +116,20 @@ import argparse, configparser, json, os, re, stat
 EXPECTED_INSTANCE=__EXPECTED_INSTANCE__
 from pathlib import Path
 CONFIG_PATH=__CONFIG_PATH__
+SUPPORTED_SERVER_WIDE_MODULES=__SUPPORTED_SERVER_WIDE_MODULES__
 checkpoint='testing_environment_unavailable'
 
 class UsageUnavailable(ValueError):
     pass
+
+
+def odoo_process(process: list[bytes]) -> bool:
+    return any(arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin',b'odoo-bin.source'}
+               for arg in process[:2])
+
+
+def supported_server_modules(value: str) -> bool:
+    return {name.strip() for name in value.split(',') if name.strip()} <= set(SUPPORTED_SERVER_WIDE_MODULES)
 
 
 def serving_configured(process, options, database):
@@ -127,19 +138,30 @@ def serving_configured(process, options, database):
         return False
     if arguments[0].rsplit('/',1)[-1].startswith('python'):
         arguments=arguments[1:]
-    if not arguments or arguments[0].rsplit('/',1)[-1] not in {'odoo','odoo-bin'}:
+    if not arguments or not (arguments[0].rsplit('/',1)[-1] in {'odoo','odoo-bin'}
+                             or arguments[0]=='/odoo/odoo-bin.source'):
         return False
+    arguments=arguments[1:]
+    if arguments and arguments[0]=='gevent':
+        arguments=arguments[1:]
     parser=argparse.ArgumentParser(add_help=False,allow_abbrev=False,exit_on_error=False)
     parser.add_argument('-c','--config')
     parser.add_argument('-d','--database')
+    parser.add_argument('--data-dir')
+    parser.add_argument('--load')
+    parser.add_argument('--addons-path')
     for name in ('db_host','db_port','db_user','db-filter'):
         parser.add_argument('--'+name)
     try:
-        args,unknown=parser.parse_known_args(arguments[1:])
+        args,unknown=parser.parse_known_args(arguments)
     except (argparse.ArgumentError,SystemExit):
         return False
     # Reject unknown switches, especially session-directory/config overrides.
     return (not unknown and args.config==CONFIG_PATH and args.database==database
+            and (args.data_dir is None or args.data_dir==options.get('data_dir'))
+            and (args.addons_path is None or args.addons_path==options.get('addons_path'))
+            and (args.load is None or supported_server_modules(args.load))
+            and supported_server_modules(options.get('server_wide_modules',''))
             and args.db_host==options['db_host']
             and args.db_port==options.get('db_port','5432')
             and args.db_user==options['db_user']
@@ -196,8 +218,7 @@ def probe():
     checkpoint='process_inventory_unavailable'
     processes=[[a for a in p.read_bytes().split(b'\0') if a]
                for p in Path('/proc').glob('[0-9]*/cmdline')]
-    odoo_processes=[p for p in processes if any(
-        arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin'} for arg in p[:2])]
+    odoo_processes=[p for p in processes if odoo_process(p)]
     if not odoo_processes:
         raise UsageUnavailable('serving_process_absent')
     checkpoint='web_configuration_unavailable'
@@ -252,7 +273,9 @@ if __name__=='__main__':
     except Exception:
         result={'type':'complete','unavailable':True,'reason_code':checkpoint}
     print(json.dumps(result),flush=True)
-""".replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH))
+""".replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH)).replace(
+    "__SUPPORTED_SERVER_WIDE_MODULES__", repr(sorted(SUPPORTED_SERVER_WIDE_MODULES))
+)
 
 
 def odoo_usage_container_program(instance: str) -> str:

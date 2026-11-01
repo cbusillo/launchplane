@@ -59,6 +59,7 @@ class SessionInventoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = self.enterContext(TemporaryDirectory())
         self.path = Path(self.directory)
+        self.addons_path = "/opt/launchplane/addons,/odoo/addons"
         self.driver = ModuleType("psycopg2")
         self.namespace: dict[str, Any] = {"__name__": "fixture"}
         self.enterContext(patch.dict("sys.modules", {"psycopg2": self.driver}))
@@ -168,7 +169,12 @@ class SessionInventoryTests(unittest.TestCase):
             self.namespace["probe"]()
 
     def probe_result(
-        self, failure: str = "", *, recent: bool = False, instance: str = "testing"
+        self,
+        failure: str = "",
+        *,
+        recent: bool = False,
+        instance: str = "testing",
+        argv: list[bytes] | None = None,
     ) -> dict[str, Any]:
         """Execute the emitted container probe, including its bounded exception handler."""
         config = MagicMock()
@@ -177,6 +183,7 @@ class SessionInventoryTests(unittest.TestCase):
             "db_name": "testing_db",
             "db_host": "database",
             "data_dir": self.directory,
+            "addons_path": self.addons_path,
             "db_user": "fixture",
             "db_password": "private-fixture",
         }
@@ -185,6 +192,8 @@ class SessionInventoryTests(unittest.TestCase):
             del options["db_user"]
         if failure == "database_identity":
             options["db_name"] = "another_db"
+        if failure == "server_wide_config":
+            options["server_wide_modules"] = "base,web,session_store_module"
         connection = MagicMock()
         connection.cursor.return_value.__enter__.return_value.fetchone.return_value = (recent,)
         if failure == "sql":
@@ -194,7 +203,7 @@ class SessionInventoryTests(unittest.TestCase):
         self.driver.connect = Mock(return_value=connection)  # type: ignore[attr-defined]
         if failure == "connection":
             self.driver.connect.side_effect = OSError("private-fixture credentials")
-        argv = supported_odoo_argv()
+        argv = supported_odoo_argv() if argv is None else argv
         if failure == "process_config":
             argv += [b"--data-dir=/private-fixture"]
         process = SimpleNamespace(read_bytes=lambda: b"\0".join(argv) + b"\0")
@@ -232,6 +241,56 @@ class SessionInventoryTests(unittest.TestCase):
         self.assertIs(result["recent_signins"], True)
         self.assertIs(result["authenticated_sessions"], True)
 
+    def wrapped_image_argv(self, *, gevent: bool = False) -> list[bytes]:
+        argv = supported_odoo_argv()
+        return [
+            argv[0],
+            b"/odoo/odoo-bin.source",
+            *([b"gevent"] if gevent else []),
+            f"--data-dir={self.directory}".encode(),
+            b"--load=base,web,launchplane_runtime_health",
+            f"--addons-path={self.addons_path}".encode(),
+            *argv[2:],
+        ]
+
+    def test_image_wrapper_process_keeps_session_and_signin_protection(self) -> None:
+        for gevent in (False, True):
+            with self.subTest(gevent=gevent):
+                result = self.probe_result(
+                    "sessions_used",
+                    recent=True,
+                    instance="preview",
+                    argv=self.wrapped_image_argv(gevent=gevent),
+                )
+                self.assertIs(result["authenticated_sessions"], True)
+                self.assertIs(result["recent_signins"], True)
+
+    def test_image_wrapper_process_can_read_complete_idle_evidence(self) -> None:
+        result = self.probe_result(instance="preview", argv=self.wrapped_image_argv())
+        self.assertIs(result["authenticated_sessions"], False)
+        self.assertIs(result["recent_signins"], False)
+
+    def test_image_wrapper_cannot_redirect_session_config_or_accept_unknown_options(self) -> None:
+        for extra in (
+            [b"--data-dir=/another-store"],
+            [b"-c", b"/another-config"],
+            [b"--session-dir=/another-store"],
+            [b"--load=base,web,session_store_module"],
+            [b"--addons-path=/another-addons"],
+        ):
+            with self.subTest(extra=extra):
+                result = self.probe_result(argv=self.wrapped_image_argv() + extra)
+                self.assertTrue(result["unavailable"])
+                self.assertEqual(result["reason_code"], "serving_configuration_mismatch")
+                self.assertNotIn("authenticated_sessions", result)
+
+    def test_unrecognized_source_script_cannot_qualify_sessions(self) -> None:
+        argv = self.wrapped_image_argv()
+        argv[1] = b"/another/odoo-bin.source"
+        result = self.probe_result(argv=argv)
+        self.assertTrue(result["unavailable"])
+        self.assertNotIn("authenticated_sessions", result)
+
     def test_encoded_and_url_credentials_share_one_candidate_reader(self) -> None:
         secret = "private-production-password"
         encoded = base64.b64encode(
@@ -267,6 +326,7 @@ class SessionInventoryTests(unittest.TestCase):
             "database_identity": "web_database_mismatch",
             "process_absent": "serving_process_absent",
             "process_config": "serving_configuration_mismatch",
+            "server_wide_config": "serving_configuration_mismatch",
             "process_inventory": "process_inventory_unavailable",
             "sessions_missing": "session_store_unavailable",
             "sessions_corrupt": "session_file_unreadable",

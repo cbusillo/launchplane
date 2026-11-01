@@ -1735,6 +1735,7 @@ def _preview_refresh_environment_values(
     *, request: OdooPreviewDokployApplyRequest, restore_upstream: bool = False
 ) -> dict[str, str]:
     environment_values = dict(request.environment_values)
+    environment_values.pop("ODOO_KEY", None)
     environment_values["PLATFORM_INSTANCE"] = "preview"
     if restore_upstream:
         environment_values.update(
