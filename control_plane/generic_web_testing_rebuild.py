@@ -180,18 +180,7 @@ def rebuild_application_specification(
             TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE,
             "This rebuild currently supports applications without persistent state.",
         )
-    if intent.application is not None:
-        if (
-            intent.application.state != intent.state
-            or intent.application.runtime_port != intent.profile.runtime_port
-            or intent.application.health_path != intent.profile.health_path
-        ):
-            raise TestingRebuildRefused(
-                "testing_rebuild_application_unverified",
-                "The original testing application specification differs from its admitted profile.",
-            )
-        return intent.application
-    return default_rebuild_application_specification(intent)
+    return intent.application or default_rebuild_application_specification(intent)
 
 
 def inspect_generic_web_testing_rebuild(

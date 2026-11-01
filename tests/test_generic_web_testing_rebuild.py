@@ -748,6 +748,34 @@ class GenericWebTestingRebuildHttpTests(
     async def test_signed_in_administrator_queues_the_real_verified_image(self) -> None:
         await self.assert_verified_queue(self.human_headers)
 
+    async def test_volume_without_activation_history_remains_pending_without_provider_reads(
+        self,
+    ) -> None:
+        from tests.support.http import request
+
+        profile = self.store.read_product_profile_record(self.profile.product)
+        lane = next(item for item in profile.lanes if item.instance == "testing")
+        lane.generic_web_testing_state = ProductGenericWebTestingState(
+            kind="volume", container_path="/app/data"
+        )
+        self.store.write_product_profile_record(profile)
+        operations = self.store.list_odoo_stable_target_replacement_operation_records()
+        with patch.object(source, "read_dokploy_config") as provider:
+            response = await request(
+                self.app,
+                "GET",
+                f"/v1/products/{profile.product}/testing-rebuild/inputs",
+                headers=self.human_headers,
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "pending")
+        self.assertTrue(response.json()["restore_applicable"])
+        provider.assert_not_called()
+        self.assertEqual(
+            self.store.list_odoo_stable_target_replacement_operation_records(), operations
+        )
+        self.assertEqual(self.current_target(), self.target)
+
     async def test_director_agent_queues_without_an_apply_rule(self) -> None:
         await self.assert_verified_queue({"Authorization": "Bearer local-operator-token"})
 

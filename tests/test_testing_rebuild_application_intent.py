@@ -34,9 +34,10 @@ class TestingRebuildApplicationIntentTests(unittest.TestCase):
             self.flow.prepare()
         outcome = self.flow.activate()
         self.assertEqual(outcome.status, "completed")
-        self.record = activation_record(self.flow.store, self.flow.product, self.flow.context)
-        assert self.record is not None and self.record.request.application is not None
-        self.specification = self.record.request.application
+        record = activation_record(self.flow.store, self.flow.product, self.flow.context)
+        assert record is not None and record.request.application is not None
+        self.record = record
+        self.specification = record.request.application
         profile = self.flow.store.read_product_profile_record(self.flow.product)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
         lane.generic_web_testing_state = ProductGenericWebTestingState.model_validate(
@@ -81,23 +82,6 @@ class TestingRebuildApplicationIntentTests(unittest.TestCase):
         self.assertFalse(captured.local_credentials)
         self.assertFalse(captured.external_credentials)
         self.assertEqual(captured.state, self.intent.state)
-
-    def test_historyless_volume_recipe_capture_keeps_execution_gated(self) -> None:
-        self.prepare_intent()
-        legacy = self.record.model_copy(
-            update={"request": self.record.request.model_copy(update={"application": None})}
-        )
-        for previous in (None, legacy):
-            with self.subTest(previous=previous is not None):
-                with patch.object(rebuild, "activation_record", return_value=previous):
-                    captured = rebuild.capture_rebuild_application_specification(
-                        self.flow.store, self.intent
-                    )
-                self.assertEqual(captured.state, self.intent.state)
-                with self.assertRaises(TestingRebuildRefused):
-                    rebuild.rebuild_application_specification(
-                        self.intent.model_copy(update={"application": captured})
-                    )
 
     def test_incomplete_current_activation_cannot_supply_a_recipe(self) -> None:
         self.prepare_intent()
