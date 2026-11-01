@@ -416,6 +416,11 @@ class RecipientRetirementTests(unittest.TestCase):
         self.assertEqual(
             set(compose_volume_names(document, payload)), {row["name"] for row in self.resources}
         )
+        defaulted = deepcopy(document)
+        for volume in defaulted["volumes"].values():
+            volume["name"] = volume["name"][:-1] + ":-fallback}"
+        with self.assertRaises(ValueError):
+            compose_volume_names(defaulted, payload, set(self.record.request.volume_keys.values()))
         for environment in (
             "DB_VOLUME=old-database",
             "DB_VOLUME=old-database\nCONFIG_VOLUME=one\nCONFIG_VOLUME=two",

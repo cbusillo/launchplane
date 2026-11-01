@@ -1,4 +1,5 @@
 import asyncio
+import json
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -440,6 +441,56 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             ),
         ):
             self.assertFalse(_inventory_clear(self.root, self.binding))
+
+    def test_exact_inventory_resolves_qualified_default_syntax_without_guessing_inputs(
+        self,
+    ) -> None:
+        environment: dict[str, object] = {**{kind: [] for kind in TARGET_COLLECTIONS}, "env": ""}
+        environment["compose"] = [{"composeId": "other-compose"}]
+        project = {"env": "", "environments": [environment]}
+        payload = {
+            "composeId": "other-compose",
+            "mounts": [],
+            "appName": "other-stack",
+            "env": "STATE_VOLUME=unrelated-state",
+            "composeType": "docker-compose",
+            "createEnvFile": True,
+            "command": None,
+            "randomize": False,
+        }
+        document = {
+            "services": {"web": {"volumes": ["data:/data"]}},
+            "volumes": {"data": {"external": True, "name": "${STATE_VOLUME:-unused-state}"}},
+        }
+        for changes, exact, clear in (
+            ({}, True, True),
+            ({"env": "STATE_VOLUME=" + self.binding.volume_name}, True, False),
+            ({"env": ""}, True, False),
+            ({"env": "STATE_VOLUME="}, True, False),
+            ({"env": "STATE_VOLUME=one\nSTATE_VOLUME=two"}, True, False),
+            ({"env": "STATE_VOLUME=$UNRESOLVED"}, True, False),
+            ({"createEnvFile": False}, True, False),
+            ({"command": "compose --env-file another.env up"}, True, False),
+            ({"composeType": "stack"}, True, False),
+            ({"randomize": True}, True, False),
+            ({}, False, False),
+        ):
+            with self.subTest(changes=changes, exact=exact):
+                with (
+                    patch(
+                        "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_projects",
+                        return_value=(project,),
+                    ),
+                    patch(
+                        "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_target_payload",
+                        return_value={**payload, **changes},
+                    ),
+                    patch(
+                        "control_plane.retained_volume_sweep_execution.compose.fetch_dokploy_converted_compose_file",
+                        return_value=json.dumps(document),
+                    ),
+                ):
+                    self.assertEqual(_inventory_clear(self.root, self.binding, exact=exact), clear)
 
     def test_exact_inventory_reads_environment_variables_from_complete_identity_bound_detail(
         self,

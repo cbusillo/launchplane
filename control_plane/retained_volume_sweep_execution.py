@@ -89,7 +89,7 @@ def compose_volume_names(
 ) -> tuple[str, ...]:
     import re
     from control_plane.dokploy.environment import require_unique_compose_inputs
-    from control_plane.testing_activation_compose import interpolate
+    from control_plane.testing_activation_compose import compose_interpolation_keys, interpolate
 
     volumes = document.get("volumes", {})
     if not isinstance(volumes, dict):
@@ -113,9 +113,22 @@ def compose_volume_names(
             raise ValueError("Compose volume identity is unavailable.")
         if "$" in actual:
             match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)}", actual)
-            if match is None or allowed_keys is not None and match[1] not in allowed_keys:
+            keys = {match[1]} if match is not None else compose_interpolation_keys(actual)
+            if (
+                not keys
+                or allowed_keys is not None
+                and (match is None or not keys <= allowed_keys)
+                or match is None
+                and (
+                    payload.get("composeType") != "docker-compose"
+                    or payload.get("createEnvFile") is not True
+                    or "command" not in payload
+                    or payload["command"] not in (None, "")
+                    or payload.get("randomize") is not False
+                )
+            ):
                 raise ValueError("Compose volume identity uses an unreviewed input.")
-            environment = require_unique_compose_inputs(str(payload.get("env") or ""), (match[1],))
+            environment = require_unique_compose_inputs(str(payload.get("env") or ""), keys)
             actual = interpolate(actual, environment)
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", actual) is None:
             raise ValueError("Compose volume identity is unsupported.")
