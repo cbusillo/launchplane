@@ -952,7 +952,7 @@ def compile_unavailable_testing_route(
         connections = identifier + "-connections"
         used_entrypoints: set[str] = set()
         equivalent_routers: dict[tuple[str, ...], dict[str, Any]] = {}
-        for index, (name, rule) in enumerate(sorted(declared.items())):
+        for name, rule in sorted(declared.items()):
             prefix = "traefik.http.routers." + name + "."
             fields = {
                 key.removeprefix(prefix): value
@@ -1047,7 +1047,7 @@ def compile_unavailable_testing_route(
                 raise ValueError(
                     "Declared TLS options require an original recorded testing template."
                 )
-            for point_index, point in enumerate(dict.fromkeys(points)):
+            for point in dict.fromkeys(points):
                 document = http_route_payload(
                     route_id=identifier,
                     host=host,
@@ -1075,7 +1075,8 @@ def compile_unavailable_testing_route(
                     continue
                 equivalent_routers[group] = router
                 used_entrypoints.add(point)
-                template["http"]["routers"][f"{identifier}-{index}-{point_index}"] = router
+                routers = template["http"]["routers"]
+                routers[identifier + "-" + str(len(routers))] = router
                 template["http"]["services"] = document["http"]["services"]
         template["http"]["middlewares"][connections] = {
             "headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP}
