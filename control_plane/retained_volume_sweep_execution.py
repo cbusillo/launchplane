@@ -89,11 +89,18 @@ def compose_volume_names(
 ) -> tuple[str, ...]:
     import re
     from control_plane.dokploy.environment import require_unique_compose_inputs
-    from control_plane.testing_activation_compose import interpolate
+    from control_plane.testing_activation_compose import compose_interpolation_keys, interpolate
 
     volumes = document.get("volumes", {})
     if not isinstance(volumes, dict):
         raise ValueError("Compose volume inventory is unavailable.")
+    standard_environment = (
+        payload.get("composeType") == "docker-compose"
+        and payload.get("createEnvFile") is True
+        and "command" in payload
+        and payload["command"] in (None, "")
+        and payload.get("randomize") is False
+    )
     names = []
     for alias, definition in volumes.items():
         if not isinstance(alias, str) or not isinstance(definition, dict | type(None)):
@@ -101,7 +108,7 @@ def compose_volume_names(
         declared = definition or {}
         actual = declared.get("name")
         if actual is None:
-            project = document.get("name") or payload.get("appName")
+            project = payload.get("appName") if standard_environment else None
             actual = (
                 alias
                 if declared.get("external")
@@ -112,10 +119,14 @@ def compose_volume_names(
         if not isinstance(actual, str):
             raise ValueError("Compose volume identity is unavailable.")
         if "$" in actual:
-            match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)}", actual)
-            if match is None or allowed_keys is not None and match[1] not in allowed_keys:
+            keys = compose_interpolation_keys(actual)
+            if (
+                not standard_environment
+                or allowed_keys is not None
+                and (not keys <= allowed_keys or actual not in {"${" + key + "}" for key in keys})
+            ):
                 raise ValueError("Compose volume identity uses an unreviewed input.")
-            environment = require_unique_compose_inputs(str(payload.get("env") or ""), (match[1],))
+            environment = require_unique_compose_inputs(str(payload.get("env") or ""), keys)
             actual = interpolate(actual, environment)
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", actual) is None:
             raise ValueError("Compose volume identity is unsupported.")
@@ -211,12 +222,12 @@ def _inventory_clear(
                     ):
                         return False
                     if target_type == "compose":
-                        document = read_provider_compose(
-                            compose.fetch_dokploy_converted_compose_file(
-                                host=host, token=token, compose_id=target_id
-                            )
-                        )
                         try:
+                            document = read_provider_compose(
+                                compose.fetch_dokploy_converted_compose_file(
+                                    host=host, token=token, compose_id=target_id
+                                )
+                            )
                             names = compose_volume_names(
                                 document, payload if exact else {**payload, "env": ""}
                             )
