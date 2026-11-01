@@ -161,7 +161,10 @@ from control_plane.testing_rebuild_driver import (
     resolve_testing_rebuild_driver,
     testing_rebuild_interlock_reason,
 )
-from control_plane.contracts.testing_application import TestingApplicationState
+from control_plane.contracts.testing_application import (
+    TestingApplicationSpecification,
+    TestingApplicationState,
+)
 from control_plane.testing_replacement_resources import IncompleteTestingResources
 from control_plane.testing_serving_copy import published_testing_copy
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
@@ -310,6 +313,9 @@ class GenericWebTestingRebuildIntent(FrozenRecord):
     profile: LaunchplaneProductProfileRecord
     before: TestingServingSnapshot
     state: TestingApplicationState
+    application: TestingApplicationSpecification | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 def capture_rebuild_intent(
@@ -351,9 +357,18 @@ def capture_rebuild_intent(
             raise TestingRebuildRefused(
                 "testing_rebuild_inputs_unverified", "The testing target records disagree."
             )
-        return GenericWebTestingRebuildIntent(
+        intent = GenericWebTestingRebuildIntent(
             operation_id=operation.operation_id, profile=profile, before=before, state=driver.state
         )
+        if target_type == "application":
+            from control_plane.generic_web_testing_rebuild import (
+                capture_rebuild_application_specification,
+            )
+
+            return intent.model_copy(
+                update={"application": capture_rebuild_application_specification(store, intent)}
+            )
+        return intent
     if (before.target.context, before.target.instance, before.target.target_type) != (
         operation.context,
         "testing",

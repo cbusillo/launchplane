@@ -70,6 +70,7 @@ class ApplicationAbsenceTests(unittest.TestCase):
         self.services: dict[str, Any] = {}
         self.containers: dict[str, Any] = {}
         self.tasks: dict[str, Any] = {}
+        self.volumes: dict[str, Any] = {}
         self.removed: list[str] = []
 
     def docker(self, *arguments: str) -> str:
@@ -100,6 +101,8 @@ class ApplicationAbsenceTests(unittest.TestCase):
                 return "\n".join(self.tasks)
             case ("inspect", "--type", "task", identifier):
                 return json.dumps([self.tasks[identifier]])
+            case ("volume", "inspect", identifier):
+                return json.dumps([self.volumes[identifier]])
             case ("ps", "-aq", "--no-trunc"):
                 return "\n".join(self.containers)
             case ("inspect", *identifiers):
@@ -107,8 +110,13 @@ class ApplicationAbsenceTests(unittest.TestCase):
             case _:
                 raise AssertionError(arguments)
 
-    def observe(self, mode: str = "absent") -> None:
-        payload = {"application": "original-app", "service_id": "original-service", "mode": mode}
+    def observe(self, mode: str = "absent", **state: str) -> None:
+        payload = {
+            "application": "original-app",
+            "service_id": "original-service",
+            "mode": mode,
+            **state,
+        }
 
         def command(arguments: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(arguments, 0, self.docker(*arguments[1:]), "")
@@ -121,6 +129,55 @@ class ApplicationAbsenceTests(unittest.TestCase):
             command,
         )
         self.assertEqual(frame, {"type": "complete", **payload})
+
+    def test_mounted_predecessor_retires_only_its_service_and_preserves_captured_state(
+        self,
+    ) -> None:
+        state = {"volume_name": "original-state", "mount_path": "/data", "volume_binding": "owned"}
+        self.services = {
+            "original-service": {
+                "ID": "original-service",
+                "Spec": {
+                    "Name": "original-app",
+                    "TaskTemplate": {
+                        "ContainerSpec": {
+                            "Mounts": [
+                                {"Type": "volume", "Source": "original-state", "Target": "/data"}
+                            ]
+                        }
+                    },
+                },
+            }
+        }
+        self.volumes = {
+            "original-state": {
+                "Name": "original-state",
+                "Driver": "local",
+                "Options": None,
+                "Labels": {"io.launchplane.testing-resources": "owned"},
+                "Mountpoint": "/var/lib/docker/volumes/original-state/_data",
+            }
+        }
+        self.containers = {
+            "old-container": {
+                "Id": "old-container",
+                "Config": {"Labels": {"com.docker.swarm.service.id": "original-service"}},
+                "Mounts": [
+                    {
+                        "Type": "volume",
+                        "Name": "original-state",
+                        "Destination": "/data",
+                        "RW": True,
+                        "Source": self.volumes["original-state"]["Mountpoint"],
+                    }
+                ],
+            }
+        }
+        self.observe("volume", **state)
+        self.containers = {}
+        self.observe("retire", **state)
+        self.assertEqual(self.removed, ["original-service"])
+        self.assertIn("original-state", self.volumes)
 
     def test_retirement_program_removes_only_the_original_stateless_service(self) -> None:
         self.services = {

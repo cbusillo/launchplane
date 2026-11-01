@@ -135,6 +135,28 @@ FINALIZATION_CLEAR_PHASE = "clear_interlock"
 FINALIZATION_HEALTH_FAILED_CLEAR_PHASE = "clear_interlock_after_health_failure"
 
 
+def capture_rebuild_application_specification(
+    store: PostgresRecordStore, intent: GenericWebTestingRebuildIntent
+) -> TestingApplicationSpecification:
+    previous = activation_record(store, intent.profile.product, intent.before.target.context)
+    if previous is None:
+        return rebuild_application_specification(intent)
+    if (
+        previous.target_id != intent.before.target_id.target_id
+        or not completed_application_activation(store, previous)
+        or previous.request.application is None
+        or previous.request.application.state != intent.state
+    ):
+        raise TestingRebuildRefused(
+            "testing_rebuild_application_unverified",
+            "The testing application needs its completed current activation and declared state.",
+        )
+    return TestingApplicationSpecification.model_validate(
+        previous.request.application.model_dump(mode="json")
+        | {"runtime_port": intent.profile.runtime_port, "health_path": intent.profile.health_path}
+    )
+
+
 def rebuild_application_specification(
     intent: GenericWebTestingRebuildIntent,
 ) -> TestingApplicationSpecification:
@@ -143,6 +165,17 @@ def rebuild_application_specification(
             TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE,
             "This rebuild currently supports applications without persistent state.",
         )
+    if intent.application is not None:
+        if (
+            intent.application.state != intent.state
+            or intent.application.runtime_port != intent.profile.runtime_port
+            or intent.application.health_path != intent.profile.health_path
+        ):
+            raise TestingRebuildRefused(
+                "testing_rebuild_application_unverified",
+                "The original testing application specification differs from its admitted profile.",
+            )
+        return intent.application
     return TestingApplicationSpecification(
         runtime_port=intent.profile.runtime_port,
         health_path=intent.profile.health_path,
