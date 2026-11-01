@@ -1359,7 +1359,7 @@ class GenericWebTestingRebuildHttpTests(
             provider.model_copy(update={"target_category": "application"})
         )
         response = await self.call("GET", path=self.url + "/inputs")
-        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.status_code, 409, response.text)
         for state, supported in (
             ({"kind": "none"}, True),
             (None, False),

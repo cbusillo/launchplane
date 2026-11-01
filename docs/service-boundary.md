@@ -2006,6 +2006,15 @@ and preserve optional `Idempotency-Key` replay/conflict behavior.
 
 #### Testing storage requirements
 
+A Director agent may conditionally set or update
+`generic_web_testing_state` on one existing active generic-web testing lane to
+`none` or `volume` with its application data path. Preserve every other profile
+field and submit the reviewed replacement with the current strong `If-Match`
+and a stable `Idempotency-Key`. Removing the declaration, selecting deferred
+PostgreSQL, changing another lane or mixing another profile edit refuses.
+This records the state shape; it does not attest current isolation, allocate
+resources or rebuild the lane.
+
 A Director agent may use the same conditional profile POST to configure only
 `database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes` within
 one existing active Odoo testing lane's `odoo_testing_drill_storage`. Read the

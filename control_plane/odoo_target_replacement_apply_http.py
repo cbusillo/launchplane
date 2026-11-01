@@ -302,6 +302,30 @@ def _validate_target_replacement_apply_artifact_authority(
         raise ValueError(
             "Odoo target replacement apply requires exact artifact and source evidence."
         )
+    profile = operation_store.read_product_profile_record(replacement_request.product)
+    if profile.driver_id == "generic-web":
+        from control_plane.storage.postgres import PostgresRecordStore
+        from control_plane.testing_activation import verified_product_image
+        from control_plane.testing_rebuild_driver import resolve_testing_rebuild_driver
+
+        if (
+            replacement_request.instance != "testing"
+            or replacement_request.strategy != "replace-and-cutover"
+            or replacement_request.data_source_mode != "empty"
+            or not isinstance(operation_store, PostgresRecordStore)
+        ):
+            raise ValueError(
+                "Generic-web replacement requires its supported native testing rebuild."
+            )
+        driver = resolve_testing_rebuild_driver(operation_store, replacement_request.product)
+        driver.require_execution()
+        if (
+            driver.lane.context != context
+            or verified_product_image(operation_store, replacement_request.product, source_git_ref)
+            != artifact_id
+        ):
+            raise ValueError("The generic-web testing rebuild requires its exact verified build.")
+        return
     if verified_manifest is not None:
         manifest = verified_manifest
         if manifest.artifact_id != artifact_id:
@@ -311,7 +335,6 @@ def _validate_target_replacement_apply_artifact_authority(
             manifest = operation_store.read_artifact_manifest(artifact_id)
         except FileNotFoundError as error:
             raise ValueError("Odoo target replacement artifact manifest was not found.") from error
-    profile = operation_store.read_product_profile_record(replacement_request.product)
     if not artifact_manifest_matches_image_repository(
         manifest,
         expected_repository=profile.image.repository,

@@ -67,6 +67,7 @@ from control_plane.dokploy.testing_retained_copy import (
 
 TRAEFIK_DYNAMIC_DIRECTORY = "/etc/dokploy/traefik/dynamic"
 TRAEFIK_STATIC_CONFIGURATION = "/etc/traefik/traefik.yml"
+DOKPLOY_INGRESS_NETWORK = "dokploy-network"
 MAX_TRAEFIK_API_BYTES = 2_000_000
 READ_TRAEFIK_API = r"""set -eu
 set -o pipefail
@@ -120,6 +121,8 @@ def testing_route_host_program() -> str:
         + repr(TRAEFIK_DYNAMIC_DIRECTORY)
         + "\nSTATIC="
         + repr(TRAEFIK_STATIC_CONFIGURATION)
+        + "\nINGRESS_NETWORK="
+        + repr(DOKPLOY_INGRESS_NETWORK)
         + "\nFENCED_WRITER="
         + repr(FENCED_TESTING_ROUTE_WRITER)
         + "\nFENCE_READER="
@@ -506,7 +509,7 @@ def main(spec):
             raise RuntimeError('The original route execution outcome is unavailable')
         return {'type':'complete','writer_outcome':outcome,'execution_custody':custody,**binding}
     network_mode=proxy.get('HostConfig',{}).get('NetworkMode','')
-    if not isinstance(proxy_networks,dict) or not isinstance(proxy_networks.get('dokploy-network'),dict) or not isinstance(network_mode,str) or network_mode=='host' or network_mode.startswith('container:'):
+    if not isinstance(proxy_networks,dict) or not isinstance(proxy_networks.get(INGRESS_NETWORK),dict) or not isinstance(network_mode,str) or network_mode=='host' or network_mode.startswith('container:'):
         raise RuntimeError('Managed proxy requires managed ingress in its own network namespace')
     static=docker('exec',proxy['Id'],'cat',STATIC).decode()
     response=docker('exec',proxy['Id'],'sh','-c',API_READER,'_',str(MAX_API_BYTES+1))
@@ -561,7 +564,7 @@ def main(spec):
         port=environment.get('ODOO_HTTP_PORT') or '8069'
         if not port.isdigit() or not 0<int(port)<65536:
             raise RuntimeError('The retained testing port is invalid')
-        network=old[0].get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network')
+        network=old[0].get('NetworkSettings',{}).get('Networks',{}).get(INGRESS_NETWORK)
         if not isinstance(network,dict) or not network.get('IPAddress'):
             raise RuntimeError('Retained testing backend is not on managed ingress')
         endpoints=['http://'+network['IPAddress']+':'+port]

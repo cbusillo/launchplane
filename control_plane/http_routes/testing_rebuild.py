@@ -44,6 +44,7 @@ from control_plane.odoo_target_replacement_apply_http import (
     find_odoo_target_replacement_apply_operation_by_idempotency_key,
 )
 from control_plane.testing_rebuild_driver import (
+    TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE,
     resolve_testing_rebuild_driver,
     testing_rebuild_build_identity,
 )
@@ -180,6 +181,7 @@ def register_testing_rebuild_routes(
         record_store: object,
         trace_id: str,
         *,
+        product: str,
         read_only: bool = False,
     ) -> PostgresRecordStore:
         if not isinstance(record_store, PostgresRecordStore):
@@ -198,15 +200,23 @@ def register_testing_rebuild_routes(
                 code="authorization_provenance_unavailable",
                 message="The current administrator policy is unavailable.",
             ) from error
+        director_allowed = director_agent_identity(identity)
+        if director_allowed and not read_only:
+            try:
+                director_allowed = (
+                    record_store.read_product_profile_record(product).driver_id == "generic-web"
+                )
+            except FileNotFoundError:
+                director_allowed = False
         if not (
             (isinstance(identity, GitHubHumanIdentity) and policy.names_administrator(identity))
-            or (read_only and director_agent_identity(identity))
+            or director_allowed
         ):
             raise common.http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Only the signed-in administrator can use this testing control.",
+                message="Only the administrator or the Director agent can use this testing control.",
             )
         return record_store
 
@@ -275,7 +285,7 @@ def register_testing_rebuild_routes(
         data_source_mode: Annotated[TestingRebuildSource, Query()] = "empty",
     ) -> TestingRebuildInspection:
         trace_id = common.next_trace_id()
-        store = require_admin(identity, record_store, trace_id, read_only=True)
+        store = require_admin(identity, record_store, trace_id, product=product, read_only=True)
         try:
             driver = resolve_testing_rebuild_driver(store, product)
             profile, lane = driver.profile, driver.lane
@@ -318,7 +328,7 @@ def register_testing_rebuild_routes(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", max_length=256)] = "",
     ) -> TestingRebuildResponse:
         trace_id = common.next_trace_id()
-        store = require_admin(identity, record_store, trace_id)
+        store = require_admin(identity, record_store, trace_id, product=product)
         require_original_scope(identity, payload, trace_id)
         if not idempotency_key.strip():
             raise common.http_error(
@@ -352,34 +362,51 @@ def register_testing_rebuild_routes(
             lane = driver.lane
             driver.require_execution()
             now = utc_now_timestamp()
-            authorization = capture_durable_operation_authorization(
-                identity=identity,
-                action=action,
-                product=product,
-                context=lane.context,
-                instances=("testing",),
-                policy_record=read_active_authz_policy_record(store),
-                authorized_at=now,
-            )
             request = replacement(product, payload)
+            authorization = (
+                capture_director_testing_rebuild_authorization(
+                    identity=identity,
+                    request=request,
+                    context=lane.context,
+                    store=store,
+                    authorized_at=now,
+                )
+                if director_agent_identity(identity)
+                else capture_durable_operation_authorization(
+                    identity=identity,
+                    action=action,
+                    product=product,
+                    context=lane.context,
+                    instances=("testing",),
+                    policy_record=read_active_authz_policy_record(store),
+                    authorized_at=now,
+                )
+            )
             verified = latest_verified_testing_release(
                 store, store.read_product_profile_record(product), lane
             )
-            if not isinstance(verified, VerifiedBuildArtifact):
+            if driver.profile.driver_id == "odoo" and not isinstance(
+                verified, VerifiedBuildArtifact
+            ):
                 raise ValueError("The selected Odoo build changed its manifest kind.")
             if testing_rebuild_build_identity(verified) != (
                 payload.artifact_id,
                 payload.source_git_ref,
             ):
                 raise ValueError("The inspected build changed.")
-            inspect_testing_rebuild(
+            inspection = inspect_testing_rebuild(
                 root=dependencies.root,
                 store=store,
                 request=request,
                 verified_build=verified,
                 actor=launchplane_identity_actor(identity),
             )
-            record_verified_build_artifact(record_store=store, verified=verified)
+            if inspection.status != "pass":
+                raise TestingRebuildRefused(
+                    TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE, inspection.message
+                )
+            if isinstance(verified, VerifiedBuildArtifact):
+                record_verified_build_artifact(record_store=store, verified=verified)
         except (
             NativeSourceAuthorizationDenied,
             ValueError,
@@ -433,7 +460,7 @@ def register_testing_rebuild_routes(
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> TestingRebuildResponse:
         trace_id = common.next_trace_id()
-        store = require_admin(identity, record_store, trace_id, read_only=True)
+        store = require_admin(identity, record_store, trace_id, product=product, read_only=True)
         try:
             operation = store.read_odoo_stable_target_replacement_operation_record(operation_id)
             if operation.product != product or not operation.is_native_testing_rebuild:
@@ -459,7 +486,7 @@ def register_testing_rebuild_routes(
     ) -> TestingRebuildResponse:
         """Read the original request after a denied recovery; never admit or retry it."""
         trace_id = common.next_trace_id()
-        store = require_admin(identity, record_store, trace_id, read_only=True)
+        store = require_admin(identity, record_store, trace_id, product=product, read_only=True)
         if director_agent_identity(identity) and isinstance(
             payload, OdooTargetReplacementApplyEnvelope
         ):
@@ -519,7 +546,7 @@ def register_testing_rebuild_routes(
         ],
     ) -> TestingRebuildSettlementResponse:
         trace_id = common.next_trace_id()
-        store = require_admin(identity, record_store, trace_id)
+        store = require_admin(identity, record_store, trace_id, product=product)
         require_original_scope(identity, payload, trace_id)
         key = idempotency_key.strip()
         if not key:

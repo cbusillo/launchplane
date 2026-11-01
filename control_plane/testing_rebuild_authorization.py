@@ -14,6 +14,10 @@ from control_plane.contracts.product_profile_record import (
     is_exclusive_product_context,
     product_context_owner_map,
 )
+from control_plane.testing_rebuild_driver import (
+    resolve_testing_rebuild_driver,
+    TestingRebuildRefused,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneIdentity,
@@ -41,18 +45,22 @@ def director_testing_rebuild_allowed(
         return False
     try:
         profile = store.read_product_profile_record(request.product)
-    except FileNotFoundError:
+        if profile.driver_id == "odoo":
+            return (
+                profile.is_active
+                and any(
+                    lane.context == context and lane.instance == "testing" for lane in profile.lanes
+                )
+                and is_exclusive_product_context(
+                    context=context,
+                    product=request.product,
+                    owners=product_context_owner_map(store.list_product_profile_records()),
+                )
+            )
+        driver = resolve_testing_rebuild_driver(store, request.product)
+    except (FileNotFoundError, TestingRebuildRefused):
         return False
-    return (
-        profile.is_active
-        and profile.driver_id == "odoo"
-        and any(lane.context == context and lane.instance == "testing" for lane in profile.lanes)
-        and is_exclusive_product_context(
-            context=context,
-            product=request.product,
-            owners=product_context_owner_map(store.list_product_profile_records()),
-        )
-    )
+    return driver.execution_available and driver.lane.context == context
 
 
 def capture_director_testing_rebuild_authorization(
