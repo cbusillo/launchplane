@@ -226,7 +226,10 @@ For addressed lanes, the existing native route journal and writer fence retain
 the public host while switching only after private readiness. The first
 application cutover admits only the physically read, domain-bound Dokploy
 application file and its matching applied `@file` routers. Foreign file routers
-are not adopted. The legacy Compose wrapper retains its Docker route behavior. The exact
+are not adopted. An unset router TLS field may match TLS inherited from the
+listener only when the same physical configuration snapshot proves that default.
+Explicit router TLS and unexplained applied differences retain their checks.
+The legacy Compose wrapper retains its Docker route behavior. The exact
 retained file identity and later owned route template remain in original
 operation custody. A lost writer reply must settle that original native journal;
 it never permits a second blind route publication.

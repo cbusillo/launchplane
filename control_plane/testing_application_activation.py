@@ -1620,6 +1620,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 application_document=document,
                 application_file_name=frame["application_file_name"],
                 application_file_sha256=frame["application_file_sha256"],
+                static_configuration=frame["static_configuration"],
                 recorded_application_route=previous_route,
             )
             admit_testing_route_predecessor(**arguments)

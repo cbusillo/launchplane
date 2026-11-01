@@ -465,6 +465,45 @@ def application_load_balancer_configuration(value: Any) -> Any:
     return configuration
 
 
+def application_router_configuration(
+    router: dict[str, Any], static_configuration: str
+) -> dict[str, Any]:
+    configuration = router_configuration(router)
+    if configuration.get("tls") is not None or not static_configuration:
+        return configuration
+    static = yaml.safe_load(static_configuration)
+    points = configuration.get("entryPoints")
+    if (
+        not isinstance(static, dict)
+        or not isinstance(static.get("entryPoints"), dict)
+        or not isinstance(points, list)
+        or not points
+    ):
+        raise ValueError("The application listener TLS configuration is unavailable.")
+    defaults = []
+    for point in points:
+        entrypoint = static["entryPoints"].get(point)
+        if not isinstance(entrypoint, dict):
+            raise ValueError("The application listener TLS configuration is unavailable.")
+        http = entrypoint.get("http")
+        if http is None:
+            http = {}
+        if (
+            not isinstance(http, dict)
+            or http.get("tls") is not None
+            and not isinstance(http["tls"], dict)
+        ):
+            raise ValueError("The application listener TLS configuration is unavailable.")
+        defaults.append(http.get("tls"))
+    if any(value != defaults[0] for value in defaults):
+        raise ValueError("The application listeners have different inherited TLS configurations.")
+    if defaults[0] is None:
+        configuration.pop("tls", None)
+    else:
+        configuration["tls"] = deepcopy(defaults[0])
+    return configuration
+
+
 def compile_testing_route(
     *,
     product: str,
@@ -481,6 +520,7 @@ def compile_testing_route(
     application_document: dict[str, Any] | None = None,
     application_file_name: str = "",
     application_file_sha256: str = "",
+    static_configuration: str = "",
     recorded_application_route: TestingLaneRoute | None = None,
     require_owned_middlewares: bool = False,
 ) -> TestingLaneRoute:
@@ -499,6 +539,7 @@ def compile_testing_route(
         application_document=application_document,
         application_file_name=application_file_name,
         application_file_sha256=application_file_sha256,
+        static_configuration=static_configuration,
         recorded_application_route=recorded_application_route,
         require_owned_middlewares=require_owned_middlewares,
     )
@@ -527,6 +568,7 @@ def _compile_testing_route(
     application_document: dict[str, Any] | None = None,
     application_file_name: str = "",
     application_file_sha256: str = "",
+    static_configuration: str = "",
     recorded_application_route: TestingLaneRoute | None = None,
     require_owned_middlewares: bool = False,
 ) -> TestingLaneRoute | None:
@@ -559,6 +601,10 @@ def _compile_testing_route(
                 continue
             expected = router_configuration(http["routers"][name.removesuffix("@file")])
             observed = router_configuration(router)
+            if expected.get("tls") is None and observed.get("tls") is not None:
+                expected = application_router_configuration(
+                    http["routers"][name.removesuffix("@file")], static_configuration
+                )
             for configuration in (expected, observed):
                 configuration["service"] = (
                     str(configuration.get("service") or "").removesuffix("@file") + "@file"
