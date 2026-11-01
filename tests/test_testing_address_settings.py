@@ -502,7 +502,7 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, stdout=output, stderr=b"")
         return self.native.command(command, **kwargs)
 
-    def run_program(self) -> tuple[int, dict[str, Any]]:
+    def run_program(self, *, packaged: bool = False) -> tuple[int, dict[str, Any]]:
         output = io.StringIO()
         status = 0
         with (
@@ -521,7 +521,22 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             redirect_stdout(output),
         ):
             try:
-                exec(compile(FRESH_TESTING_RESTORE_HOST_PROGRAM, "<canonical-host>", "exec"), {})
+                if packaged:
+                    from control_plane.host_package import host_package
+                    from control_plane.host_package_runtime import main
+
+                    encoded = base64.b64encode(json.dumps(self.native.spec).encode()).decode()
+                    with patch.object(
+                        sys,
+                        "argv",
+                        ["fixture.pyz", "restore", "--input", encoded, "--prefix", "fixture:"],
+                    ):
+                        main(host_package().content)
+                else:
+                    exec(
+                        compile(FRESH_TESTING_RESTORE_HOST_PROGRAM, "<canonical-host>", "exec"),
+                        {"spec": self.native.spec},
+                    )
             except SystemExit as error:
                 status = int(error.code or 0)
         frames = [
@@ -531,6 +546,68 @@ class CanonicalAddressProgramTests(unittest.TestCase):
         ]
         self.assertTrue(frames, output.getvalue())
         return status, frames[-1]
+
+    def test_failed_canonical_commands_retain_private_evidence(self) -> None:
+        from control_plane.copy_readback_diagnostics import (
+            COPY_FAILURE_EVIDENCE_MARKER,
+            COPY_FAILURE_STATE_DIRECTORY,
+            copy_failure_marker_is_safe,
+        )
+        from control_plane import http_error_evidence
+
+        original = self.command
+        parameters = dict(self.parameters)
+        directory = self.native.root / COPY_FAILURE_STATE_DIRECTORY
+        directory.mkdir(parents=True, mode=0o700)
+        for mode, capture_available in itertools.product(("inspect", "gate"), (True, False)):
+            with self.subTest(mode=mode, capture_available=capture_available):
+                directory.chmod(0o700 if capture_available else 0o755)
+                retained = set(directory.iterdir())
+                self.native.spec["inspection_only"] = mode == "inspect"
+                self.native.spec["canonical_settings"]["mode"] = mode
+                private = "private-canonical-database-failure-" + mode
+
+                def command(arguments: list[str], **kwargs: Any) -> Any:
+                    if CANONICAL_ADDRESS_DATABASE_READ in arguments:
+                        return subprocess.CompletedProcess(
+                            arguments, 1, stdout=b"", stderr=private.encode()
+                        )
+                    return original(arguments, **kwargs)
+
+                with patch.object(self, "command", side_effect=command):
+                    status, frame = self.run_program(packaged=True)
+                self.assertNotEqual(status, 0)
+                identity = frame.get(COPY_FAILURE_EVIDENCE_MARKER, "")
+                self.assertTrue(copy_failure_marker_is_safe(COPY_FAILURE_EVIDENCE_MARKER, identity))
+                if capture_available:
+                    path = directory / (identity + ".json")
+                    evidence = json.loads(path.read_text())
+                    self.assertEqual(base64.b64decode(evidence["stderr"]), private.encode())
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+                else:
+                    self.assertEqual(set(directory.iterdir()), retained)
+                with self.assertRaises(transport.NativeProgramFailed) as raised:
+                    transport._read_program(
+                        Connection(frame),
+                        program=FRESH_TESTING_RESTORE_HOST_PROGRAM,
+                        payload={},
+                        timeout_seconds=5,
+                        receive=lambda _frame: None,
+                    )
+                with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+                    http_error_evidence.log_handled_error_cause(raised.exception, "canonical-test")
+                text = logs.records[-1].getMessage()
+                native = json.loads(text)["native_programs"][0]
+                self.assertEqual(native[COPY_FAILURE_EVIDENCE_MARKER], identity)
+                baseline = transport.NativeProgramFailed(
+                    "baseline", predicate=frame.get("predicate", ""), kind=frame.get("kind", "")
+                )
+                self.assertEqual(raised.exception.evidence, baseline.evidence)
+                self.assertEqual(raised.exception.code, baseline.code)
+                self.assertNotIn(private, text + json.dumps(frame))
+                self.assertFalse(self.gate.exists())
+                self.assertEqual(self.parameters, parameters)
 
     def test_unavailable_native_steps_keep_distinct_private_source_sites(self) -> None:
         import ast
