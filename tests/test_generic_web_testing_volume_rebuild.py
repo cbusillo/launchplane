@@ -67,7 +67,7 @@ class GenericWebTestingVolumeRebuildFixture(rebuild.GenericWebTestingRebuildFlow
                     return PublicHttpResponse(
                         429, "", 0, (), json.dumps({"retry_after": 0.125}).encode()
                     )
-                return responses.discord_response(url, **kwargs)
+                return cast(PublicHttpResponse, responses.discord_response(url, **kwargs))
 
             self.enterContext(
                 patch("control_plane.discord_external_resources.request_public_http", discord)
