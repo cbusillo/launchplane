@@ -1485,6 +1485,8 @@ as the supported renewal path rather than returning a provider-domain error.
 
 Address-plan refusals retain their trace and sanitized source sites in the
 service cause log; responses and logs omit raw provider errors and request values.
+The log retains validated native failure predicates and kinds even when the remote
+program supplies no source lines.
 
 `POST /v1/products/{product}/testing-address` amends the current published Odoo
 testing lane without replacing its copy. The Director agent supplies `context`,

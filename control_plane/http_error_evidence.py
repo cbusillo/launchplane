@@ -88,11 +88,10 @@ def log_handled_error_cause(error: BaseException, trace_id: str, *, operation_id
         if isinstance(cause, ProviderResponseValidationError):
             validation.extend(cause.validation[: _MAX_VALIDATION_ERRORS - len(validation)])
             validation_error_count += cause.error_count
-        if isinstance(cause, NativeProgramFailed) and cause.program_sites:
-            native: dict[str, object] = {
-                "sha": cause.program_sha256,
-                "lines": list(cause.program_sites),
-            }
+        if isinstance(cause, NativeProgramFailed) and (cause.program_sites or cause.has_diagnostic):
+            native: dict[str, object] = dict(cause.evidence) if cause.has_diagnostic else {}
+            if cause.program_sites:
+                native.update(sha=cause.program_sha256, lines=list(cause.program_sites))
             if cause.container_fields:
                 native["container_fields"] = [
                     {"field": field, "difference": difference}
