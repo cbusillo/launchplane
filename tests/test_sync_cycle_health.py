@@ -165,14 +165,13 @@ class SyncCycleHealthTests(unittest.TestCase):
                 assert record.targets[-1].sync is not None
                 self.assertEqual(record.targets[-1].sync.status, "recorded")
 
-    def test_full_failure_stays_open_through_healthy_restart_until_recovery(self) -> None:
+    def test_full_failure_stays_open_through_restart_until_recovery(self) -> None:
         failed_cycle_id = uuid4().hex
         recovery_cycle_id = uuid4().hex
         store = _Store((_profile(),))
         stages = (
             (503, "failed", failed_cycle_id, failed_cycle_id, "full", "open"),
-            (200, "running", recovery_cycle_id, failed_cycle_id, "full", "open"),
-            (200, "success", uuid4().hex, failed_cycle_id, "incremental", "open"),
+            (503, "running", recovery_cycle_id, failed_cycle_id, "full", "open"),
             (200, "success", recovery_cycle_id, None, "full", "resolved"),
         )
         for minute, (http_status, status, cycle_id, retained, mode, incident_status) in enumerate(
@@ -278,7 +277,7 @@ class SyncCycleHealthTests(unittest.TestCase):
                 status_code=200,
                 final_url=url,
                 redirect_count=0,
-                payload={"sync": sync_cycle_payload(unrecovered_full_cycle_id=uuid4().hex)},
+                payload={"sync": sync_cycle_payload()},
             ),
         )
         record = store.records[0]
@@ -305,6 +304,7 @@ class SyncCycleHealthTests(unittest.TestCase):
                             "sync": sync_cycle_payload(
                                 status="failed",
                                 freshness_status="failed",
+                                unrecovered_full_cycle_id=sync_cycle_payload()["cycle_id"],
                                 last_error="private-error-sentinel",
                             )
                         },
@@ -316,11 +316,15 @@ class SyncCycleHealthTests(unittest.TestCase):
             try:
                 record = store.list_public_ingress_observation_records()[0]
                 self.assertEqual(record.status, "fail")
-                assert (
-                    record.targets[-1].sync is not None
-                    and record.targets[-1].sync.cycle is not None
+                evidence = record.targets[-1].sync
+                assert evidence is not None
+                cycle = evidence.cycle
+                assert cycle is not None
+                self.assertEqual(cycle.status, "failed")
+                self.assertEqual(
+                    cycle.unrecovered_full_cycle_id,
+                    sync_cycle_payload()["cycle_id"],
                 )
-                self.assertEqual(record.targets[-1].sync.cycle.status, "failed")
                 self.assertNotIn("private-error-sentinel", record.model_dump_json())
                 self.assertEqual(record.observed_at, checked_at)
             finally:

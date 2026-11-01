@@ -35,13 +35,13 @@ The optional `unrecovered_full_cycle_id` is a canonical UUID reported by the
 product that executes imports. It identifies a full import that failed or was
 proved interrupted after exclusive database ownership was obtained. The product
 retains it through restart and retry, and clears it only after full recovery.
-Launchplane preserves this field in the existing projection and treats it as
-`health_status_error` even when the endpoint responds with HTTP 200. Existing
-HTTP, runtime-identity and dependency failures retain their precedence. Existing
-incidents stay open until the producer clears the field and the configured
-healthy-observation threshold is met; Launchplane adds no cycle ledger or alert
-rule. Older payloads without this field retain their existing behavior. A new
-cycle ID or a missed poll does not establish an interruption.
+Launchplane preserves this field in the existing projection. The product returns
+HTTP 503 while it is retained, so existing health failures keep the incident open
+through restart and the running recovery. When full recovery clears the field,
+the product returns HTTP 200 and the configured healthy-observation threshold
+resolves the incident. Launchplane adds no cycle ledger or alert rule. Older
+payloads without this field retain their existing behavior. A new cycle ID or a
+missed poll does not establish an interruption.
 
 `recorded` means that the product supplied well-formed facts. It does not prove
 current freshness, checkpoint advancement, complete data, consumer queries,
