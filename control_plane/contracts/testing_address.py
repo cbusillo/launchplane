@@ -34,7 +34,7 @@ def retained_address_custody_sha256(
 class TestingAddressPlan(FrozenRecord):
     product: str
     context: str
-    retirement_operation_id: str
+    retirement_operation_id: str = Field(default="", exclude_if=lambda value: not value)
     reason: str = Field(min_length=1)
     publication_key: str
     publication_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -53,7 +53,9 @@ class TestingAddressPlan(FrozenRecord):
     recipient_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     domain_inventory_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     operation_sha256: dict[str, str]
-    retirement_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    retirement_sha256: str = Field(
+        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
+    )
     created_at: datetime
     canonical_settings: TestingAddressSettingsPlan | None = Field(
         default=None, exclude_if=lambda value: value is None, repr=False
@@ -85,10 +87,11 @@ class TestingAddressPlan(FrozenRecord):
             raise ValueError(
                 "Canonical address authority requires its original exclusive native testing profile."
             )
-        expected_operations = {
-            self.retirement_operation_id,
-            *(item.operation_id for item in self.reservations),
-        }
+        if bool(self.retirement_operation_id) != bool(self.retirement_sha256):
+            raise ValueError("Retirement custody requires its original receipt digest.")
+        expected_operations = {item.operation_id for item in self.reservations}
+        if self.retirement_operation_id:
+            expected_operations.add(self.retirement_operation_id)
         if set(self.operation_sha256) != expected_operations or any(
             item.target_id == self.before.target_id.target_id for item in self.reservations
         ):

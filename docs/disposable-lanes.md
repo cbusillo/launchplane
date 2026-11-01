@@ -1488,11 +1488,17 @@ service cause log; responses and logs omit raw provider errors and request value
 
 `POST /v1/products/{product}/testing-address` amends the current published Odoo
 testing lane without replacing its copy. The Director agent supplies `context`,
-`retirement_operation_id`, `reservation_operation_id`, `hostname`, and `reason`.
-`instance` is always `testing`. The retirement ID identifies the original
-retirement inspection; the reservation ID identifies the separate retained
-allocation or generation that actually reserves the requested hostname. These
-may be different operations. Production is outside this operation.
+`reservation_operation_id`, `hostname`, and `reason`, plus
+`retirement_operation_id` for replacement-operation custody. `instance` is always
+`testing`. The retirement ID identifies the original retirement inspection; the
+reservation ID identifies the separate retained allocation or generation that
+actually reserves the requested hostname. These may be different operations.
+For an initial allocation, omit the retirement ID. The service requires its
+recorded initial request, apply and reconcile state, no release, and an exact
+retained-target match. It binds both preparation and allocation state into the
+plan and checks them again under the original executor exclusion. No retirement
+receipt is created, and no original allocation, key or reservation is released.
+Production is outside this operation.
 
 Use `mode: dry-run` first. The service saves an immutable private plan and returns
 its `plan_sha256`, current target ID, new canonical hostname, retained original
@@ -1505,8 +1511,9 @@ grant is an input. Generated agent/OpenAPI contracts describe this service API.
 The reviewed reason is retained in the immutable plan and applied receipt.
 
 The plan requires exact retained hostname custody in the same product/context,
-a superseded original recipient operation, complete credential-visible provider
-domain membership, and stopped recipients on the existing testing server. The
+a superseded original recipient operation or the qualified initial allocation,
+complete credential-visible provider domain membership, and stopped recipients on
+the existing testing server. The
 old recipients must have known automatic-deployment flags and no target
 schedules. Enabled flags are bound into the reviewed plan; apply disables only
 those exact unbound retained recipients before route publication. Every recipient
