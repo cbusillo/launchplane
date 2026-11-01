@@ -25148,6 +25148,16 @@ def create_launchplane_fastapi_app(
                     and director_agent_identity(identity)
                     and remediation_request.terminal_status == "destroyed"
                 )
+                policy_apply_allowed = (
+                    policy_allowed
+                    if remediation_request.mode == "apply"
+                    else resolved_authz_policy_runtime.allows(
+                        identity=identity,
+                        action="preview_pr_feedback_remediation.apply",
+                        product=remediation_request.product,
+                        context=remediation_request.context,
+                    )
+                )
                 if not policy_allowed and not standing_retirement:
                     raise _launchplane_http_error(
                         status_code=403,
@@ -25186,20 +25196,6 @@ def create_launchplane_fastapi_app(
                         record_store=remediation_store,
                         request=remediation_request,
                     )
-                    retirement_digest = (
-                        verified_preview_retirement_digest(
-                            record_store, profile=target.profile, number=target.pr_number
-                        )
-                        if standing_retirement
-                        else ""
-                    )
-                    if not policy_allowed and not retirement_digest:
-                        raise _launchplane_http_error(
-                            status_code=403,
-                            trace_id=trace_id,
-                            code="authorization_denied",
-                            message="Terminal feedback requires verified native retirement evidence.",
-                        )
                     feedback_credentials = credentials.enter_context(
                         resolve_remediation_token(
                             control_plane_root=resolved_control_plane_root,
@@ -25215,7 +25211,24 @@ def create_launchplane_fastapi_app(
                             feedback_credentials.actor_id,
                             feedback_credentials.actor_login,
                         ),
-                    ).model_copy(update={"retirement_sha256": retirement_digest})
+                    )
+                    retirement_digest = (
+                        verified_preview_retirement_digest(
+                            record_store, profile=target.profile, number=target.pr_number
+                        )
+                        if standing_retirement and not policy_apply_allowed
+                        else ""
+                    )
+                    if not policy_allowed and not retirement_digest:
+                        raise _launchplane_http_error(
+                            status_code=403,
+                            trace_id=trace_id,
+                            code="authorization_denied",
+                            message="Terminal feedback requires verified native retirement evidence.",
+                        )
+                    observation = observation.model_copy(
+                        update={"retirement_sha256": retirement_digest}
+                    )
                 except FileNotFoundError as error:
                     raise _launchplane_http_error(
                         status_code=404,
@@ -25267,13 +25280,7 @@ def create_launchplane_fastapi_app(
                         code="matching_dry_run_required",
                         message="Preview PR feedback remediation apply requires a prior matching dry-run.",
                     )
-                if dry_run_record.observation.retirement_sha256 != retirement_digest or (
-                    retirement_digest
-                    and verified_preview_retirement_digest(
-                        record_store, profile=target.profile, number=target.pr_number
-                    )
-                    != retirement_digest
-                ):
+                if dry_run_record.observation.retirement_sha256 != retirement_digest:
                     raise _launchplane_http_error(
                         status_code=409,
                         trace_id=trace_id,

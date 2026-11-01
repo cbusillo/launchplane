@@ -99,7 +99,6 @@ from control_plane.odoo_preview_apply_http import (
 )
 from control_plane.product_reconcile_read import (
     product_reconcile_request_view,
-    preview_current_failure,
 )
 from control_plane.product_review_status import OwnerReviewStatus, owner_review_reference_url
 from control_plane.product_review import resolve_serving_preview
@@ -8248,7 +8247,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             feedback_id = cast(dict[str, object], held.last_plan["pr_feedback"])["feedback_id"]
             assert isinstance(feedback_id, str)
             feedback = self.store.read_preview_pr_feedback_record(feedback_id)
-            self.assertEqual(feedback.failure_summary, preview_current_failure(held.last_plan))
+            self.assertEqual(feedback.failure_summary, held.last_error)
 
             self.github.runs[50]["conclusion"] = "failure"
             self.request("preview", 5)

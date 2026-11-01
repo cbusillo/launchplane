@@ -118,8 +118,8 @@ def preview_refresh_failure(request: ProductReconcileRequestRecord, *, store: ob
     ):
         return ""
     summary = (
-        preview_current_failure(request.last_plan)
-        or request.last_error
+        request.last_error
+        or preview_current_failure(request.last_plan)
         or request.last_plan.get(_FAILURE_SUMMARY_KEY)
     )
     if not isinstance(summary, str) or not summary.strip():
@@ -130,6 +130,8 @@ def preview_refresh_failure(request: ProductReconcileRequestRecord, *, store: ob
 
 
 def preview_current_failure(plan: Mapping[str, object]) -> str:
+    if plan.get("pull_request_state") == "closed":
+        return ""
     if plan.get("action") == "wait" and plan.get("held") is True:
         reason = plan.get("reason")
         if isinstance(reason, str) and reason.strip():

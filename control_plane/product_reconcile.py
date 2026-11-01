@@ -3193,7 +3193,7 @@ def run_product_reconcile_once(
         and plan.get("action") != "destroy"
         and plan.get("reason") not in {"pull_request_not_open", "already_serving"}
         and plan.get("preview_result_status") != "pass"
-        and preview_refresh_failure(request)
+        and preview_refresh_failure(request, store=record_store)
     ):
         for key in ("last_failed_error_code", "last_failed_error_summary"):
             if key in request.last_plan:

@@ -1649,7 +1649,9 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
 
     def test_reopened_preview_creation_can_be_retired_after_closing_again(self) -> None:
         from control_plane.workflows.launchplane import apply_preview_destroyed_transition
-        from control_plane.odoo_preview_apply_http import _odoo_preview_destroy_reason
+        from control_plane.contracts.preview_execution import (
+            odoo_preview_destroy_reason as _odoo_preview_destroy_reason,
+        )
 
         self.prepare_cleanup()
         previous = self.store.list_preview_records()[0]

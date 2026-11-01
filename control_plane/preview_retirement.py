@@ -91,17 +91,18 @@ def verified_preview_retirement_digest(
             )
         except FileNotFoundError:
             request = None
-        if (
-            request is not None
-            and _timestamp(request.updated_at) >= _timestamp(preview.destroyed_at)
-            and (request.last_error or request.last_plan.get("held") is True)
-        ):
-            return ""
+        if request is not None and (request.last_error or request.last_plan.get("held") is True):
+            timing = request.last_plan.get("timing")
+            decided_at = timing.get("planning_finished_at") if isinstance(timing, dict) else None
+            if not isinstance(decided_at, str) or not decided_at.strip():
+                decided_at = request.updated_at if request.state in {"done", "failed"} else ""
+            if not decided_at or _timestamp(decided_at) >= _timestamp(preview.destroyed_at):
+                return ""
         if any(
             feedback.product == profile.product
             and feedback.anchor_pr_number == number
             and feedback.repository.casefold() == profile.repository.casefold()
-            and feedback.status not in {"destroyed", "cleared"}
+            and feedback.status not in {"destroyed", "cleared", "pending"}
             and _timestamp(feedback.requested_at) >= _timestamp(preview.destroyed_at)
             for feedback in store.list_preview_pr_feedback_records(
                 context_name=profile.preview.context
