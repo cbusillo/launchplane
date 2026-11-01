@@ -201,7 +201,9 @@ the returned user ID before opening the web client. Supply bounded `steps`:
 ```
 
 Use the product's actual checklist selectors; these are illustrative. The
-driver accepts no evaluated script, arbitrary URL, query string, dot-segment or
+browser uses Playwright's bounded strict locator resolution for controls that
+render after the web client. Missing, ambiguous or sensitive controls refuse.
+The driver accepts no evaluated script, arbitrary URL, query string, dot-segment or
 encoded-path escape, staff credentials or non-TEST input. It blocks external network requests, login and
 password-reset pages, service workers, websockets, downloads and sensitive
 controls. Screenshots are available only on the signed-in web client, with
