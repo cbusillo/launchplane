@@ -468,9 +468,34 @@ def preservation_database(database: dict):
                 docker('stop', '-t', '30', database['Id'])
 
 
+@contextmanager
+def preservation_writers(source: dict, containers: dict):
+    completed = False
+    running = [service for service in ('web', 'script-runner') if containers[service]['State']['Running']]
+    try:
+        for service in running:
+            docker('stop', '-t', '30', containers[service]['Id'])
+        yield
+        completed = True
+    finally:
+        if not completed and spec.get('continuation', False):
+            with preservation_cleanup():
+                current = preview_containers(source)
+                if any(current[service]['Id'] != containers[service]['Id']
+                    or current[service]['Image'] != containers[service]['Image']
+                    for service in ('database', 'web', 'script-runner')):
+                    raise RuntimeError('Preview preservation cannot recover changed writers')
+                for service in running:
+                    if not current[service]['State']['Running']:
+                        docker('start', current[service]['Id'])
+
+
 def preserve(path: Path, source: dict) -> dict:
     containers = preview_containers(source)
     continuation = spec.get('continuation', False)
+    if spec.get('require_stopped_writers') and any(
+        containers[service]['State']['Running'] for service in ('web', 'script-runner')):
+        raise RuntimeError('Preview preservation stopped writer custody changed')
     if has_overlay_mount(source, containers):
         if continuation:
             raise RuntimeError('Preserving continuation requires a plain retained data volume')
@@ -490,7 +515,8 @@ def preserve(path: Path, source: dict) -> dict:
     if not continuation and any(paths['logs'].iterdir()):
         raise RuntimeError('Preview preservation has additional log custody')
     filestore = paths['data'] if continuation else paths['data'] / 'filestore'
-    total = sum(path.stat().st_size for path in filestore.rglob('*') if path.is_file())
+    initial_manifest = tree_manifest(filestore)
+    total = sum(entry.get('bytes', 0) for entry in initial_manifest.values())
     space = os.statvfs(path.parent)
     budget = spec['storage_budget']
     require_preservation_memory()
@@ -510,8 +536,14 @@ def preserve(path: Path, source: dict) -> dict:
         raise RuntimeError('Preview preservation verifier lacks its pending custody')
     if not continuation:
         require_unserved_web(containers['web'])
-    for service in ('web', 'script-runner'):
-        docker('stop', '-t', '30', containers[service]['Id'])
+    with preservation_writers(source, containers):
+        return capture_preservation(path, source, containers, binding, filestore, addons, budget)
+
+
+def capture_preservation(path: Path, source: dict, containers: dict, binding: dict,
+    filestore: Path, addons: Path, budget: dict) -> dict:
+    temporary = path.with_name('.pending-' + path.name)
+    database = containers['database']
     current = preview_containers(source)
     if any(current[service]['State']['Running'] for service in ('web', 'script-runner')):
         raise RuntimeError('Preview preservation writers did not stop')
@@ -566,7 +598,8 @@ def inspect_pending_preservation(path: Path, source: dict) -> dict:
     database = containers['database']
     if database.get('ExecIDs', 'unknown') not in (None, []):
         raise RuntimeError('Preview preservation database execution is unavailable')
-    require_unserved_web(containers['web'])
+    if not spec.get('continuation', False):
+        require_unserved_web(containers['web'])
     binding = preview_attempt_binding(source['compose_project'], source['database_name'],
         source['preview_volumes'], spec['authority'])
     temporary = path.with_name('.pending-' + path.name)
@@ -575,7 +608,8 @@ def inspect_pending_preservation(path: Path, source: dict) -> dict:
         if (docker('ps', '-aq', '--filter', 'name=^/' + verifier + '$').decode().split()
             or verifier in docker('volume', 'ls', '--format', '{{.Name}}').decode().splitlines()):
             raise RuntimeError('Preview preservation verifier lacks its pending custody')
-    return {'source': source, 'volume_binding': binding}
+    return {'source': source, 'volume_binding': binding,
+        'writers_stopped': not any(containers[service]['State']['Running'] for service in ('web', 'script-runner'))}
 
 
 def execute() -> dict:
@@ -607,7 +641,7 @@ def execute() -> dict:
             receipt = verify_preservation(path)
             if spec.get('source'):
                 verify_preservation_source(receipt, spec['source'], inspect_only=spec['mode'] == 'inspect')
-            return receipt
+            return {**receipt, 'writers_stopped': not spec.get('continuation_applied', False)}
         if spec['mode'] == 'inspect' and spec.get('source'):
             return inspect_pending_preservation(path, spec['source'])
         if spec['mode'] != 'preserve' or not spec.get('source'):
@@ -623,6 +657,7 @@ try:
     receipt = execute()
     print(sys.argv[2] + json.dumps({'type': 'complete', 'preservation_id': spec['preservation_id'],
         'source': receipt['source'], 'volume_binding': receipt['volume_binding'],
+        'writers_stopped': receipt.get('writers_stopped'),
         'retry_safe': spec['mode'] == 'inspect'}), flush=True)
 except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError, tarfile.TarError):
     print(sys.argv[2] + json.dumps({'type': 'failed'}), flush=True)

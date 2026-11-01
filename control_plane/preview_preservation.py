@@ -408,6 +408,13 @@ def run_preview_preservation(
     budget = (
         snapshot_storage_budget(profile, profile.preview.context) if mode == "preserve" else None
     )
+    continuation_applied = (
+        authority.continuation
+        and operation is not None
+        and bool(operation.provider_effect_phase)
+        and operation.provider_effect_phase not in PREVIEW_PRESERVATION_PHASES
+    )
+    require_stopped_writers = False
     if mode == "preserve":
         if effect_checkpoint is None or budget is None:
             raise ValueError("Preview preservation requires durable custody and reviewed capacity.")
@@ -418,11 +425,24 @@ def run_preview_preservation(
             original_reservation_id=original_reservation_id,
             operation_record_id=operation_record_id,
         )
-        if authority.continuation and not (
+        if authority.continuation and (
             operation is not None
             and operation.attempt > 1
             and operation.provider_effect_phase == PREVIEW_PRESERVATION_CAPTURE_PHASE
         ):
+            inspection = run_preview_preservation(
+                store=store,
+                profile=profile,
+                issued_plan=issued_plan,
+                original_reservation_id=original_reservation_id,
+                operation_record_id=operation_record_id,
+                control_plane_root=control_plane_root,
+                mode="inspect",
+                timeout_seconds=timeout_seconds,
+                check=check,
+            )
+            require_stopped_writers = inspection.get("writers_stopped") is True
+        if authority.continuation and not require_stopped_writers:
             from control_plane.odoo_preview_qualification import collect_odoo_preview_qualification
             from control_plane.workflows.launchplane import find_preview_record
 
@@ -507,10 +527,8 @@ def run_preview_preservation(
         payload={
             "mode": mode,
             "continuation": authority.continuation,
-            "continuation_applied": authority.continuation
-            and operation is not None
-            and bool(operation.provider_effect_phase)
-            and operation.provider_effect_phase not in PREVIEW_PRESERVATION_PHASES,
+            "continuation_applied": continuation_applied,
+            "require_stopped_writers": require_stopped_writers,
             "provider_effect_phase": dispatch_phase,
             "authority": authority.model_dump(mode="json"),
             "preservation_id": authority.preservation_id,
@@ -526,16 +544,25 @@ def run_preview_preservation(
         dispatch_guard=dispatch,
     )
     check()
+    captured_source = frames[0].get("source") if frames else None
     if (
         len(frames) != 1
         or frames[0].get("type") != "complete"
         or frames[0].get("preservation_id") != authority.preservation_id
-        or not isinstance(frames[0].get("source"), dict)
+        or not isinstance(captured_source, dict)
         or not isinstance(frames[0].get("volume_binding"), dict)
         or (
             current_source is not None
-            and frames[0]["source"] != current_source
-            and not authority.continuation
+            and {
+                key: value
+                for key, value in captured_source.items()
+                if not continuation_applied or key != "provider_binding_sha256"
+            }
+            != {
+                key: value
+                for key, value in current_source.items()
+                if not continuation_applied or key != "provider_binding_sha256"
+            }
         )
         or (mode == "inspect" and frames[0].get("retry_safe") is not True)
     ):

@@ -259,18 +259,46 @@ class PreviewPreservationProgramTests(unittest.TestCase):
         (self.paths["logs"] / "odoo.log").write_bytes(b"retained log")
         unserved = self.namespace["require_unserved_web"]
         unserved.side_effect = RuntimeError("web is listening")
-        original_manifest = self.namespace["tree_manifest"]
+        original_capture = self.namespace["capture_snapshot_file"]
 
-        def manifest(path: Path) -> dict[str, Any]:
+        def capture(*args: Any, **kwargs: Any) -> Any:
             self.assertFalse(self.containers["web"]["State"]["Running"])
             self.assertFalse(self.containers["script-runner"]["State"]["Running"])
-            return cast(dict[str, Any], original_manifest(path))
+            return original_capture(*args, **kwargs)
 
-        self.namespace["tree_manifest"] = manifest
+        self.namespace["capture_snapshot_file"] = capture
         receipt = self.preserve()
         self.assertTrue(receipt["database_restore_verified"])
         unserved.assert_not_called()
         self.assertEqual((self.paths["logs"] / "odoo.log").read_bytes(), b"retained log")
+
+    def test_continuation_preflight_and_capture_failures_keep_original_available(self) -> None:
+        self.spec["continuation"] = True
+        alias = self.paths["data"] / "alias"
+        alias.symlink_to(self.filestore, target_is_directory=True)
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertFalse(self.calls)
+        alias.unlink()
+        self.restored.side_effect = RuntimeError("restore failed")
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        for service in ("web", "script-runner"):
+            self.assertTrue(self.containers[service]["State"]["Running"])
+        self.assertFalse(self.path.exists())
+
+    def test_interrupted_pre_stop_continuation_requalifies_running_source(self) -> None:
+        self.spec["continuation"] = True
+        unserved = self.namespace["require_unserved_web"]
+        unserved.side_effect = RuntimeError("web is listening")
+        result = self.namespace["inspect_pending_preservation"](self.path, self.source)
+        self.assertFalse(result["writers_stopped"])
+        unserved.assert_not_called()
+        self.spec["require_stopped_writers"] = True
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertTrue(self.containers["web"]["State"]["Running"])
+        self.assertTrue(self.containers["script-runner"]["State"]["Running"])
 
     def test_continuation_receipt_remains_bound_after_refresh_reopens_writers(self) -> None:
         self.spec["continuation"] = True
@@ -715,6 +743,14 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             ),
         )
         original_plan = _issued_plan(original_request)
+        from control_plane.odoo_preview_apply_http import issue_odoo_preview_apply_plan
+
+        assert original_plan.plan_provenance is not None
+        original_plan = issue_odoo_preview_apply_plan(
+            result=original_plan,
+            plan_id=original_plan.plan_provenance.plan_id,
+            issued_at=original_plan.plan_provenance.issued_at - timedelta(seconds=5),
+        )
         operation = prepare_odoo_preview_apply_operation(
             control_plane_root=self.root,
             record_store=self.store,
@@ -912,7 +948,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                 return_value=PreviewQualification(
                     OdooTestingUsage(usage="in_use", resources_qualified=True), "fixture"
                 ),
-            ),
+            ) as qualification,
             patch("control_plane.dokploy.native_copy_stream._read_remote") as remote,
         ):
             with self.assertRaises(ValueError):
@@ -929,85 +965,124 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                     effect_checkpoint=lambda phase: None,
                     mutation_guard=nullcontext,
                 )
+        qualification.assert_called_once()
         remote.assert_not_called()
 
-    def test_preserving_refresh_keeps_data_and_supplies_future_retained_source(self) -> None:
+    def test_preserving_refresh_keeps_data_through_later_ordinary_refreshes(self) -> None:
         from control_plane import odoo_preview_apply_http as preview_http
         from control_plane.preview_source import require_source_free_preview_history
 
         self.record_serving_original()
         original_intent = self.store.read_original_mutation_intent(self.original)
+        original_time = datetime.fromisoformat(
+            original_intent["issued_plan"]["plan_provenance"]["issued_at"]
+        )
         self.destroy.apply.dry_run_plan.operation = "refresh"
         request = OdooPreviewApplyEnvelope.model_validate(self.destroy.model_dump(mode="json"))
-        self.issued = _issued_plan(request)
-        old_plan = self.issued.plan_provenance
-        assert old_plan is not None
-        self.issued = preview_http.issue_odoo_preview_apply_plan(
-            result=self.issued,
-            plan_id="preserving-refresh",
-            issued_at=old_plan.issued_at,
-        )
-        operation = prepare_odoo_preview_apply_operation(
-            control_plane_root=self.root,
-            record_store=self.store,
-            profile=self.profile,
-            apply_request=request,
-            issued_plan=self.issued,
-            reservation_scope="preserving-refresh",
-            idempotency_key="preserving-refresh",
-            request_fingerprint="preserving-refresh",
-            trace_id="preserving-refresh",
-            execute_apply=preview_http.execute_odoo_preview_apply_result,
-        )
-        result = {
-            "status": "pass",
-            "operation": "refresh",
-            "product": self.profile.product,
-            "repository": self.profile.repository,
-            "preview_slug": self.issued.preview_slug,
-            "compose_id": self.issued.dry_run_plan.compose_ref,
-            "compose_name": self.issued.dry_run_plan.compose_name,
-            "preview_url": self.issued.preview_url,
-            "domain_host": self.issued.dry_run_plan.domain_host,
-        }
-        with (
-            patch.object(operation.adapter, "capture_schedule_binding"),
-            patch.object(
-                preview_http, "_build_odoo_preview_apply_inputs", return_value=self.issued
-            ),
-            patch.object(
-                preview_http,
-                "_odoo_preview_service_environment",
-                return_value=preview_http._OdooPreviewServiceEnvironment(values={}),
-            ),
-            patch("control_plane.lane_movement.require_forward_preview_build"),
-            patch("control_plane.preview_preservation.run_preview_preservation") as preserve,
-            patch.object(
-                preview_http,
-                "execute_odoo_preview_dokploy_apply",
-                return_value=Mock(model_dump=Mock(return_value=result)),
-            ) as execute,
-        ):
-            outcome = operation.run(self.store)
-        self.assertEqual(outcome.status, "completed")
-        self.assertEqual(
-            [call.kwargs["mode"] for call in preserve.call_args_list], ["preserve", "verify"]
-        )
-        self.assertTrue(execute.call_args.kwargs["preserve_existing_data"])
-        self.assertFalse(execute.call_args.kwargs["restore_upstream"])
-        self.assertFalse(execute.call_args.kwargs["restore_clean_snapshot"])
-        self.assertEqual(self.store.read_original_mutation_intent(self.original), original_intent)
-        decision = preview_http.resolve_preview_source_decision(
-            record_store=self.store, profile=self.profile, issued_plan=self.issued, environment={}
-        )
-        self.assertEqual(decision.source, "retained")
-        require_source_free_preview_history(
-            self.store,
-            profile=self.profile,
-            issued_plan=self.issued,
-            operation_record_id="future-operation",
-            effective_source=decision,
-        )
+        for sequence in range(3):
+            request.preserve_original_reservation_id = (
+                self.original.record_id if sequence == 0 else ""
+            )
+            key = f"refresh-{sequence}"
+            self.issued = preview_http.issue_odoo_preview_apply_plan(
+                result=_issued_plan(request),
+                plan_id=key,
+                issued_at=original_time + timedelta(seconds=sequence + 1),
+            )
+            if sequence:
+                require_source_free_preview_history(
+                    self.store,
+                    profile=self.profile,
+                    issued_plan=self.issued,
+                    operation_record_id=key,
+                )
+            operation = prepare_odoo_preview_apply_operation(
+                control_plane_root=self.root,
+                record_store=self.store,
+                profile=self.profile,
+                apply_request=request,
+                issued_plan=self.issued,
+                reservation_scope=key,
+                idempotency_key=key,
+                request_fingerprint=key,
+                trace_id=key,
+            )
+            result = {
+                "status": "pass",
+                "operation": "refresh",
+                "product": self.profile.product,
+                "repository": self.profile.repository,
+                "preview_slug": self.issued.preview_slug,
+                "compose_id": self.issued.dry_run_plan.compose_ref,
+                "compose_name": self.issued.dry_run_plan.compose_name,
+                "preview_url": self.issued.preview_url,
+                "domain_host": self.issued.dry_run_plan.domain_host,
+            }
+            captured = False
+
+            def preserve(**kwargs: Any) -> None:
+                nonlocal captured
+                if kwargs["mode"] == "preserve":
+                    captured = True
+
+            def execute(**kwargs: Any) -> Mock:
+                if sequence == 0:
+                    self.assertTrue(captured)
+                self.assertTrue(kwargs["preserve_existing_data"])
+                self.assertFalse(kwargs["restore_upstream"])
+                self.assertFalse(kwargs["restore_clean_snapshot"])
+                return Mock(model_dump=Mock(return_value=result))
+
+            with (
+                patch.object(operation.adapter, "capture_schedule_binding"),
+                patch.object(
+                    preview_http, "_build_odoo_preview_apply_inputs", return_value=self.issued
+                ),
+                patch.object(
+                    preview_http,
+                    "_odoo_preview_service_environment",
+                    return_value=preview_http._OdooPreviewServiceEnvironment(values={}),
+                ),
+                patch("control_plane.lane_movement.require_forward_preview_build"),
+                patch(
+                    "control_plane.preview_preservation.run_preview_preservation",
+                    side_effect=preserve,
+                ),
+                patch.object(
+                    preview_http, "execute_odoo_preview_dokploy_apply", side_effect=execute
+                ),
+            ):
+                outcome = operation.run(self.store)
+            self.assertEqual(outcome.status, "completed")
+            self.assertEqual(
+                self.store.read_original_mutation_intent(self.original), original_intent
+            )
+            decision = preview_http.resolve_preview_source_decision(
+                record_store=self.store,
+                profile=self.profile,
+                issued_plan=self.issued,
+                environment={},
+            )
+            self.assertEqual(decision.source, "retained")
+
+    def test_legacy_source_probe_does_not_validate_unrelated_originals(self) -> None:
+        from control_plane.odoo_preview_apply_http import resolve_preview_source_decision
+
+        self.record_serving_original()
+        self.destroy.apply.dry_run_plan.operation = "refresh"
+        self.issued = _issued_plan(self.destroy)
+        with patch(
+            "control_plane.preview_reservation_recovery.original_preview_intent",
+            side_effect=ValueError("legacy intent unavailable"),
+        ) as validate:
+            decision = resolve_preview_source_decision(
+                record_store=self.store,
+                profile=self.profile,
+                issued_plan=self.issued,
+                environment={},
+            )
+        self.assertEqual(decision.source, "none")
+        validate.assert_not_called()
 
     def test_no_snapshot_original_uses_its_retained_server_without_changing_intent(self) -> None:
         binding = self.server_binding()

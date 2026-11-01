@@ -687,10 +687,12 @@ def resolve_preview_source_decision(
 ) -> PreviewSourceDecision:
     if issued_plan.operation == "refresh" and (
         preserve_original_reservation_id
-        or preview_has_completed_preservation(
+        or preview_has_completed_retained_source(
             record_store=record_store, profile=profile, issued_plan=issued_plan
         )
     ):
+        if issued_plan.plan_request.fishbowl_source is not None:
+            raise ValueError("A retained preview cannot import replacement data.")
         return PreviewSourceDecision(source="retained", fishbowl_import=False)
     upstream = preview_uses_upstream_restore(profile, environment)
     snapshot = profile.preview.clean_testing_snapshot and issued_plan.operation == "refresh"
@@ -724,7 +726,7 @@ def preview_uses_upstream_restore(
     )
 
 
-def preview_has_completed_preservation(
+def preview_has_completed_retained_source(
     *,
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
@@ -743,7 +745,10 @@ def preview_has_completed_preservation(
     )
     if preview is None or not preview.serving_generation_id or preview.state == "destroyed":
         return False
-    generation = record_store.read_preview_generation_record(preview.serving_generation_id)
+    try:
+        generation = record_store.read_preview_generation_record(preview.serving_generation_id)
+    except FileNotFoundError:
+        return False
     identity = generation.runtime_identity
     original = (
         record_store.read_idempotency_record_by_id(identity.deployment_record_id)
@@ -752,17 +757,16 @@ def preview_has_completed_preservation(
     )
     if original is None or original.state != "completed":
         return False
-    retained = original_preview_intent(original, profile=profile, store=record_store)
-    if not retained.apply_request.preserve_original_reservation_id:
+    decision = PreviewSourceDecision(source="retained", fishbowl_import=False).model_dump(
+        mode="json"
+    )
+    if record_store.read_original_mutation_intent(original).get("effective_source") != decision:
         return False
+    original_preview_intent(original, profile=profile, store=record_store)
     from control_plane.odoo_preview_qualification import read_preview_inspection_authority
 
     authority = read_preview_inspection_authority(record_store, preview)
-    return (
-        authority.target_id.target_id == issued_plan.dry_run_plan.compose_ref
-        and record_store.read_original_mutation_intent(original).get("effective_source")
-        == PreviewSourceDecision(source="retained", fishbowl_import=False).model_dump(mode="json")
-    )
+    return authority.target_id.target_id == issued_plan.dry_run_plan.compose_ref
 
 
 def preview_has_completed_restore(
