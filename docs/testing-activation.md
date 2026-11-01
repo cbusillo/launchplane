@@ -740,6 +740,9 @@ verification remains pending until the worker completes it. Generic-web builds
 keep their verified immutable image reference, without an Odoo manifest.
 Static predecessor placement, preview and disabled-schedule requirements are
 checked before setting the operation's hold, and checked again before retirement.
+Runtime and retirement inventories use Docker's supported quiet service listing,
+then resolve every listed prefix to one distinct inspected full service ID.
+Incomplete or ambiguous inspection still refuses the operation.
 
 The existing rebuild worker creates an operation-owned staging hold, prepares
 independent resources and runs the native application activation. The old copy

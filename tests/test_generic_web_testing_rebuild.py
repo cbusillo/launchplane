@@ -80,10 +80,22 @@ class ApplicationAbsenceTests(unittest.TestCase):
                 return identifier
             case ("node", "ls", "--format", "json"):
                 return "\n".join(json.dumps(row) for row in self.nodes)
-            case ("service", "ls", "-q", "--no-trunc"):
-                return "\n".join(self.services)
-            case ("service", "inspect", *identifiers):
-                return json.dumps([self.services[identifier] for identifier in identifiers])
+            case ("service", "ls", "-q"):
+                return "\n".join(identifier[:12] for identifier in self.services)
+            case ("service", "inspect", *identifiers) | (
+                "inspect",
+                "--type",
+                "service",
+                *identifiers,
+            ):
+                return json.dumps(
+                    [
+                        row
+                        for identifier in identifiers
+                        for key, row in self.services.items()
+                        if key.startswith(identifier)
+                    ]
+                )
             case ("service", "ps", "--no-trunc", "-q", _application):
                 return "\n".join(self.tasks)
             case ("inspect", "--type", "task", identifier):
@@ -854,15 +866,20 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
                         value = identifier
                     case ["node", "ls", "--format", "json"]:
                         value = "\n".join(json.dumps(row) for row in self.flow.nodes)
-                    case ["service", "ls", "-q", "--no-trunc"]:
-                        value = "\n".join(row["ID"] for row in self.flow.services.values())
-                    case ["service", "inspect", *identifiers]:
+                    case ["service", "ls", "-q"]:
+                        value = "\n".join(row["ID"][:12] for row in self.flow.services.values())
+                    case ["service", "inspect", *identifiers] | [
+                        "inspect",
+                        "--type",
+                        "service",
+                        *identifiers,
+                    ]:
                         value = json.dumps(
                             [
                                 next(
                                     row
                                     for name, row in self.flow.services.items()
-                                    if name == identifier or row["ID"] == identifier
+                                    if name == identifier or row["ID"].startswith(identifier)
                                 )
                                 for identifier in identifiers
                             ]

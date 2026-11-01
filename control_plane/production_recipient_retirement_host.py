@@ -119,7 +119,7 @@ def capture():
         protect(row.get('Mounts'),own)
     networks=_batched_docker_inspect('network',identifiers('network','ls','--format','{{.Name}}'),load)
     protected_networks={row['Id'] for name,row in networks.items() if name in {project,project+'_default'}}|{project,project+'_default'}
-    services=_batched_docker_inspect('service',identifiers('service','ls','-q','--no-trunc'),load)
+    services=_batched_docker_inspect('service',identifiers('service','ls','-q'),load)
     for row in services.values():
         definition=row['Spec']
         if (definition.get('Labels') or {}).get('com.docker.stack.namespace')==project:

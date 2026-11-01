@@ -50,7 +50,7 @@ elif args[:3]==['inspect','--type','container']:
     if state.get('duplicate_containers') and rows:
         rows.append(rows[0])
     print(json.dumps(rows))
-elif args[:3]==['service','ls','-q']:
+elif args==['service','ls','-q']:
     sys.stdout.write('\n'.join(state.get('services',[])))
 elif args[:3]==['inspect','--type','service']:
     mounts=[{'Type':'volume','Source':name}] if state.get('service_ref') else []

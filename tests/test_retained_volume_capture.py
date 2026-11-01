@@ -26,6 +26,7 @@ from control_plane.product_retirement import (
     redacted_product_retirement_response,
 )
 from control_plane.retained_volume_capture import (
+    _batched_docker_inspect,
     _RETAINED_VOLUME_CAPTURE_PROGRAM,
     capture_retained_volumes,
     retained_volume_engine_identity,
@@ -34,6 +35,34 @@ from control_plane.retained_volume_capture import (
 
 
 class RetainedVolumeCaptureTests(unittest.TestCase):
+    def test_service_inventory_resolves_listed_prefixes_to_full_inspected_identities(self) -> None:
+        first, second = "a" * 25, "b" * 25
+        rows = [{"ID": second}, {"ID": first}]
+        self.assertEqual(
+            _batched_docker_inspect("service", [first[:12], second[:12]], lambda *_: rows),
+            {second: rows[0], first: rows[1]},
+        )
+
+    def test_service_inventory_refuses_missing_duplicate_foreign_or_ambiguous_identities(
+        self,
+    ) -> None:
+        full = "a" * 25
+        for references, rows in (
+            ([full[:12]], []),
+            ([full[:12]], [{"ID": full}, {"ID": full}]),
+            ([full[:12]], [{"ID": "b" * 25}]),
+            ([full[:12], full[:13]], [{"ID": full}]),
+            ([full[:12]], [{"ID": full}, {"ID": full + "b"}]),
+            ([""], [{"ID": full}]),
+        ):
+            with self.subTest(references=references, rows=rows), self.assertRaises(ValueError):
+                _batched_docker_inspect("service", references, lambda *_: rows)
+
+    def test_other_inspection_kinds_require_exact_identities(self) -> None:
+        for kind, key in (("container", "Id"), ("task", "ID"), ("volume", "Name")):
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                _batched_docker_inspect(kind, ["short"], lambda *_: [{key: "short-full"}])
+
     def test_non_string_provider_identity_never_dispatches_capture(self) -> None:
         for field in ("applicationId", "appName"):
             with (
