@@ -134,6 +134,10 @@ class ApplicationStateVolumeRetentionTests(unittest.TestCase):
         self.assertEqual(self.store.read_original_mutation_intent(retained), self.intent)
         self.assertEqual(retained.response_payload["result"], result)
         self.assertEqual(result["allocation_state"], "retained_uncertain")
+        self.assertIn(
+            state_volume_allocation_names(self.intent["plan_id"]),
+            list(self.store.retained_volume_recovery_payloads()),
+        )
         self.assertFalse(result["applied"])
         self.assertTrue(result["resources_retained"])
         self.assertFalse(result["deployment_performed"])
