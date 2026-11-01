@@ -738,12 +738,15 @@ A missing declaration refuses admission. `postgresql` records the
 still-deferred independent PostgreSQL prerequisite and refuses before provider work.
 These declarations apply only to generic-web testing lanes.
 
-The signed-in control and native product rebuild routes admit stateless
-application targets with a public testing address. The existing Director-agent
+The signed-in control and native product rebuild routes admit application
+targets with either no persistent state or one fresh local volume. They preserve
+a public testing address or the single verified private HTTPS endpoint selected
+by the testing lane's private health policy. The existing Director-agent
 testing rebuild authority also covers these routes. Inspection verifies the
 immutable build, exclusive product/context ownership, target agreement, holds,
-use protections, independent credential bindings and actual absence of mounted
-state. It performs no writes. A passing inspection admits the operation; candidate
+use protections, independent credential bindings and actual mounted-state
+custody. A mounted predecessor requires its exact completed native application
+activation, original volume allocation and captured physical volume identity. It performs no writes. A passing inspection admits the operation; candidate
 verification remains pending until the worker completes it. Generic-web builds
 keep their verified immutable image reference, without an Odoo manifest.
 Static predecessor placement, preview and disabled-schedule requirements are
@@ -756,7 +759,7 @@ The existing rebuild worker creates an operation-owned staging hold, prepares
 independent resources and runs the native application activation. The old copy
 keeps serving until the candidate passes readiness and health at the unchanged
 address. Candidate failure retains the old copy. Retirement first disables the
-old application's automatic deploys and verifies its placement, empty mounts,
+old application's automatic deploys and verifies its placement, exact captured mounts,
 absence of other lane references or provider previews, terminal deployments and
 quiescent jobs and schedules. An active or unobserved old job prevents retirement.
 Existing unresolved Launchplane reservations remain fenced;
@@ -769,10 +772,15 @@ and its current applied configuration, without requiring a retired predecessor's
 route file. Foreign or changed routers still refuse.
 
 Provider metadata deletion is followed by physical service/container absence
-verification. If provider cleanup leaves the original stateless service behind,
-the same operation can remove only its captured service ID through the guarded
-host program, after observing metadata absence. It never removes volumes. Completed
-retirement requires final health and absence checks. A lost
+verification. If provider cleanup leaves the original service behind, the same
+operation can remove only its captured service ID through the guarded host
+program, after observing metadata absence. That service removal preserves its
+volume. A separate durable child removes the original volume only after current
+candidate health and complete Launchplane, provider and local Docker inventories
+prove independent cleanup custody. The existing retained-volume host program
+checks the captured engine and backing identity, references, path aliases and
+same-boot monotonic permit before removal. Completed retirement requires final
+health and independent service, container and volume absence checks. A lost
 reply resumes the original receipts; a later staff hold or deployment is retained.
 The host program waits for Docker's asynchronous container teardown within a
 bounded interval. Metadata already deleted outside this operation permits only
@@ -793,7 +801,7 @@ delete checkpoint for each predecessor. Those records carry exact activation
 identities; already-retired copies are not carried forward, and ordinary activation
 history is not adopted. An older leftover's static refusal does not block a new
 independent testing copy. The same
-identity, empty-state, quiescence, health and absence requirements apply.
+identity, captured-state, quiescence, health and absence requirements apply.
 Unverified health keeps the original operation pending.
 
 Known admission refusals before candidate dispatch clear only this operation's
@@ -806,8 +814,12 @@ old configuration or enables a changed binding.
 Direct provider changes outside Launchplane are
 not synchronized with this operation.
 
-Volume, private-address and non-application lanes remain pending in this slice.
-Existing Odoo preflight and execution continue through the same control.
+A lost volume-removal reply reads back only the original host receipt and key;
+it never renews an expired removal permit. Known protected-volume refusals retain
+the exact predecessor for a later rebuild while allowing ordinary testing work.
+Unknown removal effects keep the original operation pending.
+Non-application lanes remain pending. Existing Odoo preflight and execution
+continue through the same control.
 
 Rebuild admission retains the completed current activation's application recipe,
 including its network and local and external credential intent. Current profile

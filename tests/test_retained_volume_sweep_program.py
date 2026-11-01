@@ -126,7 +126,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
 
     def volume(self) -> dict[str, object]:
         return {
-            "Name": "candidate",
+            "Name": self.state["name"],
             "CreatedAt": "2026-01-01T00:00:00Z",
             "Driver": "local",
             "Labels": self.state.get("volume_labels", {}),
@@ -158,7 +158,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         assert isinstance(engine_id, str)
         spec: dict[str, object] = {
             "mode": mode,
-            "volume": "candidate",
+            "volume": self.state["name"],
             "identity": identity or self.identity(),
             "operation": operation,
             "engine_identity": (

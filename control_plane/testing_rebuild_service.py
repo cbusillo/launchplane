@@ -324,6 +324,10 @@ class GenericWebTestingRebuildIntent(FrozenRecord):
     retained_volumes: tuple[RetainedVolumeBinding, ...] = Field(
         default=(), max_length=1, exclude_if=lambda value: not value
     )
+    testing_address: str = Field(default="", exclude_if=lambda value: not value)
+    private_ingress: dict[str, str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
 
 
 def capture_rebuild_intent(

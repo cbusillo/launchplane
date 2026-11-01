@@ -65,6 +65,7 @@ from control_plane.testing_rebuild_application_state import (
     RetainedApplicationState,
     application_mount_matches,
     retained_application_state,
+    rebuild_address,
 )
 from control_plane.testing_lane_hold import (
     TestingHoldApplyRequest,
@@ -180,10 +181,10 @@ def default_rebuild_application_specification(
 def rebuild_application_specification(
     intent: GenericWebTestingRebuildIntent,
 ) -> TestingApplicationSpecification:
-    if intent.state.kind != "none" or intent.before.target.target_type != "application":
+    if intent.before.target.target_type != "application":
         raise TestingRebuildRefused(
             TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE,
-            "This rebuild currently supports applications without persistent state.",
+            "This rebuild requires an application testing recipient.",
         )
     return intent.application or default_rebuild_application_specification(intent)
 
@@ -669,7 +670,7 @@ class GenericWebTestingRebuildExecution:
         self.guard("testing_rebuild_external_comparison", recovery=self.recovering)
         return self.store.list_product_profile_records()
 
-    def retirement_state(self, record: TestingActivationRecord) -> RetainedApplicationState:
+    def retirement_intent(self, record: TestingActivationRecord) -> GenericWebTestingRebuildIntent:
         if record.request.preparation_key == self.resources_key:
             intent = self.intent
         else:
@@ -694,7 +695,10 @@ class GenericWebTestingRebuildExecution:
             or intent.before.target_id.target_id != record.retained_target_id.target_id
         ):
             raise NativeTestingRebuildPending("The original predecessor state belongs elsewhere.")
-        return retained_application_state(self.store, intent)
+        return intent
+
+    def retirement_state(self, record: TestingActivationRecord) -> RetainedApplicationState:
+        return retained_application_state(self.store, self.retirement_intent(record))
 
     def application_adapter(
         self, request: TestingActivationRequest
@@ -716,6 +720,17 @@ class GenericWebTestingRebuildExecution:
         self.check()
         self.lease.assert_current()
         self.parent.authorize(phase)
+        if self.intent.private_ingress:
+            from control_plane.testing_application_private_route import (
+                require_private_ingress_records,
+            )
+
+            require_private_ingress_records(
+                self.store,
+                self.operation.product,
+                self.operation.context,
+                self.intent.private_ingress,
+            )
         if not is_exclusive_product_context(
             context=self.operation.context,
             product=self.operation.product,
@@ -829,6 +844,7 @@ class GenericWebTestingRebuildExecution:
         request: dict[str, Any],
         name: str,
         original_intent: dict[str, Any] | None = None,
+        parent_lease: ProviderOperationLease | None = None,
     ) -> dict[str, object]:
         self.guard(name + ":admission")
         if not isinstance(self.lease, ProviderEvidenceLease):
@@ -843,7 +859,9 @@ class GenericWebTestingRebuildExecution:
             ),
             lease_owner=self.lease.evidence_reservation().lease_owner,
             response_trace_id=self.operation.operation_id,
-            adapter=RebuildChildAdapter(child, self.lease, self.guard, name),
+            adapter=RebuildChildAdapter(
+                child, parent_lease if parent_lease is not None else self.lease, self.guard, name
+            ),
             original_intent=original_intent,
         )
         if result.status not in {"completed", "adopted", "replayed"}:
@@ -1150,10 +1168,10 @@ class GenericWebTestingRebuildExecution:
             "remove_retired_service",
         }:
             try:
-                self.require_predecessor_absent(retained)
+                self.require_predecessor_service_absent(retained)
             except ValueError:
                 return retain_predecessor()
-            return True
+            return self.retire_volume(adapter, record, retained, lease)
 
         def dispatch(remove: Callable[[], None]) -> None:
             self.guard("testing_rebuild_remove_retired_service")
@@ -1181,8 +1199,71 @@ class GenericWebTestingRebuildExecution:
             mount_path=state["mount_path"],
             volume_binding=state["volume_binding"],
         )
-        self.require_predecessor_absent(retained)
-        return True
+        self.require_predecessor_service_absent(retained)
+        return self.retire_volume(adapter, record, retained, lease)
+
+    def retire_volume(
+        self,
+        activation: ApplicationActivationAdapter,
+        successor: TestingActivationRecord,
+        predecessor: TestingActivationRecord,
+        lease: ProviderOperationLease,
+    ) -> bool:
+        from control_plane.testing_rebuild_volume_retirement import TestingRebuildVolumeRetirement
+        from control_plane.traffic_switch import MAX_READINESS_AGE_SECONDS
+
+        intent = self.retirement_intent(predecessor)
+        if not intent.retained_volumes:
+            return True
+        volume = intent.retained_volumes[0]
+        adapter = TestingRebuildVolumeRetirement(self, activation, successor, predecessor, volume)
+        route = REBUILD_ROUTE + ":volume-retirement"
+        key = self.operation.operation_id + ":volume:" + adapter.reconciliation_key()
+        row = self.store.read_idempotency_record(
+            scope=self.scope, route_path=route, idempotency_key=key
+        )
+        if row is not None:
+            original = self.store.read_original_mutation_intent(row)
+        else:
+            readiness = predecessor.application_readiness
+            assert readiness is not None and readiness.route is not None
+            assert predecessor.predecessor is not None
+            host, token = source.read_dokploy_config(control_plane_root=self.root)
+            clock = inspect_application_state(
+                host=host,
+                token=token,
+                server_id=volume.server_id,
+                application=volume.application_name,
+                service_id=predecessor.predecessor.service_id,
+                mode="absent",
+                include_clock=True,
+            )
+            if clock is None:
+                raise NativeTestingRebuildPending("Fresh original host custody is unavailable.")
+            original = {
+                "volume": volume.model_dump(mode="json"),
+                "retirement": {
+                    "binding": adapter.reconciliation_key(),
+                    "fresh_until": clock.received_at + MAX_READINESS_AGE_SECONDS,
+                    "boot_id": clock.boot_id,
+                    "monotonic_deadline": clock.monotonic + MAX_READINESS_AGE_SECONDS,
+                },
+            }
+        result = self.run_child(
+            adapter,
+            route=route,
+            key=key,
+            request={"retirement": adapter.reconciliation_key()},
+            name="retirement_volume",
+            original_intent=original,
+            parent_lease=lease,
+        )
+        retired = result.get("retired")
+        if not isinstance(retired, bool):
+            raise NativeTestingRebuildPending("Original volume retirement is unobserved.")
+        if retired:
+            self.require_predecessor_absent(predecessor)
+        return retired
 
     def require_retirement_custody(self, record: TestingActivationRecord) -> None:
         target_id = record.retained_target_id.target_id
@@ -1207,6 +1288,21 @@ class GenericWebTestingRebuildExecution:
             raise NativeTestingRebuildPending("An unrelated predecessor writer remains protected.")
 
     def require_predecessor_absent(self, record: TestingActivationRecord) -> None:
+        from control_plane.retained_volume_sweep_execution import _host_result
+
+        self.require_predecessor_service_absent(record)
+        intent = self.retirement_intent(record)
+        for volume in intent.retained_volumes:
+            status, _ = _host_result(
+                self.root,
+                volume,
+                "dry-run",
+                "testing-rebuild-volume-absence:" + record.plan_sha256,
+            )
+            if status != "absent":
+                raise ValueError("Original predecessor volume absence is unobserved.")
+
+    def require_predecessor_service_absent(self, record: TestingActivationRecord) -> None:
         readiness = record.application_readiness
         assert readiness is not None and readiness.route is not None
         assert readiness.route_execution is not None and record.predecessor is not None
@@ -1495,9 +1591,7 @@ class GenericWebTestingRebuildExecution:
             target_name=record.namespace if ready else record.retained_target.target_name,
             artifact_id=record.image_reference,
             image_reference=record.image_reference,
-            health_url=next(
-                lane.base_url for lane in self.intent.profile.lanes if lane.instance == "testing"
-            ),
+            health_url=rebuild_address(self.intent),
             runtime_source={
                 "testing_rebuild": self.operation.operation_id,
                 "testing_activation": record.plan_sha256,

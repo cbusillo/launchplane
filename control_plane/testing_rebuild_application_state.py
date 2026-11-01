@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Literal, TypedDict
+from urllib.parse import urlsplit, urlunsplit
 
 from control_plane import retained_volume_capture
 from control_plane.dokploy import api, source
@@ -20,6 +21,42 @@ class RetainedApplicationState(TypedDict):
     volume_name: str
     mount_path: str
     volume_binding: str
+
+
+def rebuild_address(intent: GenericWebTestingRebuildIntent) -> str:
+    return intent.testing_address or next(
+        lane.base_url for lane in intent.profile.lanes if lane.instance == "testing"
+    )
+
+
+def capture_private_rebuild_address(
+    root: Path, store: PostgresRecordStore, intent: GenericWebTestingRebuildIntent
+) -> GenericWebTestingRebuildIntent:
+    lane = next(lane for lane in intent.profile.lanes if lane.instance == "testing")
+    keys = {
+        check.private_endpoint_key
+        for check in lane.health_monitoring.checks
+        if check.enabled and check.kind == "private_http"
+    }
+    if lane.base_url or lane.health_monitoring.monitoring_intent != "private" or not keys:
+        return intent
+    if len(keys) != 1:
+        raise TestingRebuildRefused(
+            "testing_rebuild_inputs_unverified", "Use one verified private testing address."
+        )
+    from control_plane.testing_application_private_route import private_ingress_snapshot
+
+    _, _, binding = private_ingress_snapshot(
+        root, store, intent.profile.product, lane.context, endpoint_key=next(iter(keys))
+    )
+    endpoint = store.read_private_health_endpoint_record(binding["endpoint_key"])
+    address = urlsplit(endpoint.url)
+    return intent.model_copy(
+        update={
+            "testing_address": urlunsplit((address.scheme, address.netloc, "", "", "")),
+            "private_ingress": binding,
+        }
+    )
 
 
 def retained_application_state(
@@ -85,6 +122,7 @@ def capture_rebuild_application_intent(
     intent = intent.model_copy(
         update={"application": capture_rebuild_application_specification(store, intent)}
     )
+    intent = capture_private_rebuild_address(root, store, intent)
     previous = activation_record(store, intent.profile.product, intent.before.target.context)
     if (
         previous is None

@@ -136,6 +136,66 @@ class ApplicationAbsenceTests(unittest.TestCase):
         )
         self.assertEqual(frame, {"type": "complete", **payload})
 
+    def test_host_clock_requires_one_complete_finite_same_observation_frame(self) -> None:
+        def read(**kwargs: Any) -> None:
+            def command(arguments: list[str], **_options: Any) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(arguments, 0, self.docker(*arguments[1:]), "")
+
+            kwargs["receive"](
+                observe_application_state_program(kwargs["program"], kwargs["payload"], command)
+            )
+
+        with (
+            patch.object(application_runtime, "_read_remote", side_effect=read),
+            patch.object(Path, "read_text", return_value="fixture-boot"),
+        ):
+            clock = application_runtime.inspect_application_state(
+                host="https://provider.invalid",
+                token="fixture",
+                server_id="server",
+                application="original-app",
+                service_id="original-service",
+                mode="absent",
+                include_clock=True,
+            )
+        assert clock is not None
+        self.assertEqual(clock.boot_id, "fixture-boot")
+        self.assertGreater(clock.monotonic, 0)
+        for changes in (
+            {"boot_id": ""},
+            {"monotonic": True},
+            {"monotonic": float("nan")},
+            {"monotonic": float("inf")},
+            {"monotonic": -1},
+            {"application": "foreign-app"},
+        ):
+
+            def invalid(**kwargs: Any) -> None:
+                kwargs["receive"](
+                    {
+                        "type": "complete",
+                        **kwargs["payload"],
+                        "boot_id": "fixture-boot",
+                        "monotonic": clock.monotonic,
+                        **changes,
+                    }
+                )
+
+            with (
+                self.subTest(changes=changes),
+                patch.object(application_runtime, "_read_remote", side_effect=invalid),
+                self.assertRaises(ValueError),
+            ):
+                application_runtime.inspect_application_state(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    server_id="server",
+                    application="original-app",
+                    service_id="original-service",
+                    mode="absent",
+                    include_clock=True,
+                )
+
     def mounted_predecessor(self) -> dict[str, str]:
         state = {"volume_name": "original-state", "mount_path": "/data", "volume_binding": "owned"}
         self.tasks = {}
@@ -759,7 +819,7 @@ class GenericWebTestingRebuildHttpTests(
         self.enterContext(
             patch.object(capabilities, "fetch_application_runtime", return_value=runtime)
         )
-        self.provider_payload = {
+        self.provider_payload: dict[str, Any] = {
             "applicationId": self.target_id.target_id,
             "appName": self.target.target_name,
             "serverId": "fixture-server",
@@ -855,7 +915,7 @@ class GenericWebTestingRebuildHttpTests(
     async def test_signed_in_administrator_queues_the_real_verified_image(self) -> None:
         await self.assert_verified_queue(self.human_headers)
 
-    async def test_volume_without_activation_history_remains_pending_without_provider_reads(
+    async def test_volume_without_activation_history_admits_only_an_unmounted_predecessor(
         self,
     ) -> None:
         from tests.support.http import request
@@ -867,7 +927,7 @@ class GenericWebTestingRebuildHttpTests(
         )
         self.store.write_product_profile_record(profile)
         operations = self.store.list_odoo_stable_target_replacement_operation_records()
-        with patch.object(source, "read_dokploy_config") as provider:
+        with patch.object(api, "dokploy_request", wraps=api.dokploy_request) as provider:
             response = await request(
                 self.app,
                 "GET",
@@ -875,9 +935,19 @@ class GenericWebTestingRebuildHttpTests(
                 headers=self.human_headers,
             )
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["status"], "pending")
+        self.assertEqual(response.json()["status"], "pass")
         self.assertTrue(response.json()["restore_applicable"])
-        provider.assert_not_called()
+        self.assertTrue(
+            all(call.kwargs.get("method", "GET") == "GET" for call in provider.call_args_list)
+        )
+        self.provider_payload["mounts"] = [{"type": "volume", "volumeName": "unowned-state"}]
+        refused = await request(
+            self.app,
+            "GET",
+            f"/v1/products/{profile.product}/testing-rebuild/inputs",
+            headers=self.human_headers,
+        )
+        self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(
             self.store.list_odoo_stable_target_replacement_operation_records(), operations
         )
@@ -923,7 +993,7 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
         self.flow.no_original = not self.with_unresolved_predecessor
         self.flow.setUp()
         self.addCleanup(self.flow.doCleanups)
-        self.routing = self.flow.addressed()
+        self.routing = self.configure_route()
         document = json.loads((self.routing.root / "old-app.yml").read_text())
         document["http"]["routers"]["old-app-router-fixture"]["middlewares"] = ["redirect-to-https"]
         document["http"].pop("middlewares")
@@ -1074,6 +1144,9 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
                 side_effect=storage,
             )
         )
+
+    def configure_route(self) -> Any:
+        return self.flow.addressed()
 
     def configure_serving_application(self) -> None:
         self.flow.payloads[self.flow.old_id]["mounts"] = []

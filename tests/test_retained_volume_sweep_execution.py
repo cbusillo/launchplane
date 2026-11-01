@@ -422,6 +422,7 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             ),
         ):
             self.assertFalse(_inventory_clear(self.root, self.binding))
+
         environment["postgres"] = []
         environment["compose"] = [{"composeId": "other-compose"}]
         with (
@@ -439,6 +440,42 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             ),
         ):
             self.assertFalse(_inventory_clear(self.root, self.binding))
+
+    def test_exact_inventory_reads_environment_variables_from_complete_identity_bound_detail(
+        self,
+    ) -> None:
+        environment = {
+            **{kind: [] for kind in TARGET_COLLECTIONS},
+            "environmentId": "environment",
+        }
+        project = {"projectId": "project", "env": "", "environments": [environment]}
+        detail = {
+            "environmentId": environment["environmentId"],
+            "projectId": project["projectId"],
+            "env": "",
+        }
+        for response, clear in (
+            (detail, True),
+            ({**detail, "env": "STATE_VOLUME=" + self.binding.volume_name}, False),
+            ({**detail, "environmentId": "foreign-environment"}, False),
+            ({**detail, "projectId": "foreign-project"}, False),
+            ({key: value for key, value in detail.items() if key != "env"}, False),
+        ):
+            with self.subTest(response=response):
+                with (
+                    patch(
+                        "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_projects",
+                        return_value=(project,),
+                    ),
+                    patch(
+                        "control_plane.retained_volume_sweep_execution.api.dokploy_request",
+                        return_value=response,
+                    ) as read,
+                ):
+                    self.assertEqual(_inventory_clear(self.root, self.binding, exact=True), clear)
+                self.assertTrue(
+                    all(call.kwargs.get("method", "GET") == "GET" for call in read.call_args_list)
+                )
 
     def test_other_retirement_cannot_bypass_an_uncertain_volume_reservation(self) -> None:
         app = self.app()

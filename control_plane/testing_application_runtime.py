@@ -1,10 +1,11 @@
 import hashlib
 import inspect
 import json
+import math
 import time
 from collections.abc import Callable
 from control_plane.contracts.promotion_record import HealthcheckEvidence
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.retained_volume_capture import _batched_docker_inspect
 
@@ -24,6 +25,12 @@ class VerifiedApplicationRuntimeFailure(ValueError):
     def __init__(self, evidence: dict[str, Any]) -> None:
         super().__init__("The attributed original application failed private qualification.")
         self.evidence = evidence
+
+
+class ApplicationStateClock(NamedTuple):
+    boot_id: str
+    monotonic: float
+    received_at: float
 
 
 def application_service_inventory(
@@ -238,7 +245,8 @@ def inspect_application_state(
     volume_name: str = "",
     mount_path: str = "",
     volume_binding: str = "",
-) -> None:
+    include_clock: bool = False,
+) -> ApplicationStateClock | None:
     frames: list[dict[str, object]] = []
     payload: dict[str, object] = {
         "application": application,
@@ -249,6 +257,8 @@ def inspect_application_state(
         payload.update(
             volume_name=volume_name, mount_path=mount_path, volume_binding=volume_binding
         )
+    if include_clock:
+        payload["include_clock"] = True
     _read_remote(
         host=host,
         token=token,
@@ -258,8 +268,22 @@ def inspect_application_state(
         receive=frames.append,
         timeout_seconds=120,
     )
-    if frames != [{"type": "complete", **payload}]:
-        raise ValueError("Physical predecessor state is unobserved.")
+    if include_clock and len(frames) == 1:
+        frame = dict(frames[0])
+        boot_id, monotonic = frame.pop("boot_id", None), frame.pop("monotonic", None)
+        if (
+            frame == {"type": "complete", **payload}
+            and isinstance(boot_id, str)
+            and boot_id
+            and isinstance(monotonic, int | float)
+            and not isinstance(monotonic, bool)
+            and math.isfinite(monotonic)
+            and monotonic > 0
+        ):
+            return ApplicationStateClock(boot_id, float(monotonic), time.time())
+    elif frames == [{"type": "complete", **payload}]:
+        return None
+    raise ValueError("Physical predecessor state is unobserved.")
 
 
 def wait_for_application_runtime_absence(
@@ -278,7 +302,7 @@ def wait_for_application_runtime_absence(
 
 APPLICATION_STATE_PROGRAM_HEADER = (
     "import base64,json,subprocess,sys,time\n"
-    "from collections.abc import Callable,Sequence\nfrom typing import Any\n"
+    "from collections.abc import Callable,Sequence\nfrom typing import Any\nfrom pathlib import Path\n"
     + inspect.getsource(_batched_docker_inspect)
     + inspect.getsource(single_local_swarm_node)
     + inspect.getsource(application_service_inventory)
@@ -302,7 +326,10 @@ if (spec['mode']=='volume') != bool(spec.get('volume_name')): raise ValueError('
 if spec['mode']=='absent': require_application_runtime_absent(docker,spec['application'],spec['service_id'])
 elif spec['mode'] in {'stateless','volume'}: require_application_runtime_state(docker,spec['application'],spec['service_id'],spec.get('volume_name',''),spec.get('mount_path',''),spec.get('volume_binding',''))
 else: raise ValueError('unsupported application state observation')
-print(sys.argv[2]+json.dumps({'type':'complete',**spec}))
+frame={'type':'complete',**spec}
+if spec.get('include_clock') is True:
+    frame.update(boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),monotonic=time.monotonic())
+print(sys.argv[2]+json.dumps(frame))
 """
 )
 

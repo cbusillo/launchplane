@@ -1005,15 +1005,21 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             raise TestingActivationRefusal(
                 "The fresh application source, credentials or managed inputs changed."
             )
-        mounts = live.get("mounts")
+        self.require_application_mount(record, live)
+        self.verify_provider_options(record, live)
+
+    def require_application_mount(
+        self, record: TestingActivationRecord, live: api.JsonObject
+    ) -> None:
+        specification = record.request.application
+        assert specification is not None
         if specification.state.kind == "volume":
             resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
             assert isinstance(resources, ApplicationTestingResources)
             if not self.mount_matches(record, live, resources):
                 raise TestingActivationRefusal("The independent application mount changed.")
-        elif mounts != []:
+        elif live.get("mounts") != []:
             raise TestingActivationRefusal("The application has an unrequested state mount.")
-        self.verify_provider_options(record, live)
 
     def require_recovery_custody(self, record: TestingActivationRecord) -> None:
         target = self.require_recipient_custody(record, recovery=True)
@@ -1040,9 +1046,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
     def verify_recovery_provider(self, record: TestingActivationRecord) -> None:
         specification = record.request.application
-        if not record.published or specification is None or specification.state.kind != "none":
+        if not record.published or specification is None:
             raise TestingActivationRefusal(
-                "Original finalization requires its stateless recipient."
+                "Original finalization requires its published recipient."
             )
         if not record.state_recipient.get("application_environment_sha256"):
             ApplicationActivationAdapter.require_unchanged(self, record)
@@ -1054,12 +1060,37 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             live.get("sourceType") != "docker"
             or live.get("dockerImage") != record.image_reference
             or live.get("autoDeploy") is not False
-            or live.get("mounts") != []
             or canonical_json_sha256(api.parse_dokploy_env_text(str(live.get("env") or "")))
             != record.state_recipient.get("application_environment_sha256")
         ):
             raise TestingActivationRefusal("The original application configuration changed.")
+        self.require_application_mount(record, live)
         self.verify_provider_options(record, live)
+        if specification.state.kind == "volume":
+            from control_plane.testing_application_runtime import inspect_application_runtime
+
+            readiness = record.application_readiness
+            if readiness is None:
+                raise TestingActivationRefusal("The original volume runtime is unavailable.")
+            resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
+            host, token = source.read_dokploy_config(control_plane_root=self.root)
+            observed = inspect_application_runtime(
+                host=host,
+                token=token,
+                server_id=str(live.get("serverId") or ""),
+                application=record.app_name,
+                runtime_port=specification.runtime_port,
+                network=specification.network_name,
+                image=record.image_reference,
+                identity=readiness.runtime_identity,
+                values=api.parse_dokploy_env_text(str(live.get("env") or "")),
+                volume=resources.volumes["state"],
+                volume_binding=resources.binding_sha256,
+                mount_path=specification.state.container_path,
+                health_path=specification.health_path,
+            )
+            if observed.get("service_id") != readiness.service_id:
+                raise TestingActivationRefusal("The original volume service changed.")
 
     def verify_registry(self, record: TestingActivationRecord, live: api.JsonObject) -> None:
         expected = record.state_recipient.get("application_registry_sha256")
