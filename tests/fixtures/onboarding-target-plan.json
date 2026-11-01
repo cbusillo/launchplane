@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mode": "dry-run",
+  "operation": "create-application",
+  "product": "launchplane",
+  "context": "fixture-testing",
+  "instance": "testing",
+  "target_name": "fixture-testing",
+  "project_name": "fixture",
+  "environment_name": "testing",
+  "server_id": "",
+  "healthcheck_path": "/healthz"
+}

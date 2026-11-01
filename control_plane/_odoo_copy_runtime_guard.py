@@ -2,10 +2,24 @@
 
 import inspect
 
-from control_plane.copy_readback_diagnostics import CopyReadbackRefused, readback_predicate_library
+from control_plane.copy_readback_diagnostics import (
+    CopyReadbackRefused,
+    copy_failure_diagnostics_library,
+    readback_predicate_library,
+)
 from control_plane._odoo_snapshot_files import CLEAN_SNAPSHOT_STATE_DIRECTORY
 from control_plane.preview_filestore import PREVIEW_FILESTORE_LIBRARY
 from control_plane.preview_gateway import PREVIEW_GATEWAY_INSPECTION_LIBRARY
+
+
+def preview_has_source_connection(environment: dict[str, str]) -> bool:
+    return any(
+        value
+        and key != "DATA_WORKFLOW_SSH_DIR"
+        and key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+        for key, value in environment.items()
+    )
+
 
 COPY_WEB_GATE_READ_PROGRAM = r"""
 import hashlib,os,sys
@@ -24,6 +38,7 @@ else:
 VOLUME_BACKING_INSPECTION_LIBRARY = (
     PREVIEW_FILESTORE_LIBRARY
     + readback_predicate_library()
+    + copy_failure_diagnostics_library()
     + inspect.getsource(CopyReadbackRefused)
     + r"""
 import subprocess
@@ -100,6 +115,7 @@ def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=No
 
 COPY_RUNTIME_INSPECTION_LIBRARY = (
     VOLUME_BACKING_INSPECTION_LIBRARY
+    + inspect.getsource(preview_has_source_connection)
     + PREVIEW_GATEWAY_INSPECTION_LIBRARY
     + "\nCOPY_WEB_GATE_READ_PROGRAM="
     + repr(COPY_WEB_GATE_READ_PROGRAM)
@@ -182,7 +198,7 @@ def inspect_copy_runtime(spec, *, expected_instance):
                 raise CopyReadbackRefused(ReadbackPredicate.HOST_ALIASES)
             if any(environment.get(key) for key in ("GITHUB_TOKEN", "GH_TOKEN", "SSH_AUTH_SOCK", "DATA_WORKFLOW_SSH_KEY", "ODOO_KEY", "ODOO_SMTP_PASSWORD")):
                 raise CopyReadbackRefused(ReadbackPredicate.CREDENTIALS)
-            if expected_instance == 'preview' and any(value and key.startswith(('ODOO_UPSTREAM_', 'DATA_WORKFLOW_SSH_')) for key, value in environment.items()):
+            if expected_instance == 'preview' and preview_has_source_connection(environment):
                 raise CopyReadbackRefused(ReadbackPredicate.CREDENTIALS)
         if service != "web":
             networks = container.get("NetworkSettings", {}).get("Networks")
@@ -223,6 +239,9 @@ def inspect_copy_runtime(spec, *, expected_instance):
         for mount in container.get('Mounts', []):
             if mount.get('Source'):
                 source_path = Path(mount['Source']).resolve(strict=False)
+                failure_state = Path.home().resolve(strict=True) / COPY_FAILURE_STATE_DIRECTORY
+                if failure_state.is_relative_to(source_path) or source_path.is_relative_to(failure_state):
+                    raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_STATE)
                 snapshot_state = Path.home().resolve(strict=True) / CLEAN_SNAPSHOT_STATE_DIRECTORY
                 if ((expected_instance == 'preview' or gen.get('clean_snapshot_enabled') or snapshot_state.exists())
                     and (snapshot_state.is_relative_to(source_path) or source_path.is_relative_to(snapshot_state))

@@ -90,6 +90,10 @@ from control_plane.contracts.production_backup_gate import (
     PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
     ProductionBackupGateRequest,
 )
+from control_plane.generic_web_release_settings import (
+    recorded_release_settings,
+    requires_initial_settings_request,
+)
 from control_plane.contracts.release_review import (
     AcceptanceReleaseStart,
     ReleaseReviewDecisionRecord,
@@ -119,6 +123,7 @@ from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
 from control_plane.generic_web_rollback_drill import run_generic_web_rollback_drill
 from control_plane.generic_web_source_qualification import (
     GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
     qualified_generic_web_source_inventory,
 )
 from control_plane.generic_web_promotion_provider_adapter import (
@@ -129,7 +134,12 @@ from control_plane.contracts.idempotency_record import parse_launchplane_mutatio
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionRequest
 from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
-from control_plane.workflows.production_promotion_backup import GENERIC_WEB_PROMOTION_BACKUP_ACTION
+from control_plane.workflows.production_promotion_backup import (
+    GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+    ODOO_PROMOTION_BACKUP_ACTION,
+    ProductionBackupNotAdmissible,
+    require_production_promotion_backup,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_prod_promotion_run import (
     OdooProdPromotionRunStore,
@@ -140,7 +150,6 @@ from control_plane.workflows.production_backup_gate import (
     enqueue_production_backup_gate,
     production_backup_gate_operation_id,
 )
-from control_plane.workflows.production_promotion_backup import ODOO_PROMOTION_BACKUP_ACTION
 from control_plane.workflows.ship import utc_now_timestamp
 
 _LOGGER = logging.getLogger(__name__)
@@ -412,7 +421,10 @@ def rejection_rollback_target(
                 and deployment.artifact_identity.artifact_id == version.artifact_id
                 and (
                     profile.driver_id != "generic-web"
-                    or deployment.source_git_ref == version.source_commit
+                    or (
+                        deployment.source_git_ref == version.source_commit
+                        and recorded_release_settings(deployment) == version.runtime_settings
+                    )
                 )
                 and deployment_record_passed(deployment)
             ):
@@ -883,6 +895,106 @@ def _native_release_continuation(
     return operation if record is not None else None
 
 
+def _release_recipient(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+) -> ProductionRecipientRecord | None:
+    return native_release_recipient(
+        store,
+        profile,
+        decision_record_id=decision.record_id,
+    )
+
+
+def native_release_recipient(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    *,
+    decision_record_id: str = "",
+) -> ProductionRecipientRecord | None:
+    from control_plane.production_recipient import custody
+
+    recipient = custody(store, profile.product, _prod_context(profile))
+    if recipient is None or recipient.phase == "retired":
+        return None
+    if recipient.phase not in {"published", "retiring_old", "old_retired"}:
+        return recipient
+    trace = recipient.execution.get("release_trace", "")
+    if not isinstance(trace, str) or not trace.startswith("client-release-"):
+        return recipient
+    owner_id = trace.removeprefix("client-release-")
+    if not owner_id or owner_id == decision_record_id:
+        return recipient
+    try:
+        owner = store.read_release_review_decision_record(
+            product=profile.product, record_id=owner_id
+        )
+    except FileNotFoundError:
+        return recipient
+    if (
+        owner.product != recipient.product
+        or owner.checklist.candidate.artifact_id != recipient.image_reference
+        or owner.checklist.candidate.source_commit != recipient.request.source_commit
+        or owner.checklist.candidate.runtime_settings is not None
+    ):
+        return recipient
+    steps = client_release_steps(owner.release_start)
+    if (
+        not steps
+        or steps[0].kind != "backup"
+        or any(_step_status(store, profile, owner, step)[0] != "pass" for step in steps)
+    ):
+        return recipient
+    return None
+
+
+def _recipient_release_refusal(
+    recipient: ProductionRecipientRecord, decision: ReleaseReviewDecisionRecord
+) -> str:
+    if (
+        decision.checklist.candidate.artifact_id,
+        decision.checklist.candidate.source_commit,
+    ) != (recipient.image_reference, recipient.request.source_commit):
+        return "The accepted release targets a different version than the retained production recipient."
+    if not recipient.activation:
+        return "The production recipient is waiting for its cutover to be armed."
+    return ""
+
+
+def _release_backup_refusal(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
+    backup_record_id: str,
+) -> str:
+    from control_plane.client_release_backup_continuation import (
+        BackupContinuationRefused,
+        native_backup_continuation_context,
+    )
+
+    try:
+        excluded_promotion_id, _context = native_backup_continuation_context(
+            store, profile, decision, step, backup_record_id
+        )
+    except BackupContinuationRefused:
+        excluded_promotion_id = ""
+    try:
+        require_production_promotion_backup(
+            record_store=store,
+            product=profile.product,
+            context=_prod_context(profile),
+            instance="prod",
+            promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+            backup_record_id=backup_record_id,
+            active_promotion_record_id=excluded_promotion_id,
+        )
+    except ProductionBackupNotAdmissible:
+        return "The release needs a fresh verified backup. An agent can continue its existing backup before deployment."
+    return ""
+
+
 def _release_run_blocked_reason(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
@@ -940,7 +1052,42 @@ def _release_run_blocked_reason(
         return _testing_release_evidence_blocked_reason(error)
     if candidate is not None and candidate != decision.checklist.candidate:
         return _TESTING_RELEASE_CHANGED_MESSAGE
-    next_step = next(view for view in views if view.status != "pass")
+    next_index = next(index for index, view in enumerate(views) if view.status != "pass")
+    next_step = views[next_index]
+    if (
+        profile.driver_id == "generic-web"
+        and next_step.kind == "promote"
+        and next_step.status == "not_started"
+        and (recipient := _release_recipient(store, profile, decision)) is not None
+        and (refusal := _recipient_release_refusal(recipient, decision))
+    ):
+        return refusal
+    if (
+        profile.driver_id == "generic-web"
+        and next_step.kind == "promote"
+        and next_step.status == "not_started"
+    ):
+        try:
+            backup = store.read_verireel_prod_backup_gate_operation_record(
+                views[next_index - 1].operation_id
+            )
+            if refusal := _release_backup_refusal(
+                store,
+                profile,
+                decision,
+                client_release_steps(decision.release_start)[next_index],
+                backup.backup_record_id,
+            ):
+                from control_plane.client_release_backup_continuation import (
+                    require_continuable_backup,
+                )
+
+                require_continuable_backup(
+                    store, backup, store.read_backup_gate_record(backup.backup_record_id)
+                )
+                return refusal
+        except (FileNotFoundError, ValueError, click.ClickException):
+            return "The release's backup authority or evidence is unavailable. An agent must reconcile it before deployment."
     expected_production = (
         decision.checklist.candidate
         if next_step.kind == "rollback"
@@ -1185,6 +1332,10 @@ def _record_standing_acceptance(
     candidate = release_version(store=store, profile=profile, instance="testing")
     if production == candidate:
         return
+    if requires_initial_settings_request(production, candidate):
+        request = profile.release_request
+        if request is None or request.production != production or request.candidate != candidate:
+            return
     latest = store.list_release_review_decision_records(product=profile.product, limit=1)
     if latest:
         previous = latest[0]
@@ -1327,29 +1478,17 @@ def _run_generic_web_promotion(
             resolved_deploy_target=target,
         )
 
-    from control_plane.production_recipient import custody
     from control_plane.production_recipient_cutover import RecipientCutoverAdapter
 
-    recipient = custody(store, profile.product, lane.context)
+    recipient = _release_recipient(store, profile, decision)
     original = store.read_idempotency_record(
         scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
         route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
         idempotency_key=_step_key(decision, step),
     )
-    if (
-        recipient is not None
-        and recipient.activation
-        and recipient.phase != "retired"
-        and (
-            recipient.phase != "published"
-            or decision.checklist.candidate.source_commit == recipient.request.source_commit
-        )
-    ):
-        if (
-            decision.checklist.candidate.artifact_id,
-            decision.checklist.candidate.source_commit,
-        ) != (recipient.image_reference, recipient.request.source_commit):
-            raise ClientReleaseNotReady("recipient_release_candidate_changed")
+    if recipient is not None:
+        if refusal := _recipient_release_refusal(recipient, decision):
+            raise ClientReleaseNotReady(refusal)
 
         def validate_recipient_release() -> None:
             if (
@@ -1480,7 +1619,7 @@ def advance_client_releases(
         except (
             ClientReleaseNotReady,
             BusinessHoursHeld,
-            GenericWebPromotionSourceRefused,
+            GenericWebPromotionAdmissionRefused,
         ) as reason:
             _LOGGER.info(
                 "client release not advanced product=%s reason=%s", profile.product, reason
@@ -1579,6 +1718,13 @@ def _advance(
                 _generic_web_drill_target(store, profile, decision)
             return _queue_backup(store, profile, decision, step, context, authorized_at)
         backup_record_id = str(getattr(previous, "backup_record_id", ""))
+        if profile.driver_id == "generic-web":
+            try:
+                refusal = _release_backup_refusal(store, profile, decision, step, backup_record_id)
+            except (FileNotFoundError, ValueError, click.ClickException):
+                refusal = ""
+            if refusal:
+                raise ClientReleaseNotReady(refusal)
         return _queue_promotion(
             store,
             control_plane_root,
@@ -2008,6 +2154,35 @@ def _generic_web_drill_target(
             ):
                 return retained
         raise ClientReleaseNotReady("rollback_target_missing")
+    if decision.checklist.candidate.runtime_settings is not None:
+        reservation = store.read_idempotency_record(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=_step_key(decision, ClientReleaseStep("promote", 1)),
+        )
+        promotion_id = (
+            reservation.response_payload.get("result", {}).get("promotion_record_id")
+            if reservation
+            else None
+        )
+        if isinstance(promotion_id, str) and promotion_id:
+            promotion = store.read_promotion_record(promotion_id)
+            target_id = promotion.rollback.target_deployment_record_id
+        else:
+            target_id = store.read_environment_inventory(
+                context_name=_prod_context(profile),
+                instance_name="prod",
+            ).deployment_record_id
+        retained = store.read_deployment_record(target_id)
+        if (
+            retained.artifact_identity is None
+            or retained.artifact_identity.artifact_id != decision.checklist.production.artifact_id
+            or retained.source_git_ref != decision.checklist.production.source_commit
+            or recorded_release_settings(retained) != decision.checklist.production.runtime_settings
+            or not deployment_record_passed(retained)
+        ):
+            raise ClientReleaseNotReady("rollback_target_missing")
+        return retained
     for deployment in store.list_deployment_records(
         context_name=_prod_context(profile), instance_name="prod"
     ):

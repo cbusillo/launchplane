@@ -1,10 +1,12 @@
 """Project a saved release decision into a durable tenant repository issue."""
 
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 import re
 from urllib.parse import quote
 
+from control_plane.github_payload import github_app_authored
+from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.service_human_auth import launchplane_public_origin_from_env
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -106,8 +108,32 @@ def release_decision_issue_body(
             + f"Checklist digest: {decision.checklist_digest}"
         ),
         "",
-        "## Client checklist",
     ]
+    if checklist.candidate.runtime_settings is not None:
+        settings = checklist.candidate.runtime_settings
+        production_settings = checklist.production.runtime_settings
+        changed = {
+            key
+            for key, value in settings.values.items()
+            if production_settings is None or production_settings.values.get(key) != value
+        }
+        removed = set(settings.absent_keys) - set(
+            production_settings.absent_keys if production_settings else ()
+        )
+        if changed or removed:
+            lines.extend(
+                [
+                    "## Production settings",
+                    "This release applies its saved non-secret production settings. Rollback restores the previous settings with the previous artifact.",
+                    _literal(
+                        "Set: "
+                        + ", ".join(sorted(changed))
+                        + "\nRemove: "
+                        + ", ".join(sorted(removed))
+                    ),
+                ]
+            )
+    lines.extend(["", "## Client checklist"])
     for item in checklist.items:
         lines.extend(
             [
@@ -127,7 +153,7 @@ def release_decision_issue_body(
     for source in checklist.shared_sources:
         lines.extend(
             [
-                "## Shared website components",
+                "## Shared release inputs",
                 _literal(
                     f"Repository: {source.repository}\n"
                     f"Production: {source.production_commit}\n"
@@ -180,21 +206,40 @@ def publish_release_decision(
     decision: ReleaseReviewDecisionRecord,
 ) -> str:
     """Serialize lookup, creation and acknowledgement of a saved decision."""
-    with store.release_review_publication_lock(record_id=decision.record_id):
-        stored = store.read_release_review_decision_record(
-            product=decision.product, record_id=decision.record_id
-        )
-        if stored.model_copy(update={"release_issue_url": ""}) != decision.model_copy(
-            update={"release_issue_url": ""}
+    stored = store.read_release_review_decision_record(
+        product=decision.product, record_id=decision.record_id
+    )
+    if stored.model_copy(update={"release_issue_url": ""}) != decision.model_copy(
+        update={"release_issue_url": ""}
+    ):
+        raise ValueError("The saved release decision has changed.")
+    if profile.product != stored.product or profile.repository != stored.checklist.repository:
+        raise ValueError("The release record must belong to the product repository.")
+    if stored.release_issue_url:
+        return stored.release_issue_url
+    previous: ReleaseReviewDecisionRecord | None = None
+    for item in store.list_release_review_decision_records(product=profile.product):
+        if item.record_id == stored.record_id or item.checklist_digest != stored.checklist_digest:
+            continue
+        previous_key = (datetime.fromisoformat(item.decided_at), item.record_id)
+        if previous_key >= (datetime.fromisoformat(stored.decided_at), stored.record_id):
+            continue
+        if previous is None or previous_key > (
+            datetime.fromisoformat(previous.decided_at),
+            previous.record_id,
         ):
-            raise ValueError("The saved release decision has changed.")
-        if profile.product != stored.product or profile.repository != stored.checklist.repository:
-            raise ValueError("The release record must belong to the product repository.")
-        if stored.release_issue_url:
-            return stored.release_issue_url
+            previous = item
+    with store.release_review_publication_lock(
+        record_id=f"candidate:{profile.product}:{stored.checklist_digest}"
+    ):
         issue_url = _publish_release_decision_issue(
-            control_plane_root=control_plane_root, profile=profile, decision=stored
+            control_plane_root=control_plane_root,
+            profile=profile,
+            decision=stored,
+            hotfix_review=previous is not None and previous.decision == "temporary_hotfix",
+            previous=previous,
         )
+    with store.release_review_publication_lock(record_id=stored.record_id):
         published = store.record_release_review_decision_publication(
             record_id=stored.record_id, release_issue_url=issue_url
         )
@@ -206,6 +251,8 @@ def _publish_release_decision_issue(
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
+    hotfix_review: bool,
+    previous: ReleaseReviewDecisionRecord | None,
 ) -> str:
     origin = launchplane_public_origin_from_env()
     body = release_decision_issue_body(
@@ -228,47 +275,86 @@ def _publish_release_decision_issue(
         if not token:
             raise ValueError("Release record source-control access is unavailable.")
         path = f"/repos/{quote(profile.repository)}/issues"
-        decision_time = (
-            datetime.fromisoformat(decision.decided_at).astimezone(UTC).replace(microsecond=0)
+        from control_plane.release_invitation import (
+            _receipt_lines,
+            _release_issue_number,
+            release_candidate_issue_marker,
+            release_issue_product_marker,
         )
-        issue_number = None
-        # A retry reuses the saved decision ID. Do not duplicate an issue when the
-        # first POST succeeded but its response or the following DB write was lost.
-        # Match the record marker on the first line, not the whole body, so a
-        # record written before a wording change is still recovered.
-        for page in range(1, 11):
-            issues = github_api_request(
-                path=f"{path}?state=all&sort=created&direction=desc&per_page=100&page={page}",
-                token=token,
+
+        candidate_marker = release_candidate_issue_marker(decision.checklist_digest)
+        product_marker = release_issue_product_marker(profile.product)
+        app_id = resolve_delivery_github_app_id(control_plane_root=control_plane_root)
+        request = profile.release_request
+        if request is not None and request.checklist_digest != decision.checklist_digest:
+            request = None
+        cutoff = datetime.fromisoformat(
+            request.decided_at
+            if request
+            else previous.decided_at
+            if previous
+            else decision.decided_at
+        ).replace(microsecond=0)
+        issue = None
+        if previous is not None and previous.release_issue_url:
+            match = re.fullmatch(
+                rf"https://github\.com/{re.escape(profile.repository)}/issues/([1-9][0-9]*)",
+                previous.release_issue_url,
             )
-            if not isinstance(issues, list):
-                raise ValueError("Release record lookup is unavailable.")
-            reached_older_issue = False
-            for issue in issues:
-                if not isinstance(issue, dict):
-                    raise ValueError("Release record lookup is incomplete.")
-                created_at = issue.get("created_at")
-                if isinstance(created_at, str):
-                    created_time = datetime.fromisoformat(created_at).astimezone(UTC)
-                    reached_older_issue |= created_time < decision_time
-                issue_body = issue.get("body")
-                if (
-                    "pull_request" in issue
-                    or not isinstance(issue_body, str)
-                    or issue_body.splitlines()[:1] != [marker]
-                ):
-                    continue
-                number = issue.get("number")
-                if not isinstance(number, int) or number < 1:
-                    raise ValueError("Release record number is unavailable.")
-                issue_number = number
-                break
-            if issue_number is not None or len(issues) < 100 or reached_older_issue:
-                break
+            if match is None:
+                raise ValueError("Release record destination does not match its repository.")
+            issue = github_api_request(path=f"{path}/{match[1]}", token=token)
+            if (
+                not isinstance(issue, dict)
+                or "pull_request" in issue
+                or not isinstance(issue.get("body"), str)
+            ):
+                raise ValueError("Release record lookup is incomplete.")
         else:
-            raise ValueError("Release record lookup exceeds the supported size.")
-        if issue_number is None:
-            created = github_api_request(
+            for page in range(1, 11):
+                issues = github_api_request(
+                    path=f"{path}?state=all&sort=created&direction=desc&per_page=100&page={page}",
+                    token=token,
+                )
+                if not isinstance(issues, list):
+                    raise ValueError("Release record lookup is unavailable.")
+                reached_older_issue = False
+                for item in issues:
+                    if not isinstance(item, dict):
+                        raise ValueError("Release record lookup is incomplete.")
+                    created_at = item.get("created_at")
+                    if isinstance(created_at, str):
+                        reached_older_issue |= datetime.fromisoformat(created_at) < cutoff
+                    if "pull_request" in item or not isinstance(item.get("body"), str):
+                        continue
+                    lines = _receipt_lines(item)
+                    if lines[:1] == [marker]:
+                        issue = item
+                        break
+                    if (
+                        lines[:1] == [candidate_marker]
+                        and product_marker in lines
+                        and github_app_authored(
+                            item,
+                            app_id,
+                            lookup_app=lambda slug: github_api_request(
+                                path=f"/apps/{quote(slug)}", token=token
+                            ),
+                        )
+                    ):
+                        issue = item
+                        break
+                if issue is not None or len(issues) < 100 or reached_older_issue:
+                    break
+            else:
+                raise ValueError("Release record lookup exceeds the supported size.")
+        closes_review = not decision.release_start and (
+            decision.decision == "changes_requested"
+            or (hotfix_review and decision.decision == "accepted")
+        )
+        if issue is None:
+            issue_body = f"{candidate_marker}\n{product_marker}\n\n{body}"
+            issue = github_api_request(
                 path=path,
                 token=token,
                 method="POST",
@@ -279,11 +365,71 @@ def _publish_release_decision_issue(
                         if decision.decision == "temporary_hotfix"
                         else decision.decision.replace("_", " ")
                     ),
-                    "body": body,
+                    "body": issue_body,
                 },
             )
-            number = created.get("number") if isinstance(created, dict) else None
-            if not isinstance(number, int) or number < 1:
+            if not isinstance(issue, dict):
                 raise ValueError("Release record creation was not confirmed.")
-            issue_number = number
-        return f"https://github.com/{profile.repository}/issues/{issue_number}"
+            issue = {"body": issue_body, "state": "open", **issue}
+        if not isinstance(issue, dict):
+            raise ValueError("Release record lookup is incomplete.")
+        number = _release_issue_number(issue)
+        if marker not in _receipt_lines(issue):
+            comments = []
+            for page in range(1, 11):
+                result = github_api_request(
+                    path=f"{path}/{number}/comments?per_page=100&page={page}", token=token
+                )
+                if not isinstance(result, list) or any(
+                    not isinstance(comment, dict) for comment in result
+                ):
+                    raise ValueError("Release decision lookup is incomplete.")
+                comments.extend(result)
+                if (
+                    any(
+                        marker in _receipt_lines(comment)
+                        and github_app_authored(
+                            comment,
+                            app_id,
+                            lookup_app=lambda slug: github_api_request(
+                                path=f"/apps/{quote(slug)}", token=token
+                            ),
+                        )
+                        for comment in result
+                    )
+                    or len(result) < 100
+                ):
+                    break
+            else:
+                raise ValueError("Release decision lookup exceeds the supported size.")
+            if not any(
+                marker in _receipt_lines(comment)
+                and github_app_authored(
+                    comment,
+                    app_id,
+                    lookup_app=lambda slug: github_api_request(
+                        path=f"/apps/{quote(slug)}", token=token
+                    ),
+                )
+                for comment in comments
+            ):
+                published = github_api_request(
+                    path=f"{path}/{number}/comments",
+                    token=token,
+                    method="POST",
+                    body={"body": body},
+                )
+                if not isinstance(published, dict) or not isinstance(published.get("id"), int):
+                    raise ValueError("Release decision publication was not confirmed.")
+        state = "closed" if closes_review else "open" if decision.release_start else ""
+        if state and issue.get("state") != state:
+            result = github_api_request(
+                path=f"{path}/{number}", token=token, method="PATCH", body={"state": state}
+            )
+            if (
+                not isinstance(result, dict)
+                or result.get("number") != number
+                or result.get("state") != state
+            ):
+                raise ValueError("Release decision state was not confirmed.")
+        return f"https://github.com/{profile.repository}/issues/{number}"

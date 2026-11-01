@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-import hashlib
-import json
 import re
 from typing import Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 from control_plane.contracts.record_fields import SHA256_PATTERN
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 EVERY_CODE_FEEDBACK_RESUME_REQUEST_ACTION: Final[Literal["every_code_feedback_resume.request"]] = (
@@ -85,9 +84,7 @@ def _digest(value: str, field_name: str) -> str:
 
 
 def _canonical_digest(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def validate_every_code_feedback_revision_time(

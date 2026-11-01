@@ -27,6 +27,16 @@ from control_plane.contracts.product_profile_record import (
     product_profile_record_sha256,
     product_lane_monitoring_probe_effective,
 )
+from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.production_recipient import ProductionRecipientRecord
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionAdmissionRefused,
+    GenericWebPromotionSourceRefused,
+)
+from control_plane.workflows.production_promotion_backup import (
+    promotion_is_temporary_admission_refusal,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     PRODUCTION_REQUEST_REFUSED,
@@ -45,6 +55,11 @@ from control_plane.lane_runtime_verification import (
     read_lane_runtime_verification,
 )
 from control_plane.source_control_change import read_branch_revision
+from control_plane.split_ingress import (
+    read_split_ingress_binding,
+    split_ingress_monitoring_lane,
+    split_ingress_advisory_check,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.delivery_evidence import (
     DeliveryEvidenceIndex,
@@ -67,6 +82,8 @@ _ROUTE = "service:production-delivery-monitor"
 _LOGGER = logging.getLogger(__name__)
 _NONTERMINAL_CODES = frozenset(
     {
+        GenericWebPromotionAdmissionRefused.failure_code,
+        GenericWebPromotionSourceRefused.failure_code,
         "mutation_in_progress",
         "lane_busy",
         "promotion_already_active",
@@ -120,10 +137,13 @@ def _resolve_guard_refusal(
     health_after: datetime,
     summary: str,
 ) -> str:
+    binding = read_split_ingress_binding(store, profile, lane)
+    lane = split_ingress_monitoring_lane(profile, lane, binding)
     checks = tuple(
         check
         for check in lane.health_monitoring.checks
         if check.enabled
+        and not split_ingress_advisory_check(profile, lane, binding, check)
         and product_lane_monitoring_probe_effective(
             monitoring_intent=lane.health_monitoring.monitoring_intent,
             check_kind=check.kind,
@@ -733,6 +753,8 @@ def _work_events(
             or store.database_dialect_name != "postgresql"
         ):
             index.reconcile_source(work, record.model_dump(mode="json"))
+        if isinstance(record, PromotionRecord) and promotion_is_temporary_admission_refusal(record):
+            return []
         if record.failure is not None or any(
             status == "fail"
             for status in (
@@ -891,6 +913,7 @@ def _recover_delivery_failures(
     now: str,
     index: DeliveryEvidenceIndex,
 ) -> None:
+    recipient_evidence_failed = False
     for incident in store.list_public_ingress_incident_records(
         product=profile.product,
         context_name=lane.context,
@@ -946,6 +969,17 @@ def _recover_delivery_failures(
             and (recovery := _later_passing_rollback(store, lane, failed_at, now, index))
         ):
             recovery_summary = f"The failed production rollback recovered through {recovery}."
+        else:
+            try:
+                recovery = _later_completed_recipient_release(
+                    store, profile, lane, key, failures, failed_at, now
+                )
+            except (ValueError, KeyError, TypeError, AttributeError, FileNotFoundError):
+                recipient_evidence_failed = True
+                _LOGGER.exception("Could not verify recipient delivery for %s", profile.product)
+            else:
+                if recovery:
+                    recovery_summary = f"The retained failed recipient recovered through accepted release {recovery}."
         if recovery_summary:
             try:
                 _observe(
@@ -986,6 +1020,262 @@ def _recover_delivery_failures(
                 if previous.targets and urlsplit(previous.targets[0].url).query
                 else None,
             )
+    if recipient_evidence_failed:
+        raise ValueError("Current recipient delivery evidence is unavailable.")
+
+
+def _later_completed_recipient_release(
+    store: Store,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    key: str,
+    failures: tuple[DeliveryFailureObservation, ...],
+    failed_at: str,
+    now: str,
+) -> str:
+    if (
+        not isinstance(store, PostgresRecordStore)
+        or profile.driver_id != "generic-web"
+        or not failures
+    ):
+        return ""
+    from control_plane.client_release import (
+        CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+        _covering_decision,
+        read_client_release_run,
+    )
+    from control_plane.production_recipient import custody
+    from control_plane.production_recipient_publication import require_owned_publication_rows
+
+    decisions = store.list_release_review_decision_records(product=profile.product, limit=1)
+    if not decisions:
+        return ""
+    decision = decisions[0]
+    if (
+        _covering_decision(
+            store, profile.product, decision_record_id=decision.record_id, recovering=True
+        )
+        is None
+    ):
+        return ""
+    record = custody(store, profile.product, lane.context)
+    if (
+        decision.decision != "accepted"
+        or decision.release_start not in {"promote", "promote_with_rollback_drill"}
+        or not decision.release_issue_url
+        or decision.checklist.repository != profile.repository
+        or decision.checklist.owner_github_id != profile.owner.github_id
+        or decision.actor_github_id != profile.owner.github_id
+        or record is None
+        or record.phase not in {"published", "retiring_old", "old_retired"}
+        or record.image_reference != decision.checklist.candidate.artifact_id
+        or record.request.source_commit != decision.checklist.candidate.source_commit
+        or record.execution.get("release_trace") != "client-release-" + decision.record_id
+    ):
+        return ""
+    run = read_client_release_run(store=store, profile=profile, decision=decision)
+    if run is None or run.state != "passed":
+        return ""
+    final = store.read_idempotency_record_by_id(run.steps[-1].operation_id)
+    if (
+        final is None
+        or final.state != "completed"
+        or final.scope != CLIENT_RELEASE_IDEMPOTENCY_SCOPE
+        or final.response_payload.get("result", {}).get("promotion_status") != "pass"
+        or final.response_payload.get("result", {}).get("recipient_plan_sha256")
+        != record.plan_sha256
+        or not final.updated_at
+        or not _time(failed_at) < _time(final.updated_at) <= _time(now)
+    ):
+        return ""
+    settled_traces = (
+        _settled_recipient_release_traces(store, profile, record, decision, final.updated_at)
+        if key
+        in {_candidate_key(record.image_reference), _candidate_key(record.request.source_commit)}
+        else set()
+    )
+    for prior in record.prior_attempts:
+        try:
+            previous = ProductionRecipientRecord.model_validate(prior)
+            if (
+                previous.phase not in {"rolled_back", "preflight_refused"}
+                or (previous.product, previous.context) != (record.product, record.context)
+                or key
+                not in {
+                    _candidate_key(previous.image_reference),
+                    _candidate_key(previous.request.source_commit),
+                }
+            ):
+                continue
+            trace = previous.execution.get("release_trace", "")
+            if not trace.startswith("client-release-"):
+                continue
+            previous_decision = store.read_release_review_decision_record(
+                product=profile.product, record_id=trace.removeprefix("client-release-")
+            )
+            settled_traces.update(
+                _settled_recipient_release_traces(
+                    store, profile, previous, previous_decision, final.updated_at
+                )
+            )
+        except (ValueError, KeyError, TypeError, AttributeError, FileNotFoundError):
+            continue
+    if any(
+        _delivery_failure_reference(failure).trace_id not in settled_traces for failure in failures
+    ):
+        return ""
+    try:
+        require_owned_publication_rows(store, record, inventory_timestamp_required=False)
+        verification = read_lane_runtime_verification(
+            record_store=store,
+            profile=profile,
+            lane=lane,
+            summary=LaunchplaneLaneSummary(
+                context=lane.context,
+                instance="prod",
+                inventory=store.read_environment_inventory(
+                    context_name=lane.context, instance_name="prod"
+                ),
+            ),
+            now=_time(now),
+        )
+    except (ValueError, FileNotFoundError):
+        return ""
+    if (
+        verification.provenance.freshness_status != "verified"
+        or verification.observation is None
+        or _time(verification.observation.observed_at) <= _time(final.updated_at)
+    ):
+        return ""
+    return decision.record_id
+
+
+def _settled_recipient_release_traces(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    record: ProductionRecipientRecord,
+    decision: ReleaseReviewDecisionRecord,
+    finished_before: str,
+) -> set[str]:
+    from control_plane.client_release import (
+        CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+        _covering_decision,
+        client_release_steps,
+        read_client_release_step_views,
+    )
+    from control_plane.client_release_backup_continuation import (
+        require_precapture_failure,
+        released_recipient_attempt_context,
+    )
+    from control_plane.production_recipient_cutover import (
+        cutover_reconciliation_key,
+        recipient_promotion_record_id,
+    )
+    from control_plane.provider_operations import build_provider_operation_key
+
+    trace = "client-release-" + decision.record_id
+    if (
+        decision.decision != "accepted"
+        or _covering_decision(
+            store, profile.product, decision_record_id=decision.record_id, recovering=True
+        )
+        is None
+        or decision.checklist.repository != profile.repository
+        or decision.checklist.candidate.artifact_id != record.image_reference
+        or decision.checklist.candidate.source_commit != record.request.source_commit
+        or record.execution.get("release_trace") != trace
+    ):
+        return set()
+    traces: set[str] = set()
+    views = read_client_release_step_views(store=store, profile=profile, decision=decision)
+    if not views:
+        return set()
+    steps = client_release_steps(decision.release_start)
+    for index, (step, view) in enumerate(zip(steps, views, strict=True)):
+        if view.status == "not_started":
+            if view.kind != "promote" or not record.execution.get(
+                "reservation:" + view.operation_id
+            ):
+                continue
+            if record.phase != "preflight_refused" or any(
+                later.status != "not_started"
+                or record.execution.get("reservation:" + later.operation_id)
+                for later in views[index + 1 :]
+            ):
+                return set()
+            backup = store.read_verireel_prod_backup_gate_operation_record(
+                views[index - 1].operation_id
+            )
+            promotion_id, context = released_recipient_attempt_context(
+                store,
+                profile,
+                decision,
+                step,
+                backup.backup_record_id,
+                record,
+            )
+            pending = context.get("promotion")
+            if not pending or PromotionRecord.model_validate(pending).failure is None:
+                return set()
+            traces.update((promotion_id, view.operation_id))
+            continue
+        if view.kind == "backup":
+            if view.status == "pass":
+                continue
+            if view.status != "fail":
+                return set()
+            operation = store.read_verireel_prod_backup_gate_operation_record(view.operation_id)
+            require_precapture_failure(operation)
+            if (
+                operation.binding is None
+                or (operation.product, operation.context, operation.instance)
+                != (record.product, record.context, "prod")
+                or _time(operation.finished_at) > _time(finished_before)
+            ):
+                return set()
+            if view.failure is not None:
+                traces.update((view.failure.record_id, view.failure.trace_id))
+            continue
+        receipt = store.read_idempotency_record_by_id(view.operation_id)
+        if (
+            view.status not in {"pass", "fail"}
+            or receipt is None
+            or receipt.state != "completed"
+            or receipt.scope != CLIENT_RELEASE_IDEMPOTENCY_SCOPE
+            or not receipt.updated_at
+            or _time(receipt.updated_at) > _time(finished_before)
+        ):
+            return set()
+        outcome = receipt.response_payload.get("result", {})
+        if outcome.get("recipient_plan_sha256") != record.plan_sha256:
+            return set()
+        if view.kind == "rollback":
+            if view.status != "pass" or outcome.get("rollback_status") != "pass":
+                return set()
+        else:
+            if receipt.reconciliation_key != cutover_reconciliation_key(record.plan_sha256):
+                return set()
+            if view.status == "fail" and (
+                outcome.get("rollback_status") == "fail"
+                or not (
+                    outcome.get("writer_effect") == "none"
+                    or outcome.get("rollback_status") == "pass"
+                )
+            ):
+                return set()
+            provider_key = build_provider_operation_key(
+                scope=receipt.scope,
+                route_path=receipt.route_path,
+                idempotency_key=receipt.idempotency_key,
+                request_fingerprint=receipt.request_fingerprint,
+                reconciliation_key=receipt.reconciliation_key,
+            )
+            traces.add(recipient_promotion_record_id(provider_key))
+        traces.update((receipt.record_id, receipt.response_trace_id))
+        if view.failure is not None:
+            traces.update((view.failure.record_id, view.failure.trace_id))
+    traces.discard("")
+    return traces | {trace} if traces else set()
 
 
 def _is_rollback_deployment(record: DeploymentRecord) -> bool:

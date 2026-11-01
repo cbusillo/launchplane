@@ -54,6 +54,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     product_profile_record_sha256,
 )
+from control_plane.contracts.read_coverage import ReadCoverage, read_coverage
 from control_plane.artifact_retention import (
     ArtifactRetentionPlan,
     ArtifactRetentionProductMissingError,
@@ -88,6 +89,7 @@ from control_plane.http_routes.support import (
     ReadRouteDependencies,
 )
 from control_plane.service_auth import (
+    director_agent_identity,
     AuthorizationTarget,
     LaunchplaneIdentity,
     TerminalAgentIdentity,
@@ -260,6 +262,7 @@ class ProductProfileListResponse(BaseModel):
     trace_id: str
     driver_id: str
     profiles: tuple[LaunchplaneProductProfileRecord, ...]
+    coverage: ReadCoverage
 
 
 class ProductProfileResponse(BaseModel):
@@ -503,7 +506,56 @@ def _build_product_incident_scope(
     trace_id: str,
     product: str,
     environment: str,
+    historical_context: str = "",
 ) -> ProductIncidentEnvironmentScope:
+    if historical_context:
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="product_environment.read",
+            product=product,
+            context=historical_context,
+            target=AuthorizationTarget(scope="instance", instances=(environment,)),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read this product's historical lane evidence.",
+            )
+        _require_database_read_store_methods(
+            record_store,
+            dependencies=dependencies,
+            trace_id=trace_id,
+            method_names=("read_product_profile_record",),
+            message="Historical lane evidence requires retained product profile reads.",
+        )
+        try:
+            profile = require_product_profile_read_store(record_store).read_product_profile_record(
+                product
+            )
+        except FileNotFoundError as error:
+            raise dependencies.http_error(
+                status_code=404, trace_id=trace_id, code="not_found", message=str(error)
+            ) from error
+        if (
+            not profile.is_active
+            or historical_context not in profile.historical_contexts
+            or environment not in {"testing", "prod"}
+        ):
+            raise dependencies.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product has no retained historical context for this read.",
+            )
+        return ProductIncidentEnvironmentScope(
+            product=profile.product,
+            display_name=profile.display_name,
+            environment=environment,
+            context=historical_context,
+            instance=environment,
+            recorded_at=profile.updated_at,
+        )
     try:
         preview_scope = preview_fence_incident_scope(
             record_store=record_store, product=product, environment=environment
@@ -968,6 +1020,12 @@ def register_agent_context_read_routes(
             generated_at=utc_now_timestamp(),
             product_store=mapping_store,
             work_request_store=mapping_store,
+            product_reference_allowed=lambda product: common.authorization_allows(
+                identity=identity,
+                action="product_profile.read",
+                product=product,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            ),
         )
         return RepoProductMappingResponse(
             trace_id=trace_id,
@@ -1037,6 +1095,12 @@ def register_agent_context_read_routes(
             work_request_store=context_store,
             preview_readiness_store=context_store,
             tenant_admission_section=tenant_admission_section,
+            product_reference_allowed=lambda referenced_product: common.authorization_allows(
+                identity=identity,
+                action="product_profile.read",
+                product=referenced_product,
+                context=LAUNCHPLANE_SERVICE_CONTEXT,
+            ),
         )
         return AgentContextResponse(trace_id=trace_id, context=context_payload)
 
@@ -1291,6 +1355,7 @@ def register_product_environment_read_routes(
         record_store: Annotated[object, Depends(common.get_record_store)],
         limit: Annotated[int, Query(ge=1, le=500)] = 200,
         cursor: Annotated[str | None, Query(max_length=4096)] = None,
+        historical_context: Annotated[str, Query(max_length=200)] = "",
     ) -> LaneHealthHistoryResponse:
         trace_id = common.next_trace_id()
         scope = _build_product_incident_scope(
@@ -1300,6 +1365,7 @@ def register_product_environment_read_routes(
             trace_id=trace_id,
             product=product,
             environment=environment,
+            historical_context=historical_context,
         )
         _require_database_read_store_methods(
             record_store,
@@ -1337,6 +1403,7 @@ def register_product_environment_read_routes(
         record_store: Annotated[object, Depends(common.get_record_store)],
         status: Annotated[ProductIncidentStatusFilter, Query()] = "all",
         limit: Annotated[int, Query(ge=1, le=50)] = 20,
+        historical_context: Annotated[str, Query(max_length=200)] = "",
     ) -> ProductEnvironmentIncidentsResponse:
         trace_id = common.next_trace_id()
         incident_scope = _build_product_incident_scope(
@@ -1346,6 +1413,7 @@ def register_product_environment_read_routes(
             trace_id=trace_id,
             product=product,
             environment=environment,
+            historical_context=historical_context,
         )
         try:
             incident_store = require_product_incident_read_store(record_store)
@@ -1390,6 +1458,7 @@ def register_product_environment_read_routes(
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         observation_limit: Annotated[int, Query(ge=1, le=200)] = 100,
+        historical_context: Annotated[str, Query(max_length=200)] = "",
     ) -> ProductEnvironmentIncidentResponse:
         trace_id = common.next_trace_id()
         incident_scope = _build_product_incident_scope(
@@ -1399,6 +1468,7 @@ def register_product_environment_read_routes(
             trace_id=trace_id,
             product=product,
             environment=environment,
+            historical_context=historical_context,
         )
         try:
             incident_store = require_product_incident_read_store(record_store)
@@ -1541,11 +1611,12 @@ def register_product_environment_read_routes(
         normalized_driver_id = driver_id.strip()
         try:
             profile_store = require_product_profile_list_store(record_store)
-            product_profile_payload = (
-                control_plane_product_read_service.build_product_profile_list_service_payload(
-                    record_store=profile_store,
-                    driver_id=normalized_driver_id,
+            profiles = tuple(
+                profile
+                for profile in profile_store.list_product_profile_records(
+                    driver_id=normalized_driver_id
                 )
+                if profile.is_active
             )
         except TypeError as error:
             raise common.http_error(
@@ -1554,10 +1625,6 @@ def register_product_environment_read_routes(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        payload_profiles = cast(list[object], product_profile_payload["profiles"])
-        profiles = tuple(
-            LaunchplaneProductProfileRecord.model_validate(profile) for profile in payload_profiles
-        )
         if not service_reader and identity is not None:
             profiles = tuple(
                 profile
@@ -1571,8 +1638,17 @@ def register_product_environment_read_routes(
             )
         return ProductProfileListResponse(
             trace_id=trace_id,
-            driver_id=str(product_profile_payload["driver_id"]),
+            driver_id=normalized_driver_id,
             profiles=profiles,
+            coverage=read_coverage(
+                profile_store,
+                collections=("product_profiles",),
+                population="active_product_profiles",
+                authorization_complete=(
+                    service_reader or (identity is not None and director_agent_identity(identity))
+                ),
+                exclusions=("inactive_products",),
+            ),
         )
 
     error_responses: dict[int | str, dict[str, object]] = {

@@ -5,10 +5,16 @@ from control_plane.dokploy.memory_capacity import observe_memory_headroom
 from control_plane.preview_gateway import PREVIEW_GATEWAY_SOCKET
 
 
+PREVIEW_IDLE_WAKE_TIMEOUT_SECONDS = 300
+PREVIEW_IDLE_START_LOCK_NAME = "idle-start.lock"
+
+
 PREVIEW_IDLE_RUNTIME_PROGRAM = (
     COPY_RUNTIME_INSPECTION_LIBRARY
     + inspect.getsource(observe_memory_headroom)
     + f"\nPREVIEW_GATEWAY_SOCKET = {PREVIEW_GATEWAY_SOCKET!r}\n"
+    + f"WAKE_HEALTH_SECONDS = {PREVIEW_IDLE_WAKE_TIMEOUT_SECONDS!r}\n"
+    + f"PREVIEW_IDLE_START_LOCK_NAME = {PREVIEW_IDLE_START_LOCK_NAME!r}\n"
     + r"""
 import base64
 import fcntl
@@ -74,16 +80,23 @@ def application_state(containers):
         for name, (_, item) in containers.items()}
 
 
-def wait_healthy(identifier):
-    deadline = time.monotonic() + 180
+def wait_healthy(identifier, deadline):
     while time.monotonic() < deadline:
         state = one_inspection(identifier)['State']
-        if not state['Running']:
-            raise RuntimeError('Preview stopped while waking')
-        if state.get('Health', {}).get('Status') == 'healthy':
+        health = state.get('Health', {}).get('Status')
+        if not state['Running'] or state.get('Restarting') or health not in {'starting', 'healthy'}:
+            raise RuntimeError('Preview wake service is stopped or unhealthy')
+        if health == 'healthy':
             return
         time.sleep(2)
     raise RuntimeError('Preview wake health is unavailable')
+
+
+def refuse_capacity(containers, status):
+    for service in ('web', 'script-runner', 'database'):
+        docker('stop', '-t', '30', containers[service][0])
+    return {'gateway': status, 'services': application_state(runtime()[0]),
+        'capacity': False, 'accepted': False}
 
 
 def execute():
@@ -110,24 +123,26 @@ def execute():
             return {'gateway': status, 'services': states, 'accepted': True}
         if status['mode'] != 'asleep' or status['sleep_record_id'] != request['sleep_record_id']:
             raise RuntimeError('Preview wake lacks its original sleep receipt')
-        if status['wake_record_id'] != request['record_id']:
-            if status['wake_record_id']:
-                raise RuntimeError('Preview wake belongs to another original operation')
+        if status['wake_record_id'] not in {'', request['record_id']}:
+            raise RuntimeError('Preview wake belongs to another original operation')
+        if any(not item['running'] for item in states.values()):
             floor = spec['memory_floor']
             if floor is not None and observe_memory_headroom(Path('/proc'), Path('/sys/fs/cgroup')) < floor:
-                return {'gateway': status, 'services': states, 'capacity': False, 'accepted': False}
+                return refuse_capacity(containers, status)
             volume = json.loads(docker('volume', 'inspect', spec['preview_volumes']['data']))[0]
             space = os.statvfs(volume['Mountpoint'])
             if space.f_bavail * space.f_frsize < spec['disk_reserve']:
-                return {'gateway': status, 'services': states, 'capacity': False, 'accepted': False}
+                return refuse_capacity(containers, status)
+        if not status['wake_record_id']:
             status = control(router, {**request, 'action': 'waking'})
             if not status.get('accepted'):
                 raise RuntimeError('Preview wake admission receipt was refused')
+        deadline = time.monotonic() + WAKE_HEALTH_SECONDS
         docker('start', containers['database'][0])
-        wait_healthy(containers['database'][0])
+        wait_healthy(containers['database'][0], deadline)
         docker('start', containers['script-runner'][0], containers['web'][0])
         for service in ('script-runner', 'web'):
-            wait_healthy(containers[service][0])
+            wait_healthy(containers[service][0], deadline)
         program = 'import json,sys,urllib.request;response=json.load(urllib.request.urlopen("http://127.0.0.1:"+sys.argv[1]+sys.argv[2],timeout=10));print(json.dumps(response))'
         port = one_inspection(router)['Config']['Cmd'][1]
         health = json.loads(docker('exec', containers['web'][0], '/venv/bin/python3', '-I', '-S', '-c', program, port, spec['health_path']))
@@ -162,14 +177,19 @@ try:
     target = hashlib.sha256(spec['compose_project'].encode()).hexdigest()
     descriptors = []
     try:
-        names = [target + '.lock'] + (['idle-start.lock'] if spec['action'] == 'awake' else [])
+        names = [target + '.lock'] + ([PREVIEW_IDLE_START_LOCK_NAME] if spec['action'] == 'awake' else [])
         for name in names:
             descriptor = os.open(root / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             descriptors.append(descriptor)
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        inherited_lock_descriptors = tuple(descriptors)
-        result = execute()
-        frame = {'type': 'complete', 'result': result}
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                frame = {'type': 'complete', 'result': {'busy': True}}
+                break
+        else:
+            inherited_lock_descriptors = tuple(descriptors)
+            result = execute()
+            frame = {'type': 'complete', 'result': result}
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)

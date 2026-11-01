@@ -2094,3 +2094,10 @@ h3 {
 .provider-hold-controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
 
 .provider-hold-attention .product-incident-overview-head { grid-template-columns: minmax(0, 1fr); }
+ .attention-details {
+  display: grid;
+  grid-template-columns: minmax(6rem, 1fr) minmax(0, 3fr);
+  gap: 0.4rem 0.8rem;
+  overflow-wrap: anywhere;
+ }
+ .attention-details dd { margin: 0; }

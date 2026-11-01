@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -9,6 +10,7 @@ from control_plane.contracts.product_retirement import canonical_sha256
 from control_plane.disposable_lanes import DisposableLaneStore
 from control_plane.odoo_testing_usage import OdooTestingUsage
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
+from control_plane.http_error_evidence import log_handled_error_cause
 
 
 @dataclass(frozen=True)
@@ -89,15 +91,21 @@ def collect_disposable_lane_facts(
 
 def disposable_collection_coverage() -> dict[str, str]:
     return {
-        "usage": "staff_testing_hold; odoo_testing_recent_logins_and_authenticated_session_files; durable_never_served_generation",
-        "data": "qualified_resettable_odoo_generation; other_custody_unavailable",
-        "production_resources": "qualified_odoo_receiver_inspection; same_kind_production_target_alias",
+        "usage": "staff_testing_hold; odoo_recent_logins_and_authenticated_session_files; serving_preview_generation; durable_never_served_testing_generation",
+        "data": "qualified_resettable_odoo_generation; retained_compose_activation_and_current_physical_inspection; other_custody_unavailable",
+        "production_resources": "qualified_odoo_receiver_inspection; serving_preview_runtime_and_production_comparison; retained_compose_current_mounts_ports_credentials; same_kind_production_target_alias",
         "historical_generations": "not_current_executor_evidence",
     }
 
 
 def collect_testing_resource_facts(
-    store: object, *, product: str, context: str, now: datetime
+    store: object,
+    *,
+    product: str,
+    context: str,
+    now: datetime,
+    root: Path | None = None,
+    trace_id: str = "",
 ) -> dict[str, str] | None:
     """Reinspect a service-created resettable copy without requiring login history."""
     from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
@@ -113,6 +121,18 @@ def collect_testing_resource_facts(
         return None
     try:
         profile = store.read_product_profile_record(product)
+        if profile.driver_id == "generic-web" and root is not None:
+            target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+            if target.target_type != "compose":
+                return None
+            from control_plane.testing_activation import activation_record
+            from control_plane.testing_compose_resources import collect_compose_resource_facts
+
+            if activation_record(store, product, context) is None:
+                return None
+            return collect_compose_resource_facts(
+                store, root=root, product=product, context=context
+            )
         lane = next(
             lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")
         )
@@ -138,8 +158,9 @@ def collect_testing_resource_facts(
         }
     except NativeSourceAuthorizationDenied:
         raise
-    except Exception:
-        # A failed physical/copy inspection never becomes an isolation fact.
+    except Exception as error:
+        if trace_id:
+            log_handled_error_cause(error, trace_id)
         return {}
 
 

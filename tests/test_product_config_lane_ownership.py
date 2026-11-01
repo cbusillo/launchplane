@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -77,6 +77,44 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
             yield cls._apps[product]
         finally:
             cls._record_store.reset(token)
+
+    def test_preview_scope_requires_an_explicit_instance(self) -> None:
+        from control_plane.contracts.product_profile_record import product_target_owner_products
+
+        profile = LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+        profile.preview.context = "preview-only"
+        for historical in ((), (profile.preview.context,)):
+            with self.subTest(historical=historical):
+                profile.historical_contexts = historical
+                self.assertFalse(
+                    product_target_owner_products(
+                        iter((profile,)), context=profile.preview.context, config_scopes=True
+                    )
+                )
+                self.assertEqual(
+                    product_target_owner_products(
+                        (profile,),
+                        context=profile.preview.context,
+                        instance="preview",
+                        config_scopes=True,
+                    ),
+                    frozenset((profile.product,)),
+                )
+        stable_context = profile.lanes[0].context
+        self.assertEqual(
+            product_target_owner_products(
+                iter((profile,)), context=stable_context, config_scopes=True
+            ),
+            frozenset((profile.product,)),
+        )
+        foreign = profile.model_copy(deep=True, update={"product": "foreign-product", "lanes": ()})
+        foreign.preview.context = stable_context
+        self.assertEqual(
+            product_target_owner_products(
+                (profile, foreign), context=stable_context, config_scopes=True
+            ),
+            frozenset((profile.product, foreign.product)),
+        )
 
     async def test_authorized_product_cannot_plan_or_write_another_lane(self) -> None:
         for driver in ("generic-web", "odoo"):
@@ -280,7 +318,7 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 )
             original_write = store.write_product_authority_bundle
 
-            def change_then_write(bundle: ProductAuthorityBundle) -> None:
+            def change_then_write(bundle: ProductAuthorityBundle, **write_options: Any) -> None:
                 if add_foreign_claim_on_commit:
                     foreign_profile = store.read_product_profile_record("other-site")
                     store.write_product_profile_record(
@@ -299,7 +337,7 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                     )
                 else:
                     store.write_product_profile_record(profile.model_copy(update={"lanes": ()}))
-                original_write(bundle)
+                original_write(bundle, **write_options)
 
             with (
                 self._app_for_store(store, product=product) as app,
@@ -330,6 +368,9 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn("private-secret", response.text)
                         self.assertEqual(store.list_runtime_environment_records(), ())
                         self.assertEqual(store.list_secret_records(), ())
+                        self.assertEqual(
+                            store.read_product_profile_record(profile.product), profile
+                        )
                         writer.assert_not_called()
                     elif refused:
                         self.assertEqual(

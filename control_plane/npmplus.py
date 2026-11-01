@@ -71,6 +71,15 @@ class NpmplusProxyHostClaim(BaseModel):
         return _normalize_proxy_host_domains(value)
 
 
+PRIVATE_BEARER_FORWARDING = (
+    'set $launchplane_bearer_authorization "";\n'
+    'if ($http_authorization ~ "^Bearer .+") {\n'
+    "    set $launchplane_bearer_authorization $http_authorization;\n"
+    "}\n"
+    "proxy_set_header Authorization $launchplane_bearer_authorization;\n"
+)
+
+
 class NpmplusAccessList(BaseModel):
     """Non-secret list metadata, without expanding authentication entries."""
 
@@ -158,6 +167,7 @@ class NpmplusProxyHostPayload(BaseModel):
     npmplus_auth_request: NpmplusAuthRequest = "none"
     advanced_config: str = ""
     enabled: bool = True
+    npmplus_location_config: str = Field(default="", exclude_if=lambda value: not value)
     meta: JsonObject = Field(default_factory=dict)
     locations: tuple[NpmplusLocationPayload, ...] = ()
 
@@ -175,6 +185,8 @@ class NpmplusProxyHostPayload(BaseModel):
         return self
 
     def to_api_payload(self) -> JsonObject:
+        if self.npmplus_location_config not in ("", PRIVATE_BEARER_FORWARDING):
+            raise ValueError("Only the code-owned private Bearer forwarder may be written.")
         if self.trust_forwarded_proto or not self.http2_support or self.meta:
             raise ValueError(
                 "The current NPMplus API does not accept legacy protocol or metadata writes."
@@ -358,7 +370,9 @@ class NpmplusClient:
             proxy_hosts.append(_validate_response(NpmplusProxyHostClaim, host_payload))
         return tuple(proxy_hosts)
 
-    def get_proxy_host(self, host_id: int, *, public_only: bool = False) -> NpmplusProxyHost:
+    def get_proxy_host(
+        self, host_id: int, *, public_only: bool = False, private_bearer_auth: bool = False
+    ) -> NpmplusProxyHost:
         payload = self._request(method="GET", path=f"/api/nginx/proxy-hosts/{host_id}")
         if not isinstance(payload, dict):
             raise click.ClickException("NPMplus proxy-host read returned an invalid payload.")
@@ -374,10 +388,11 @@ class NpmplusClient:
                     "npmplus_mtls_verify_client_optional": False,
                     "npmplus_mtls_bypass_auth_request": False,
                     "npmplus_auth_request_upstream": "",
-                    "npmplus_location_config": "",
                     "npmplus_directory": "",
                 }.items()
             )
+            or payload.get("npmplus_location_config")
+            not in (("", PRIVATE_BEARER_FORWARDING) if private_bearer_auth else ("",))
         ):
             raise click.ClickException("NPMplus route is not a loaded public proxy host.")
         host = _validate_response(NpmplusProxyHost, payload)

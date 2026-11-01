@@ -98,6 +98,22 @@ LaunchplaneIdentity: TypeAlias = (
     | LocalOperatorIdentity
     | LocalAdminIdentity
 )
+
+
+def launchplane_identity_actor(identity: LaunchplaneIdentity) -> str:
+    if isinstance(identity, GitHubHumanIdentity):
+        return f"github:{identity.login}"
+    if isinstance(identity, LocalOperatorIdentity):
+        return f"local-operator:{identity.subject}"
+    if isinstance(identity, LocalAdminIdentity):
+        return f"local-admin:{identity.subject}"
+    if isinstance(identity, TerminalAgentIdentity):
+        return f"terminal-agent:{identity.subject}"
+    return (
+        f"github-actions:{identity.repository}:{identity.workflow_ref or identity.job_workflow_ref}"
+    )
+
+
 AuthorizationScope: TypeAlias = Literal["global", "context", "instance", "preview"]
 AuthzPolicySchemaVersion: TypeAlias = Literal[1, 2, 3]
 AgentConsumerSubjectType: TypeAlias = Literal[

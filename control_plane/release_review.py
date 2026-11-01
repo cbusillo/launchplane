@@ -4,6 +4,7 @@ import hashlib
 from contextlib import AbstractContextManager, ExitStack
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, Protocol, cast
@@ -12,6 +13,11 @@ from urllib.parse import quote, unquote
 
 import click
 
+from control_plane.generic_web_release_settings import (
+    desired_release_settings,
+    recorded_release_settings,
+    ReleaseSettingsStore,
+)
 from control_plane.client_test_notes import change_client_review, owner_test_notes
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -43,7 +49,8 @@ from control_plane.release_review_github import (
     recorded_preview_hosts,
     read_release_changes,
 )
-from control_plane.release_review_shared import read_shared_source_changes, repository_key
+from control_plane.release_review_shared import read_shared_source_changes
+from control_plane.artifact_release_inputs import repository_key
 from control_plane.odoo_website_settings import matches_production_origin
 from control_plane.release_compatibility import classify_release_database_compatibility
 from control_plane.workflows.launchplane import (
@@ -51,9 +58,10 @@ from control_plane.workflows.launchplane import (
     resolve_launchplane_github_token,
     launchplane_github_token,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
-class ReleaseReviewStore(GenericWebSourceQualificationStore, Protocol):
+class ReleaseReviewStore(GenericWebSourceQualificationStore, ReleaseSettingsStore, Protocol):
     def list_preview_records(
         self,
         *,
@@ -119,6 +127,7 @@ RELEASE_EVIDENCE_MESSAGES: dict[ReleaseEvidenceReason, str] = {
     "source_control_access_unavailable": "Launchplane cannot read this product's source control.",
     "production_identity_missing": "Production has no recorded deployed version.",
     "candidate_identity_missing": "Testing has no qualified deployed version.",
+    "production_settings_unavailable": "Production release settings could not be verified.",
     "candidate_operation_unresolved": "Testing has an unresolved operation. Fresh release work waits until it finishes.",
     "release_record_missing": "A release record Launchplane needs is missing.",
     "github_read_failed": "Reading this release's changes from GitHub failed. Reload to try again.",
@@ -163,6 +172,8 @@ class PullRequestNotes(NamedTuple):
     title: str
     client_test_notes: str
     client_test_notes_error: str
+    head_sha: str = ""
+    state: str = ""
 
 
 UNREAD_PULL_REQUEST_NOTES = PullRequestNotes(
@@ -216,10 +227,17 @@ def read_pull_request_notes(
         labels=tuple(label["name"] for label in labels),
         review_label=profile.owner.review_label,
     )
+    head = pull.get("head")
+    head_sha = head.get("sha") if isinstance(head, dict) else None
+    state = pull.get("state")
     return PullRequestNotes(
         title=pull["title"],
         client_test_notes=owner_test_notes(body),
         client_test_notes_error=intent.error,
+        head_sha=head_sha.lower()
+        if isinstance(head_sha, str) and re.fullmatch(r"[0-9a-fA-F]{40}", head_sha)
+        else "",
+        state=state if isinstance(state, str) and state in {"open", "closed"} else "",
     )
 
 
@@ -252,9 +270,7 @@ def checklist_digest(checklist: ReleaseChecklist) -> str:
         for item in source["items"]:
             item.pop("already_reviewed")
             item.pop("client_test_notes_error", None)
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def release_website_settings(
@@ -364,7 +380,7 @@ def release_version(
     except FileNotFoundError as error:
         raise ReleaseEvidenceUnavailable("release_record_missing") from error
     return _generic_web_inventory_release_version(
-        inventory=inventory, profile=profile, instance=instance, context=lane.context
+        store=store, inventory=inventory, profile=profile, instance=instance, context=lane.context
     )
 
 
@@ -379,12 +395,13 @@ def recorded_generic_web_testing_version(
     except GenericWebSourceUnqualified as error:
         raise _identity_missing("testing") from error
     return _generic_web_inventory_release_version(
-        inventory=inventory, profile=profile, instance="testing", context=lane.context
+        store=store, inventory=inventory, profile=profile, instance="testing", context=lane.context
     )
 
 
 def _generic_web_inventory_release_version(
     *,
+    store: ReleaseReviewStore,
     inventory: EnvironmentInventory,
     profile: LaunchplaneProductProfileRecord,
     instance: str,
@@ -401,11 +418,23 @@ def _generic_web_inventory_release_version(
     ):
         raise _identity_missing(instance)
     try:
-        return ReleaseVersion(
-            artifact_id=identity.artifact_id, source_commit=identity.source_git_ref
-        )
-    except ValueError as error:
-        raise _identity_missing(instance) from error
+        settings = None
+        if instance == "testing":
+            settings = desired_release_settings(store, profile)
+        else:
+            try:
+                deployment = store.read_deployment_record(inventory.deployment_record_id)
+            except FileNotFoundError:
+                pass
+            else:
+                settings = recorded_release_settings(deployment)
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
+        raise ReleaseEvidenceUnavailable("production_settings_unavailable") from error
+    return ReleaseVersion(
+        artifact_id=identity.artifact_id,
+        source_commit=identity.source_git_ref,
+        runtime_settings=settings,
+    )
 
 
 def build_release_review(
@@ -480,7 +509,7 @@ def build_release_review(
             review_label=profile.owner.review_label,
             policy_store=store,
         )
-        if production.shared_addons_digest != candidate.shared_addons_digest:
+        if profile.driver_id == "odoo":
             shared_sources, additional_changes = read_shared_source_changes(
                 production=store.read_artifact_manifest(production.artifact_id),
                 candidate=store.read_artifact_manifest(candidate.artifact_id),
@@ -701,7 +730,7 @@ def checklist_blockers(
                 f"The release contains {repository}commits without a merged pull request and Client test notes."
             )
     blockers.extend(checklist.additional_changes)
-    return tuple(blockers)
+    return tuple(dict.fromkeys(blockers))
 
 
 def unavailable_release_review(code: ReleaseEvidenceReason) -> ReleaseReviewStatus:

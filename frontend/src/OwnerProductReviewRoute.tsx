@@ -242,6 +242,10 @@ function OwnerReviewState({
   );
 }
 
+function previewIdentity(review: ProductReviewResponse): string {
+  return `${review.repository}:${review.pull_request_number}:${review.head_sha}:${review.preview_url}:${review.preview_generation_id}`;
+}
+
 function ProductReviewCard({
   historical,
   fixtureMode,
@@ -257,6 +261,8 @@ function ProductReviewCard({
 }) {
   const previewUrl = safeExternalUrl(review.preview_url);
   const pullRequestUrl = safeExternalUrl(review.pull_request_url);
+  const previewKey = previewIdentity(review);
+  const [openedPreview, setOpenedPreview] = useState("");
   return (
     <article className="owner-review-card" data-product={review.product}>
       <header>
@@ -271,6 +277,8 @@ function ProductReviewCard({
             href={previewUrl.toString()}
             target="_blank"
             rel="noreferrer"
+            onClick={() => setOpenedPreview(previewKey)}
+            onAuxClick={(event) => { if (event.button === 1) setOpenedPreview(previewKey); }}
           >
             Open the preview <ExternalLink size={15} aria-hidden="true" />
           </a>
@@ -307,9 +315,10 @@ function ProductReviewCard({
       ) : null}
       {!historical && review.can_decide && previewUrl ? (
         <ProductReviewDecisionForm
-          key={`${review.repository}:${review.pull_request_number}:${review.head_sha}:${review.preview_url}:${review.preview_generation_id}`}
+          key={previewKey}
           fixtureMode={fixtureMode}
           review={review}
+          previewOpened={openedPreview === previewKey}
           onDecided={onDecided}
           onRefresh={onRefresh}
         />
@@ -368,7 +377,15 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
             pull_request: review.pull_request_number,
             decision_id: decision.record_id,
           });
-      onDecided({ ...response, pull_request_title: review.pull_request_title, client_test_notes: review.client_test_notes, client_test_notes_error: review.client_test_notes_error });
+      const samePreview = previewIdentity(response) === previewIdentity(review);
+      onDecided({
+        ...response,
+        pull_request_title: review.pull_request_title,
+        client_test_notes: review.client_test_notes,
+        client_test_notes_error: review.client_test_notes_error,
+        preview_is_current: samePreview && review.preview_is_current,
+        cannot_accept_reason: samePreview ? review.cannot_accept_reason : response.cannot_accept_reason,
+      });
       if (!response.latest_decision?.feedback_url) {
         setFailure("Delivery is still pending. Your saved decision has not changed.");
       }
@@ -399,6 +416,8 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
         <p data-carry-reason={decision.carried_from.reason}>
           Carried from version {decision.carried_from.head_sha.slice(0, 7)}: {decision.carried_from.reason === "client_impact_none"
             ? "later commits were marked as having no Client-visible changes."
+            : decision.carried_from.reason === "accepted_base_integration"
+              ? "accepted or engineering-only base changes were integrated, with no new Client-visible change."
             : "the base was updated, and the change itself was identical."}
         </p>
       ) : null}
@@ -427,12 +446,15 @@ function ProductReviewDecisionForm({
   onDecided,
   onRefresh,
   review,
+  previewOpened,
 }: {
   fixtureMode: DevFixtureMode;
   onDecided: (review: ProductReviewResponse) => void;
   onRefresh: () => Promise<void>;
   review: ProductReviewResponse;
+  previewOpened: boolean;
 }) {
+  const [previewConfirmed, setPreviewConfirmed] = useState(false);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
@@ -503,15 +525,28 @@ function ProductReviewDecisionForm({
           }}
         />
       </label>
+      {review.preview_is_current ? (
+        <label className="owner-review-preview-confirmation">
+          <input
+            type="checkbox"
+            checked={previewConfirmed}
+            disabled={busy || stale || !previewOpened}
+            onChange={(event) => setPreviewConfirmed(event.target.checked)}
+          />
+          I looked at this preview and it is right.
+        </label>
+      ) : null}
       <div className="owner-review-action-buttons">
-        <button
-          className="button button-primary"
-          type="button"
-          disabled={busy || stale || Boolean(review.client_test_notes_error)}
-          onClick={() => void record("accepted")}
-        >
-          Accept
-        </button>
+        {review.preview_is_current ? (
+          <button
+            className="button button-primary"
+            type="button"
+            disabled={busy || stale || !previewOpened || !previewConfirmed || Boolean(review.client_test_notes_error)}
+            onClick={() => void record("accepted")}
+          >
+            Accept
+          </button>
+        ) : null}
         <button
           className="button"
           type="button"
@@ -521,10 +556,12 @@ function ProductReviewDecisionForm({
           Request changes
         </button>
       </div>
+      {review.preview_is_current && !previewOpened ? <p className="owner-review-state">Open the preview, check the notes above, then confirm that it is right.</p> : null}
+      {!review.preview_is_current ? <OwnerReviewState>{review.cannot_accept_reason}</OwnerReviewState> : null}
       {review.client_test_notes_error ? <p className="owner-review-alert" role="alert">{review.client_test_notes_error}</p> : null}
       {busy ? <p className="owner-review-state" role="status">Recording…</p> : null}
       {failure ? <p className="owner-review-alert" role="alert">{failure}</p> : null}
-      {stale ? <button className="button" type="button" disabled={busy} onClick={async () => {
+      {stale || !review.preview_is_current ? <button className="button" type="button" disabled={busy} onClick={async () => {
         setBusy(true);
         try { await onRefresh(); } finally { setBusy(false); }
       }}>Refresh review</button> : null}

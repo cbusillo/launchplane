@@ -1,12 +1,11 @@
 """Reviewed withdrawal of stale public declarations on privately monitored products."""
 
-import hashlib
-import json
 import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 
 
@@ -53,9 +52,7 @@ class ProductWebsiteCleanupPlan(BaseModel):
 
 
 def _digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(value)
 
 
 def build_website_cleanup(

@@ -72,6 +72,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsRequest,
     OdooPreviewApplyInputsResult,
     OdooPreviewDokployApplyResult,
+    ODOO_PREVIEW_REQUIRED_ENV_KEYS,
 )
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateResult,
@@ -1037,103 +1038,77 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         apply_driver.assert_not_called()
 
     async def test_odoo_preview_apply_blocks_missing_service_runtime_environment(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = self._profile_store(database_url)
-            store.write_runtime_environment_record(
-                RuntimeEnvironmentRecord(
-                    scope="instance",
-                    context="cm",
-                    instance="testing",
-                    env={"ODOO_DB_USER": "odoo"},
-                    updated_at="2026-05-09T12:30:00Z",
-                    source_label="test",
-                )
+        from control_plane.odoo_preview_resources import preview_resource_environment
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._profile_store(_sqlite_database_url(root / "launchplane.sqlite3"))
+            runtime = RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={"ODOO_DB_USER": "odoo"},
+                updated_at="2026-05-09T12:30:00Z",
+                source_label="test",
             )
+            store.write_runtime_environment_record(runtime)
             identity = self._identity(
                 repository="cbusillo/launchplane",
-                workflow_ref=(
-                    "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml@refs/heads/main"
-                ),
+                workflow_ref="cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml@refs/heads/main",
             )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(identity),
                 authz_policy=self._policy(
                     actions=("odoo_preview_apply.execute",),
-                    repository="cbusillo/launchplane",
-                    workflow_ref=(
-                        "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml"
-                        "@refs/heads/main"
-                    ),
+                    repository=identity.repository,
+                    workflow_ref=identity.workflow_ref,
                 ),
                 record_store_factory=lambda: store,
                 control_plane_root_path=root,
             )
-            plan_id = self._store_issued_preview_plan(
-                store=store,
-                identity=identity,
-                payload=_ready_odoo_preview_apply_payload(),
+            request_payload = _ready_odoo_preview_apply_payload()
+            request = OdooPreviewApplyEnvelope.model_validate(request_payload)
+            missing = sorted(
+                set(ODOO_PREVIEW_REQUIRED_ENV_KEYS)
+                - preview_resource_environment(request.apply.dry_run_plan.compose_name).keys()
+                - runtime.env.keys()
             )
-
-            with (
-                patch(
-                    "control_plane.odoo_preview_apply_http.refresh_odoo_preview_issued_plan",
-                    side_effect=lambda **kwargs: kwargs["request"],
-                ),
-                patch(
-                    "control_plane.odoo_preview_apply_http.execute_odoo_preview_dokploy_apply",
-                    return_value=OdooPreviewDokployApplyResult(
-                        status="pass",
-                        operation="refresh",
-                        product="odoo-tenant-cm",
-                        repository="cbusillo/odoo-tenant-cm",
-                        preview_slug="pr-42",
-                        preview_url="https://pr-42.cm-preview.example.test",
-                        domain_host="pr-42.cm-preview.example.test",
-                        compose_id="compose-cm-pr-42",
-                        compose_name="cm-odoo-preview-pr-42",
-                    ),
-                ) as apply_driver,
-            ):
-                response = await _post_odoo_preview_apply(
-                    app,
-                    {
-                        "schema_version": 1,
-                        "product": "odoo-tenant-cm",
-                        "apply": {
-                            "dry_run_plan": {
-                                "status": "ready",
-                                "operation": "refresh",
-                                "product": "odoo-tenant-cm",
-                                "repository": "cbusillo/odoo-tenant-cm",
-                                "preview_slug": "pr-42",
-                                "preview_url": "https://pr-42.cm-preview.example.test",
-                                "domain_host": "pr-42.cm-preview.example.test",
-                                "compose_ref": "${created.composeId:cm-odoo-preview-pr-42}",
-                                "compose_name": "cm-odoo-preview-pr-42",
-                                "environment_id": "env-cm-preview",
-                                "template_compose_id": "compose-cm-testing",
-                                "summary": "ready isolated Odoo preview apply",
-                            },
-                            "image_reference": _TEST_PREVIEW_IMAGE_REFERENCE,
-                            "wait_for_deploy": False,
-                            "smoke_check": False,
-                        },
-                    },
-                    idempotency_key=plan_id,
-                )
-
-        payload = response.json()
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(payload["error"]["code"], "odoo_preview_runtime_config_incomplete")
-        self.assertEqual(payload["details"]["context"], "cm")
-        self.assertEqual(payload["details"]["instance"], "testing")
-        self.assertEqual(
-            payload["details"]["missing_keys"],
-            ["ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD"],
-        )
-        apply_driver.assert_not_called()
+            for transport in ("none", "driver"):
+                with self.subTest(transport=transport):
+                    profile = store.read_product_profile_record("odoo-tenant-cm")
+                    store.write_product_profile_record(
+                        profile.model_copy(
+                            update={
+                                "preview": profile.preview.model_copy(
+                                    update={"data_transport_mode": transport}
+                                )
+                            }
+                        )
+                    )
+                    plan_id = self._store_issued_preview_plan(
+                        store=store, identity=identity, payload=request_payload
+                    )
+                    with (
+                        patch(
+                            "control_plane.odoo_preview_apply_http.refresh_odoo_preview_issued_plan",
+                            side_effect=lambda **kwargs: kwargs["request"],
+                        ),
+                        patch(
+                            "control_plane.odoo_preview_apply_http.execute_odoo_preview_dokploy_apply"
+                        ) as driver,
+                    ):
+                        response = await _post_odoo_preview_apply(
+                            app, request_payload, idempotency_key=plan_id
+                        )
+                    payload = response.json()
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(
+                        payload["error"]["code"], "odoo_preview_runtime_config_incomplete"
+                    )
+                    self.assertEqual(payload["details"]["context"], runtime.context)
+                    self.assertEqual(payload["details"]["instance"], runtime.instance)
+                    self.assertEqual(payload["details"]["missing_keys"], missing)
+                    driver.assert_not_called()
 
     async def test_odoo_preview_apply_resolves_runtime_environment_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2381,11 +2356,23 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         result=self._planned_preview_result(old_request.model_dump(mode="json")),
                         plan_id="odoo-preview-stale-refresh",
                     )
-                    original_intent = {
-                        "product": "odoo-tenant-cm",
-                        "issued_plan": old_plan.model_dump(mode="json"),
-                        "apply_request": old_request.model_dump(mode="json"),
-                    }
+                    from control_plane.odoo_preview_apply_execution import (
+                        prepare_odoo_preview_apply_operation,
+                    )
+
+                    original_operation = prepare_odoo_preview_apply_operation(
+                        control_plane_root=root,
+                        record_store=store,
+                        profile=store.read_product_profile_record("odoo-tenant-cm"),
+                        apply_request=old_request,
+                        issued_plan=old_plan,
+                        reservation_scope=idempotency_scope(identity),
+                        idempotency_key="odoo-preview-stale-refresh",
+                        request_fingerprint="odoo-preview-stale-refresh-fingerprint",
+                        trace_id="stale-refresh-trace",
+                    )
+                    original_operation.adapter.capture_source_decision()
+                    original_intent = original_operation.adapter.original_intent()
                     plan_id = self._store_issued_preview_plan(
                         store=store,
                         identity=identity,

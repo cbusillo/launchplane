@@ -238,19 +238,92 @@ registration roots reject explicit `..` path components rather than resolving
 them into a different path. Registration and retirement remain separate
 lifecycle contracts and are not covered by this planner validation.
 
-## Existing-runner relabel library
+## Native existing-runner relabel
 
 `control_plane.workflows.runner_lane_relabel` provides the exact-existing-runner
-custom-label engine and typed audit contract. This is library support only:
-there is no relabel workflow, local live CLI, or service execution route. It
-adds no live authority, credential binding or supported dispatch path. Under
-[DIRECTION.md](../DIRECTION.md), a relabel requested by an admin or agent belongs in the
-service under the signed-in admin or agent identity. Native integration must
-record that actor, enforce the reviewed repository/runner policy, serialize
-conflicting updates, and use a purpose-bound runner-administration capability.
-Missing capability is an activation prerequisite, never permission to borrow a
-workflow's credential or identity. Existing register/retire workflow modes stay
-supported until their complete replacement is deployed.
+custom-label engine and typed audit contract. The native service integrates it
+at `/v1/runner-relabel/{policy_id}`. It adds no workflow mode or local live CLI.
+Source delivery alone does not activate a capability, qualify a deployed route,
+or prove the runner change requested in shiny-infra-ops#488. Existing
+register/retire workflow modes and their credentials stay supported until a
+deployed service covers every existing mode.
+
+The service policy records an exact repository numeric ID/name, reviewed host,
+and a nonempty roster of unique runner IDs, names and absolute registration roots,
+plus protected runner names/labels,
+product/context authorization scope, and optional accepted runner-purpose
+capability metadata. The host/root binding is a reviewed service record, never
+an inferred runner-name host hint. No real fleet identities or App selection
+live in source. Missing/disabled policy, unaccepted capability or absent
+purpose-bound managed key returns an inactive prerequisite. It never borrows a
+Delivery, Protection, train, workflow, PAT or environment credential.
+
+Use these service routes in order:
+
+1. `GET .../policy` reads current policy. `POST .../policy` with `mode: dry-run`
+   saves an inert candidate under read/plan authority and returns `plan_sha256`.
+   `mode: apply` requires the signed-in immutable-ID administrator, that
+   administrator's own saved candidate digest in `expected_plan_sha256`, and
+   `expected_policy_sha256` matching the prior revision (empty only for creation).
+   Applying authority is subject to the Director's access-grant stop boundary.
+2. `POST .../reviews` takes one roster `runner_id`, desired custom labels and a reason, reads the exact
+   runner using an Administration-read token, and stores a review containing
+   the selected runner ID/name/root, original actor, policy revision digest and before/automatic labels.
+   It performs no label mutation. All cookie-backed POSTs consume browser CSRF
+   authority. A review digest is evidence, never an authorization grant.
+3. `POST .../operations` takes `review_id`, `expected_review_sha256`,
+   `mode: apply` and a stable `Idempotency-Key`. It requires the same immutable
+   actor and current authority. Director agents use standing permission under
+   [Q578](https://github.com/cbusillo/launchplane/issues/4119#issuecomment-6300535484):
+   exact reviewed runner and labels, a fresh prior-label check, protected-runner
+   exclusion and stored before-labels for undo. Other agents need exact-scope
+   `runner_relabel.apply` authority. Workflow and
+   read-only identities cannot apply; a scoped agent is never converted to an
+   admin. The operation retains immutable original intent and planned evidence,
+   fences the repository ID/runner ID across actors and keys, rechecks policy
+   and lease immediately before dispatch, attempts at most one PUT, then reads
+   back independently. One review is bound permanently to one operation key. A key conflict needs
+   a fresh review/key; GET receipts and inverse creation verify the exact saved
+   original intent and never borrow another review's receipt.
+4. `GET .../reviews/{review_id}` returns a scope-authorized stored review and
+   original operation receipt without provider calls or reservation changes.
+   `mode: reconcile` on the operations route observes the original operation
+   with read-only provider capability. A different scope-authorized reader may
+   recover it; receipts preserve the original actor and separately name the
+   recovery actor. Historical observation uses the original policy snapshot.
+   A proved pre-dispatch refusal returns a durable 409: create a fresh review
+   and key. An abandoned empty-phase reservation settles only through adoption
+   of its exact original snapshot; a stale worker cannot checkpoint afterward.
+   Desired labels plus exact identity and
+   automatic-label agreement can settle the fence; this proves the observed
+   state, not attribution to a particular writer. Absent or ambiguous state
+   stays unknown and never authorizes another PUT. `mode: recover-evidence`
+   consults only service-retained terminal success or exact-PUT validation
+   rejection evidence and constructs no provider transport. Only a 422 from
+   that PUT records a known provider rejection; a later read failure, server
+   error or timeout keeps the original fence. A rejected PUT returns a durable
+   409, and a new review/key can proceed without replaying it. Both recovery modes retain actor/key/review binding.
+5. An inverse is a fresh review with `inverse_of_review_id`, desired labels
+   equal to the saved original before snapshot, then a new explicit apply/key.
+   It is subject to fresh identity, policy, authorization and target-fence checks.
+
+Capability metadata names an accepted App/installation and exact secret context.
+Its key must already exist as one configured context-only, write-only managed
+secret in the `runner-relabel` integration, binding `private_key`, with no inherited
+scope. Provisioning, moving keys and granting access are separate Director
+decisions. Tokens are short-lived, exact-repository installation tokens with
+Metadata read and Administration read for review/reconcile, Administration write
+only for apply. See GitHub's [runner label API permission requirements](https://docs.github.com/en/rest/actions/self-hosted-runners#list-labels-for-a-self-hosted-runner-for-a-repository).
+Token values and provider exception text never enter native evidence or replies.
+
+Policy revisions, reviews and planned/terminal custody are insert-only typed
+records in dedicated namespaces of the existing idempotency table. They do not
+use legacy runner-audit upserts as authority and add no schema migration across
+the held retirement boundary. Policy CAS and dispatch use the same bounded
+transaction lock; original-operation reservation/lease/fence uses the existing
+durable provider runner. An unknown outcome retains that global target fence.
+Restart, cancellation, missing evidence or a failed legacy audit status never
+means an effect is absent or safe to repeat.
 
 The engine takes an explicit repository/host/root policy, exact runner name/ID,
 reviewed prior custom labels and desired custom labels. It preserves automatic
@@ -269,14 +342,11 @@ write automatically. For an inverse, review the verified current custom labels
 as expected and the saved original custom labels as desired, with fresh identity
 checks. Empty custom-label sets are valid inverses.
 
-`audit_delivery_pending` retains the terminal audit, its original idempotency
-key and observed mutation status. `deliver_terminal_audit` validates that packet
-and sends only evidence through the injected poster; it cannot change labels.
-Validation is structural, not cryptographic provenance or a new provider
-observation. The native caller must bind packets to the original operation and
-actor, and retain uncertain outcomes for reconciliation. An absent result never
-proves that no provider write occurred. Audit acceptance is evidence acceptance,
-not execution authorization.
+`audit_delivery_pending` reports the engine's observed mutation outcome.
+The native service keeps uncertain effects fenced under the original operation;
+use `reconcile` for provider readback after terminal-audit failure.
+`recover-evidence` requires retained terminal success or rejection evidence.
+Audit acceptance is evidence acceptance, not execution authorization.
 
 ## Lifecycle Executors
 

@@ -1,4 +1,4 @@
-import type { DataProvenance, ProductEnvironmentDetail, ProductEnvironmentSummary, ProductIncidentSummary, ProductSiteOverview } from "./generated/openapi.ts";
+import type { DataProvenance, ProductEnvironmentDetail, ProductEnvironmentSummary, ProductSiteOverview } from "./generated/openapi.ts";
 
 function expireProvenance(provenance: DataProvenance, now: number): DataProvenance {
   return ["verified", "recorded"].includes(provenance.freshness_status) && Date.parse(provenance.stale_after) < now
@@ -7,7 +7,7 @@ function expireProvenance(provenance: DataProvenance, now: number): DataProvenan
 
 type Topology = ProductEnvironmentSummary["topology"];
 type Evidence = { trust_state: DataProvenance["freshness_status"]; provenance: DataProvenance };
-type EnvironmentEvidence = Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology">;
+export type EnvironmentEvidence = Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology" | "lane_status">;
 
 function expireEvidence<T extends Evidence>(evidence: T, now: number): T {
   const provenance = expireProvenance(evidence.provenance, now);
@@ -17,7 +17,7 @@ function expireEvidence<T extends Evidence>(evidence: T, now: number): T {
 function publicTopologyEvidence(topology: Topology): Evidence[] {
   const recorded = topology.provider_recorded;
   return [recorded, recorded.ingress, recorded.tls,
-    topology.observed.ingress, ...topology.observed.tls_domains];
+    topology.observed.ingress, ...topology.observed.tls_domains.filter(domain => !domain.advisory)];
 }
 
 function publicTopologyApplicable(topology: Topology): boolean {
@@ -27,11 +27,12 @@ function publicTopologyApplicable(topology: Topology): boolean {
 }
 
 export function environmentEvidenceDeadlines(environment: EnvironmentEvidence): string[] {
-  return [environment.provenance, ...environment.health_monitoring.checks.map(check => check.provenance),
+  const deadlines = [environment.provenance, ...environment.health_monitoring.checks.map(check => check.provenance),
     environment.topology.provider_recorded.placement.provenance,
     environment.topology.observed.placement.provenance,
     ...publicTopologyEvidence(environment.topology).map(evidence => evidence.provenance),
   ].map(provenance => provenance.stale_after);
+  return [...deadlines, ...(environment.lane_status?.transitions.map(transition => transition.after) ?? [])];
 }
 
 function expiredAggregate(state: DataProvenance["freshness_status"], expired: boolean): DataProvenance["freshness_status"] {
@@ -64,7 +65,7 @@ export function expireEnvironmentEvidence<T extends ProductEnvironmentSummary | 
   topology.trust_state = expiredAggregate(topology.trust_state, publicExpired || placementExpired);
   topology.observed.trust_state = expiredAggregate(topology.observed.trust_state,
     placementExpired || publicTopologyApplicable(topology) &&
-    [topology.observed.ingress, ...topology.observed.tls_domains].some(evidence => evidence.trust_state === "stale"));
+    [topology.observed.ingress, ...topology.observed.tls_domains.filter(domain => !domain.advisory)].some(evidence => evidence.trust_state === "stale"));
   return {
     ...environment, provenance,
     trust_state: provenance.freshness_status === "stale" ? "stale" : expiredAggregate(environment.trust_state, topology.trust_state === "stale"),
@@ -85,94 +86,32 @@ export function expireProductEvidence(product: ProductSiteOverview, now = Date.n
 
 export type SignalTone = ProductEnvironmentSummary["trust_state"] | "warning" | "danger";
 
-export const negativeTlsStates: ReadonlySet<string> = new Set([
-  "expired", "hostname_mismatch", "untrusted", "self_signed", "unreachable",
-]);
-export const failedRuntimeIdentityStates: ReadonlySet<string> = new Set(["mismatch", "malformed"]);
+export type LaneStatusEvidence = Partial<Pick<ProductEnvironmentSummary, "lane_status">>;
 
-function healthWarnings(environment: ProductEnvironmentSummary): Topology["warnings"] {
-  // Recorded route ownership and placement describe readiness to change a route.
-  // They do not attest the health of the running application.
-  const routeDiagnostics = new Set([
-    "missing_route_authority", "route_authority_disabled", "stale_route_authority",
-    "domain_divergence", "provider_placement_missing", "placement_divergence",
-    "external_ingress_internals_unsupported", "ingress_ownership_unknown",
-    "ingress_divergence", "tls_ownership_unknown", "tls_ownership_divergence",
-  ]);
-  return environment.topology.warnings.filter(warning => !routeDiagnostics.has(warning.code));
-}
-
-export function publicObservationGap(topology: Topology): string | null {
-  if (!publicTopologyApplicable(topology)) return null;
-  const ingress = topology.observed.ingress;
-  if (!ingress.probe_effective || ingress.status !== "pass" || ingress.trust_state !== "verified")
-    return "Public route observation incomplete";
-  if (ingress.runtime_identity_status !== "match") return "Public runtime identity unverified";
-  const expectedTls = topology.desired.domains.filter(domain => domain.tls_expected);
-  if (!expectedTls.length) return "Public HTTPS domain missing";
-  if (topology.observed.tls_domains.some(observed => ["expiring", "unknown", "unsupported"].includes(observed.status)))
-    return "Public TLS needs review";
-  return expectedTls.every(expected =>
-    topology.observed.tls_domains.some(observed =>
-      observed.domain_name === expected.domain_name && observed.status === "valid" &&
-      observed.trust_state === "verified" && observed.public_name_match &&
-      observed.validated_address_count > 0 && observed.days_remaining !== null &&
-      observed.days_remaining > 0)) ? null : "Public DNS/TLS observation incomplete";
-}
-
-function readable(value: string | null | undefined): string {
-  return (value ?? "").replaceAll("_", " ").trim();
-}
-
-function productionDeliveryWarning(environment: ProductEnvironmentSummary, incident: ProductIncidentSummary): boolean {
-  return environment.environment === "prod" && incident.failure_layer === "provider" &&
-    incident.severity === "warning";
-}
-
-export function operationalWarningReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
-  return operationalSignal(environment, now).warningReasons;
-}
-
-export function operationalAttentionReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
-  return operationalSignal(environment, now).attentionReasons;
-}
-
-function operationalSignal(environment: ProductEnvironmentSummary | null, now: number): {
-  tone: SignalTone; attentionReasons: string[]; warningReasons: string[];
-} {
-  if (!environment) return { tone: "missing", attentionReasons: [], warningReasons: [] };
-  environment = expireEnvironmentEvidence(environment, now);
-  const reasons = new Set<string>();
-  const incidents = environment.health_monitoring.open_incidents;
-  for (const check of environment.health_monitoring.checks.filter(check => check.probe_effective)) {
-    if (check.status === "fail") {
-      reasons.add(check.summary?.trim() || `Health check ${check.name} failed: ${readable(check.failure_code) || "unknown failure"}`);
-    } else if (check.incident_status === "open" && !incidents.some(incident => incident.check_name === check.name)) {
-      reasons.add(`Health check ${check.name} has an open incident`);
-    }
+export function laneSignal(environment: LaneStatusEvidence | null, now = Date.now()) {
+  const status = environment?.lane_status;
+  if (!status) return null;
+  let signal = status.current;
+  for (const transition of status.transitions) {
+    if (Date.parse(transition.after) < now) signal = transition.signal;
   }
-  const identity = environment.topology.observed.placement?.runtime_identity_status ?? "unchecked";
-  if (failedRuntimeIdentityStates.has(identity)) reasons.add(`Runtime identity ${identity}`);
-  healthWarnings(environment).filter(warning => warning.severity === "error")
-    .forEach(warning => reasons.add(warning.detail));
-  environment.topology.observed.tls_domains.filter(domain => negativeTlsStates.has(domain.status))
-    .forEach(domain => reasons.add(`TLS for ${domain.domain_name}: ${readable(domain.status)}`));
-  const runtimeTone = environmentRuntimeTone(environment, now);
-  const deliveryOnly = incidents.length > 0 && reasons.size === 0 && runtimeTone === "verified" &&
-    incidents.every(incident => productionDeliveryWarning(environment, incident));
-  if (!deliveryOnly) {
-    for (const incident of incidents) {
-      const severity = readable(incident.severity) || "Open";
-      reasons.add(`${severity[0].toUpperCase()}${severity.slice(1)} incident open: ${readable(incident.failure_code) || "unknown failure"}`);
-    }
-  }
-  return {
-    tone: reasons.size ? "danger" : deliveryOnly ? "warning" : runtimeTone,
-    attentionReasons: [...reasons],
-    warningReasons: deliveryOnly
-      ? incidents.map(incident => `${readable(incident.failure_code)}; the current production release is healthy`)
-      : [],
-  };
+  return signal;
+}
+
+export function publicObservationGap(environment: ProductEnvironmentSummary): string | null {
+  return laneSignal(environment)?.public_observation_gap ?? null;
+}
+
+export function operationalWarningReasons(environment: LaneStatusEvidence | null, now = Date.now()): string[] {
+  return laneSignal(environment, now)?.warning_reasons ?? [];
+}
+
+export function operationalAttentionReasons(environment: LaneStatusEvidence | null, now = Date.now()): string[] {
+  return laneSignal(environment, now)?.attention_reasons ?? [];
+}
+
+export function environmentReleaseHealthy(environment: LaneStatusEvidence | null, now = Date.now()): boolean {
+  return laneSignal(environment, now)?.release_healthy ?? false;
 }
 
 export const deployHoldNotices: Record<NonNullable<ProductEnvironmentSummary["deploy_hold"]>, string> = {
@@ -184,35 +123,6 @@ export function deployHoldNotice(environment: ProductEnvironmentSummary | null):
   return environment?.deploy_hold ? deployHoldNotices[environment.deploy_hold] : null;
 }
 
-export function environmentOperationalTone(environment: ProductEnvironmentSummary | null, now = Date.now()): SignalTone {
-  return operationalSignal(environment, now).tone;
-}
-
-function environmentRuntimeTone(environment: ProductEnvironmentSummary, now: number): SignalTone {
-  environment = expireEnvironmentEvidence(environment, now);
-  const checks = environment.health_monitoring.checks.filter(check => check.probe_effective);
-  const warnings = healthWarnings(environment);
-  const otherWarnings = environment.warnings.filter(detail =>
-    !environment.topology.warnings.some(warning => warning.detail === detail));
-  if (!checks.length && environment.provenance.freshness_status === "missing") return "missing";
-  if (
-    otherWarnings.length || warnings.some(warning => warning.severity !== "info") ||
-    environment.topology.observed.placement.trust_state !== "verified" ||
-    publicObservationGap(environment.topology) !== null ||
-    publicTopologyApplicable(environment.topology) && (
-      !checks.some(check => check.kind === "public_http") ||
-      environment.topology.observed.ingress.trust_state === "stale" ||
-      environment.topology.observed.tls_domains.some(domain => domain.trust_state === "stale")
-    ) ||
-    environment.topology.observed.placement.runtime_identity_status !== "match" ||
-    checks.some(check => check.status !== "pass" || check.trust_state !== "verified") ||
-    checks.length > 0 && environment.provenance.freshness_status !== "verified" ||
-    Date.parse(environment.provenance.stale_after) < now ||
-    checks.some(check => Date.parse(check.provenance?.stale_after ?? "") < now) ||
-    environment.provenance.freshness_status === "stale"
-  ) return "warning";
-  // Lane provenance is verified only after health and current deployment identity both pass.
-  if (checks.length && environment.provenance.freshness_status === "verified") return "verified";
-  if (environment.provenance.freshness_status === "missing") return "missing";
-  return environment.trust_state === "verified" ? "recorded" : environment.trust_state;
+export function environmentOperationalTone(environment: LaneStatusEvidence | null, now = Date.now()): SignalTone {
+  return laneSignal(environment, now)?.tone ?? "missing";
 }

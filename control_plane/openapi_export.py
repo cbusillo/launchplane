@@ -122,14 +122,6 @@ def canonical_openapi_document() -> dict[str, Any]:
     app = build_deterministic_export_app()
     openapi_payload: dict[str, Any] = app.openapi()
     scrubbed_payload: dict[str, Any] = _scrub_openapi_payload(openapi_payload)
-    info = scrubbed_payload.get("info", {})
-    if not isinstance(info, dict):
-        info = {}
-    scrubbed_payload["info"] = {
-        **info,
-        "title": "Launchplane API",
-        "version": "0.1.0",
-    }
     scrubbed_payload["x-launchplane-ui-read-operations"] = UI_OPENAPI_READ_OPERATIONS
     scrubbed_payload["x-launchplane-ui-write-operations"] = UI_OPENAPI_WRITE_OPERATIONS
     return scrubbed_payload
@@ -148,6 +140,9 @@ def write_canonical_openapi(output_path: Path) -> Path:
 
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
+    "/v1/attention/requests": "read_request_attention",
+    "/v1/product-config/integration-allowances": "read_integration_allowances",
+    "/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile": "read_odoo_secret_reference_plan",
     "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}": "read_promotion_recovery",
     PROVIDER_HOLD_ATTENTION_ROUTE: "read_provider_hold_attention",
     "/v1/product-config/testing-hold": "read_testing_hold",
@@ -216,9 +211,12 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/product-config/integration-allowances/apply": "apply_integration_allowances",
+    "/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile": "reconcile_odoo_secret_references",
     "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/dry-run": "dry_run_promotion_recovery",
     "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/apply": "apply_promotion_recovery",
     "/v1/admin/runtime-settings/removal": "runtime_setting_removal",
+    "/v1/previews/lifecycle-sweep": "apply_preview_lifecycle_sweep",
     "/v1/product-config/testing-hold/apply": "apply_testing_hold",
     "/v1/dokploy-targets/setup": "setup_dokploy_target",
     "/v1/route-bindings/reconcile": "reconcile_route_binding",

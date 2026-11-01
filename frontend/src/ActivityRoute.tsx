@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { LaunchplaneApiError, readProductActivity } from "./api";
+import { isLaunchplaneHttpError, readProductActivity } from "./api";
 import {
   loadDevFixtures,
   type DevFixtureMode,
@@ -108,8 +108,8 @@ export function ProductActivityRoute({
             error instanceof Error
               ? error.message
               : "Launchplane could not load recent product activity.",
-          traceId: error instanceof LaunchplaneApiError ? error.traceId : "",
-          statusCode: error instanceof LaunchplaneApiError ? error.statusCode : 503,
+          traceId: isLaunchplaneHttpError(error) ? error.traceId : "",
+          statusCode: isLaunchplaneHttpError(error) ? error.statusCode : 503,
         }));
       }
     }

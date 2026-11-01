@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -145,6 +146,42 @@ class FastApiProductRepositoryIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, status_code, response.json())
         self.assertEqual(response.json()["error"]["code"], code)
 
+    async def test_modes_reject_invalid_complete_candidates_without_writes(self) -> None:
+        for conflict in ("missing_health_url", "preview_override"):
+            with self.subTest(conflict=conflict):
+                payload = _profile().model_dump(mode="json")
+                if conflict == "preview_override":
+                    payload["preview"]["override_env"] = {"LEGACY_SETTING": "private-value"}
+                else:
+                    payload["lanes"][0].update(
+                        base_url="",
+                        health_url="",
+                        health_monitoring={
+                            "monitoring_intent": "prelaunch",
+                            "checks": [{"name": "public", "kind": "public_http"}],
+                        },
+                    )
+                original = LaunchplaneProductProfileRecord.model_validate(
+                    payload, context={"stored_product_profile": True}
+                )
+                self.store.write_product_profile_record(original)
+                self.store.write_repository_inventory_record(_inventory())
+                with patch.object(self.store, "compare_and_write_product_profile_record") as write:
+                    for mode in ("dry-run", "apply"):
+                        response = await self._post(
+                            _payload(
+                                mode=mode,
+                                reviewed_plan_sha256="a" * 64 if mode == "apply" else "",
+                            ),
+                            idempotency_key="invalid-candidate" if mode == "apply" else "",
+                        )
+                        self._assert_refused(
+                            response, status_code=400, code="invalid_product_profile"
+                        )
+                        self.assertNotIn("private-value", response.text)
+                    write.assert_not_called()
+                self.assertEqual(self.store.read_product_profile_record(_PRODUCT), original)
+
     async def test_dry_run_plans_identity_from_inventory_without_writing(self) -> None:
         original = _profile(repository="CBusillo/SellYourOutboard")
         self.store.write_product_profile_record(original)
@@ -200,6 +237,13 @@ class FastApiProductRepositoryIdentityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_apply_reports_unchanged_when_identity_already_matches(self) -> None:
         original = _profile(repository_id="7001", repository_owner_id="8001")
+        original = original.model_copy(
+            update={
+                "preview": original.preview.model_copy(
+                    update={"override_env": {"LEGACY_SETTING": "private-value"}}
+                )
+            }
+        )
         self.store.write_product_profile_record(original)
         self.store.write_repository_inventory_record(_inventory())
         plan_sha256 = await self._reviewed_plan_sha256()

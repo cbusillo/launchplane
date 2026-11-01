@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import time
+from functools import partial
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 from urllib.parse import quote
 
 import click
+
+if TYPE_CHECKING:
+    from control_plane.workflows.public_ingress_monitor import PrivateHealthEndpointResolution
 from control_plane.generic_web_source_qualification import (
     GenericWebSourceQualificationStore,
     GenericWebSourceUnqualified,
     GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
     qualified_generic_web_source_inventory,
 )
 from control_plane.release_review import require_release_approval
@@ -23,6 +28,7 @@ from control_plane.workflows.production_promotion_backup import (
     production_promotion_backup_guard,
     require_production_promotion_backup,
 )
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_health_url
 from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deploy_reference import (
     is_non_floating_tag_reference,
@@ -70,6 +76,7 @@ from control_plane.workflows.launchplane import (
     launchplane_github_token,
 )
 from control_plane.workflows.runtime_identity_health import (
+    HealthcheckPass,
     RuntimeIdentityHealthcheckError,
     healthcheck_evidence_with_runtime_identity,
     wait_for_healthcheck_with_retry,
@@ -307,14 +314,25 @@ def _execute_generic_web_prod_promotion_unserialized(
         request=request,
         source_lane=source_lane,
     )
+    release_decision = None
     if not request.dry_run:
-        require_release_approval(
+        release_decision = require_release_approval(
             control_plane_root=control_plane_root,
             record_store=record_store,
             product=profile.product,
             artifact_id=request.artifact_id,
             source_commit=request.source_git_ref,
         )
+    from control_plane.generic_web_release_settings import desired_release_settings
+
+    try:
+        release_settings = (
+            release_decision.checklist.candidate.runtime_settings
+            if not request.dry_run and release_decision is not None
+            else desired_release_settings(record_store, profile)
+        )
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
+        raise click.ClickException("Production release settings could not be verified.") from error
     if request.release_tag:
         _preflight_github_release(
             control_plane_root=control_plane_root,
@@ -328,12 +346,16 @@ def _execute_generic_web_prod_promotion_unserialized(
         to_instance_name=destination_lane.instance,
     )
     source_health = _health_evidence_for_lane(
+        record_store=record_store,
+        profile=profile,
         lane=source_lane,
         request=request,
         health_path=profile.health_path,
         status="pending" if request.verify_health else "skipped",
     )
     destination_health = _health_evidence_for_lane(
+        record_store=record_store,
+        profile=profile,
         lane=destination_lane,
         request=request,
         health_path=profile.health_path,
@@ -372,7 +394,32 @@ def _execute_generic_web_prod_promotion_unserialized(
         )
 
     try:
-        source_health = _verify_health_evidence(source_health)
+        source_identity = record_store.read_environment_inventory(
+            context_name=source_lane.context, instance_name=source_lane.instance
+        ).runtime_identity
+        if (
+            any(
+                check.kind == "private_http" and check.enabled
+                for check in source_lane.health_monitoring.checks
+            )
+            and source_identity is not None
+            and (source_identity.artifact_id, source_identity.source_git_ref)
+            != (request.artifact_id, request.source_git_ref)
+        ):
+            raise click.ClickException("Private source health differs from the accepted candidate.")
+        source_health = _verify_lane_health_evidence(
+            source_health,
+            record_store=record_store,
+            profile=profile,
+            lane=source_lane,
+            control_plane_root=control_plane_root,
+            expected_runtime_identity=source_identity,
+            source=True,
+        )
+        if source_health.status == "fail":
+            raise click.ClickException(
+                "Source private health does not match the qualified runtime."
+            )
     except click.ClickException as error:
         failed_record = _build_promotion_record(
             request=request,
@@ -444,7 +491,7 @@ def _execute_generic_web_prod_promotion_unserialized(
         # dispatch. Only an explicitly new record plus this invocation's first
         # checkpoint refusal proves that no forward effect was admitted.
         fresh_deployment = False
-        source_refusal: GenericWebPromotionSourceRefused | None = None
+        admission_refusal: GenericWebPromotionAdmissionRefused | None = None
         if original_deployment_record_id:
             try:
                 record_store.read_deployment_record(original_deployment_record_id)
@@ -452,10 +499,14 @@ def _execute_generic_web_prod_promotion_unserialized(
                 fresh_deployment = True
 
         def admit_source() -> None:
-            nonlocal source_admitted, source_refusal
+            nonlocal source_admitted, admission_refusal
             # Admit this accepted artifact after health/backup waits. Once its
             # production attempt starts, testing may advance to another build.
             if not source_admitted:
+                if desired_release_settings(record_store, profile) != release_settings:
+                    raise click.ClickException(
+                        "Production settings changed after release acceptance."
+                    )
                 try:
                     _resolve_source_inventory_inputs(
                         record_store=record_store,
@@ -464,14 +515,18 @@ def _execute_generic_web_prod_promotion_unserialized(
                         source_lane=source_lane,
                     )
                 except GenericWebPromotionSourceRefused as refusal:
-                    source_refusal = refusal
+                    admission_refusal = refusal
                     raise
                 source_admitted = True
 
         def promotion_checkpoint(phase: str) -> None:
-            nonlocal forward_effect_admitted
-            admit_source()
-            backup_checkpoint.before_provider_effect(phase, provider_effect_checkpoint)
+            nonlocal forward_effect_admitted, admission_refusal
+            try:
+                admit_source()
+                backup_checkpoint.before_provider_effect(phase, provider_effect_checkpoint)
+            except GenericWebPromotionAdmissionRefused as refusal:
+                admission_refusal = refusal
+                raise
             forward_effect_admitted = True
 
         try:
@@ -495,6 +550,7 @@ def _execute_generic_web_prod_promotion_unserialized(
                 deployment_record_id=deployment_record_id,
                 provider_effect_checkpoint=promotion_checkpoint,
                 before_deployment_records=admit_source,
+                release_settings=release_settings,
             )
         except (ValueError, TimeoutError, click.ClickException) as error:
             if destination_lane.generic_web_cutover is None or not deployment_record_id:
@@ -526,8 +582,8 @@ def _execute_generic_web_prod_promotion_unserialized(
         # The ordinary deploy records checkpoint refusals as failed results.
         # Restore their typed admission meaning only for this explicitly fresh,
         # never-admitted invocation; prior or uncertain effects stay conservative.
-        if source_refusal is not None and fresh_deployment and not forward_effect_admitted:
-            raise source_refusal
+        if admission_refusal is not None and fresh_deployment and not forward_effect_admitted:
+            raise admission_refusal
     backup_gate.evidence.update(backup_checkpoint.evidence)
     deployment_record = _read_deployment_record(
         record_store=record_store,
@@ -546,8 +602,12 @@ def _execute_generic_web_prod_promotion_unserialized(
         failure_code = "destination_post_deploy_failed"
     elif deploy_result.deploy_status == "pass":
         try:
-            destination_health = _verify_health_evidence_with_identity(
+            destination_health = _verify_lane_health_evidence(
                 destination_health,
+                record_store=record_store,
+                profile=profile,
+                lane=destination_lane,
+                control_plane_root=control_plane_root,
                 expected_runtime_identity=deployment_record.runtime_identity,
             )
         except click.ClickException as error:
@@ -587,10 +647,13 @@ def _execute_generic_web_prod_promotion_unserialized(
             request=request,
             rollback_target=rollback_target,
             production_changed=deploy_result.deploy_status == "pass"
-            or deploy_result.image_effect_attempted,
+            or deploy_result.image_effect_attempted
+            or release_settings is not None
+            and deploy_result.provider_effect_attempted,
             deploy_provider=deploy_provider,
             provider_operation_title=provider_operation_title,
             deployment_record_id=deploy_result.deployment_record_id,
+            source_deployment_record_id=deploy_result.deployment_record_id,
             provider_effect_checkpoint=provider_effect_checkpoint,
         )
     deployment_record = _write_deployment_health(
@@ -772,6 +835,7 @@ def _roll_back_production(
     deployment_record_id: str,
     provider_effect_checkpoint: Callable[[str], None] | None,
     resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    source_deployment_record_id: str = "",
 ) -> _RollbackOutcome:
     target_id = rollback_target.deployment_record_id
     planned_deploy = rollback_target.planned_deploy
@@ -814,7 +878,7 @@ def _roll_back_production(
             deployment_record_id=f"{deployment_record_id}-rollback",
             recorded_artifact=True,
             rollback=True,
-            rollback_source_deployment_record_id=deployment_record_id,
+            rollback_source_deployment_record_id=source_deployment_record_id,
             rollback_target_deployment_record_id=target_id,
             provider_effect_checkpoint=_rollback_phase_checkpoint(provider_effect_checkpoint),
         )
@@ -850,16 +914,23 @@ def _roll_back_production(
         record_store=record_store,
         deployment_record_id=deploy_result.deployment_record_id,
     )
-    rollback_health = _health_evidence_for_lane(
-        lane=lane,
-        request=request,
-        health_path=profile.health_path,
-        status="pending",
-    )
+    rollback_health = HealthcheckEvidence(status="pending")
     health_error = ""
     try:
-        rollback_health = _verify_health_evidence_with_identity(
+        rollback_health = _health_evidence_for_lane(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            request=request,
+            health_path=profile.health_path,
+            status="pending",
+        )
+        rollback_health = _verify_lane_health_evidence(
             rollback_health,
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            control_plane_root=control_plane_root,
             expected_runtime_identity=rollback_record.runtime_identity,
         )
     except click.ClickException as error:
@@ -1002,6 +1073,8 @@ def _health_url_for_lane(*, lane: ProductLaneProfile, health_path: str) -> str:
 
 def _health_evidence_for_lane(
     *,
+    record_store: GenericWebPromotionStore,
+    profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     request: GenericWebProdPromotionRequest,
     health_path: str,
@@ -1009,11 +1082,20 @@ def _health_evidence_for_lane(
 ) -> HealthcheckEvidence:
     if not request.verify_health:
         return HealthcheckEvidence(status="skipped")
-    health_url = _health_url_for_lane(lane=lane, health_path=health_path)
-    if not health_url:
+    private = _private_lane_health_endpoints(record_store, profile, lane)
+    binding = read_split_ingress_binding(record_store, profile, lane)
+    health_url = (
+        split_ingress_health_url(
+            profile, lane, next(d.domain_name for d in binding.domains if d.role == "primary")
+        )
+        if binding is not None
+        else _health_url_for_lane(lane=lane, health_path=health_path)
+    )
+    urls = tuple(dict.fromkeys(([health_url] if health_url else []) + [e.url for e in private]))
+    if not urls:
         return HealthcheckEvidence(status="skipped")
     return HealthcheckEvidence(
-        urls=(health_url,),
+        urls=urls,
         timeout_seconds=request.health_timeout_seconds,
         status=status,
     )
@@ -1056,6 +1138,7 @@ def _verify_health_evidence_with_identity(
     evidence: HealthcheckEvidence,
     *,
     expected_runtime_identity: RuntimeIdentity | None,
+    wait_once: Callable[..., HealthcheckPass] | None = None,
 ) -> HealthcheckEvidence:
     if evidence.status == "skipped" or not evidence.urls:
         return evidence
@@ -1063,9 +1146,12 @@ def _verify_health_evidence_with_identity(
         return _verify_health_evidence(evidence)
     timeout_seconds = evidence.timeout_seconds or DEFAULT_GENERIC_WEB_HEALTH_TIMEOUT_SECONDS
     healthcheck_errors: list[str] = []
+    identity_check = wait_for_runtime_identity_healthcheck_with_retry
+    if wait_once is not None:
+        identity_check = partial(identity_check, wait_once=wait_once)
     for health_url in evidence.urls:
         try:
-            healthcheck_pass = wait_for_runtime_identity_healthcheck_with_retry(
+            healthcheck_pass = identity_check(
                 url=health_url,
                 timeout_seconds=timeout_seconds,
                 expected_runtime_identity=expected_runtime_identity,
@@ -1104,6 +1190,132 @@ def _verify_health_evidence_with_identity(
         "Healthcheck verification failed for all generic web URLs:\n"
         + "\n".join(healthcheck_errors)
     )
+
+
+def _private_lane_health_endpoints(
+    record_store: GenericWebPromotionStore,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+) -> tuple[PrivateHealthEndpointResolution, ...]:
+    from control_plane.workflows.public_ingress_monitor import _resolved_private_health_url
+
+    checks = tuple(
+        check
+        for check in lane.health_monitoring.checks
+        if check.kind == "private_http" and check.enabled
+    )
+    endpoints = []
+    for check in checks:
+        try:
+            endpoint = _resolved_private_health_url(
+                record_store=record_store,
+                profile=profile,
+                lane=lane,
+                endpoint_key=check.private_endpoint_key,
+            )
+        except (ValueError, OSError) as error:
+            raise click.ClickException(
+                "Private release health endpoint authority is invalid."
+            ) from error
+        if endpoint.failure_code or not endpoint.url:
+            raise click.ClickException("Private release health endpoint authority is unavailable.")
+        endpoints.append(endpoint)
+    return tuple(endpoints)
+
+
+def _verify_lane_health_evidence(
+    evidence: HealthcheckEvidence,
+    *,
+    record_store: GenericWebPromotionStore,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    expected_runtime_identity: RuntimeIdentity | None,
+    control_plane_root: Path | None = None,
+    source: bool = False,
+) -> HealthcheckEvidence:
+    if evidence.status == "skipped":
+        return evidence
+    endpoints = _private_lane_health_endpoints(record_store, profile, lane)
+    if not endpoints:
+        return (
+            _verify_health_evidence(evidence)
+            if source
+            else _verify_health_evidence_with_identity(
+                evidence, expected_runtime_identity=expected_runtime_identity
+            )
+        )
+    private_urls = tuple(e.url for e in endpoints)
+    if expected_runtime_identity is None or not set(private_urls) <= set(evidence.urls):
+        raise click.ClickException("Private release health lacks its exact lane/runtime binding.")
+    verified = evidence
+    public_urls = tuple(url for url in evidence.urls if url not in private_urls)
+    if public_urls:
+        public_evidence = evidence.model_copy(update={"urls": public_urls})
+        verified = (
+            _verify_health_evidence(public_evidence)
+            if source
+            else _verify_health_evidence_with_identity(
+                public_evidence, expected_runtime_identity=expected_runtime_identity
+            )
+        )
+        if verified.status != "pass":
+            return verified.model_copy(update={"urls": evidence.urls})
+    checks = tuple(
+        check
+        for check in lane.health_monitoring.checks
+        if check.kind == "private_http" and check.enabled
+    )
+    for check, endpoint in zip(checks, endpoints, strict=True):
+        verified = _verify_health_evidence_with_identity(
+            evidence.model_copy(update={"urls": (endpoint.url,)}),
+            expected_runtime_identity=expected_runtime_identity,
+            wait_once=partial(
+                _wait_for_private_healthcheck,
+                record_store=record_store,
+                profile=profile,
+                lane=lane,
+                endpoint_key=check.private_endpoint_key,
+                endpoint=endpoint,
+                control_plane_root=control_plane_root,
+            ),
+        )
+        if verified.status != "pass":
+            break
+    return verified.model_copy(update={"urls": evidence.urls})
+
+
+def _wait_for_private_healthcheck(
+    *,
+    record_store: GenericWebPromotionStore,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    endpoint_key: str,
+    endpoint: PrivateHealthEndpointResolution,
+    control_plane_root: Path | None,
+    url: str,
+    timeout_seconds: int,
+) -> HealthcheckPass:
+    from control_plane.workflows.public_ingress_monitor import fetch_scoped_private_health
+
+    try:
+        observed = fetch_scoped_private_health(
+            record_store=record_store,
+            product=profile.product,
+            context=lane.context,
+            instance=lane.instance,
+            endpoint_key=endpoint_key,
+            endpoint_sha256=endpoint.authority_sha256,
+            url=url,
+            timeout_seconds=min(5, timeout_seconds),
+            tls_ca_pem=endpoint.tls_ca_pem,
+            require_runtime_identity=True,
+            root=control_plane_root,
+        )
+    except (OSError, ValueError, RuntimeError) as error:
+        raise click.ClickException("Private release health could not be read.") from error
+    if not 200 <= observed.status_code < 300:
+        raise click.ClickException(f"Private release health returned HTTP {observed.status_code}.")
+    return HealthcheckPass(payload=observed.payload)
 
 
 def _mark_health_failed(evidence: HealthcheckEvidence) -> HealthcheckEvidence:

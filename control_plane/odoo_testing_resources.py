@@ -1,7 +1,5 @@
 """Provision new local Docker volumes without adopting or changing existing data."""
 
-import base64
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -34,23 +32,22 @@ class OdooTestingResources(BaseModel):
     def binding_sha256(self) -> str:
         return canonical_json_sha256(self.model_dump(mode="json"))
 
-    def script(self, mode: Literal["prepare", "readback"], *, compose_project: str = "") -> str:
+    def host_spec(
+        self, mode: Literal["prepare", "readback"], *, compose_project: str = ""
+    ) -> dict[str, object]:
         if mode not in {"prepare", "readback"}:
             raise ValueError("Unsupported replacement resource mode.")
-        spec = {
+        return {
             **self.model_dump(mode="json"),
             "volumes": self.volumes,
             "mode": mode,
             "compose_project": compose_project or self.namespace,
         }
-        encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
-        return (
-            "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
-            + encoded
-            + " <<'LP_TESTING_RESOURCES'\n"
-            + ODOO_TESTING_RESOURCE_PROGRAM
-            + "\nLP_TESTING_RESOURCES\n"
-        )
+
+    def script(self, mode: Literal["prepare", "readback"], *, compose_project: str = "") -> str:
+        from control_plane.host_package import host_schedule
+
+        return host_schedule("resources", self.host_spec(mode, compose_project=compose_project))
 
 
 class GenericWebTestingResources(OdooTestingResources):
@@ -110,14 +107,9 @@ class OdooRehearsalResources(BaseModel):
             "mode": mode,
             "compose_project": self.namespace,
         }
-        encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
-        return (
-            "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
-            + encoded
-            + " <<'LP_TESTING_RESOURCES'\n"
-            + ODOO_TESTING_RESOURCE_PROGRAM
-            + "\nLP_TESTING_RESOURCES\n"
-        )
+        from control_plane.host_package import host_schedule
+
+        return host_schedule("resources", spec)
 
 
 def resource_readback_passes(evidence: dict[str, str], resources: OdooTestingResources) -> bool:

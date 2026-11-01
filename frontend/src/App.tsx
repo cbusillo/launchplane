@@ -20,6 +20,7 @@ import {
 } from "./OwnerProductReviewRoute";
 import {
   LaunchplaneApiError,
+  isLaunchplaneHttpError,
   listProducts,
   logout,
   readAuthSession,
@@ -169,7 +170,7 @@ export function App() {
             error instanceof Error
               ? error.message
               : "Launchplane could not verify this browser session.",
-          traceId: error instanceof LaunchplaneApiError ? error.traceId : "",
+          traceId: isLaunchplaneHttpError(error) ? error.traceId : "",
         });
       }
     }
@@ -232,8 +233,8 @@ export function App() {
             error instanceof Error
               ? error.message
               : "Launchplane could not load the product inventory.",
-          traceId: error instanceof LaunchplaneApiError ? error.traceId : "",
-          statusCode: error instanceof LaunchplaneApiError ? error.statusCode : 503,
+          traceId: isLaunchplaneHttpError(error) ? error.traceId : "",
+          statusCode: isLaunchplaneHttpError(error) ? error.statusCode : 503,
         }));
       }
     }

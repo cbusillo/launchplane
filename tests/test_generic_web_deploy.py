@@ -98,6 +98,36 @@ def _source_of_truth() -> DokploySourceOfTruth:
 
 
 class _GenericWebDeployStore:
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretRecord, ...]:
+        return ()
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        return ()
+
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return ()
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord:
+        raise FileNotFoundError("No target environment")
+
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
         self.deployments: list[DeploymentRecord] = []
@@ -625,6 +655,54 @@ class _LegacyFakeGenericWebDeployProvider(_FakeGenericWebDeployProvider):
 
 
 class GenericWebDeployTests(unittest.TestCase):
+    def test_source_outage_keeps_prior_and_testing_failure_records(self) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+
+        for instance in ("testing", "prod"):
+            with self.subTest(instance=instance):
+                profile = _profile()
+                profile = profile.model_copy(
+                    update={"lanes": (profile.lanes[0].model_copy(update={"instance": instance}),)}
+                )
+                store = _GenericWebDeployStore(profile)
+                provider = _FakeGenericWebDeployProvider()
+                record_id = "retained-outage-attempt"
+
+                def deploy() -> GenericWebDeployResult:
+                    return execute_generic_web_deploy(
+                        control_plane_root=Path("."),
+                        record_store=store,
+                        request=_request(instance),
+                        deploy_provider=provider,
+                        deployment_record_id=record_id,
+                    )
+
+                if instance == "prod":
+                    deploy()
+                    prior = store.read_deployment_record(record_id)
+                    store.write_deployment_record(
+                        prior.model_copy(
+                            update={
+                                "deploy": prior.deploy.model_copy(
+                                    update={"status": "pending", "finished_at": ""}
+                                ),
+                            }
+                        )
+                    )
+                before = tuple(provider.runtime_identities)
+                with patch(
+                    "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
+                    side_effect=LaneMovementRefused("source_order_unavailable"),
+                ):
+                    if instance == "testing":
+                        with self.assertRaises(LaneMovementRefused):
+                            deploy()
+                    else:
+                        result = deploy()
+                        self.assertEqual(result.deploy_status, "fail")
+                self.assertEqual(tuple(provider.runtime_identities), before)
+                self.assertEqual(store.read_deployment_record(record_id).deploy.status, "fail")
+
     def test_failed_candidate_task_evidence_survives_runtime_history_churn(self) -> None:
         from control_plane.dokploy.application_runtime import ApplicationTaskObservation
 

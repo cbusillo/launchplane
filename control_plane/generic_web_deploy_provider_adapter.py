@@ -229,6 +229,7 @@ class GenericWebDeployProviderMutationAdapter:
         self._standing_testing_permission = standing_testing_permission
         self._complete_inert_inventory_refusal = complete_inert_inventory_refusal
         self._standing_effect_started = False
+        self._standing_compose_proof: tuple[str, str] | None = None
         self._pre_effect_inventory_digest: str | None = None
         self._standing_binding_sha256 = ""
         self.execution_check: Callable[[], None] = lambda: None
@@ -1647,10 +1648,96 @@ class GenericWebDeployProviderMutationAdapter:
                 raise DisposableLaneSafetyUnknown(
                     "The prepared testing recipient or inputs changed."
                 )
+
         except (FileNotFoundError, ValueError) as error:
             raise DisposableLaneSafetyUnknown(
                 "Standing testing deployment lacks current lane qualification."
             ) from error
+
+    def _require_compose_effect_preflight(self) -> None:
+        if not self._standing_testing_permission or self._standing_effect_started:
+            return
+        self._require_standing_testing_admission()
+        definition = cast(DisposableLaneStore, self._record_store).read_dokploy_target_record(
+            context_name=self._lane.context, instance_name=self._lane.instance
+        )
+        if definition.target_type != "compose":
+            return
+        from control_plane.testing_compose_resources import (
+            collect_compose_resource_facts,
+            compose_custody_sha256,
+        )
+        from control_plane.storage.postgres import PostgresRecordStore
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        if not isinstance(self._record_store, PostgresRecordStore):
+            raise DisposableLaneSafetyUnknown("Compose qualification requires durable custody.")
+        try:
+            authority = compose_custody_sha256(
+                self._record_store,
+                root=self._control_plane_root,
+                product=self._profile.product,
+                context=self._lane.context,
+            )
+            facts = collect_compose_resource_facts(
+                self._record_store,
+                root=self._control_plane_root,
+                product=self._profile.product,
+                context=self._lane.context,
+            )
+            if not facts or authority != compose_custody_sha256(
+                self._record_store,
+                root=self._control_plane_root,
+                product=self._profile.product,
+                context=self._lane.context,
+            ):
+                raise DisposableLaneSafetyUnknown("Compose authority changed during inspection.")
+            evidence = self._record_store.read_disposable_lane_safety(
+                self._profile.product, self._lane.context, self._lane.instance
+            )
+            if evidence is None or facts["isolation_evidence"] != evidence.isolation_evidence:
+                raise DisposableLaneSafetyUnknown("Physical Compose qualification changed.")
+            self._require_standing_testing_admission()
+            self._standing_compose_proof = (authority, facts["isolation_evidence"])
+        except NativeSourceAuthorizationDenied as error:
+            raise ProviderMutationRejectedError(error) from error
+        except (FileNotFoundError, ValueError) as error:
+            raise DisposableLaneSafetyUnknown(
+                "Compose first-effect qualification is unavailable."
+            ) from error
+
+    def _require_compose_effect_authority(self) -> None:
+        if not self._standing_testing_permission or self._standing_effect_started:
+            return
+        definition = cast(DisposableLaneStore, self._record_store).read_dokploy_target_record(
+            context_name=self._lane.context, instance_name=self._lane.instance
+        )
+        if definition.target_type != "compose":
+            return
+        from control_plane.testing_compose_resources import compose_custody_sha256
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        if (
+            not isinstance(self._record_store, PostgresRecordStore)
+            or self._standing_compose_proof is None
+        ):
+            raise DisposableLaneSafetyUnknown("Compose first-effect proof is unavailable.")
+        authority, physical = self._standing_compose_proof
+        evidence = self._record_store.read_disposable_lane_safety(
+            self._profile.product, self._lane.context, self._lane.instance
+        )
+        if (
+            evidence is None
+            or evidence.isolation_evidence != physical
+            or authority
+            != compose_custody_sha256(
+                self._record_store,
+                root=self._control_plane_root,
+                product=self._profile.product,
+                context=self._lane.context,
+            )
+        ):
+            raise DisposableLaneSafetyUnknown("Compose first-effect authority changed.")
 
     def _proved_no_effect_lifecycle_retry(
         self,
@@ -1713,6 +1800,12 @@ class GenericWebDeployProviderMutationAdapter:
         if self._standing_effect_started:
             return
         self._require_standing_testing_admission()
+        try:
+            self._require_compose_effect_authority()
+        except (FileNotFoundError, ValueError) as error:
+            raise DisposableLaneSafetyUnknown(
+                "Compose first-effect custody is unavailable."
+            ) from error
         if (
             self._pre_effect_inventory_digest is not None
             and self._pre_effect_inventory_digest != self._current_testing_inventory_digest()
@@ -1886,6 +1979,7 @@ class GenericWebDeployProviderMutationAdapter:
     ) -> ProviderMutationOutcome:
         self._standing_effect_started = self._settlement_operation == provider_operation_key
         self._pre_effect_inventory_digest = None
+        self._standing_compose_proof = None
         guard = (
             getattr(self._record_store, "provider_evidence_guard", None)
             if self._standing_testing_permission
@@ -1962,6 +2056,7 @@ class GenericWebDeployProviderMutationAdapter:
             if phase == "provider_dispatch_prepared" or known_dispatch_refusal:
                 lease.assert_current()
             else:
+                self._require_compose_effect_preflight()
                 lease.checkpoint_effect(phase)
                 effect_started = True
                 self._standing_effect_started = True
@@ -2085,13 +2180,7 @@ class GenericWebDeployProviderMutationAdapter:
                 resolved_deploy_target=resolved_target,
                 provider_effect_checkpoint=checkpoint,
                 before_records_commit=lambda: checkpoint("records_commit"),
-                # Publishing a refusal checks ownership without inventing a
-                # provider effect or replacing the last recoverable phase.
-                before_failure_records_commit=(
-                    (lambda: checkpoint("provider_dispatch_prepared"))
-                    if recorder is not None or resolved_target.testing_runtime_digest
-                    else None
-                ),
+                before_failure_records_commit=lambda: checkpoint("provider_dispatch_prepared"),
                 recorded_artifact=self._recorded_artifact,
                 proved_pre_image_retry=proved_pre_image_retry,
                 proved_no_effect_retry=proved_no_effect_retry,
@@ -2120,7 +2209,9 @@ class GenericWebDeployProviderMutationAdapter:
         except click.ClickException as error:
             from control_plane.lane_movement import LaneMovementRefused
 
-            if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":
+            if isinstance(error, LaneMovementRefused) and (
+                error.code == "source_order_unavailable" or not effect_started
+            ):
                 raise ProviderMutationRejectedError(error) from error
             raise ProviderMutationUnknownError(str(error)) from error
         provider_effect_attempted = result.pop("provider_effect_attempted", False) is True

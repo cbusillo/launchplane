@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Event, Thread
 from typing import Callable, Protocol
 
+from control_plane.timestamps import utc_now_timestamp as _utc_now_timestamp
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.production_backup_failures import LEGACY_BACKUP_EXECUTION_RETIRED_CODE
 from control_plane.contracts.verireel_prod_backup_gate import (
@@ -608,10 +609,6 @@ def _lease_summary(
         heartbeat_age_seconds=heartbeat_age_seconds,
         lease_expired=lease_expired,
     )
-
-
-def _utc_now_timestamp() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _timestamp_after(timestamp: str, *, seconds: int) -> str:

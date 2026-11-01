@@ -1,15 +1,14 @@
 """Narrow browser reviews for existing record-only route repair operations."""
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
-import hashlib
-import json
-import re
 from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingReadModel,
@@ -117,9 +116,7 @@ class BrowserDomainRepairPlan:
 
 
 def _digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(value)
 
 
 def plan_browser_domain_repair(
@@ -250,6 +247,9 @@ def binding_repair_review(
     if plan.record is not None:
         semantic_record = plan.record.model_dump(mode="json")
         semantic_record.pop("updated_at", None)
+        external = semantic_record.get("external_ingress")
+        if isinstance(external, dict):
+            external.pop("attested_at", None)
         source = semantic_record.get("source")
         if isinstance(source, dict):
             source.pop("refreshed_at", None)

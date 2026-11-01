@@ -1,3 +1,4 @@
+from control_plane.host_package import host_schedules_match
 from pathlib import Path
 import re
 
@@ -118,7 +119,9 @@ def inspect_preparation_programs(
             observed.status = "observed"
             observed.schedule_id = program_identifier(api.schedule_key(program))
             observed.script_matches = (
-                program.get("script") == expected_script if expected_script is not None else None
+                host_schedules_match(program.get("script"), expected_script)
+                if expected_script is not None
+                else None
             )
             if expected_script is not None and observed.kind in {
                 "retained_capability",

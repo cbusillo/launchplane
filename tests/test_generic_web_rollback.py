@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackBlocker
 from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
@@ -48,6 +49,21 @@ from tests.support.auth import _StubVerifier, _identity
 
 
 class _GenericWebRollbackStore:
+    def list_secret_records(self, **_kwargs: object) -> tuple[()]:
+        return ()
+
+    def list_secret_bindings(self, **_kwargs: object) -> tuple[()]:
+        return ()
+
+    def list_runtime_environment_records(self, **_kwargs: object) -> tuple[()]:
+        return ()
+
+    def read_dokploy_target_record(self, **_kwargs: object) -> DokployTargetRecord:
+        raise FileNotFoundError("No target environment")
+
+    def read_environment_inventory(self, **_kwargs: object) -> EnvironmentInventory:
+        raise FileNotFoundError("No inventory")
+
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
         self.deployments: dict[str, DeploymentRecord] = {}
@@ -1029,68 +1045,6 @@ class FastApiGenericWebRollbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             rollback.call_args.kwargs["post_deploy_executor"],
             execute_odoo_generic_web_post_deploy,
-        )
-
-    async def test_declared_testing_rollback_route_selects_product_qualification(self) -> None:
-        from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
-        from control_plane.workflows.verireel_testing_post_deploy import (
-            execute_verireel_testing_post_deploy,
-        )
-
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            profile = _profile()
-            profile = profile.model_copy(
-                update={
-                    "lanes": tuple(
-                        lane.model_copy(
-                            update={
-                                "generic_web_extensions": GenericWebLaneExtensions(
-                                    verification_extension="verireel-testing"
-                                )
-                            }
-                        )
-                        if lane.instance == "testing"
-                        else lane
-                        for lane in profile.lanes
-                    )
-                }
-            )
-            store.write_product_profile_record(profile)
-            app = self._app(
-                root=root,
-                store=store,
-                policy=_rollback_route_policy("generic_web_prod_rollback.execute"),
-            )
-            result = GenericWebRollbackApplyResult(
-                plan_id="testing-plan",
-                deployment_record_id="testing-rollback",
-                rollback_status="pass",
-                deploy_status="pass",
-                post_deploy_status="pass",
-                product=profile.product,
-                context=profile.lanes[0].context,
-                instance="testing",
-                rollback_deployment_record_id="previous-testing",
-            )
-            with patch(
-                "control_plane.generic_web_rollback_http.execute_generic_web_rollback",
-                return_value=result,
-            ) as rollback:
-                response = await _post_generic_web_rollback(
-                    app,
-                    _rollback_payload(
-                        rollback={
-                            "instance": "testing",
-                            "rollback_deployment_record_id": "previous-testing",
-                        }
-                    ),
-                    idempotency_key="testing-rollback",
-                )
-        self.assertEqual(response.status_code, 202)
-        self.assertIs(
-            rollback.call_args.kwargs["post_deploy_executor"], execute_verireel_testing_post_deploy
         )
 
     async def test_rollback_route_replays_idempotent_response_shape(self) -> None:

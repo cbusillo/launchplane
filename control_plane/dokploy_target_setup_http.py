@@ -7,8 +7,10 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.browser_route_repair import BrowserRouteRepairRequest
+from control_plane.generic_web_onboarding import GenericWebOnboardingIntent
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.public_hosts import retained_hostname_identity
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetPolicies,
     DokployTargetRecord,
@@ -252,6 +254,11 @@ class DokployTargetSetupEnvelope(BaseModel):
     state_volume_path: str = ""
     state_volume_plan_id: str = ""
     expected_plan_sha256: str = ""
+    onboarding: GenericWebOnboardingIntent | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    reviewed_onboarding_plan_sha256: str = Field(default="", exclude_if=lambda value: not value)
+    reviewed_target_request_sha256: str = Field(default="", exclude_if=lambda value: not value)
     browser_review: BrowserRouteRepairRequest | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -416,6 +423,12 @@ class DokployTargetSetupEnvelope(BaseModel):
             raise ValueError("Dokploy compose domain prune requires domains.")
         if self.healthcheck_path and not self.healthcheck_path.startswith("/"):
             raise ValueError("Dokploy target setup healthcheck_path must start with /.")
+        if self.onboarding is not None:
+            from control_plane.onboarding_target import validate_onboarding_target_request
+
+            validate_onboarding_target_request(self)
+        elif self.reviewed_onboarding_plan_sha256 or self.reviewed_target_request_sha256:
+            raise ValueError("Onboarding review digests require the new-product intent.")
         return self
 
 
@@ -702,7 +715,9 @@ def _execute_dokploy_target_setup(
         return mutate_dokploy_payload_for_target_setup(host, token, path, payload)
 
     apply_changes = request.mode == "apply"
-    if set(request.domains).intersection(record_store.retained_disposable_hostnames()):
+    if {retained_hostname_identity(host) for host in request.domains}.intersection(
+        retained_hostname_identity(host) for host in record_store.retained_disposable_hostnames()
+    ):
         raise ValueError("A hostname remains reserved by retained testing custody.")
     if disposable_placement is not None and disposable_checkpoint is None:
         raise ValueError("Resuming fresh placement requires its service-owned checkpoint.")

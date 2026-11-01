@@ -78,7 +78,7 @@ def main() -> int:
             saved = json.loads(evidence_path.read_text())
             if saved["request"] != review_request:
                 raise ValueError("Review belongs to another lane or operation.")
-            plan = TestingReplacementBootstrapPlan.model_validate(saved["plan"])
+            plan = TestingReplacementBootstrapPlan.model_validate(saved["plan"], extra="ignore")
             if plan.applied:
                 raise ValueError("The review is not a dry run.")
             body.update(mode=args.mode, reviewed_plan_sha256=plan.plan_sha256)
@@ -106,7 +106,7 @@ def main() -> int:
         ):
             raise ValueError("The receipt belongs to another lane or operation.")
         if args.mode == "dry-run":
-            plan = TestingReplacementBootstrapPlan.model_validate(result)
+            plan = TestingReplacementBootstrapPlan.model_validate(result, extra="ignore")
             if plan.applied:
                 raise ValueError("The dry run unexpectedly applied a change.")
             assert evidence_path is not None
@@ -115,7 +115,7 @@ def main() -> int:
             ) as output:
                 json.dump({"request": review_request, "plan": plan.model_dump(mode="json")}, output)
         elif args.mode == "apply":
-            applied = TestingReplacementBootstrapPlan.model_validate(result)
+            applied = TestingReplacementBootstrapPlan.model_validate(result, extra="ignore")
             if (
                 applied.model_dump()
                 != plan.model_copy(
@@ -124,7 +124,7 @@ def main() -> int:
             ):
                 raise ValueError("Apply differs from the reviewed plan.")
         else:
-            actual = TestingReplacementBootstrapPlan.model_validate(result)
+            actual = TestingReplacementBootstrapPlan.model_validate(result, extra="ignore")
             if not actual.applied or not actual.reconcile_requested:
                 raise ValueError("Bootstrap generation is not prepared.")
         print(

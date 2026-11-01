@@ -127,12 +127,10 @@ uv run python scripts/declare-external-resource.py dry-run \
 ```
 
 Review the names-only declaration and repeat the same arguments with `apply`,
-`--reviewed-dry-run` and `--idempotency-key <stable-key>`. Initial classification of
-an already nonlocal binding is additive. Clearing its purpose, changing generation
-intent or shadowing a local declaration uses the existing expected-config action
-and a live product's admin boundary. A denial stays stopped; it is not permission
-to switch identity. The client preserves other requirement metadata. Odoo's
-driver-owned local password keys reject external declarations at profile validation.
+`--reviewed-dry-run` and `--idempotency-key <stable-key>`. Declaration authority
+follows the [product profile contract](service-boundary.md#product-profile-endpoints).
+A denial stays stopped; it is not permission to switch identity. The client
+preserves other requirement metadata.
 Applicable external purpose excludes that key from effective testing generation
 across broad and exact declarations, in either declaration order. Production has
 no testing-local generation. External observations use the applicable purpose and

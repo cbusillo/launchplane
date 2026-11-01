@@ -1305,6 +1305,12 @@
   font-weight: 800;
   letter-spacing: 0.03em;
   text-transform: uppercase;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.odoo-secret-parameter-panel code {
+  overflow-wrap: anywhere;
 }
 
 .product-config-select {
@@ -1345,6 +1351,7 @@
 }
 
 .promotion-recovery-panel select,
+.product-config-field select,
 .product-config-field input[type="text"],
 .product-config-field input[type="password"],
 .product-config-field textarea,

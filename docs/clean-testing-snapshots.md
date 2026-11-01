@@ -80,6 +80,20 @@ the staff-used database. Partial captures cannot become preview sources.
 
 ## Preview copy
 
+When the copy runner fails during restore or update, it reports
+`copy_failure_stage` from its closed set of execution stages. The host also
+reports `copy_failure_exit_status` from its failed child command.
+The host forwards these markers without forwarding the child's output or
+traceback. The stage identifies the first failure before rollback or cleanup;
+it does not prove the underlying application cause or authorize another copy.
+`module_update` covers witness reads, restored-database preparation and its
+module/install/hook work; it does not prove that an Odoo subprocess failed.
+Failed preview and fresh-testing copy commands now retain the captured output
+privately and report only `copy_failure_evidence_id`; see
+[private copy failure evidence](host-program-package.md#private-copy-failure-evidence).
+Provider completion and these diagnostics do not settle custody or establish a
+usable preview.
+
 A new preview selects one completed same-product snapshot. An existing preview
 with a qualified completed deployment keeps its data and needs no snapshot
 lookup, including before the product has published its first snapshot. There
@@ -177,35 +191,47 @@ A visitor sees a page that checks again while Launchplane starts the preview.
 A waiting non-GET request is forwarded once after wake, or receives a temporary
 failure if startup exceeds its bounded wait. The router never replays it.
 
-Sleep and wake use the existing preview executor and product locks, durable
-provider reservations and host project lock. An interrupted operation keeps its
-original intent; only a fresh observation under exclusion can resume it. A
-gateway cursor cannot authorize wake on its own: Launchplane verifies the
-completed sleep receipt against the current ready generation and target.
-Manual stops, staff testing holds, changed generations, foreign reservations
-and unavailable custody remain held. Existing previews gain the router on their
-next normal data-preserving refresh.
+Sleep and wake use the existing preview executor and product locks plus the
+host project lock. They are best-effort, idempotent operations without durable
+provider reservations or retained intents. Each pass observes the current ready
+generation, gateway receipt and service state. A partial stop finishes on a later
+pass, after any failure backoff, before admitting a requested wake. This lets
+the next wake measure headroom after the stop completes. An admitted partial
+wake uses the gateway's persisted receipt as its idempotency key while a recent
+visitor is asking. When visits stop for the idle interval, an unfinished wake
+returns to sleep. A router or scheduler restart needs only another observation;
+a lost successful completion response preserves the running services.
+A failed stop/start backs off that preview for five minutes in memory, allowing
+other previews and ordinary refresh/destroy operations to proceed; no retry
+intent or budget is stored. Busy host locks and failed observations retry on the
+next pass. Manual stops, staff testing holds, changed generations, other
+provider reservations and unavailable custody still block idle effects.
+Existing previews gain the router on their next normal data-preserving refresh.
 
-Wakes serialize on the host, retain the configured memory floor and disk reserve,
-and wait for PostgreSQL, runner and web health plus the exact runtime identity
-before forwarding traffic. Insufficient capacity reports that no start occurred
-and leaves no held target reservation. A later attempt checks capacity again.
-Once admitted, the original wake receipt survives a gateway restart and an
-interrupted start resumes without charging its own running containers twice.
-Data-preserving refreshes also credit their own running services after matching
-the current target's identity; cold starts still meet the memory floor.
-Shared operation truth stays in Launchplane's database. Existing preview
-reservation reads expose idle operations too, and the normal original-operation
-observation and qualified refresh/destroy supersession paths recognize them.
-Changing a memory floor or storage budget does not change storage custody.
-Wake authority uses the retained completed sleep intent and its gateway receipt,
-including completion adopted by observation or qualified supersession. Idle
-retries preserve their effect checkpoint and stop after three attempts, leaving
-the original fence available for observation or expired refresh/destroy
-supersession. Exhaustion emits a warning naming the preview and original
-operation. The waiting page remains until recovery; partially started services
-stay under that original operation's custody. If a refresh aborts, a completed original wake can resume only
-its exact gateway receipt after target qualification with no live hold.
+Wakes serialize on the host and check the configured memory headroom threshold
+and disk reserve before starting stopped services. PostgreSQL starts first,
+followed by runner and web. A wake keeps the existing executor and host startup
+locks for one attempt, with one shared five-minute health deadline. Docker
+reporting a stopped, restarting or unhealthy service fails the attempt at once.
+The gateway opens only after all services pass health and the exact runtime
+identity agrees. Insufficient capacity leaves the preview asleep; a later pass
+checks capacity again. The gateway's wake receipt identifies recovery; any
+attempt that still needs to start stopped services checks current memory and
+disk again. If admission refuses a partial wake, its running services stop so
+it releases their memory before the next pass. It does not reserve capacity
+across an interruption. A preview that
+never becomes healthy can be refreshed or destroyed through the ordinary
+preview path. Data-preserving refreshes also credit their own running services
+after matching the current target's identity; cold starts still meet the memory
+floor.
+
+The normal schema migration removes historical idle reservations and their
+retained intents, leaving other operations intact. A database constraint refuses
+late idle-reservation writes from an older overlapping service before effects.
+Gateway receipt IDs keep the existing wire format for routers already deployed;
+they are opaque correlation IDs and no longer refer to database reservations.
+Refresh and destroy use their own ordinary recovery paths and have no idle
+supersession special case.
 Quiet polling does not take the preview executor lock or perform a host-wide
 storage inspection. Full qualification runs under exclusion before effects.
 

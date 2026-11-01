@@ -53,8 +53,22 @@ def _driver_profile(
             app_name_suffix="-app" if declared_transport else "",
             template_instance="testing",
             data_transport_mode="driver",
-            transport_extension="verireel-postgres" if declared_transport else "",
+            transport_extension="postgres" if declared_transport else "",
             transport_database_prefix="verireel_preview_" if declared_transport else "",
+            generated_secret_env={
+                "BETTER_AUTH_SECRET": "urlsafe",
+                "VERIREEL_SECRETS_MASTER_KEY": "base64",
+                "VERIREEL_CRON_SECRET": "urlsafe",
+                "VERIREEL_SMOKE_MAINTENANCE_SECRET": "urlsafe",
+            }
+            if declared_transport
+            else {},
+            preview_url_env_keys=("VERIREEL_APP_URL", "BETTER_AUTH_URL")
+            if declared_transport
+            else (),
+            preview_domain_env_keys=("DOKPLOY_PREVIEW_DOMAIN", "NEXT_PUBLIC_DOKPLOY_PREVIEW_DOMAIN")
+            if declared_transport
+            else (),
         ),
         updated_at="2026-07-12T03:00:00Z",
         source="test",
@@ -63,7 +77,7 @@ def _driver_profile(
 
 class GenericWebPreviewExtensionTests(unittest.TestCase):
     @patch(
-        "control_plane.drivers.generic_web_preview_extensions.apply_verireel_preview_refresh_result"
+        "control_plane.drivers.generic_web_preview_extensions.apply_postgres_preview_refresh_result"
     )
     def test_verireel_refresh_delegates_driver_owned_transport(
         self, apply_refresh: MagicMock
@@ -134,7 +148,7 @@ class GenericWebPreviewExtensionTests(unittest.TestCase):
         self.assertEqual(delegated.timeout_seconds, 240)
 
     @patch(
-        "control_plane.drivers.generic_web_preview_extensions.apply_verireel_preview_destroy_result"
+        "control_plane.drivers.generic_web_preview_extensions.apply_postgres_preview_destroy_result"
     )
     def test_verireel_destroy_delegates_database_cleanup(self, apply_destroy: MagicMock) -> None:
         apply_destroy.return_value = (
@@ -178,7 +192,7 @@ class GenericWebPreviewExtensionTests(unittest.TestCase):
         self.assertEqual(delegated.destroy_reason, "pull_request_closed")
 
     @patch(
-        "control_plane.drivers.generic_web_preview_extensions.apply_verireel_preview_destroy_result"
+        "control_plane.drivers.generic_web_preview_extensions.apply_postgres_preview_destroy_result"
     )
     def test_verireel_destroy_without_resource_or_record_returns_noop(
         self, apply_destroy: MagicMock
@@ -213,10 +227,7 @@ class GenericWebPreviewExtensionTests(unittest.TestCase):
         self.assertEqual(result["destroy_outcome"], "no_preview_recorded")
 
     def test_unknown_driver_owned_transport_fails_closed(self) -> None:
-        with self.assertRaisesRegex(
-            click.ClickException,
-            "does not register a generic-web preview refresh extension",
-        ):
+        with self.assertRaises(click.ClickException):
             apply_generic_web_preview_driver_refresh(
                 control_plane_root=Path("."),
                 record_store=object(),

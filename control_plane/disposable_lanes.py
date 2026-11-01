@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import json
 from typing import Literal, Protocol
 
@@ -18,6 +17,7 @@ from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.lane_usage import evaluate_lane_usage
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 LaneConfigurationRecord = (
     RuntimeEnvironmentRecord
@@ -132,9 +132,7 @@ def disposable_lane_binding_sha256(
             key=lambda item: json.dumps(item, sort_keys=True),
         )
     )
-    return hashlib.sha256(
-        json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(bindings)
 
 
 @dataclass(frozen=True)
@@ -345,15 +343,7 @@ def require_disposable_lane(
             and preview.state not in {"active", "destroyed"}
         ):
             raise DisposableLaneSafetyUnknown("The preview lifecycle does not admit a refresh.")
-        if evidence is not None and (
-            usage.protected
-            or evidence.data == "only_copy"
-            or evidence.production_resources in {"shared", "separation_ready"}
-        ):
-            # Expiry or config drift cannot silently erase a protective report.
-            raise DisposableLaneSafetyUnknown(
-                "The preview has a recorded protected use or resource."
-            )
+        require_unprotected_preview(target, evidence)
         binding = disposable_lane_binding_sha256(
             profile,
             target,
@@ -429,6 +419,20 @@ def require_disposable_lane(
     return evidence.binding_sha256
 
 
+def require_unprotected_preview(
+    target: DokployTargetRecord | None, evidence: DisposableLaneSafety | None
+) -> None:
+    if (target is not None and target.policies.staff_testing_hold is not None) or (
+        evidence is not None
+        and (
+            evidence.usage == "in_use"
+            or evidence.data == "only_copy"
+            or evidence.production_resources in {"shared", "separation_ready"}
+        )
+    ):
+        raise DisposableLaneSafetyUnknown("The preview has a recorded protected use or resource.")
+
+
 def resolve_disposable_preview(
     store: DisposableLaneStore,
     profile: LaunchplaneProductProfileRecord,
@@ -497,14 +501,16 @@ def disposable_lane_configuration(
         policies = store.list_runtime_key_safety_policy_records(status="active", limit=1)
         template = profiles[0].preview.template_instance
         instances.add(template)
-        try:
-            overrides.append(
-                store.read_odoo_instance_override_record(
-                    context_name=context, instance_name=template
+        instances.add("preview")
+        for override_instance in dict.fromkeys((template, instance)):
+            try:
+                overrides.append(
+                    store.read_odoo_instance_override_record(
+                        context_name=context, instance_name=override_instance
+                    )
                 )
-            )
-        except FileNotFoundError:
-            pass
+            except FileNotFoundError:
+                pass
     # Site values and version pointers stay inside the service and only enter
     # the digest. Secret values are never read or returned.
     bindings = tuple(

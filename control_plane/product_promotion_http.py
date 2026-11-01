@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -27,6 +25,7 @@ from control_plane.drivers.generic_web_dispatch import (
     GenericWebProdPromotionEnvelope,
     GenericWebPromotionWorkflowEnvelope,
 )
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.generic_web_promotion_http import (
     GenericWebProdPromotionRecords,
@@ -45,6 +44,7 @@ from control_plane.workflows.generic_web_promotion_workflow import (
     BumpLevel,
     GenericWebPromotionWorkflowRequest,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 PRODUCT_PROMOTION_INVENTORY_STALE_AFTER = timedelta(minutes=30)
@@ -674,6 +674,9 @@ def _promotion_evidence(
     summary: LaunchplaneLaneSummary | None,
     now: datetime,
 ) -> ProductPromotionEvidence:
+    lane = split_ingress_monitoring_lane(
+        profile, lane, read_split_ingress_binding(record_store, profile, lane)
+    )
     inventory = summary.inventory if summary is not None else None
     if inventory is None:
         return ProductPromotionEvidence(environment=lane.instance)
@@ -1025,8 +1028,7 @@ def _promotion_evidence_fingerprint(
 
 
 def _canonical_sha256(payload: dict[str, object]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def _parse_timestamp(value: str) -> datetime:

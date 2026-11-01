@@ -12,7 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import provider_key_adoption, runtime_platform_credentials
 from control_plane import product_secret_copy
+from control_plane.preview_settings import validate_preview_scope
 from control_plane import secrets as control_plane_secrets
+from control_plane.service_agent_identities import AGENT_SELECTOR_KEYS
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.public_hosts import normalize_public_hosts
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentScope
@@ -178,7 +180,10 @@ def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, ob
         context_name=context_name,
         instance_name=instance_name,
     )
-    runtime_env = _normalize_product_config_runtime_env(runtime_input["env"])
+    runtime_env = _normalize_product_config_runtime_env(
+        runtime_input["env"],
+        non_secret_keys=AGENT_SELECTOR_KEYS if context_name == "launchplane" else frozenset(),
+    )
     secrets = _product_config_secret_inputs(
         payload,
         context_name=context_name,
@@ -421,6 +426,38 @@ def plan_product_config_authority_bundle(
         retired_provider_keys=retired_provider_keys,
         source_label=source_label,
     )
+    if instance_name == "preview":
+        secret_keys = set(
+            control_plane_secrets.resolve_effective_secret_bindings_from_store(
+                record_store=record_store,
+                integration="runtime_environment",
+                context_name=context_name,
+                instance_name="preview",
+                scopes=site_secret_scopes("preview"),
+                excluded_binding_ids=frozenset(
+                    binding.binding_id for binding in disabled_bundle.secret_bindings
+                ),
+            )
+        ) | {
+            str(secret["binding_key"])
+            for secret in secrets
+            if secret["integration"] == "runtime_environment" and secret["instance"] == "preview"
+        }
+        current_preview_record = _find_runtime_environment_record(
+            existing_records=existing_runtime_records,
+            scope="instance",
+            context_name=context_name,
+            instance_name="preview",
+        )
+        plain = (
+            runtime_record.env
+            if runtime_record is not None
+            else (current_preview_record.env if current_preview_record else {})
+        )
+        try:
+            validate_preview_scope(plain, context=context_name, secret_keys=frozenset(secret_keys))
+        except ValueError as error:
+            raise ProductConfigError(str(error), code="runtime_setting_refused") from error
     secret_summaries: list[dict[str, object]] = list(disabled_summaries)
     runtime_key_safety_summary = _evaluate_product_config_runtime_key_safety(
         record_store=record_store,
@@ -952,7 +989,9 @@ def _provider_adoption_value_origin(
     return "provider"
 
 
-def _normalize_product_config_runtime_env(raw_env: object) -> dict[str, ScalarValue]:
+def _normalize_product_config_runtime_env(
+    raw_env: object, *, non_secret_keys: frozenset[str] = frozenset()
+) -> dict[str, ScalarValue]:
     if not isinstance(raw_env, dict):
         raise ProductConfigError("Product config runtime_env.env must be a JSON object.")
     env: dict[str, ScalarValue] = {}
@@ -960,7 +999,7 @@ def _normalize_product_config_runtime_env(raw_env: object) -> dict[str, ScalarVa
         if not isinstance(raw_key, str):
             raise ProductConfigError("Product config runtime env keys must be strings.")
         key_name = _normalize_runtime_environment_key(raw_key)
-        if is_secret_shaped_runtime_key(key_name):
+        if is_secret_shaped_runtime_key(key_name) and key_name not in non_secret_keys:
             raise ProductConfigError(
                 f"Runtime environment key {key_name!r} must be written as a managed secret."
             )
@@ -1053,6 +1092,8 @@ def _product_config_secret_inputs(
             instance_name=secret_instance,
             index=index,
         )
+        if instance_name == "preview" and validated_scope != "context_instance":
+            raise ProductConfigError("Preview secrets require the exact preview instance scope.")
         context_scope_uses_instance_safety_target = (
             validated_scope == "context" and expected_scope == "context_instance"
         )

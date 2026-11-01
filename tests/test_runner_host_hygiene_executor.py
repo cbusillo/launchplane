@@ -4,6 +4,7 @@ import json
 from email.message import Message
 from functools import partial
 from io import BytesIO
+from http.client import IncompleteRead
 import tempfile
 import unittest
 
@@ -350,7 +351,8 @@ def execute_runner_host_hygiene_executor(
     **kwargs: Any,
 ) -> Any:
     kwargs.setdefault("audit_delivery_sleeper", lambda _seconds: None)
-    kwargs.setdefault("github_idle_evidence_reader", _github_idle_evidence_reader)
+    if "github_idle_sample_reader" not in kwargs:
+        kwargs.setdefault("github_idle_evidence_reader", _github_idle_evidence_reader)
     if request.mutate and kwargs.get("audit_spool") is None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             kwargs["audit_spool"] = RunnerHostHygieneAuditSpool(
@@ -418,9 +420,12 @@ class _PermanentlyFailingAuditPoster(_AuditPoster):
 
 
 class _FlakyTerminalAuditPoster(_AuditPoster):
-    def __init__(self, *, failures: int) -> None:
+    def __init__(self, *, failures: int, failure: Exception | None = None) -> None:
         super().__init__()
         self._failures = failures
+        self._failure = failure or AuditDeliveryError(
+            "temporary audit service failure", retryable=True
+        )
 
     def __call__(
         self, audit: RunnerHostHygieneApplyAuditRecord, idempotency_key: str
@@ -429,7 +434,7 @@ class _FlakyTerminalAuditPoster(_AuditPoster):
             self._failures -= 1
             self.records.append((audit.status, idempotency_key))
             self.audits.append(audit)
-            raise AuditDeliveryError("temporary audit service failure", retryable=True)
+            raise self._failure
         return super().__call__(audit, idempotency_key)
 
 
@@ -1343,19 +1348,67 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         )
 
     def test_cache_prune_completes_when_unrelated_workdir_evidence_is_partial(self) -> None:
-        command_runner = _CommandRunner(runner_workdir_status="partial")
+        for whole_sample in (False, True):
+            with self.subTest(whole_sample=whole_sample):
+                command_runner = _CommandRunner(runner_workdir_status="partial")
+                request = _request(mutate=True)
 
-        result = execute_runner_host_hygiene_executor(
-            request=_request(mutate=True),
-            remote_runner=command_runner,
-            audit_poster=_AuditPoster(),
-        )
+                def sample() -> tuple[RunnerHostHygieneIdleObservation, ...]:
+                    return tuple(
+                        observation
+                        for binding in request.github_idle_bindings
+                        for observation in _github_idle_evidence_reader(
+                            binding.repository_scope, binding.execution_lane, binding.runner_name
+                        )
+                    )
 
-        self.assertEqual(result.status, "completed")
-        self.assertIn("post evidence still needs attention", result.message)
-        self.assertTrue(
-            any(command[:5] == _ENGINE_PRUNE_PREFIX for command in command_runner.commands)
-        )
+                options = {"github_idle_sample_reader": sample} if whole_sample else {}
+                result = execute_runner_host_hygiene_executor(
+                    request=request,
+                    remote_runner=command_runner,
+                    audit_poster=_AuditPoster(),
+                    **options,
+                )
+                self.assertEqual(result.status, "completed")
+                self.assertTrue(
+                    any(command[:5] == _ENGINE_PRUNE_PREFIX for command in command_runner.commands)
+                )
+
+    def test_whole_sample_reader_survives_action_started_recovery(self) -> None:
+        request = _request(mutate=True)
+
+        def sample() -> tuple[RunnerHostHygieneIdleObservation, ...]:
+            return tuple(
+                observation
+                for binding in request.github_idle_bindings
+                for observation in _github_idle_evidence_reader(
+                    binding.repository_scope, binding.execution_lane, binding.runner_name
+                )
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            spool = RunnerHostHygieneAuditSpool(root=Path(directory) / "spool")
+            with self.assertRaises(RuntimeError):
+                execute_runner_host_hygiene_executor(
+                    request=request,
+                    remote_runner=_CrashingCommandRunner(),
+                    audit_poster=_AuditPoster(),
+                    audit_spool=spool,
+                    github_idle_sample_reader=sample,
+                )
+            poster = _AuditPoster()
+            result = execute_runner_host_hygiene_executor(
+                request=_request(mutate=True, resolve_action_started=True),
+                remote_runner=_CommandRunner(),
+                audit_poster=poster,
+                audit_spool=spool,
+                github_idle_sample_reader=sample,
+            )
+        self.assertTrue(result.reconciled)
+        self.assertEqual(result.status, "failed")
+        report = poster.audits[-1].post_apply_report
+        assert report is not None
+        self.assertEqual(report.idle_convergences[0].status, "idle")
 
     def test_executor_uses_root_owned_workdir_usage_helper(self) -> None:
         command_runner = _CommandRunner(runner_workdir_bytes=12_345)
@@ -2039,29 +2092,31 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             self.assertTrue(reconciled.reconciled)
 
     def test_executor_retries_terminal_audit_delivery(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
-            request = _request(mutate=True)
-            poster = _FlakyTerminalAuditPoster(failures=2)
-
-            result = execute_runner_host_hygiene_executor(
-                request=request,
-                remote_runner=_CommandRunner(),
-                audit_poster=poster,
-                audit_spool=spool,
-                audit_delivery_sleeper=lambda _seconds: None,
-            )
-
-            self.assertEqual(result.status, "completed")
-            self.assertFalse(result.audit_delivery_pending)
-            envelope = spool.read(
-                host_name=request.host_name,
-                action=request.action,
-                audit_record_key=request.audit_record_key,
-            )
-            assert envelope is not None
-            self.assertEqual(envelope.terminal_delivery_state, "delivered")
-            self.assertEqual(envelope.delivery_attempts, 4)
+        for failure in (None, IncompleteRead(b"synthetic", 1)):
+            with (
+                self.subTest(failure=failure),
+                tempfile.TemporaryDirectory() as temporary_directory,
+            ):
+                spool = RunnerHostHygieneAuditSpool(root=Path(temporary_directory) / "spool")
+                request = _request(mutate=True)
+                poster = _FlakyTerminalAuditPoster(failures=2, failure=failure)
+                result = execute_runner_host_hygiene_executor(
+                    request=request,
+                    remote_runner=_CommandRunner(),
+                    audit_poster=poster,
+                    audit_spool=spool,
+                    audit_delivery_sleeper=lambda _seconds: None,
+                )
+                self.assertEqual(result.status, "completed")
+                self.assertFalse(result.audit_delivery_pending)
+                envelope = spool.read(
+                    host_name=request.host_name,
+                    action=request.action,
+                    audit_record_key=request.audit_record_key,
+                )
+                assert envelope is not None
+                self.assertEqual(envelope.terminal_delivery_state, "delivered")
+                self.assertEqual(envelope.delivery_attempts, len(poster.records))
 
     def test_executor_blocks_new_action_while_terminal_delivery_is_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

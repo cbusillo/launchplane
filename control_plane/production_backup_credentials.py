@@ -1,5 +1,3 @@
-"""Metadata-only rebinding of an existing lane's shared-backup credentials."""
-
 import hashlib
 import json
 from typing import Any, Literal
@@ -33,21 +31,39 @@ class BackupCredentialBindingRequest(BaseModel):
 
     mode: Literal["dry-run", "apply"] = "dry-run"
     bindings: dict[str, str]
+    generate_capture_key: bool = False
+    known_hosts: str = Field(default="", max_length=8192)
     reason: str = Field(min_length=1, max_length=500)
     reviewed_plan_sha256: str = ""
     promotion_action: str = ""
 
     @model_validator(mode="after")
     def validate_bindings(self) -> "BackupCredentialBindingRequest":
+        if not self.reason.strip():
+            raise ValueError("A concrete reason is required.")
+        if self.mode == "apply" and len(self.reviewed_plan_sha256) != 64:
+            raise ValueError("Apply requires the reviewed plan digest.")
+        if self.generate_capture_key:
+            if self.bindings or not self.known_hosts.strip() or not self.promotion_action.strip():
+                raise ValueError(
+                    "Key generation requires a host pin and promotion action, without bindings."
+                )
+            return self
+        if self.known_hosts:
+            raise ValueError("Host pins are accepted only for initial key generation.")
         if set(self.bindings) != set(BACKUP_CREDENTIAL_KEYS):
             raise ValueError("Select both shared backup credential bindings.")
         if len(set(self.bindings.values())) != len(BACKUP_CREDENTIAL_KEYS):
             raise ValueError("The private key and host-key binding must be distinct.")
         if not self.reason.strip() or any(not value.strip() for value in self.bindings.values()):
             raise ValueError("Binding references and reason must be nonempty.")
-        if self.mode == "apply" and len(self.reviewed_plan_sha256) != 64:
-            raise ValueError("Apply requires the reviewed plan digest.")
         return self
+
+    def fingerprint_payload(self) -> dict[str, Any]:
+        return self.model_dump(
+            mode="json",
+            exclude=set() if self.generate_capture_key else {"generate_capture_key", "known_hosts"},
+        )
 
 
 def credential_metadata(

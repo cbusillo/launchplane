@@ -5,7 +5,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hmac
-import gzip
 import json
 from pathlib import Path
 import re
@@ -20,6 +19,7 @@ from control_plane._odoo_rehearsal_business_validation import (
     business_entrypoint_schedule,
     final_business_database,
     business_validation_history,
+    require_passing_business_validation,
     BUSINESS_ENTRYPOINT_WAIT_TIMEOUT_SECONDS,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -275,15 +275,11 @@ def rehearsal_inputs(
             or previous.intent_sha256 != canonical_json_sha256(request.intent())
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-        if request.action == "verify" and (
-            (previous.business_validations and not previous.business_validations[-1].passed)
-            or (
-                previous.abandoned_validations
-                and len(previous.business_validations)
-                <= previous.abandoned_validations[-1].validation_count
-            )
-        ):
-            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        if request.action == "verify" and request.mode != "readback":
+            try:
+                require_passing_business_validation(previous.model_dump(mode="json"))
+            except ValueError:
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED) from None
         if request.action in {
             "simulate-final",
             "rebuild-final",
@@ -694,7 +690,6 @@ class OdooRehearsalAdapter:
     def operation_readback(
         self, record: OdooUpgradeRehearsalRecord, idempotency_key: str
     ) -> dict[str, object]:
-        """Read a journal bound to the original request and unchanged partial record."""
         from control_plane.http_routes.mutation_support import request_fingerprint
         from control_plane.provider_operations import build_provider_operation_key
 
@@ -705,18 +700,12 @@ class OdooRehearsalAdapter:
         )
         if not idempotency_key or reservation is None:
             raise RehearsalRefused(RehearsalPrerequisite.OPERATION_UNAVAILABLE)
-        original = self.request.model_copy(
-            update={
-                "mode": "apply",
-                "reviewed_plan_sha256": self.initial_prepare_binding(record)
-                if self.request.action == "prepare"
-                else self.request.reviewed_plan_sha256
-                if self.request.action in {"validate-business", "rebuild-final"}
-                else record.binding_sha256,
-            }
-        )
+        original = self.request.model_copy(update={"mode": "apply"})
         if (
-            reservation.provider_target_key != record.rehearsal_id
+            record.product != self.product
+            or record.principal != self.principal
+            or record.rehearsal_id != self.request.rehearsal_id
+            or reservation.provider_target_key != record.rehearsal_id
             or reservation.reconciliation_key != self.reconciliation_key()
             or reservation.request_fingerprint
             != request_fingerprint(
@@ -1254,6 +1243,7 @@ class OdooRehearsalAdapter:
         inspect_capture: bool = False,
         abandoned_attempt_sha256: str = "",
         abandoned_action: str = "",
+        execute_never_started: bool = False,
     ) -> str:
         if mode == "observe" or self.request.action in {
             "validate-business",
@@ -1274,6 +1264,8 @@ class OdooRehearsalAdapter:
         spec["attempt_sha256"] = canonical_json_sha256({"operation_key": operation_key})
         spec["record_binding_sha256"] = record.binding_sha256
         spec["inspect_capture"] = mode == "observe" and inspect_capture
+        if execute_never_started:
+            spec["execute_never_started"] = True
         if self.request.action == "retire" and self.request.consumer_confirmation is not None:
             spec["retain_final_recovery"] = True
             progress = record.incomplete_retirement
@@ -1296,23 +1288,10 @@ class OdooRehearsalAdapter:
             spec["business_validation_identity"] = business_validation_identity(
                 record, operation_key
             )
-        program = str(spec.pop("program"))
-        encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
-        # Keep both Dokploy's remote shell materializer and Python's argv small.
-        # The full reviewed record binding stays above; only the host's projection
-        # and reviewed program cross this transport, through Python's stdin.
-        program = "import sys\nsys.argv = ['rehearsal', " + repr(encoded) + "]\n" + program
-        packed = base64.b64encode(gzip.compress(program.encode(), mtime=0)).decode()
-        script = (
-            "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_REHEARSAL'\n"
-            + "import base64, gzip\nexec(compile(gzip.decompress(base64.b64decode("
-            + repr(packed)
-            + ")), "
-            + repr(REHEARSAL_HOST_FILENAME)
-            + ", 'exec'), {})"
-            + "\nLP_REHEARSAL\n"
-        )
-        return script
+        from control_plane.host_package import host_schedule
+
+        spec.pop("program")
+        return host_schedule("rehearsal", spec)
 
     @staticmethod
     def validate_apply_script(record: OdooUpgradeRehearsalRecord, script: str) -> None:
@@ -1463,6 +1442,11 @@ class OdooRehearsalAdapter:
     def publish(
         self, record: OdooUpgradeRehearsalRecord, result: dict[str, object]
     ) -> dict[str, object]:
+        if self.request.action == "verify":
+            try:
+                require_passing_business_validation(record.model_dump(mode="json"))
+            except ValueError:
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED) from None
         allowed = {
             "prepare": "prepared",
             "execute": "upgraded",
@@ -1536,7 +1520,7 @@ class OdooRehearsalAdapter:
         if not set(old_copies) <= {copy.database for copy in updated.copies}:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         history = business_validation_history(record.model_dump(mode="json"))
-        if self.request.action == "verify" and history:
+        if self.request.action == "verify":
             final = next(
                 (copy for copy in updated.copies if copy.database.endswith("_final_upgrade")), None
             )
@@ -1843,6 +1827,7 @@ class OdooRehearsalAdapter:
                 try:
                     create_isolated_placement(
                         self.root,
+                        record_store=self.store,
                         namespace=record.rehearsal_id,
                         server_id=record.server_id,
                         description=REHEARSAL_PROJECT_DESCRIPTION,

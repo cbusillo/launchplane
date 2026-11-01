@@ -15,6 +15,7 @@ from threading import Event, Thread
 import time
 from typing import Any, Callable, Protocol, cast
 
+from control_plane.timestamps import utc_now_timestamp as _utc_now_timestamp
 from pydantic import BaseModel
 from control_plane.lane_movement import LaneMovementRefused
 from control_plane.http_error_evidence import log_handled_error_cause
@@ -999,6 +1000,7 @@ def run_odoo_stable_operation_worker_loop(
     error_count = 0
     consecutive_errors = 0
     last_sweep_at: float | None = None
+    sweep_thread: Thread | None = None
     client_release_stop_event = Event()
     invitation_thread: Thread | None = None
     last_invitation_advance_at: float | None = None
@@ -1054,6 +1056,16 @@ def run_odoo_stable_operation_worker_loop(
         except Exception:
             logging.exception("Product config-authority scan failed.")
 
+    def sweep_reconciles() -> None:
+        try:
+            request_product_reconcile_sweep(
+                cast(ProductReconcileStore, record_store),
+                _utc_now_timestamp(),
+                control_plane_root=control_plane_root_path,
+            )
+        except Exception:
+            logging.exception("Product reconcile sweep failed.")
+
     client_release_thread = Thread(
         target=advance_releases, name="client-release-advance", daemon=False
     )
@@ -1075,19 +1087,18 @@ def run_odoo_stable_operation_worker_loop(
                     target=resume_rehearsals, name="rehearsal-checkpoint-resume", daemon=False
                 )
                 rehearsal_resume_thread.start()
-            if hasattr(record_store, "request_product_reconcile") and (
-                last_sweep_at is None or monotonic() - last_sweep_at >= reconcile_sweep_seconds
+            if (
+                hasattr(record_store, "request_product_reconcile")
+                and (
+                    last_sweep_at is None or monotonic() - last_sweep_at >= reconcile_sweep_seconds
+                )
+                and (sweep_thread is None or not sweep_thread.is_alive())
             ):
-                # In-memory timer: another replica's sweep only folds into the same requests.
                 last_sweep_at = monotonic()
-                try:
-                    request_product_reconcile_sweep(
-                        cast(ProductReconcileStore, record_store),
-                        _utc_now_timestamp(),
-                        control_plane_root=control_plane_root_path,
-                    )
-                except Exception:
-                    logging.exception("Product reconcile sweep failed.")
+                sweep_thread = Thread(
+                    target=sweep_reconciles, name="product-reconcile-sweep", daemon=False
+                )
+                sweep_thread.start()
             if (
                 last_invitation_advance_at is None
                 or monotonic() - last_invitation_advance_at >= CLIENT_RELEASE_ADVANCE_SECONDS
@@ -1147,6 +1158,8 @@ def run_odoo_stable_operation_worker_loop(
             invitation_thread.join()
         if config_scan_thread is not None:
             config_scan_thread.join()
+        if sweep_thread is not None:
+            sweep_thread.join()
         if rehearsal_resume_thread is not None:
             rehearsal_resume_thread.join()
     return OdooStableOperationWorkerLoopResult(
@@ -2454,6 +2467,8 @@ def _execute_target_replacement_with_checkpoint(
     execution_checkpoint: Callable[[str], None] | None = None,
 ) -> bool:
     from control_plane.service_bootstrap import _bearer_identity_config_from_env
+    from control_plane.service_agent_identities import load_service_agent_identities
+    from control_plane.service_auth import BearerIdentityConfig
     from control_plane.testing_rebuild_authorization import (
         director_testing_rebuild_authorization_allows,
     )
@@ -2487,7 +2502,11 @@ def _execute_target_replacement_with_checkpoint(
                 authorization=authorization,
                 operation=operation,
                 store=record_store,
-                config=_bearer_identity_config_from_env(),
+                config=load_service_agent_identities(
+                    store=record_store, bootstrap=_bearer_identity_config_from_env()
+                )
+                if isinstance(record_store, PostgresRecordStore)
+                else BearerIdentityConfig(),
             )
         ),
     )
@@ -3135,10 +3154,6 @@ def _target_replacement_result_passed(result: OdooStableTargetReplacementApplyRe
         and result.canonical_status != "fail"
         and result.logo_status != "fail"
     )
-
-
-def _utc_now_timestamp() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _parse_timestamp(value: str) -> datetime:

@@ -28,6 +28,7 @@ from control_plane.contracts.secret_record import (
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 LAUNCHPLANE_SECRET_KEYS_JSON_ENV_VAR = "LAUNCHPLANE_SECRET_KEYS_JSON"
 LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR = "LAUNCHPLANE_MASTER_ENCRYPTION_KEY"
@@ -421,36 +422,53 @@ def resolve_context_secret_value(
     if store is None:
         return ""
     try:
-        bindings = tuple(
-            binding
-            for binding in store.list_secret_bindings(
-                integration=integration, context_name=context_name, limit=None
-            )
-            if binding.integration == integration
-            and binding.context == context_name
-            and not binding.instance
-            and binding.binding_key == binding_key
-            and binding.status == SECRET_STATUS_CONFIGURED
+        return resolve_context_secret_value_from_store(
+            record_store=store,
+            integration=integration,
+            context_name=context_name,
+            binding_key=binding_key,
         )
-        if len(bindings) != 1:
-            return ""
-        record = store.read_secret_record(bindings[0].secret_id)
-        if (
-            record.secret_id != bindings[0].secret_id
-            or record.scope != "context"
-            or record.context != context_name
-            or record.instance
-            or record.integration != integration
-            or record.policy != "write_only"
-            or record.status != SECRET_STATUS_CONFIGURED
-        ):
-            return ""
-        version = store.read_secret_version(record.current_version_id)
-        if version.version_id != record.current_version_id or version.secret_id != record.secret_id:
-            return ""
-        return _decrypt_secret_value(version.ciphertext, version.key_id).strip()
     finally:
         store.close()
+
+
+def resolve_context_secret_value_from_store(
+    *,
+    record_store: SecretReadStore,
+    integration: str,
+    context_name: str,
+    binding_key: str,
+) -> str:
+    if not context_name.strip():
+        return ""
+    bindings = tuple(
+        binding
+        for binding in record_store.list_secret_bindings(
+            integration=integration, context_name=context_name
+        )
+        if binding.integration == integration
+        and binding.context == context_name
+        and not binding.instance
+        and binding.binding_key == binding_key
+        and binding.status == SECRET_STATUS_CONFIGURED
+    )
+    if len(bindings) != 1:
+        return ""
+    record = record_store.read_secret_record(bindings[0].secret_id)
+    if (
+        record.secret_id != bindings[0].secret_id
+        or record.scope != "context"
+        or record.context != context_name
+        or record.instance
+        or record.integration != integration
+        or record.policy != "write_only"
+        or record.status != SECRET_STATUS_CONFIGURED
+    ):
+        return ""
+    version = record_store.read_secret_version(record.current_version_id)
+    if version.version_id != record.current_version_id or version.secret_id != record.secret_id:
+        return ""
+    return _decrypt_secret_value(version.ciphertext, version.key_id).strip()
 
 
 def resolve_secret_values_for_integration(
@@ -965,17 +983,13 @@ def reencrypt_secrets(
         for record, version in zip(records, versions, strict=True)
     )
     delivery_key_usage = record_store.ordinary_agent_delivery_key_usage()
-    plan_digest = hashlib.sha256(
-        json.dumps(
-            {
-                "active_key_id": active_key_id,
-                "entries": plan_entries,
-                "delivery_key_usage": delivery_key_usage,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    plan_digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "active_key_id": active_key_id,
+            "entries": plan_entries,
+            "delivery_key_usage": delivery_key_usage,
+        }
+    )
     key_usage = dict(delivery_key_usage)
     for version in versions:
         key_usage[version.key_id] = key_usage.get(version.key_id, 0) + 1

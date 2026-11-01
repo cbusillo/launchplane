@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
@@ -29,9 +30,11 @@ from control_plane.storage.migrations.versions import (
     f1b5d9a3c7e0_join_public_host_fences as public_host_join,
     f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
     f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
-    a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
     a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
-    a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
+    c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
+    b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
+    f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
+    c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
 )
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
@@ -59,6 +62,49 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_additive_attestation_migration_preserves_held_delivery_tables(self) -> None:
+        with TemporaryDirectory() as temporary:
+            url = f"sqlite+pysqlite:///{Path(temporary) / 'migration.db'}"
+            command.upgrade(alembic_config(url), integration_attestations.down_revision)
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            held_before = set(retired_delivery.RETIRED_TABLES) & set(
+                inspect(engine).get_table_names()
+            )
+            self.assertTrue(held_before)
+            command.upgrade(alembic_config(url), SCHEMA_MIGRATION_TARGET_REVISION)
+            self.assertTrue(held_before <= set(inspect(engine).get_table_names()))
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            self.assertEqual(
+                store.list_integration_attestation_records(
+                    repository="example/product", pull_request_number=1
+                ),
+                (),
+            )
+
+    def test_preceding_target_reads_additive_schema_without_downgrading_it(self) -> None:
+        with TemporaryDirectory() as temporary:
+            url = f"sqlite+pysqlite:///{Path(temporary) / 'compatibility.db'}"
+            command.upgrade(alembic_config(url), integration_attestations.down_revision)
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            before = set(inspect(engine).get_table_names())
+            self.assertTrue(set(retired_delivery.RETIRED_TABLES) & before)
+            self.assertNotIn("launchplane_integration_attestations", before)
+            command.upgrade(alembic_config(url), integration_attestations.revision)
+            self.assertEqual(
+                schema_migration_action(
+                    current_revision=integration_attestations.revision,
+                    target_revision=integration_attestations.down_revision,
+                ),
+                "compatible_ahead",
+            )
+            self.assertTrue(before <= set(inspect(engine).get_table_names()))
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            store.verify_schema()
+
     def test_migration_preserves_existing_application_loggers(self) -> None:
         application_logger = logging.getLogger("control_plane.merge_train_controller_run_once")
         original_disabled = application_logger.disabled
@@ -72,48 +118,6 @@ class SchemaMigrationTests(unittest.TestCase):
             command.upgrade(alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
 
         self.assertFalse(application_logger.disabled)
-
-    def test_release_archive_joins_every_applied_branch_without_activating_held_drop(
-        self,
-    ) -> None:
-        for revision, target in (
-            (retired_delivery.revision, archive_retirement_join.revision),
-            (retirement_join.revision, archive_retirement_join.revision),
-            (topics_join.revision, archive_retirement_join.revision),
-            (public_host_fences.revision, archive_hostnames_join.revision),
-            (topics_hostnames.revision, archive_hostnames_join.revision),
-            (public_host_join.revision, archive_compatibility_join.revision),
-            (compatibility_join.revision, archive_compatibility_join.revision),
-            (discussion_topics.revision, SCHEMA_MIGRATION_TARGET_REVISION),
-            (retired_preview.revision, SCHEMA_MIGRATION_TARGET_REVISION),
-        ):
-            with self.subTest(revision=revision):
-                self.assertEqual(schema_migration_action(current_revision=revision), "upgrade")
-                self.assertEqual(
-                    schema_migration_target(
-                        current_revision=revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
-                    ),
-                    target,
-                )
-        for revision in (
-            archive_retirement_join.revision,
-            archive_hostnames_join.revision,
-            archive_compatibility_join.revision,
-        ):
-            with self.subTest(revision=revision):
-                self.assertEqual(
-                    schema_migration_action(current_revision=revision), "compatible_ahead"
-                )
-
-    def test_explicit_delivery_request_after_archive_joins_both_paths(self) -> None:
-        for target in (retired_delivery.revision, retirement_join.revision, topics_join.revision):
-            with self.subTest(target=target):
-                self.assertEqual(
-                    schema_migration_target(
-                        current_revision=SCHEMA_MIGRATION_TARGET_REVISION, target_revision=target
-                    ),
-                    archive_retirement_join.revision,
-                )
 
     def test_delivery_preview_join_preserves_explicit_topics_route(self) -> None:
         for current, target in (
@@ -145,18 +149,41 @@ class SchemaMigrationTests(unittest.TestCase):
         )
 
     def test_hostname_only_database_does_not_infer_delivery_drop_approval(self) -> None:
+        script = ScriptDirectory.from_config(alembic_config("sqlite://"))
         for current in (
             public_host_fences.revision,
             topics_hostnames.revision,
             archive_hostnames_join.revision,
+            preview_hostnames_join.revision,
+            idle_hostnames_join.revision,
         ):
+            with self.subTest(current=current):
+                target = schema_migration_target(
+                    current_revision=current,
+                    target_revision=SCHEMA_MIGRATION_TARGET_REVISION,
+                )
+                applied_revisions = {
+                    revision.revision for revision in script.iterate_revisions(target, "base")
+                }
+                self.assertNotIn(retired_delivery.revision, applied_revisions)
+                self.assertEqual(
+                    schema_migration_action(current_revision=current),
+                    "current" if current == target else "upgrade",
+                )
             for revision in (
                 retired_delivery.revision,
                 retirement_join.revision,
                 topics_join.revision,
             ):
-                with self.subTest(current=current, target=revision), self.assertRaises(ValueError):
-                    schema_migration_action(current_revision=current, target_revision=revision)
+                with self.subTest(current=current, explicit_target=revision):
+                    self.assertEqual(
+                        schema_migration_target(current_revision=current, target_revision=revision),
+                        idle_compatibility_join.revision,
+                    )
+                    self.assertEqual(
+                        schema_migration_action(current_revision=current, target_revision=revision),
+                        "upgrade",
+                    )
 
     def test_future_source_revision_is_not_an_approved_bootstrap_target(self) -> None:
         for revision in (

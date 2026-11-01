@@ -359,9 +359,13 @@ def run_preview_preservation(
         PREVIEW_PRESERVATION_PROGRAM,
     )
     from control_plane.clean_testing_snapshot import snapshot_storage_budget
-    from control_plane.dokploy.memory_capacity import preview_host_memory_floor
+    from control_plane.dokploy.memory_capacity import (
+        PreviewMemoryCapacityRefused,
+        preview_host_memory_floor,
+    )
     from control_plane.dokploy.native_copy_stream import _read_remote
     from control_plane.odoo_preview_resources import require_existing_preview_resources
+    from control_plane.preview_reservation_recovery import original_preview_intent
 
     authority = read_preview_preservation_authority(
         store=store,
@@ -370,6 +374,12 @@ def run_preview_preservation(
         original_reservation_id=original_reservation_id,
         operation_record_id=operation_record_id,
     )
+    original = store.read_idempotency_record_by_id(original_reservation_id)
+    if original is None:
+        raise ValueError("Original preview preservation authority disappeared.")
+    snapshot = original_preview_intent(
+        original, profile=profile, store=store
+    ).issued_plan.dry_run_plan.clean_snapshot
     current_source = read_preview_preservation_source(
         authority=authority, control_plane_root=control_plane_root, database_url=store.database_url
     )
@@ -409,17 +419,45 @@ def run_preview_preservation(
                 if binding != current_source["provider_binding_sha256"]:
                     raise ValueError("Original preview changed during preservation qualification.")
 
+    dispatch_phase = PREVIEW_PRESERVATION_CAPTURE_PHASE if mode == "preserve" else ""
+    if mode == "verify" and current_source is not None and effect_checkpoint is not None:
+        current = store.read_idempotency_record_by_id(operation_record_id)
+        if current is None or current.state != "running" or not current.provider_effect_phase:
+            raise ValueError("Preview verification requires its current provider checkpoint.")
+        dispatch_phase = current.provider_effect_phase
+    if dispatch_phase and current_source is not None and mutation_guard is None:
+        raise ValueError("Preview preservation effects require the current mutation guard.")
+
     def dispatch(send: Callable[[], None]) -> None:
         check()
-        if mode != "preserve":
+        if not dispatch_phase:
             send()
             return
         assert effect_checkpoint is not None
         with mutation_guard() if mutation_guard else nullcontext():
             check()
-            effect_checkpoint(PREVIEW_PRESERVATION_CAPTURE_PHASE)
+            if mode == "verify":
+                current = store.read_idempotency_record_by_id(operation_record_id)
+                if (
+                    current is None
+                    or current.state != "running"
+                    or current.provider_effect_phase != dispatch_phase
+                ):
+                    raise ValueError(
+                        "Preview verification provider checkpoint changed before dispatch."
+                    )
+            effect_checkpoint(dispatch_phase)
             send()
 
+    memory_floor = None
+    memory_floor_unavailable = False
+    if current_source is not None and mode != "inspect":
+        try:
+            memory_floor = preview_host_memory_floor(
+                server_id=authority.server_id, record_store=store
+            )
+        except PreviewMemoryCapacityRefused:
+            memory_floor_unavailable = True
     frames: list[dict[str, object]] = []
     _read_remote(
         host=host,
@@ -428,15 +466,14 @@ def run_preview_preservation(
         program=PREVIEW_PRESERVATION_PROGRAM,
         payload={
             "mode": mode,
+            "provider_effect_phase": dispatch_phase,
             "authority": authority.model_dump(mode="json"),
             "preservation_id": authority.preservation_id,
             "source": current_source,
+            "snapshot": snapshot.model_dump(mode="json") if snapshot else None,
             "storage_budget": budget.model_dump(mode="json") if budget else {},
-            "memory_floor": preview_host_memory_floor(
-                server_id=authority.server_id, record_store=store
-            )
-            if mode == "preserve"
-            else None,
+            "memory_floor": memory_floor,
+            "memory_floor_unavailable": memory_floor_unavailable,
             "timeout_seconds": timeout_seconds,
         },
         receive=frames.append,

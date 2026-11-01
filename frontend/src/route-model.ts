@@ -24,12 +24,14 @@ export type EnvironmentView =
 export type EngineeringView =
   | "credentials"
   | "hub"
+  | "request-attention"
   | "merge-train"
   | "tenant-admission"
   | "governance-projection"
   | "github-delivery"
   | "privileged-operations"
-  | "runtime-setting-removal";
+  | "runtime-setting-removal"
+  | "preview-lifecycle";
 
 export function productIndexPath(): string {
   return "/ui/products";
@@ -67,7 +69,9 @@ export function ownerReviewPath(): string {
 
 export function engineeringViewLabel(view: EngineeringView): string {
   if (view === "credentials") return "Credentials";
+  if (view === "request-attention") return "Waiting requests";
   if (view === "runtime-setting-removal") return "Remove stored settings";
+  if (view === "preview-lifecycle") return "Preview cleanup";
   if (view === "github-delivery") {
     return "GitHub delivery";
   }
@@ -111,10 +115,12 @@ export function parseAppRoute(pathname: string): AppRoute {
     if (
       routeSegments.length === 1 &&
       [
+        "request-attention",
         "merge-train",
         "tenant-admission",
         "governance-projection",
         "github-delivery",
+        "preview-lifecycle",
         "privileged-operations",
         "runtime-setting-removal",
         "credentials",

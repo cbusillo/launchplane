@@ -103,7 +103,7 @@ test("serves this run while its peer is alive", async ({ page, baseURL }) => {
 `);
       return runPlaywright(config, children);
     }));
-    for (const run of runs) assert.equal(run.code, 0, run.output);
+    for (const run of runs) assert.equal(run.code, 0, JSON.stringify(runs, null, 2));
     const facts = await Promise.all(receipts.map(async receipt =>
       JSON.parse(await readFile(receipt, "utf8"))));
     assert.notEqual(facts[0].baseURL, facts[1].baseURL);

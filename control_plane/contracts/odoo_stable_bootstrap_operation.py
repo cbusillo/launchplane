@@ -13,6 +13,7 @@ from control_plane.contracts.odoo_stable_bootstrap import (
     OdooStableBootstrapRequest,
     OdooStableBootstrapResult,
 )
+from control_plane.contracts.text_fields import require_text as _normalize_required
 
 OdooStableBootstrapOperationStatus = Literal[
     "pending",
@@ -197,10 +198,3 @@ def build_odoo_stable_bootstrap_operation_id(
         "odoo-stable-bootstrap-"
         f"{normalized_context}-{normalized_instance}-{normalized_created_at}-{digest}"
     )
-
-
-def _normalize_required(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized

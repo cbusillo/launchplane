@@ -134,7 +134,7 @@ class DirectorScanActivationTests(unittest.IsolatedAsyncioTestCase):
         lane["lanes"][0]["base_url"] = "https://other.example.test"
         variants.append(lane)
         preview = deepcopy(self.after)
-        preview["preview"]["override_env"]["EXTRA_SETTING"] = "extra"
+        preview["preview"]["copied_env_keys"] = ["EXTRA_SETTING"]
         variants.append(preview)
         with patch("control_plane.artifact_scan.qualify_product_artifact") as scan:
             for payload in variants:

@@ -240,6 +240,7 @@ export function environmentForFixture(
     available_actions: summary.available_actions,
     driver_extensions: summary.driver_extensions,
     health_monitoring: summary.health_monitoring,
+    lane_status: summary.lane_status,
     public_ingress: summary.public_ingress,
     topology: {
       ...summary.topology,
@@ -2052,6 +2053,7 @@ function environmentFixture({
     context: `atlas-${environment}`,
     base_url: baseUrl,
     health_url: `${baseUrl}/health`,
+    lane_status: fixtureLaneStatus(warning ? "danger" : "verified"),
     trust_state: trustState,
     provenance: evidence,
     warnings: warning ? [ingressSummary] : [],
@@ -2320,6 +2322,7 @@ function missingEnvironmentFixture(
     context: `beacon-${environment}`,
     base_url: `https://${host}`,
     health_url: `https://${host}/health`,
+    lane_status: fixtureLaneStatus("missing"),
     trust_state: "missing",
     provenance: missing,
     warnings: ["Operational evidence is missing."],
@@ -2495,7 +2498,7 @@ export function productReviewForFixture(
   assertEngineeringFixtureAvailable(fixture);
   const params = new URLSearchParams(window.location.search);
   const scenario = params.get("scenario") ?? "ready";
-  const carriedDecision = ["carried-decision", "carried-invisible-decision", "former-client-carried-decision", "earlier-carried-decision", "carried-without-preview"].includes(scenario);
+  const carriedDecision = ["carried-decision", "carried-base-integration", "carried-invisible-decision", "former-client-carried-decision", "earlier-carried-decision", "carried-without-preview"].includes(scenario);
   const invisibleCarry = scenario !== "carried-decision";
   const ownerSet = scenario !== "no-owner";
   const viewerIsOwner = ownerSet && params.get("viewer") !== "non-owner";
@@ -2525,9 +2528,9 @@ export function productReviewForFixture(
       "answered-questions": "Check the contact page.\n### Open questions for the Client\n",
     }[scenario] ?? "1. Open **iPhone 15** repairs.\n2. Confirm each repair shows its price.",
     client_test_notes_error: {
-      "missing-notes": "Client test notes are missing.",
-      "notes-unavailable": "Client test notes are missing.",
-      "open-questions": "Some Client facts are unanswered.",
+      "missing-notes": "We are updating the preview and its test notes. We will let you know when it is ready to review.",
+      "notes-unavailable": "The test notes could not be loaded. Refresh the review.",
+      "open-questions": "We are updating the preview and its test notes. We will let you know when it is ready to review.",
     }[scenario] ?? "",
     preview_url: previewUrl,
     head_sha: previewUrl ? "a".repeat(40) : "",
@@ -2537,6 +2540,10 @@ export function productReviewForFixture(
     viewer_is_owner: viewerIsOwner,
     can_decide: !cannotDecideReason,
     cannot_decide_reason: cannotDecideReason,
+    preview_is_current: Boolean(previewUrl) && !["stale-preview", "notes-unavailable"].includes(scenario),
+    cannot_accept_reason: !previewUrl ? "No preview is ready for this pull request yet."
+      : scenario === "notes-unavailable" ? "We could not check the latest version of this change. Refresh the review."
+      : scenario === "stale-preview" ? "We are updating the preview for the latest change. We will let you know when it is ready to review." : "",
     latest_decision:
       (latestDecision ? {
         ...latestDecision,
@@ -2557,10 +2564,14 @@ export function productReviewForFixture(
             carried_from: {
               record_id: "fixture-original-acceptance",
               head_sha: ["earlier-carried-decision", "carried-without-preview"].includes(scenario) ? "c".repeat(40) : "b".repeat(40),
-              reason: invisibleCarry ? "client_impact_none" : "unchanged_patch_base_update",
+              reason: scenario === "carried-base-integration" ? "accepted_base_integration" : invisibleCarry ? "client_impact_none" : "unchanged_patch_base_update",
               commits: invisibleCarry ? [{ sha: "a".repeat(40), client_impact: "none" }] : [],
               refresh_record_ids: [],
-              comparison_base_sha: invisibleCarry ? "" : "c".repeat(40),
+              comparison_base_sha: scenario === "carried-base-integration" || !invisibleCarry ? "c".repeat(40) : "",
+              integrated_changes: scenario === "carried-base-integration"
+                ? [{ pull_request_number: 307, head_sha: "d".repeat(40), decision_record_id: "fixture-imported-acceptance", engineering_basis: "" }]
+                : [],
+              batch_record_ids: [],
             },
           }
         : scenario === "decided"
@@ -2983,5 +2994,24 @@ export async function applyProductProfileFieldForFixture(
       plan_sha256: "a".repeat(64), reason: payload.reason,
       lanes: field === "image" ? [{ instance: "prod", current_artifact_id: "ghcr.io/example/old-package@sha256:fixture" }] : [],
     },
+  };
+}
+
+export function fixtureLaneStatus(tone: "verified" | "danger" | "warning" | "stale" | "missing"): NonNullable<ProductEnvironmentSummary["lane_status"]> {
+  const reason = "Public ingress observation needs review";
+  return {
+    evaluated_at: OBSERVED_AT,
+    current: {
+      tone: tone === "stale" ? "warning" : tone, sidebar_tone: tone,
+      description: tone === "verified" ? "Healthy" : tone === "danger" ? `Alert; ${reason}` : tone === "warning" ? "Warning; Public DNS/TLS observation incomplete" : tone === "stale" ? "Stale evidence; awaiting current observations" : "Unknown (unverified)",
+      reasons: tone === "danger" ? [reason] : [],
+      attention_reasons: tone === "danger" ? [reason] : [], warning_reasons: [],
+      release_healthy: tone === "verified", public_observation_gap: null,
+    },
+    transitions: tone === "verified" ? [{ after: STALE_AFTER, signal: {
+      tone: "warning", sidebar_tone: "stale", description: "Stale evidence; awaiting current observations",
+      reasons: [], attention_reasons: [], warning_reasons: [], release_healthy: false,
+      public_observation_gap: "Public route observation incomplete",
+    } }] : [],
   };
 }

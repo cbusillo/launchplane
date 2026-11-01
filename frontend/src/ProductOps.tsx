@@ -16,7 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ProviderHoldAttention, useProviderHoldAttention } from "./ProviderHoldAttention";
 import { providerAttentionQualifier } from "./provider-hold-attention";
 
-import { LaunchplaneApiError, readProduct } from "./api";
+import { isLaunchplaneHttpError, readProduct } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductGenericWebTransitionPanel } from "./ProductGenericWebTransitionPanel";
@@ -30,7 +30,7 @@ import { ProductReleaseReviewLink } from "./ProductReleaseReviewLink";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, environmentReleaseHealthy, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireProductEvidence, type EnvironmentEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -240,8 +240,8 @@ export function ProductWorkspaceRoute({
             error instanceof Error
               ? error.message
               : "Launchplane could not load this product workspace.",
-          traceId: error instanceof LaunchplaneApiError ? error.traceId : "",
-          statusCode: error instanceof LaunchplaneApiError ? error.statusCode : 503,
+          traceId: isLaunchplaneHttpError(error) ? error.traceId : "",
+          statusCode: isLaunchplaneHttpError(error) ? error.statusCode : 503,
         }));
       });
     return () => {
@@ -300,7 +300,7 @@ export function ProductWorkspaceRoute({
   );
 }
 
-export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology">[], extraDeadlines: string[] = []) {
+export function useEvidenceExpiry(environments: EnvironmentEvidence[], extraDeadlines: string[] = []) {
   const [tick, setTick] = useState(0);
   const nextExpiry = Math.min(...[...environments.flatMap(environmentEvidenceDeadlines), ...extraDeadlines].map(value => Date.parse(value)).filter(value => Number.isFinite(value) && value >= Date.now()));
   useEffect(() => {
@@ -455,7 +455,7 @@ function ProductWorkspace({
     environments.some(
       (environment) =>
         ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)) &&
-        !operationalWarningReasons(environment).length,
+        !environmentReleaseHealthy(environment),
     );
 
   useEffect(() => {
@@ -542,7 +542,7 @@ function ProductWorkspace({
           label="Production"
           state={production?.trust_state ?? "missing"}
           value={signalHeadline(production)}
-          detail={operationalWarningReasons(production).length ? "Current release is healthy" : undefined}
+          detail={environmentReleaseHealthy(production) ? "Current release is healthy" : undefined}
         />
         <SignalTile
           label="Previews"
@@ -960,7 +960,7 @@ function ProductDiagnostics({ product }: { product: ProductSiteOverview }) {
               </div>
               <div>
                 <dt>Ingress path</dt>
-                <dd>{environment.topology.provider_recorded.ingress.path}</dd>
+                <dd>{environment.topology.provider_recorded.external_ingress ? "Separate business and recovery paths" : environment.topology.provider_recorded.ingress.path}</dd>
               </div>
             </dl>
           </section>
@@ -1079,7 +1079,7 @@ function NoProducts({ onRetry }: { onRetry: () => void }) {
         No products are owned by Launchplane yet
       </h1>
       <p>
-        Use Product Onboarding to record the product, its lanes and runtime targets.
+        Record the product, its lanes and runtime targets in Launchplane.
       </p>
       <ol className="onboarding-checklist">
         <li>Record the product profile and display name.</li>
@@ -1250,7 +1250,7 @@ function nextSafeInspection(
     return {
       title: "Complete stable lane evidence",
       detail:
-        "The product profile exists without stable environment summaries. Use Product Onboarding to record lane authority.",
+        "The product profile exists without stable environment summaries. Record its lanes and runtime targets in Launchplane.",
       targetId: "product-diagnostics",
     };
   }
@@ -1312,8 +1312,7 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
     return "Needs attention";
   }
   if (tone === "warning") {
-    if (operationalWarningReasons(environment).length) return "Delivery warning";
-    return environment ? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
+    return environment ? publicObservationGap(environment) ?? "Review warning" : "Review warning";
   }
   if (!environment || tone === "missing") {
     return "Evidence missing";

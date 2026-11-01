@@ -131,3 +131,19 @@ fits this file.
   Live product's promotion happens without one.
 - `Retired machinery deleted` proves the retired designs above are gone from
   the code; ends if a deletion breaks a live product.
+- `Director questions in Launchplane` proves the Director sees, answers and
+  finds every question and decision in Launchplane, while agents keep writing
+  them through the catalog's question record unchanged; ends if a question
+  still has to be asked or found somewhere else, or Launchplane needs more
+  upkeep for questions than the catalog's own store did.
+- `One copy of each fact` proves Launchplane reads current facts a git host
+  or provider owns through its driver, instead of keeping a second copy to
+  reconcile, while it keeps its own decisions and the release evidence they rest
+  on; ends if Launchplane becomes a second authority for a fact a provider owns.
+- `A breaking update stops at a preview` proves a shared update, such as an
+  `odoo-devkit` pin, is checked on one preview before any testing lane takes
+  it; ends if one update turns more than one testing lane red.
+- `Previews work the first time` proves that for a week every pull request's
+  preview builds and serves without an agent repairing Launchplane; a correct
+  refusal of an unverified build still counts as working. Ends if a preview
+  needs an agent's repair to serve.

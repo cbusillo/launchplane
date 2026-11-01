@@ -1,3 +1,7 @@
+from control_plane.preview_namespaces import (
+    validate_preview_profile_writes,
+)
+
 import fcntl
 import hashlib
 import json
@@ -22,6 +26,7 @@ from control_plane.storage.delivery_evidence import (
     filesystem_index,
     source_changed,
 )
+from control_plane.timestamps import utc_now_timestamp
 
 from control_plane.generic_web_source_qualification import (
     GenericWebSourceSnapshot,
@@ -79,8 +84,11 @@ from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
     MergeTrainControllerLeaseLostError,
+    MergeTrainControllerReconciliationRequiredError,
     MergeTrainControllerStateRecord,
     build_merge_train_controller_resume_detail,
+    require_canonical_merge_train_controller_state,
+    merge_train_controller_alias_reconciliation_detail,
 )
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
@@ -198,6 +206,7 @@ from control_plane.contracts.product_retirement import (
     product_retirement_secret_authority,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.integration_attestation import IntegrationAttestationRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventRecord,
@@ -271,6 +280,7 @@ from control_plane.storage.product_authority_bundle import (
     SecretRecordConflictError,
     require_bundle_context_owner,
     require_absent_products,
+    require_runtime_key_safety_policies,
     ProductAuthorityBundle,
     ProductProfileConflictError,
     ProviderTargetWrite,
@@ -344,7 +354,7 @@ class _AuthorityBundleStageManifest(BaseModel):
 
 
 def _utc_now_timestamp() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return utc_now_timestamp()
 
 
 def _lease_expires_at(*, observed_at: str, lease_seconds: int) -> str:
@@ -392,6 +402,12 @@ class FilesystemRecordStore:
             return self._write_model_locked(record_type, record_id, model)
 
     def _write_model_locked(self, record_type: str, record_id: str, model: BaseModel) -> Path:
+        if isinstance(model, LaunchplaneProductProfileRecord):
+            validate_preview_profile_writes(
+                profiles=self._list_product_profile_records_locked(),
+                replacements=(model,),
+                previews=self._list_models_locked(PreviewRecord, "launchplane_previews"),
+            )
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_path = tempfile.mkstemp(
@@ -466,7 +482,12 @@ class FilesystemRecordStore:
     ) -> RecordModel:
         record_path = self._record_path(record_type, record_id)
         payload = json.loads(record_path.read_text(encoding="utf-8"))
-        return model_type.model_validate(payload)
+        return model_type.model_validate(
+            payload,
+            context={"stored_product_profile": True}
+            if model_type is ProductRetirementRecord
+            else None,
+        )
 
     def _record_dir(self, record_type: str) -> Path:
         return self.state_dir / record_type
@@ -487,7 +508,14 @@ class FilesystemRecordStore:
         records: list[RecordModel] = []
         for record_path in sorted(record_dir.glob("*.json")):
             payload = json.loads(record_path.read_text(encoding="utf-8"))
-            records.append(model_type.model_validate(payload))
+            records.append(
+                model_type.model_validate(
+                    payload,
+                    context={"stored_product_profile": True}
+                    if model_type is ProductRetirementRecord
+                    else None,
+                )
+            )
         return tuple(records)
 
     def _product_authority_bundle_stage_root(self) -> Path:
@@ -536,9 +564,25 @@ class FilesystemRecordStore:
             return
         with self._product_authority_bundle_lock():
             profiles = self._list_product_profile_records_locked()
+            validate_preview_profile_writes(
+                profiles=profiles,
+                replacements=bundle.product_profiles,
+                previews=self._list_models_locked(PreviewRecord, "launchplane_previews"),
+            )
             require_absent_products(bundle.absent_product_ids, profiles)
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
+            if bundle.expected_runtime_key_safety_policies is not None:
+                require_runtime_key_safety_policies(
+                    bundle.expected_runtime_key_safety_policies,
+                    (
+                        item
+                        for item in self._list_models_locked(
+                            RuntimeKeySafetyPolicyRecord, "launchplane_runtime_key_safety_policies"
+                        )
+                        if item.status == "active"
+                    ),
+                )
             for model_type, record_type, expected_records in (
                 (DokployTargetRecord, "dokploy_targets", bundle.expected_dokploy_targets),
                 (DokployTargetIdRecord, "dokploy_target_ids", bundle.expected_dokploy_target_ids),
@@ -673,9 +717,12 @@ class FilesystemRecordStore:
     ) -> None:
         for write in bundle.odoo_instance_override_writes:
             record_id = f"{write.record.context}-{write.record.instance}"
-            current = self._read_model_locked(
-                OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
-            )
+            try:
+                current = self._read_model_locked(
+                    OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
+                )
+            except FileNotFoundError:
+                current = None
             if not odoo_instance_override_records_match(current, write.expected_record):
                 raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             self._stage_product_authority_bundle_write(
@@ -2326,8 +2373,12 @@ class FilesystemRecordStore:
     def write_merge_train_controller_state_record(
         self, record: MergeTrainControllerStateRecord
     ) -> Path:
+        record = require_canonical_merge_train_controller_state(record)
         record_type = "launchplane_merge_train_controller_states"
         with self._exclusive_record_lock(record_type, record.controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=record.repository, base_branch=record.base_branch
+            )
             return self._write_model_locked(
                 record_type,
                 _merge_train_controller_storage_id(record.controller_key),
@@ -2337,12 +2388,10 @@ class FilesystemRecordStore:
     def read_merge_train_controller_state_record(
         self, controller_key: str
     ) -> MergeTrainControllerStateRecord:
-        return MergeTrainControllerStateRecord.model_validate(
-            self._read_model(
-                MergeTrainControllerStateRecord,
-                "launchplane_merge_train_controller_states",
-                _merge_train_controller_storage_id(controller_key),
-            ).model_dump(mode="json")
+        return self._read_model(
+            MergeTrainControllerStateRecord,
+            "launchplane_merge_train_controller_states",
+            _merge_train_controller_storage_id(controller_key),
         )
 
     def list_merge_train_controller_state_records(
@@ -2367,6 +2416,28 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def list_merge_train_controller_state_alias_records(
+        self, *, repository: str, base_branch: str
+    ) -> tuple[MergeTrainControllerStateRecord, ...]:
+        return tuple(
+            record
+            for record in self.list_merge_train_controller_state_records()
+            if record.repository.lower() == repository.lower()
+            and record.repository != repository.lower()
+            and record.base_branch == base_branch
+        )
+
+    def _require_inert_merge_train_controller_aliases(
+        self, *, repository: str, base_branch: str
+    ) -> None:
+        detail = merge_train_controller_alias_reconciliation_detail(
+            self.list_merge_train_controller_state_alias_records(
+                repository=repository, base_branch=base_branch
+            )
+        )
+        if detail:
+            raise MergeTrainControllerReconciliationRequiredError(detail)
 
     def acquire_merge_train_controller_state_record(
         self,
@@ -2404,6 +2475,9 @@ class FilesystemRecordStore:
         )
         storage_id = _merge_train_controller_storage_id(controller_key)
         with self._exclusive_record_lock(record_type, controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=repository, base_branch=base_branch
+            )
             observed_at = _utc_now_timestamp()
             record_path = self._record_path(record_type, storage_id)
             current_record = (
@@ -2473,9 +2547,13 @@ class FilesystemRecordStore:
         expected_lease_acquired_at: str,
         lease_seconds: int,
     ) -> MergeTrainControllerStateRecord:
+        record = require_canonical_merge_train_controller_state(record)
         record_type = "launchplane_merge_train_controller_states"
         storage_id = _merge_train_controller_storage_id(record.controller_key)
         with self._exclusive_record_lock(record_type, record.controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=record.repository, base_branch=record.base_branch
+            )
             observed_at = _utc_now_timestamp()
             try:
                 current_record = self._read_model_locked(
@@ -2663,6 +2741,9 @@ class FilesystemRecordStore:
         controller_record_type = "launchplane_merge_train_controller_states"
         controller_storage_id = _merge_train_controller_storage_id(record.controller_key)
         with self._exclusive_record_lock(controller_record_type, record.controller_key):
+            self._require_inert_merge_train_controller_aliases(
+                repository=record.repository, base_branch=record.base_branch
+            )
             controller_path = self._record_path(
                 controller_record_type,
                 controller_storage_id,
@@ -3836,6 +3917,13 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def collection_read_coverage(self, collection: str) -> str:
+        return (
+            "complete"
+            if collection in {"product_profiles", "secret_records", "secret_bindings"}
+            else "unsupported"
+        )
 
     def write_secret_version(self, version: SecretVersion) -> Path:
         return self._write_model("launchplane_secret_versions", version.version_id, version)
@@ -7328,6 +7416,11 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def read_preview_pr_feedback_record(self, feedback_id: str) -> PreviewPrFeedbackRecord:
+        return self._read_model(
+            PreviewPrFeedbackRecord, "launchplane_preview_pr_feedback", feedback_id
+        )
+
     def write_preview_pr_feedback_record(self, record: PreviewPrFeedbackRecord) -> Path:
         return self._write_model("launchplane_preview_pr_feedback", record.feedback_id, record)
 
@@ -7421,6 +7514,34 @@ class FilesystemRecordStore:
             f"product-review-{purpose}", f"{repository.casefold()}#{pull_request_number}"
         ):
             yield
+
+    def list_integration_attestation_records(
+        self, *, repository: str, pull_request_number: int
+    ) -> tuple[IntegrationAttestationRecord, ...]:
+        return tuple(
+            record
+            for record in self._list_models(
+                IntegrationAttestationRecord, "launchplane_integration_attestations"
+            )
+            if record.evidence.repository == repository
+            and record.evidence.pull_request_number == pull_request_number
+        )
+
+    def write_integration_attestation_record_if_absent(
+        self, record: IntegrationAttestationRecord
+    ) -> IntegrationAttestationRecord:
+        kind = "launchplane_integration_attestations"
+        with self._exclusive_record_lock(kind, record.record_id):
+            path = self._record_path(kind, record.record_id)
+            if path.exists():
+                existing = IntegrationAttestationRecord.model_validate_json(path.read_text())
+                if existing.review != record.review or existing.statement != record.statement:
+                    raise ValueError(
+                        "Integration attestation is immutable; read back the original."
+                    )
+                return existing
+            self._write_model(kind, record.record_id, record)
+        return record
 
     def write_product_review_decision_record(self, record: ProductReviewDecisionRecord) -> Path:
         return self._write_model("launchplane_product_review_decisions", record.record_id, record)

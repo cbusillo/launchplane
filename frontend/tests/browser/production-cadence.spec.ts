@@ -1,6 +1,22 @@
 import { expect, setClockTime, test, waitForState } from "./state";
 import { DEADLINE_RETRY_INTERVAL_MS, READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
+import type { ProductEnvironmentSummary } from "../../src/generated/openapi";
 import { smokeArtifact } from "../../browser-smoke-paths.mjs";
+
+function statusAtDeadline(now: number, deadline: number, production: boolean): NonNullable<ProductEnvironmentSummary["lane_status"]> {
+  const expired = {
+    tone: production ? "danger" as const : "warning" as const,
+    sidebar_tone: production ? "danger" as const : "stale" as const,
+    description: production ? "Alert; Current production health is not verified" : "Stale evidence; awaiting current observations",
+    reasons: [], attention_reasons: production ? ["Current production health is not verified"] : [],
+    warning_reasons: [], release_healthy: false, public_observation_gap: "Public route observation incomplete",
+  };
+  return {
+    evaluated_at: new Date(now).toISOString(),
+    current: now > deadline ? expired : { tone: "verified", sidebar_tone: "verified", description: "Healthy", reasons: [], attention_reasons: [], warning_reasons: [], release_healthy: true, public_observation_gap: null },
+    transitions: now > deadline ? [] : [{ after: new Date(deadline).toISOString(), signal: expired }],
+  };
+}
 
 const fixtureBootstrapPath = "/ui/products?fixture=products";
 
@@ -65,6 +81,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
             record.freshness_status = serviceTime <= observed + cadence ? "verified" : "stale";
           }
           if ("trust_state" in record) record.trust_state = serviceTime <= observed + cadence ? "verified" : "stale";
+          if ("lane_status" in record) record.lane_status = statusAtDeadline(serviceTime, observed + cadence, true);
           Object.values(record).forEach(fresh);
         };
         fresh(copy);
@@ -95,6 +112,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
       const signal = findSignal(main);
       const attribute = view === "index" ? "data-operational" : "data-tone";
       const healthy = view === "environment" ? "pass" : "verified";
+      const unverified = view === "environment" ? "warning" : "danger";
       await expect(signal).toHaveAttribute(attribute, healthy);
       await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
       const advanceRead = async (milliseconds: number) => {
@@ -123,10 +141,10 @@ for (const view of ["index", "workspace", "environment"] as const) {
           continue;
         }
         // Observe expiry before publication and consecutive stale responses.
-        await advance(origin + (minute + 1) * cadence + 1 - browserTime, "warning");
+        await advance(origin + (minute + 1) * cadence + 1 - browserTime, unverified);
         // Publishing at +11 seconds leaves +5 and +10 second responses stale.
-        await advance(DEADLINE_RETRY_INTERVAL_MS, "warning");
-        await advance(DEADLINE_RETRY_INTERVAL_MS, "warning");
+        await advance(DEADLINE_RETRY_INTERVAL_MS, unverified);
+        await advance(DEADLINE_RETRY_INTERVAL_MS, unverified);
         await advance(DEADLINE_RETRY_INTERVAL_MS, healthy);
       }
       if (journey === "long-lived") {
@@ -156,10 +174,10 @@ for (const view of ["index", "workspace", "environment"] as const) {
       }
       // Successful GETs must not renew stopped monitor evidence.
       stoppedAt = serviceTime;
-      await advance(cadence, "warning");
+      await advance(cadence, unverified);
       // Repeated successful reads cannot renew the stopped observation, and the
       // short follow-up ends after one cadence rather than spinning forever.
-      await advance(READ_REFRESH_INTERVAL_MS, "warning");
+      await advance(READ_REFRESH_INTERVAL_MS, unverified);
       const stoppedReads = reads;
       browserTime += DEADLINE_RETRY_INTERVAL_MS * 2;
       await page.clock.runFor(DEADLINE_RETRY_INTERVAL_MS * 2);
@@ -171,7 +189,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
       // Check after the response renders too, so queued intercepted requests
       // cannot escape the earlier synchronous no-spin assertion.
       expect(reads).toBe(stoppedReads + 1);
-      await expect(signal).toHaveAttribute(attribute, "warning");
+      await expect(signal).toHaveAttribute(attribute, unverified);
       expect(mutations).toEqual([]);
     });
   }
@@ -224,6 +242,7 @@ for (const heldRead of [false, true]) {
           Object.values(record).forEach(stamp);
         };
         stamp(lane);
+        lane.lane_status = statusAtDeadline(now, expires, !testing);
       }
       return route.fulfill({ json: { status: "ok", products: [product] } });
     });
@@ -242,7 +261,7 @@ for (const heldRead of [false, true]) {
     if (heldRead) {
       await page.clock.runFor(5_001);
       await waitForState(() => Boolean(releaseRead)).toBe(true);
-      await expect(prod).toHaveAttribute("data-operational", "warning");
+      await expect(prod).toHaveAttribute("data-operational", "danger");
       await expect(testing).toHaveAttribute("data-operational", "verified");
       await page.clock.runFor(2_000);
       await expect(testing).toHaveAttribute("data-operational", "warning");
@@ -251,7 +270,7 @@ for (const heldRead of [false, true]) {
       await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
     } else {
       await advance(5_001);
-      await expect(prod).toHaveAttribute("data-operational", "warning");
+      await expect(prod).toHaveAttribute("data-operational", "danger");
       await expect(testing).toHaveAttribute("data-operational", "verified");
       await advance(2_000);
       await expect(testing).toHaveAttribute("data-operational", "warning");

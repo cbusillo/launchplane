@@ -30,6 +30,7 @@ from control_plane.workflows.provider_target_dual_write import (
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy.api import JsonObject
 from control_plane.dokploy.network_capacity import require_bridge_network_capacity
+from control_plane.production_recipient_retirement_names import require_unretired_provider_name
 
 
 PROJECT_CREATE_PATH = "/api/project.create"
@@ -396,6 +397,9 @@ def adopt_dokploy_target(
     recorded_at = updated_at.strip() or utc_now_timestamp()
     provider_payload = fetch_target_payload(host, token, target_type, normalized_target_id)
     provider_fields = _provider_fields(provider_payload=provider_payload, target_type=target_type)
+    require_unretired_provider_name(
+        record_store, str(provider_payload.get("appName") or ""), normalized_target_id
+    )
     normalized_source_git_ref = _resolved_source_git_ref(
         explicit_source_git_ref=source_git_ref,
         provider_fields=provider_fields,
@@ -567,6 +571,7 @@ def create_dokploy_application_target(
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
     normalized_target_name = _require_non_empty(target_name, "target_name")
+    require_unretired_provider_name(record_store, app_name.strip())
     normalized_project_id = project_id.strip()
     normalized_project_name = project_name.strip()
     normalized_environment_id = environment_id.strip()
@@ -676,7 +681,14 @@ def create_dokploy_application_target(
         application_payload["description"] = application_description.strip()
     if server_id.strip():
         application_payload["serverId"] = server_id.strip()
-    created_application = mutate_provider(host, token, APPLICATION_CREATE_PATH, application_payload)
+    from control_plane.production_recipient_retirement_names import provider_name_guard
+
+    with provider_name_guard(
+        record_store, app_name.strip(), generated_prefix="" if app_name.strip() else "app-"
+    ):
+        created_application = mutate_provider(
+            host, token, APPLICATION_CREATE_PATH, application_payload
+        )
     application_id = _extract_provider_id(created_application, "applicationId", "application")
 
     adoption = adopt_dokploy_target(
@@ -753,6 +765,7 @@ def create_dokploy_compose_target(
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
     normalized_target_name = _require_non_empty(target_name, "target_name")
+    require_unretired_provider_name(record_store, app_name.strip() or normalized_target_name)
     normalized_project_id = project_id.strip()
     normalized_project_name = project_name.strip()
     normalized_environment_id = environment_id.strip()
@@ -917,7 +930,10 @@ def create_dokploy_compose_target(
     }
     if compose_description.strip():
         compose_payload["description"] = compose_description.strip()
-    created_compose = mutate_provider(host, token, COMPOSE_CREATE_PATH, compose_payload)
+    from control_plane.production_recipient_retirement_names import provider_name_guard
+
+    with provider_name_guard(record_store, app_name.strip() or normalized_target_name):
+        created_compose = mutate_provider(host, token, COMPOSE_CREATE_PATH, compose_payload)
     compose_id = _extract_provider_id(created_compose, "composeId", "compose")
 
     adoption_fetch = fetch_target_payload

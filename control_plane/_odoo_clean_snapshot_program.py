@@ -46,16 +46,22 @@ def snapshot_tree_digest(path, bound=None):
     return digest.hexdigest()
 
 
-def verified_clean_snapshot(snapshot_id):
-    path = clean_snapshot_root(snapshot_id)
+def clean_snapshot_receipt(snapshot_id):
+    path = clean_snapshot_root(snapshot_id, create=False)
     if path.is_symlink() or not path.is_dir():
         raise RuntimeError('The completed clean snapshot is unavailable')
     receipt_path = path / 'receipt.json'
     if receipt_path.is_symlink() or receipt_path.stat().st_size > 4096:
         raise RuntimeError('The clean snapshot receipt is invalid')
     receipt = json.loads(receipt_path.read_text())
-    if (receipt.get('snapshot_id') != snapshot_id
-        or (path / 'database.dump').is_symlink()
+    if receipt.get('snapshot_id') != snapshot_id:
+        raise RuntimeError('Clean snapshot receipt identity changed')
+    return path, receipt
+
+
+def verified_clean_snapshot(snapshot_id):
+    path, receipt = clean_snapshot_receipt(snapshot_id)
+    if ((path / 'database.dump').is_symlink()
         or snapshot_file_digest(path / 'database.dump') != receipt.get('database_sha256')
         or snapshot_tree_digest(path / 'filestore') != receipt.get('filestore_sha256')):
         raise RuntimeError('Clean snapshot integrity readback failed')

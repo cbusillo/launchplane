@@ -80,7 +80,11 @@ from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
 )
-from control_plane.merge_train_release_hold import MergeTrainReleaseHold, merge_train_release_hold
+from control_plane.merge_train_release_hold import (
+    MergeTrainReleaseHold,
+    MergeTrainReleaseHoldStore,
+    merge_train_release_hold,
+)
 from control_plane.release_review import build_release_review
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
@@ -1496,6 +1500,116 @@ class ClientReleaseTests(unittest.TestCase):
                 self.assertEqual(self.store.list_odoo_prod_rollback_operation_records(), ())
             execute.assert_called_once()
 
+    def test_real_replacement_source_outage_keeps_accepted_release_pending_without_incident(
+        self,
+    ) -> None:
+        from control_plane.lane_movement import LaneMovementRefused
+        from control_plane.production_delivery_monitor import monitor_production_delivery_once
+        from control_plane.workflows.odoo_stable_target_replacement import (
+            execute_odoo_stable_target_replacement_apply,
+        )
+        from tests.test_odoo_stable_target_replacement import (
+            _opw_profile_with_prelaunch_policy,
+            _opw_target_record,
+            _opw_target_id_record,
+            _runtime_environment_records_for_profile,
+            _site_environment,
+            _request,
+        )
+        from functools import partial
+        from control_plane.contracts.odoo_stable_target_replacement import (
+            LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+        )
+
+        current = self.store.read_product_profile_record(PRODUCT)
+        candidate = self.store.read_artifact_manifest("artifact-testing")
+        candidate.odoo_install_modules = LAUNCHPLANE_REQUIRED_ODOO_MODULES
+        self.store.write_artifact_manifest(candidate)
+        configured = _opw_profile_with_prelaunch_policy(enabled=True)
+        current.expected_config = configured.expected_config
+        current.runtime_port = configured.runtime_port
+        current.health_path = configured.health_path
+        current.lanes[1].odoo_data_policy = configured.lanes[0].odoo_data_policy
+        self.store.write_product_profile_record(current)
+        self.store.write_dokploy_target_record(
+            _opw_target_record().model_copy(update={"context": CONTEXT})
+        )
+        self.store.write_dokploy_target_id_record(
+            _opw_target_id_record().model_copy(update={"context": CONTEXT})
+        )
+        (runtime,) = _runtime_environment_records_for_profile(
+            current.model_copy(update={"lanes": (current.lanes[1],)})
+        )
+        self.store.write_runtime_environment_record(runtime)
+        runtime_values = {key: str(value) for key, value in runtime.env.items()}
+        accepted, source = self.queued_promotion()
+        original_records = self.store.list_deployment_records()
+        transport = Mock()
+        transport.get_json.return_value = {"sha": HEAD}
+        with (
+            self.promotion_providers(),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply",
+                side_effect=partial(
+                    execute_odoo_stable_target_replacement_apply, dokploy_request=_request
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.example", "test-token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "\n".join(f"{key}={value}" for key, value in runtime_values.items()),
+                    "appName": "opw-prod-app",
+                    "composeFile": "services: {}",
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "old-deploy", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=_site_environment(dict(runtime_values)),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.require_forward_lane_build",
+                side_effect=LaneMovementRefused("source_order_unavailable"),
+            ) as source_check,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_compose.sync_dokploy_compose_raw_source"
+            ) as dispatch,
+        ):
+            self.run_release_worker()
+            operation = self.store.read_odoo_prod_promotion_operation_record(source.operation_id)
+            self.assertEqual(operation.status, "pending", operation.error_message)
+            source_check.assert_called_once()
+            dispatch.assert_not_called()
+        operation = self.store.read_odoo_prod_promotion_operation_record(source.operation_id)
+        self.assertEqual(operation.status, "pending", operation.error_message)
+        self.assertEqual(
+            operation.error_code,
+            LaneMovementRefused("source_order_unavailable").record_failure().code,
+        )
+        self.assertEqual(self.store.list_deployment_records(), original_records)
+        assert operation.authorization is not None
+        self.assertEqual(operation.authorization.release_decision_record_id, accepted.record_id)
+        self.assertEqual(self.store.list_odoo_prod_rollback_operation_records(), ())
+        run = read_client_release_run(
+            store=self.store,
+            profile=self.store.read_product_profile_record(PRODUCT),
+            decision=accepted,
+        )
+        assert run is not None
+        self.assertNotEqual(run.state, "stopped")
+        monitor_production_delivery_once(
+            self.store,
+            transport_factory=Mock(return_value=transport),
+        )
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+
     def promotion_providers(
         self,
         *,
@@ -2264,6 +2378,13 @@ class ClientReleaseTests(unittest.TestCase):
 
         self.assertEqual(merge_train_release_hold(self.store, "Example/Site"), held)
         self.assertEqual(merge_train_release_hold(self.store, "example/shared-addons"), held)
+        artifact = self.store.read_artifact_manifest(accepted.checklist.candidate.artifact_id)
+        repositories = {
+            image.source_repository for image in artifact.build_provenance.base_images
+        } | {tool.source_repository for tool in artifact.build_provenance.build_tools}
+        store = cast(MergeTrainReleaseHoldStore, cast(object, self.store))
+        for repository in repositories:
+            self.assertEqual(merge_train_release_hold(store, repository), held)
         self.assertIsNone(merge_train_release_hold(self.store, "example/launchplane"))
         (backup_id,) = self.advance()
         self.assertEqual(merge_train_release_hold(self.store, "example/site"), held)

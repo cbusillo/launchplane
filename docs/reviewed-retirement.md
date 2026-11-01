@@ -20,11 +20,18 @@ context cannot be substituted. This is separate from product-config's merge
 writer and does not change its ownership or global-target refusal.
 
 The authenticated Director agent can prepare previews and read back results.
-An existing admin can review with `secret.list`. Apply requires
-the signed-in immutable-ID administrator and existing `product_config.apply`
-authority for the exact selected scope, product and context. A `local_admin`,
-workflow, `local_operator` or terminal token cannot apply, even with a matching preview.
-Browser origin/fetch metadata/CSRF checks still apply. No new grant is installed.
+An existing admin can review with `secret.list`. Apply requires existing
+`product_config.apply` authority for the exact selected scope, product and
+context. The signed-in immutable-ID administrator keeps its existing scopes.
+The authenticated Director `local_operator` can also apply an instance-scoped
+removal for an exclusively owned, enabled product preview context with
+`instance: preview`. That context/instance pair must not alias a stable lane.
+This narrow path for the Director's agent rejects testing, production, context and global
+selections; other caller credentials, `local_admin`, workflow and terminal credentials
+cannot use it. The trusted Director marker alone does not make a terminal token
+writable, and standing read authority never supplies the required write grant.
+The same scope and permission checks run before receipt replay. Browser
+origin/fetch metadata/CSRF checks still apply. No new grant is installed.
 
 Dry-run saves a service-owned review containing the complete original record,
 request, reviewer and active authority binding. Its wire response contains only
@@ -57,6 +64,57 @@ last-value deletions without retirement intent keep the previous record format.
 Managed-secret records and bindings are untouched. An inherited value can
 become visible after a stored override is removed; the preview is not a claim
 that a key is absent across all layers or from the provider.
+
+Exact non-preview instance reviews also return `instance_plain_setting_effects`: for each
+selected key, whether the context supplies the same string value, a different
+value, or no value after the lane override is removed. This comparison follows
+the current site plain-setting layers, which exclude global settings. It does
+not evaluate preview templates, target overrides, managed secrets, provider
+leftovers, actual runtime consumers or legacy global-inclusive resolvers.
+Preview, context and global reviews omit this comparison and still require their own
+consumer and inheritance qualification.
+
+The service compares selected context values privately and binds them to the
+review with a nonce-protected `context_values_sha256`. Apply rechecks this
+binding under the existing authority locks, including when an absent context
+value has since appeared. A changed fallback requires a fresh review; unrelated
+context keys do not invalidate it. Older non-preview instance reviews also require a fresh
+review before applying. The comparison stays with the original review in
+historical receipts and readback; it is not a fresh runtime observation.
+
+Global dry runs also return `consumer_inventory`, a bounded names-only observation
+of every stored runtime record, product lane and preview profile, target overlay,
+and matching runtime secret-binding metadata. Enumeration includes inactive
+profiles, undeclared contexts, historical lane names and global bindings. Preview
+profile matches describe explicit overrides only; they do not resolve the
+template. Matching runtime/secret requirements and preview key policies are
+listed separately, including omitted/copied/required/template URL/domain names.
+An unspecified requirement context applies to all product lanes; it is not
+evidence of a global plain-setting source. Declarations do not prove runtime
+consumption. Lane entries have null `selected_keys` because their effective values
+have not been evaluated. An empty list for a source means no selected name in
+that source, not an unused setting. Counts describe the complete enumerated
+tables; each displayed consumer and authority list is capped separately and
+reports truncation.
+Matching entries appear before unmatched entries. The page shows displayed and
+total counts, so even a list containing only matches cannot imply full coverage.
+
+The inventory also lists every saved reconciliation request and production
+recipient, including completed and failed records. These are potential authority
+consumers, not proof that a selected name occurs in their captured authority.
+Resolve a held record through its original operation; never replace its key or
+capture new authority to bypass drift. Retained operation payloads, preview
+generations, baked images, provider environments, managed-secret resolution and
+external CLI consumers remain explicitly unqualified. This is no complete-fleet
+runtime-consumption verdict.
+
+This observation is collected after the saved review, is outside its digest,
+and is neither atomic across tables nor revalidated by Apply. It is not saved in
+the review or repeated on Apply/readback. It changes none of their existing
+guards. Obtain current operational qualification independently before removal.
+The signed-in page displays this evidence on global reviews. Terminal clients
+that omit the additive field cannot claim inventory coverage; use the page or
+update the bounded client in its owning repository.
 
 The change and its completion receipt commit in one transaction. Retry an
 uncertain reply only with its original request and key. A confirmed replay
@@ -162,12 +220,16 @@ uses the existing removal endpoint. Enter the product, exact stored scope,
 context/lane when applicable, selected names and reason. **Review removal** saves
 a fresh service review and shows the exact selected names, survivors, retirement
 intent and reader/rollback requirement. Changing any field invalidates that review.
-No stored values, secret bindings or rollback preimages are displayed.
+No stored values, secret values or rollback preimages are displayed.
+Non-preview instance reviews display the stored context fallback comparison alongside the
+selected keys. This evidence narrows the stored-value question without
+attesting runtime use or qualifying a removal by itself.
 
 Before confirming, qualify the actual runtime consumers and the effective value
 that would be inherited from broader scopes. A context removal can change every
 lane without a more specific override; a global removal can reach other products.
-The page does not discover or attest those dependencies. Follow the live-site and
+The global inventory identifies stored sources but does not attest actual
+consumption or effective values. Follow the live-site and
 Client boundaries in DIRECTION.md before approving the exact change.
 
 **Remove reviewed settings** uses the signed-in administrator's existing authority,

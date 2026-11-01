@@ -9,14 +9,20 @@ from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 
+from control_plane.contracts.production_recipient import ProductionRecipientRecord
+from control_plane.production_recipient_continuation import (
+    RecipientContinuationRequest,
+    continuation_plan,
+    supersede_recipient,
+)
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
-from control_plane.contracts.runtime_identity import runtime_identity_env
-from control_plane.production_recipient import custody, runtime_values
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
+from control_plane.production_recipient import custody
 from control_plane.production_recipient_cutover import (
     RecipientCutoverAdapter,
     RecipientCutoverRequest,
@@ -28,6 +34,7 @@ from control_plane.runtime_environments import SiteRuntimeEnvironment
 from control_plane.dokploy import api
 from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 from control_plane.workflows.production_backup_gate import enqueue_production_backup_gate
+from control_plane.workflows.dokploy_deploy import update_dokploy_target_artifact
 from control_plane.workflows.production_backup_gate_operation_worker import (
     run_production_backup_gate_operation_worker_once,
 )
@@ -329,14 +336,16 @@ class RecipientCutoverTests(unittest.TestCase):
             )
 
     def deploy(self, **kwargs: Any) -> None:
-        kwargs["before_provider_mutation"]("target_update")
         current = custody(self.store, self.fixture.product, self.fixture.context)
         assert current is not None
-        self.fixture.provider[current.target_id]["env"] = api.serialize_dokploy_env_text(
-            {
-                **runtime_values(self.store, self.fixture.root, current),
-                **runtime_identity_env(kwargs["runtime_identity"]),
-            },
+        update_dokploy_target_artifact(
+            host="https://provider.invalid",
+            token="fixture-token",
+            target_type="compose",
+            target_id=current.target_id,
+            artifact_id=current.image_reference,
+            runtime_identity=kwargs["runtime_identity"],
+            before_provider_mutation=kwargs["before_provider_mutation"],
         )
         kwargs["before_provider_mutation"]("deploy_trigger")
         self.assertFalse(self.old_running)
@@ -952,6 +961,18 @@ class RecipientCutoverTests(unittest.TestCase):
         assert current is not None
         self.assertEqual(current.phase, "preflight_refused")
         self.assertTrue(self.old_running)
+        self.assertTrue(current.execution.get("runtime_identity"))
+        self.assertNotIn("trigger_requested_at", current.execution)
+        provider = self.fixture.provider[current.target_id]
+        original_environment = str(provider["env"])
+        expected = api.parse_dokploy_env_text(original_environment)
+        for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS:
+            with self.subTest(missing_before_dispatch=key):
+                provider["env"] = api.serialize_dokploy_env_text(
+                    {name: value for name, value in expected.items() if name != key}
+                )
+                self.fixture.adapter.verify_configuration(current)
+        provider["env"] = original_environment
         self.assertEqual(self.run_release().response_status_code, 202)
 
     def test_missing_peer_target_does_not_block_an_unrelated_products_effect(self) -> None:
@@ -1067,26 +1088,9 @@ class RecipientCutoverTests(unittest.TestCase):
         assert current is not None
         self.assertEqual(current.phase, "bootstrapping")
 
-    def test_settled_failed_bootstrap_can_supersede_with_both_writer_hosts_fenced(self) -> None:
-        from control_plane.production_recipient_continuation import (
-            RecipientContinuationRequest,
-            continuation_plan,
-            supersede_recipient,
-        )
-        from control_plane.integration_allowances import canonical_sha256
-
-        self.test_terminal_bad_health_stops_only_new_writer_and_restores_old()
-        current = custody(self.store, self.record.product, self.record.context)
-        assert current is not None
-        request = RecipientContinuationRequest(
-            context=current.context,
-            original_key=current.original_key,
-            expected_custody_sha256=canonical_sha256(current.model_dump(mode="json")),
-            replacement=current.request.model_copy(
-                update={"mode": "dry-run", "reviewed_plan_sha256": ""}
-            ),
-            reason="Retain failed bootstrap and requalify a new generation",
-        )
+    def continue_preparation(
+        self, current: ProductionRecipientRecord, request: RecipientContinuationRequest
+    ) -> tuple[ProductionRecipientRecord, Mock]:
         draft = continuation_plan(
             self.fixture.root, self.store, current.product, request, current.actor, current.scope
         )[2]
@@ -1107,6 +1111,24 @@ class RecipientCutoverTests(unittest.TestCase):
             )
         replacement = custody(self.store, current.product, current.context)
         assert replacement is not None
+        return replacement, fence
+
+    def test_settled_failed_bootstrap_can_supersede_with_both_writer_hosts_fenced(self) -> None:
+        from control_plane.integration_allowances import canonical_sha256
+
+        self.test_terminal_bad_health_stops_only_new_writer_and_restores_old()
+        current = custody(self.store, self.record.product, self.record.context)
+        assert current is not None
+        request = RecipientContinuationRequest(
+            context=current.context,
+            original_key=current.original_key,
+            expected_custody_sha256=canonical_sha256(current.model_dump(mode="json")),
+            replacement=current.request.model_copy(
+                update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+            ),
+            reason="Retain failed bootstrap and requalify a new generation",
+        )
+        replacement, fence = self.continue_preparation(current, request)
         self.assertEqual(replacement.original_key, current.original_key)
         self.assertNotEqual(replacement.namespace, current.namespace)
         self.assertEqual(replacement.prior_attempts[-1]["execution"], current.execution)

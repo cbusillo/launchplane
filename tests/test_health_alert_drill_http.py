@@ -2,7 +2,10 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.health_alert_drill import DRILL_ROUTE
-from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.http_app import (
+    _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE,
+    create_launchplane_fastapi_app,
+)
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from tests.http_app_test_support import (
     _local_operator_bearer_config,
@@ -14,6 +17,79 @@ from tests import test_health_alert_drill as drill_tests
 
 
 class HealthAlertDrillHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_director_drill_does_not_require_or_authorize_real_monitor_execution(
+        self,
+    ) -> None:
+        fixture = drill_tests.HealthAlertDrillTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.write_policy()
+        config = _local_operator_bearer_config().model_copy(
+            update={
+                "terminal_agent_token": "terminal-test-token",
+                "terminal_agent_subject": "terminal-test-agent",
+                "terminal_agent_token_label": "terminal-test-label",
+            }
+        )
+        policy = LaunchplaneAuthzPolicy(schema_version=2)
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=policy,
+            record_store_factory=lambda: fixture.store,
+            bearer_identity_config=config,
+        )
+        headers = {"Authorization": "Bearer local-operator-token"}
+        with (
+            patch(
+                "control_plane.health_alert_drill.public_ingress_notification_drivers",
+                return_value=fixture.drivers,
+            ),
+            patch("control_plane.http_routes.health_alert_drill.time", return_value=fixture.now),
+        ):
+            async with lifespan_client(app) as client:
+                read = await client.get(
+                    DRILL_ROUTE, params=fixture.scope.model_dump(), headers=headers
+                )
+                self.assertEqual(read.status_code, 200)
+                payload = {
+                    **fixture.scope.model_dump(),
+                    "mode": "send",
+                    "window": read.json()["drill"]["window"],
+                }
+                terminal = await client.post(
+                    DRILL_ROUTE,
+                    json=payload,
+                    headers={"Authorization": "Bearer terminal-test-token"},
+                )
+                anonymous = await client.post(DRILL_ROUTE, json=payload)
+                self.assertEqual(terminal.status_code, 403)
+                self.assertEqual(anonymous.status_code, 401)
+                self.assertFalse(fixture.posts)
+                monitor = await client.post(
+                    _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE,
+                    json={},
+                    headers=headers,
+                )
+                self.assertEqual(monitor.status_code, 403, monitor.text)
+                sent = await client.post(DRILL_ROUTE, json=payload, headers=headers)
+                self.assertEqual(sent.status_code, 200, sent.text)
+                receipt = sent.json()["drill"]["receipt"]
+                self.assertEqual(receipt["status"], "delivered")
+                replay = await client.post(DRILL_ROUTE, json=payload, headers=headers)
+                readback = await client.get(
+                    DRILL_ROUTE,
+                    params={**fixture.scope.model_dump(), "window": payload["window"]},
+                    headers=headers,
+                )
+        self.assertEqual(replay.json()["drill"]["receipt"], receipt)
+        self.assertEqual(readback.json()["drill"]["receipt"], receipt)
+        self.assertEqual(len(fixture.posts), len(fixture.policy.destinations))
+        self.assertFalse(fixture.store.list_public_ingress_incident_records())
+        self.assertFalse(fixture.store.list_outbox_delivery_records())
+        self.assertEqual(
+            fixture.store.read_product_profile_record(fixture.scope.product), fixture.profile
+        )
+
     @scoped_agent_test
     async def test_read_and_default_dry_run_cannot_send_and_scoped_caller_is_denied(self) -> None:
         fixture = drill_tests.HealthAlertDrillTests()

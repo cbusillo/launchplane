@@ -1,11 +1,10 @@
-import hashlib
-import json
 import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 ProductPreviewTlsMode = Literal["dry-run", "apply"]
@@ -73,6 +72,10 @@ def build_product_preview_tls_plan(
     if profile.driver_id != "odoo":
         raise ProductPreviewTlsDriverError("Product preview TLS policy requires the Odoo driver.")
     current_value = profile.preview.domain_certificate_type
+    if current_value != request.domain_certificate_type:
+        updated_product_preview_tls_profile(
+            profile=profile, request=request, updated_at=profile.updated_at
+        )
     plan_evidence = {
         "schema_version": 1,
         "product": profile.product,
@@ -83,13 +86,7 @@ def build_product_preview_tls_plan(
         "source_label": PRODUCT_PREVIEW_TLS_SOURCE,
         "reason": request.reason,
     }
-    plan_sha256 = hashlib.sha256(
-        json.dumps(
-            plan_evidence,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    plan_sha256 = nonvalidating_compact_sorted_json_sha256(plan_evidence)
     return ProductPreviewTlsPlan(
         mode=request.mode,
         product=profile.product,

@@ -1,6 +1,7 @@
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from datetime import datetime, timezone
 import base64
+import click
 import hashlib
 import fcntl
 import io
@@ -18,7 +19,14 @@ import yaml
 
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
 from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
-from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.copy_readback_diagnostics import (
+    COPY_FAILURE_EXIT_MARKER,
+    COPY_FAILURE_EVIDENCE_MARKER,
+    COPY_FAILURE_STAGE_MARKER,
+    COPY_FAILURE_STATE_DIRECTORY,
+    CopyFailureStage,
+    ReadbackPredicate,
+)
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_script
@@ -28,13 +36,202 @@ from control_plane.dokploy.source import (
     DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS,
     DokployTargetDefinition,
 )
-from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY, render_odoo_raw_compose_file
+from control_plane.dokploy.compose import (
+    ODOO_DATABASE_IMAGE,
+    ODOO_DATABASE_DATA_DIRECTORY,
+    render_odoo_raw_compose_file,
+)
 from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
-from control_plane.preview_filestore import PREPARE_PREVIEW_FILESTORE_PROGRAM
+from control_plane.preview_filestore import (
+    PREPARE_PREVIEW_FILESTORE_PROGRAM,
+    PreviewRestoreCustodyUnknown,
+    PreviewRestoreDisposalRequired,
+    prepare_preview_filestore,
+)
+from control_plane.odoo_testing_usage import MAX_CREDENTIAL_CANDIDATES, credential_digest
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 
 
 class PreviewCleanSnapshotTests(unittest.TestCase):
+    containers: dict[str, dict[str, Any]]
+
+    def preview_usage(
+        self,
+        *,
+        integration_ok: bool = True,
+        changed: bool = False,
+        health_tick: bool = False,
+        stopped: bool = False,
+        parameters: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        from control_plane.dokploy.compose import ODOO_WEB_START_COMMAND
+        from control_plane.odoo_testing_usage import ODOO_TESTING_USAGE_HOST_PROGRAM
+
+        identity = {
+            "product": "fixture",
+            "instance": "preview-target",
+            "preview_generation_id": "serving",
+        }
+        for service, container in self.containers.items():
+            container["State"] = {"Running": True, "StartedAt": "fixture"}
+            if service != "database":
+                container["Config"]["Cmd"] = [ODOO_WEB_START_COMMAND]
+                container["Config"]["Env"].append("PLATFORM_CONTEXT=fixture")
+                if not any(
+                    value.startswith("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=")
+                    for value in container["Config"]["Env"]
+                ):
+                    container["Config"]["Env"].append(
+                        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + json.dumps(identity)
+                    )
+        if stopped:
+            self.containers["web"]["State"]["Running"] = False
+        payload = {
+            "context": "fixture",
+            "instance": "preview",
+            "project": self.project,
+            "container_program": "fixture-usage",
+            "preview_spec": {
+                "generation": {"instance": "preview", "namespace": self.project},
+                "compose_project": self.project,
+                "database_name": self.database,
+                "image_reference": self.image,
+                "usage_only": True,
+                "preview_volumes": {
+                    "data": "preview-data",
+                    "database": "preview-db",
+                    "logs": "preview-logs",
+                },
+                "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
+                "runtime_identity": identity,
+                "credential_nonce": "fixture-nonce",
+                "forbidden_credential_keys": [],
+                "integration_spec": "fixture-policy",
+                "integration_program": "fixture-integrations",
+            },
+        }
+
+        def read(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            self.assertIn(
+                arguments[:2],
+                (["docker", "ps"], ["docker", "inspect"], ["docker", "volume"], ["docker", "exec"]),
+            )
+            if arguments[1] != "exec":
+                return self.command(arguments, **kwargs)
+            if "psql" in " ".join(arguments):
+                frame_bytes = json.dumps(list((parameters or {}).items())).encode()
+            elif kwargs.get("input") == b"fixture-integrations":
+                frame_bytes = (
+                    b"integration_readback_ok=true\n"
+                    if integration_ok
+                    else b"integration_readback_ok=false\n"
+                )
+            else:
+                frame_bytes = json.dumps(
+                    {"type": "complete", "recent_signins": False, "authenticated_sessions": True}
+                ).encode()
+                if changed:
+                    self.containers["script-runner"]["Config"]["Env"].append(
+                        "OTHER_SETTING=changed"
+                    )
+                if health_tick:
+                    for value in self.containers.values():
+                        value["State"]["Health"] = {
+                            "Status": "healthy",
+                            "Log": [{"End": "new-tick"}],
+                        }
+            return subprocess.CompletedProcess(arguments, 0, stdout=frame_bytes, stderr=b"")
+
+        output = io.StringIO()
+        with (
+            patch("pathlib.Path.home", return_value=self.root),
+            patch("subprocess.run", side_effect=read),
+            patch(
+                "sys.argv",
+                ["probe", base64.b64encode(json.dumps(payload).encode()).decode(), "frame:"],
+            ),
+            redirect_stdout(output),
+        ):
+            exec(ODOO_TESTING_USAGE_HOST_PROGRAM, {"__name__": "__main__"})
+        self.assertNotIn("private-production-password", output.getvalue())
+        result = json.loads(output.getvalue().removeprefix("frame:"))
+        assert isinstance(result, dict)
+        return result
+
+    def test_preview_usage_reuses_physical_guard_and_refuses_credentials_ports_and_drift(
+        self,
+    ) -> None:
+        import copy
+
+        original = copy.deepcopy(self.containers)
+        for scenario, expected in (
+            ("complete", ""),
+            ("health_tick", ""),
+            ("credentials", ""),
+            ("ports", "resource_" + ReadbackPredicate.PORTS),
+            ("identity", "resource_" + ReadbackPredicate.RUNTIME_IDENTITY),
+            ("integrations", "resource_" + ReadbackPredicate.INTEGRATIONS),
+            ("changed", "runtime_changed"),
+            ("stopped", "serving_container_stopped"),
+        ):
+            with self.subTest(scenario=scenario):
+                self.containers = copy.deepcopy(original)
+                if scenario == "credentials":
+                    self.containers["database"]["Config"]["Env"].append(
+                        "POSTGRES_PASSWORD=private-production-password"
+                    )
+                elif scenario == "ports":
+                    self.containers["web"]["HostConfig"] = {
+                        "PortBindings": {"8069/tcp": [{"HostPort": "8069"}]}
+                    }
+                elif scenario == "identity":
+                    self.containers["web"]["Config"]["Env"].append(
+                        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON={}"
+                    )
+                result = self.preview_usage(
+                    integration_ok=scenario != "integrations",
+                    changed=scenario == "changed",
+                    health_tick=scenario == "health_tick",
+                    stopped=scenario == "stopped",
+                )
+                if expected:
+                    self.assertTrue(result["unavailable"], result)
+                    self.assertEqual(result["reason_code"], expected)
+                    self.assertNotIn("resources_qualified", result)
+                else:
+                    self.assertIs(result["resources_qualified"], True)
+                    self.assertIs(result["authenticated_sessions"], True)
+                    if scenario == "credentials":
+                        self.assertIn(
+                            credential_digest("fixture-nonce", "private-production-password"),
+                            result["credential_hashes"],
+                        )
+
+    def test_preview_parameter_values_are_inventoried_only_on_the_pinned_database_image(
+        self,
+    ) -> None:
+        result = self.preview_usage(parameters={"custom.api_token": "private-production-password"})
+        self.assertIn(
+            credential_digest("fixture-nonce", "private-production-password"),
+            result["credential_hashes"],
+        )
+        self.containers["database"]["Config"]["Image"] = "untrusted.invalid/database:latest"
+        result = self.preview_usage()
+        self.assertTrue(result["unavailable"])
+        self.assertEqual(result["reason_code"], "resource_" + ReadbackPredicate.IMAGE)
+
+    def test_preview_inventory_bound_applies_to_the_combined_containers_and_parameters(
+        self,
+    ) -> None:
+        for index, container in enumerate(self.containers.values()):
+            container["Config"]["Env"].extend(
+                f"VALUE_{number}=fixture-{index}-{number}"
+                for number in range(MAX_CREDENTIAL_CANDIDATES // 3)
+            )
+        result = self.preview_usage(parameters={"custom.api_token": "private-production-password"})
+        self.assertTrue(result["unavailable"])
+        self.assertEqual(result["reason_code"], "credential_inventory_unavailable")
+
     def setUp(self) -> None:
         temporary = self.enterContext(TemporaryDirectory())
         self.root = Path(temporary).resolve()
@@ -91,7 +288,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.overlay = self.root / "runner-overlay"
         self.overlay.mkdir()
         self.volume_created_at = datetime.now(timezone.utc).isoformat()
-        self.containers: dict[str, dict[str, Any]] = {
+        self.containers = {
             role: {
                 "Id": role,
                 "ExecIDs": None,
@@ -125,6 +322,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             }
             for role in ("database", "web", "script-runner")
         }
+        self.containers["database"]["Config"]["Image"] = ODOO_DATABASE_IMAGE
         self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.overlay)}}
         self.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"] = {}
         self.private = self.data.parent / "launchplane-preview-filestore"
@@ -135,6 +333,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             "device": "overlay",
             "o": f"lowerdir={self.source}/filestore,upperdir={self.private}/upper,workdir={self.private}/work,userxattr",
         }
+        self.mounted_filestore = self.root / "runner-filestore"
+        (self.data / "filestore").mkdir()
         self.remount_filestore()
         self.volume_options = {"preview-data-filestore": self.overlay_options}
         self.volume_labels = {
@@ -155,7 +355,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             )
 
     def remount_filestore(self) -> None:
-        destination = self.data / "filestore" / self.database
+        destination = self.mounted_filestore
         if destination.exists():
             shutil.rmtree(destination)
         shutil.copytree(self.source / "filestore", destination)
@@ -215,18 +415,43 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         assert isinstance(result, dict)
         return result
 
+    def assert_native_refusal(self, frame: dict[str, Any], expected: type[Exception]) -> None:
+        from control_plane.dokploy import native_copy_stream
+        from tests.test_odoo_testing_native_source import Connection
+
+        with (
+            patch.object(
+                native_copy_stream, "connect", return_value=nullcontext(Connection(frame))
+            ),
+            self.assertRaises(expected) as caught,
+        ):
+            prepare_preview_filestore(
+                host="https://provider.invalid",
+                token="fixture",
+                server_id=self.snapshot.server_id,
+                project=self.project,
+                data_volume="preview-data",
+                database_volume="preview-db",
+                logs_volume="preview-logs",
+                database_name=self.database,
+                snapshot=self.snapshot,
+                apply=False,
+                dispatch_guard=lambda dispatch: dispatch(),
+            )
+        self.assertIs(type(caught.exception), expected)
+
     def execute_script(self, script: str) -> str:
-        program = script.partition("<<'LP_PREVIEW_SNAPSHOT'\n")[2].rsplit(
-            "\nLP_PREVIEW_SNAPSHOT", 1
-        )[0]
         output = io.StringIO()
+        self.script_output = output
         with (
             patch("pathlib.Path.home", return_value=self.root),
             patch("subprocess.run", side_effect=self.command),
             patch("time.sleep"),
             redirect_stdout(output),
         ):
-            exec(compile(program, "<preview-snapshot-fixture>", "exec"), {})
+            from tests.support.host_package import execute_host_schedule
+
+            execute_host_schedule(script)
         return output.getvalue()
 
     def command(self, arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
@@ -393,7 +618,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         output = self.run_script()
         self.assertIn("clean_preview_snapshot_restored=true", output.splitlines())
         self.assertEqual(
-            (self.data / "filestore" / self.database / "attachment").read_bytes(),
+            (self.mounted_filestore / "attachment").read_bytes(),
             (self.source / "filestore/attachment").read_bytes(),
         )
         self.assertIn(["docker", "start", "web"], self.calls)
@@ -416,19 +641,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertEqual(reused, created)
         self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
         self.volumes.pop("preview-data-filestore")
-        reconstructed = self.prepare_filestore(snapshot=newer, require_existing=True)
-        self.assertEqual(reconstructed, created)
-        self.assertEqual(
-            self.volume_labels["preview-data-filestore"]["io.launchplane.preview-snapshot"],
-            self.snapshot.snapshot_id,
-        )
+        self.assertEqual(self.prepare_filestore(snapshot=newer, require_existing=True), created)
         library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
         exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
-        attempts = self.source.parent / "preview-attempts"
-        for attempt in attempts.glob("*.json"):
-            payload = json.loads(attempt.read_text())
-            payload["completed"] = True
-            attempt.write_text(json.dumps(payload))
         with patch("pathlib.Path.home", return_value=self.root):
             library["retire_clean_snapshots"](
                 {
@@ -438,13 +653,6 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             )
             self.assertTrue(self.source.is_dir())
             self.volumes.pop("preview-data-filestore")
-            library["retire_clean_snapshots"](
-                {
-                    "copy_binding_sha256": "c" * 64,
-                    "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
-                }
-            )
-            self.assertTrue(self.source.is_dir())
             for path in self.volumes.values():
                 shutil.rmtree(path)
             self.volumes.clear()
@@ -507,6 +715,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         result = self.prepare_filestore(snapshot=self.snapshot, require_existing=True)
         self.assertEqual(result["type"], "complete")
         self.assertIsNotNone(result["declaration"])
+        self.remount_filestore()
+        self.run_script()
+        self.assertIn(["docker", "start", "web"], self.calls)
 
     def test_fresh_generation_preserves_surviving_upper_before_any_data_changes(self) -> None:
         attachment = self.private / "upper" / "staff-attachment"
@@ -529,6 +740,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def test_preparation_preserves_legacy_database_and_filestore(self) -> None:
         self.volumes.pop("preview-data-filestore")
+        legacy = self.data / "filestore" / self.database / "legacy-attachment"
+        legacy.parent.mkdir()
+        legacy.write_bytes(b"needed legacy data")
         self.present = True
         result = self.prepare_filestore(snapshot=self.snapshot)
         self.assertEqual(result["type"], "failed")
@@ -540,11 +754,22 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.present = False
         result = self.prepare_filestore(snapshot=self.snapshot)
         self.assertEqual(result["type"], "failed")
-        self.assertTrue((self.data / "filestore" / self.database / "attachment").is_file())
+        self.assertEqual(legacy.read_bytes(), b"needed legacy data")
+
+    def test_hidden_legacy_filestore_cannot_become_disposable_restore_evidence(self) -> None:
+        legacy = self.data / "filestore" / self.database / "legacy-attachment"
+        legacy.parent.mkdir()
+        legacy.write_bytes(b"only retained legacy attachment")
+        self.assertEqual(self.prepare_filestore(snapshot=self.snapshot)["type"], "failed")
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertEqual(legacy.read_bytes(), b"only retained legacy attachment")
+        self.assertFalse((self.source.parent / "preview-attempts").exists())
+        self.assertFalse(any(call[1] in {"stop", "start", "cp"} for call in self.calls))
 
     def test_overlay_declaration_does_not_admit_an_unknown_database(self) -> None:
         self.present = True
-        attachment = self.data / "filestore" / self.database / "attachment"
+        attachment = self.mounted_filestore / "attachment"
         original = attachment.read_bytes()
         result = self.prepare_filestore(snapshot=self.snapshot, apply=False)
         self.assertEqual(result["type"], "failed")
@@ -554,7 +779,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def test_completed_native_custody_preserves_edits_with_a_newer_snapshot(self) -> None:
         self.run_script()
-        attachment = self.data / "filestore" / self.database / "staff-attachment"
+        attachment = self.mounted_filestore / "staff-attachment"
         attachment.write_bytes(b"staff edits after native completion")
         newer = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
         self.calls.clear()
@@ -566,18 +791,92 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
         self.assertFalse(any(call[:2] == ["docker", "cp"] for call in self.calls))
 
-    def test_owned_unfinished_restore_admits_and_resumes_its_pinned_source(self) -> None:
+    def test_interrupted_restore_requires_disposal_before_rebuilding(self) -> None:
         self.killed_during_restore = True
         with self.assertRaises(RuntimeError):
             self.run_script()
         self.killed_during_restore = False
+        self.assert_native_refusal(
+            self.prepare_filestore(snapshot=self.snapshot, apply=False),
+            PreviewRestoreDisposalRequired,
+        )
         newer = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
+        self.assert_native_refusal(
+            self.prepare_filestore(snapshot=newer, apply=False),
+            PreviewRestoreDisposalRequired,
+        )
+        attempt = next((self.source.parent / "preview-attempts").glob("*.json"))
+        legacy = json.loads(attempt.read_text())
+        legacy.pop("started")
+        attempt.write_text(json.dumps(legacy))
+        self.assert_native_refusal(
+            self.prepare_filestore(snapshot=self.snapshot, apply=False),
+            PreviewRestoreCustodyUnknown,
+        )
         self.calls.clear()
-        self.assertEqual(self.prepare_filestore(snapshot=newer, apply=False)["type"], "complete")
+        self.assert_native_refusal(
+            self.prepare_filestore(snapshot=newer, apply=False),
+            PreviewRestoreCustodyUnknown,
+        )
+        with self.assertRaises(RuntimeError):
+            self.run_script(snapshot=newer)
+        self.assertTrue(self.present)
         self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
-        self.run_script(snapshot=newer)
-        self.assertIn(["docker", "start", "web"], self.calls)
-        self.assertTrue(any("dropdb " in " ".join(call) for call in self.calls))
+        self.assertFalse(any(call[1] in {"stop", "start", "cp"} for call in self.calls))
+
+    def test_native_transport_preserves_interrupted_restore_classification(self) -> None:
+        from control_plane.dokploy import native_copy_stream
+
+        self.killed_during_restore = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.killed_during_restore = False
+        receipt = next((self.source.parent / "preview-attempts").glob("*.json"))
+        for legacy, refusal in (
+            (False, PreviewRestoreDisposalRequired),
+            (True, PreviewRestoreCustodyUnknown),
+        ):
+            with self.subTest(legacy=legacy):
+                if legacy:
+                    retained = json.loads(receipt.read_text())
+                    retained.pop("started")
+                    receipt.write_text(json.dumps(retained))
+                frame = self.prepare_filestore(snapshot=self.snapshot, apply=False)
+                self.calls.clear()
+                for candidate, expected in (
+                    (frame, refusal),
+                    ({**frame, "unexpected": True}, click.ClickException),
+                    ({**frame, "declaration": None}, click.ClickException),
+                    ({"type": "complete"}, click.ClickException),
+                    (
+                        {"type": "complete", "restore_disposition": "unknown"},
+                        click.ClickException,
+                    ),
+                    ({"type": "failed"}, native_copy_stream.NativeProgramFailed),
+                ):
+                    with self.subTest(frame=candidate):
+                        self.assert_native_refusal(candidate, expected)
+
+    def test_interrupted_receipt_never_qualifies_shared_or_hidden_data(self) -> None:
+        self.killed_during_restore = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.killed_during_restore = False
+        self.containers["foreign"] = {
+            "Id": "foreign",
+            "Config": {"Labels": {"com.docker.compose.project": "another-project"}},
+            "Mounts": [{"Type": "volume", "Name": "preview-data-filestore"}],
+        }
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, apply=False), {"type": "failed"}
+        )
+        del self.containers["foreign"]
+        attachment = self.data / "filestore" / "needed-attachment"
+        attachment.write_bytes(b"retain this data")
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, apply=False), {"type": "failed"}
+        )
+        self.assertEqual(attachment.read_bytes(), b"retain this data")
 
     def test_receipt_alone_never_admits_changed_or_missing_native_data(self) -> None:
         self.run_script()
@@ -664,6 +963,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def test_missing_retained_overlay_refuses_instead_of_hiding_attachments(self) -> None:
         self.volumes.pop("preview-data-filestore")
+        legacy = self.data / "filestore" / self.database / "legacy-attachment"
+        legacy.parent.mkdir()
+        legacy.write_bytes(b"needed legacy data")
         for snapshot in (None, self.snapshot):
             with self.subTest(snapshot=snapshot):
                 self.assertEqual(
@@ -690,7 +992,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 result = self.prepare_filestore(snapshot=self.snapshot, apply=False)
                 self.assertEqual(result["type"], "complete" if b"No such" in error else "failed")
 
-    def test_owned_legacy_resume_preserves_attempt_writes_without_an_overlay(self) -> None:
+    def test_interrupted_legacy_restore_preserves_writes_without_an_overlay(self) -> None:
         self.sanitized = False
         with self.assertRaises(RuntimeError):
             self.run_script()
@@ -698,20 +1000,21 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.volumes.pop("preview-data-filestore")
         for role in ("web", "script-runner"):
             self.containers[role]["Mounts"].pop()
-        attachment = self.data / "filestore" / self.database / "attempt-attachment"
+        attachment = self.mounted_filestore / "attempt-attachment"
         attachment.write_bytes(b"attachment created during module update")
         self.calls.clear()
         result = self.prepare_filestore(snapshot=self.snapshot)
-        self.assertEqual(result, {"type": "complete", "declaration": None})
-        self.assertEqual(
-            self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"],
-            "failed",
+        self.assert_native_refusal(result, PreviewRestoreDisposalRequired)
+        self.assert_native_refusal(
+            self.prepare_filestore(snapshot=self.snapshot, require_existing=True),
+            PreviewRestoreDisposalRequired,
         )
         self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
-        self.run_script()
+        with self.assertRaises(RuntimeError):
+            self.run_script()
         self.assertEqual(attachment.read_bytes(), b"attachment created during module update")
         self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
-        self.assertIn(["docker", "start", "web"], self.calls)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
 
     def test_overlay_plan_has_no_application_storage_effects(self) -> None:
         self.volumes.pop("preview-data-filestore")
@@ -721,22 +1024,17 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
         self.assertFalse((self.source.parent / "preview-attempts").exists())
 
-    def test_owned_legacy_attempts_transition_without_another_filestore_copy(self) -> None:
+    def test_interrupted_attempt_never_reconstructs_missing_overlay(self) -> None:
         self.killed_during_restore = True
         with self.assertRaises(RuntimeError):
             self.run_script()
         self.killed_during_restore = False
         self.volumes.pop("preview-data-filestore")
-        mounts = {}
         for role in ("web", "script-runner"):
-            mounts[role] = self.containers[role]["Mounts"].pop()
+            self.containers[role]["Mounts"].pop()
         result = self.prepare_filestore(snapshot=self.snapshot)
-        self.assertEqual(result["type"], "complete")
-        for role, mount in mounts.items():
-            self.containers[role]["Mounts"].append(mount)
-        self.run_script()
-        self.assertIn(["docker", "start", "web"], self.calls)
-        self.assertFalse(any(call[0] == "cp" for call in self.calls))
+        self.assert_native_refusal(result, PreviewRestoreDisposalRequired)
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
 
     def test_foreign_overlay_or_aliased_upper_refuses_before_data_changes(self) -> None:
         self.overlay_options["o"] += ",upperdir=/another-preview"
@@ -839,6 +1137,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             }
 
         with (
+            patch("control_plane.dokploy.host_package.ensure_schedule_host_package"),
             patch.object(
                 api,
                 "fetch_dokploy_target_payload",
@@ -889,11 +1188,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertEqual(evidence["clean_preview_snapshot_restored"], "true")
         self.assertTrue(self.ready_before_web)
 
-    def test_retry_records_actual_and_requested_snapshot_provenance(self) -> None:
-        self.runner_failure = True
-        with self.assertRaises(RuntimeError):
-            self.run_script()
-        self.runner_failure = False
+    def test_completed_restore_retry_records_actual_and_requested_snapshot_provenance(self) -> None:
+        self.run_script()
         requested = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
         evidence = self.service_schedule(requested)
         self.assertEqual(evidence["clean_preview_snapshot_id"], self.snapshot.snapshot_id)
@@ -917,7 +1213,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def test_ready_data_without_a_witness_is_preserved(self) -> None:
         self.run_script()
-        attachment = self.data / "filestore" / self.database / "attachment"
+        attachment = self.mounted_filestore / "attachment"
         attachment.write_bytes(b"Client edit")
         self.database_witness = ""
         self.calls.clear()
@@ -1065,6 +1361,101 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             self.calls.index(["docker", "stop", "web"]),
         )
 
+    def test_runner_failure_reports_only_closed_diagnostics_and_keeps_web_stopped(self) -> None:
+        original = self.command
+        stage = CopyFailureStage.MODULE_UPDATE
+        exit_status = 7
+
+        def refuse(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if arguments[-1:] == ["clean-snapshot"]:
+                return subprocess.CompletedProcess(
+                    arguments,
+                    exit_status,
+                    stdout=(
+                        f"{COPY_FAILURE_STAGE_MARKER}={stage}\n"
+                        f"{COPY_FAILURE_STAGE_MARKER}=private-fixture-detail\n"
+                        "password=private-fixture-detail\n"
+                    ).encode(),
+                    stderr=b"private-fixture-detail",
+                )
+            return original(arguments, **kwargs)
+
+        with (
+            patch.object(self, "command", side_effect=refuse),
+            self.assertRaises(RuntimeError),
+        ):
+            self.run_script()
+        self.assertIn(
+            f"{COPY_FAILURE_STAGE_MARKER}={stage}", self.script_output.getvalue().splitlines()
+        )
+        self.assertIn(
+            f"{COPY_FAILURE_EXIT_MARKER}={exit_status}", self.script_output.getvalue().splitlines()
+        )
+        self.assertNotIn("private-fixture-detail", self.script_output.getvalue())
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+        evidence = post_deploy.extract_odoo_post_deploy_readback_markers(
+            {"logs": self.script_output.getvalue()}
+        )
+        self.assertEqual(evidence[COPY_FAILURE_STAGE_MARKER], stage)
+        self.assertEqual(evidence[COPY_FAILURE_EXIT_MARKER], str(exit_status))
+        evidence = post_deploy.extract_odoo_post_deploy_readback_markers(
+            {
+                "logs": self.script_output.getvalue()
+                + f"{COPY_FAILURE_STAGE_MARKER}={CopyFailureStage.RESTORE}\n"
+                + f"{COPY_FAILURE_EXIT_MARKER}=-9\n"
+                + f"{COPY_FAILURE_STAGE_MARKER}=private-fixture-detail\n"
+                + f"{COPY_FAILURE_EXIT_MARKER}=private-fixture-detail\n"
+            }
+        )
+        self.assertEqual(evidence[COPY_FAILURE_STAGE_MARKER], stage)
+        self.assertEqual(evidence[COPY_FAILURE_EXIT_MARKER], str(exit_status))
+        self.assertNotIn("private-fixture-detail", str(evidence))
+
+    def test_foreign_readonly_mount_cannot_reach_private_copy_failure_evidence(self) -> None:
+        self.containers["foreign"] = {
+            "Id": "foreign",
+            "Config": {"Labels": {"com.docker.compose.project": "another-project"}},
+            "Mounts": [{"Source": str(self.root / COPY_FAILURE_STATE_DIRECTORY), "RW": False}],
+        }
+        with self.assertRaises(RuntimeError) as raised:
+            self.run_script()
+        self.assertEqual(
+            getattr(raised.exception, "predicate", None), ReadbackPredicate.PRIVATE_STATE
+        )
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+
+    def test_failed_runner_retains_private_traceback_without_publishing_it(self) -> None:
+        original = self.command
+        child_stdout = b"copy_failure_stage=module_update\nprivate fixture output\n"
+        child_stderr = b"Traceback (most recent call last):\nValueError: private fixture cause\n"
+
+        def refuse(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if arguments[-1:] == ["clean-snapshot"]:
+                return subprocess.CompletedProcess(
+                    arguments, 1, stdout=child_stdout, stderr=child_stderr
+                )
+            return original(arguments, **kwargs)
+
+        with (
+            patch.object(self, "command", side_effect=refuse),
+            self.assertRaises(RuntimeError),
+        ):
+            self.run_script()
+        markers = post_deploy.extract_odoo_post_deploy_readback_markers(
+            {"logs": self.script_output.getvalue()}
+        )
+        evidence_id = markers[COPY_FAILURE_EVIDENCE_MARKER]
+        path = self.root / COPY_FAILURE_STATE_DIRECTORY / (evidence_id + ".json")
+        evidence = json.loads(path.read_text())
+        self.assertEqual(base64.b64decode(evidence["stdout"]), child_stdout)
+        self.assertEqual(base64.b64decode(evidence["stderr"]), child_stderr)
+        self.assertEqual(evidence["exit_status"], 1)
+        self.assertEqual(evidence["stage"], CopyFailureStage.MODULE_UPDATE)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertNotIn("private fixture", self.script_output.getvalue())
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+
     def test_every_command_inherits_target_lock_and_child_blocks_retry_after_failure(self) -> None:
         command = self.command
         child: subprocess.Popen[bytes] | None = None
@@ -1105,8 +1496,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             if child is not None:
                 child.communicate(timeout=10)
         self.runner_failure = False
-        self.run_script()
-        self.assertIn(["docker", "start", "web"], self.calls)
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertNotIn(["docker", "start", "web"], self.calls)
 
     def test_abandoned_attempt_releases_snapshot_only_after_every_backing_is_gone(self) -> None:
         self.runner_failure = True
@@ -1168,16 +1560,11 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             self.run_script()
         self.assertNotIn(["docker", "start", "web"], self.calls)
 
-    def test_failed_copy_retries_only_redundant_frozen_filestore(self) -> None:
-        self.runner_failure = True
+    def test_destroyed_preview_can_start_again_on_new_storage(self) -> None:
+        self.killed_during_restore = True
         with self.assertRaises(RuntimeError):
             self.run_script()
-        self.runner_failure = False
-        self.run_script(snapshot=self.snapshot.model_copy(update={"snapshot_id": "b" * 64}))
-        self.assertIn(["docker", "start", "web"], self.calls)
-
-    def test_destroyed_preview_can_start_again_on_new_storage(self) -> None:
-        self.run_script()
+        self.killed_during_restore = False
         self.remount_filestore()
         self.present = False
         self.volume_created_at = datetime.now(timezone.utc).isoformat()
@@ -1185,51 +1572,25 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.run_script()
         self.assertIn(["docker", "start", "web"], self.calls)
 
-    def test_failed_unreleased_module_files_can_be_rebuilt_from_the_snapshot(self) -> None:
+    def test_interrupted_restore_preserves_upper_and_legacy_writes(self) -> None:
         self.runner_failure = True
         with self.assertRaises(RuntimeError):
             self.run_script()
-        extra = self.data / "filestore" / self.database / "failed-module-attachment"
-        extra.write_bytes(b"rebuild this from the PR module")
+        legacy = self.mounted_filestore / "failed-module-attachment"
+        upper = self.private / "upper" / "attempt-attachment"
+        for attachment in (legacy, upper):
+            attachment.write_bytes(b"preserve interrupted writes")
         self.runner_failure = False
-        self.run_script()
-        self.assertFalse(extra.exists())
-        self.assertIn(["docker", "start", "web"], self.calls)
-
-    def test_owned_cleanup_failure_restarts_runner_and_keeps_web_held(self) -> None:
-        self.runner_failure = True
+        self.calls.clear()
         with self.assertRaises(RuntimeError):
             self.run_script()
-        attachment = self.private / "upper" / "attempt-attachment"
-        attachment.write_bytes(b"preserve failed cleanup")
-        self.calls.clear()
-        remove = shutil.rmtree
-
-        def fail_upper_reset(path: Path, *args: Any, **kwargs: Any) -> None:
-            if path == self.private / "upper":
-                raise PermissionError("fixture cleanup failure")
-            remove(path, *args, **kwargs)
-
-        with patch.object(shutil, "rmtree", side_effect=fail_upper_reset):
-            with self.assertRaises(PermissionError):
-                self.run_script()
-        self.assertIn(["docker", "start", "script-runner"], self.calls)
-        self.assertLess(
-            self.calls.index(["docker", "stop", "script-runner"]),
-            self.calls.index(["docker", "start", "script-runner"]),
-        )
-        self.assertIn(["docker", "stop", "web"], self.calls)
-        self.assertNotIn(["docker", "start", "web"], self.calls)
-        self.assertFalse(self.present)
-        self.assertFalse(any(call[:2] == ["docker", "cp"] for call in self.calls))
-        self.assertEqual(attachment.read_bytes(), b"preserve failed cleanup")
-        self.assertEqual(
-            (self.source / "filestore/attachment").read_bytes(), b"clean snapshot attachment"
-        )
+        for attachment in (legacy, upper):
+            self.assertEqual(attachment.read_bytes(), b"preserve interrupted writes")
+        self.assertFalse(any(call[1] in {"stop", "start", "cp"} for call in self.calls))
 
     def test_qualified_copy_preserves_edits_after_api_completion_failure(self) -> None:
         self.run_script()
-        attachment = self.data / "filestore" / self.database / "attachment"
+        attachment = self.mounted_filestore / "attachment"
         attachment.write_bytes(b"preview edit")
         self.calls.clear()
         self.sanitized = True
@@ -1238,22 +1599,6 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertFalse(
             any(call[0] == "cp" or call[:2] == ["docker", "cp"] for call in self.calls)
         )
-
-    def test_inherited_testing_witness_cannot_certify_an_interrupted_preview_restore(self) -> None:
-        self.killed_during_restore = True
-        with self.assertRaises(RuntimeError):
-            self.run_script()
-        self.killed_during_restore = False
-        self.calls.clear()
-        self.run_script()
-        phases = [
-            call[-3]
-            for call in self.calls
-            if call[:2] == ["docker", "exec"] and call[-1:] == ["clean-snapshot"]
-        ]
-        self.assertEqual(phases, ["fresh"])
-        self.assertTrue(any("dropdb " in " ".join(call) for call in self.calls))
-        self.assertIn(["docker", "start", "web"], self.calls)
 
     def test_shared_guard_refuses_privilege_and_snapshot_mount_exposure(self) -> None:
         self.containers["script-runner"]["HostConfig"] = {"Privileged": True}

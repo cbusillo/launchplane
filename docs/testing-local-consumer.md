@@ -15,7 +15,7 @@ credentials cannot use this path. The active key-safety evaluation still applies
 The signed-in administrator or an agent authenticated as `local_operator` uses existing
 exact-lane `product_config.plan` and `product_config.apply` authority. Agent read
 access alone cannot issue a delivery. Worker and service identities cannot issue
-one. Terminal-agent credentials remain read/plan only. No credential, enrollment,
+one. Terminal-agent credentials cannot issue a delivery through this operation. No credential, enrollment,
 session, lease or authorization grant is created
 for the local consumer.
 

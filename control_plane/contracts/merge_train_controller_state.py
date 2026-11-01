@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -101,7 +102,10 @@ class MergeTrainControllerStateRecord(BaseModel):
         self.controller_key = require_text(
             self.controller_key, "merge train controller state requires controller_key"
         )
-        self.repository = _normalize_repository(self.repository)
+        stored_repository = require_text(
+            self.repository, "merge train controller state requires repository"
+        )
+        self.repository = _normalize_repository(stored_repository)
         self.base_branch = require_text(
             self.base_branch, "merge train controller state requires base_branch"
         )
@@ -133,7 +137,12 @@ class MergeTrainControllerStateRecord(BaseModel):
             base_branch=self.base_branch,
         )
         if self.controller_key != expected_key:
-            raise ValueError("merge train controller state controller_key does not match scope")
+            historical_key = (
+                f"merge-train-controller:{stored_repository.replace('/', ':')}:{self.base_branch}"
+            )
+            if self.controller_key != historical_key:
+                raise ValueError("merge train controller state controller_key does not match scope")
+            self.repository = stored_repository
         if self.status == "running":
             if not self.lease_owner:
                 raise ValueError("running merge train controller state requires lease_owner")
@@ -190,6 +199,44 @@ def build_merge_train_controller_state_record(
         policy_sha256=policy_sha256,
         updated_at=updated_at,
     )
+
+
+def require_canonical_merge_train_controller_state(
+    record: MergeTrainControllerStateRecord,
+) -> MergeTrainControllerStateRecord:
+    validated = MergeTrainControllerStateRecord.model_validate(record.model_dump(mode="json"))
+    if validated.controller_key != build_merge_train_controller_key(
+        repository=validated.repository, base_branch=validated.base_branch
+    ):
+        raise ValueError("Historical merge controller identities are read-only.")
+    return validated
+
+
+def merge_train_controller_alias_reconciliation_detail(
+    records: Iterable[MergeTrainControllerStateRecord],
+) -> str:
+    for record in records:
+        if (
+            record.status != "idle"
+            or record.ordinary_job_binding is not None
+            or any(
+                (
+                    record.lease_owner,
+                    record.lease_acquired_at,
+                    record.lease_expires_at,
+                    record.heartbeat_at,
+                    record.active_action,
+                    record.active_phase,
+                    record.active_record_id,
+                    record.step_payload,
+                    record.reconciliation_detail,
+                )
+            )
+            or record.active_pull_request_number is not None
+            or record.reconciliation_status != "clean"
+        ):
+            return "Retained controller activity requires reconciliation before this train can continue."
+    return ""
 
 
 def build_merge_train_controller_resume_detail(

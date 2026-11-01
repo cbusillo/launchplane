@@ -1,6 +1,7 @@
 import base64
 from collections.abc import Callable
 import json
+import zlib
 
 from control_plane.dokploy.native_copy_stream import (
     NativeSourceUnavailable,
@@ -9,14 +10,20 @@ from control_plane.dokploy.native_copy_stream import (
 )
 
 
-CUTOVER_COMMAND_OUTPUT_BYTES = 64 * 1024 * 1024
+CUTOVER_COMMAND_BYTES = 64 * 1024 * 1024
 
 CUTOVER_COMMAND_PROGRAM = r"""
-import base64,json,subprocess,sys
-spec=json.loads(base64.b64decode(sys.argv[1],validate=True)); prefix=sys.argv[2]
+import base64,json,subprocess,sys,zlib
+prefix=sys.argv[2]
 def emit(value):
     print(prefix+json.dumps(value),flush=True)
 try:
+    envelope=json.loads(base64.b64decode(sys.argv[1],validate=True))
+    decoder=zlib.decompressobj()
+    raw=decoder.decompress(base64.b64decode(envelope['command'],validate=True),__OUTPUT_BYTES__+1)
+    if len(raw)>__OUTPUT_BYTES__ or not decoder.eof or decoder.unconsumed_tail or decoder.unused_data:
+        raise ValueError('invalid bounded command envelope')
+    spec=json.loads(raw)
     argv=spec['argv']
     if not isinstance(argv,list) or not argv or argv[0] not in {'docker','python3','bash'}:
         raise ValueError('unbound host command')
@@ -29,7 +36,7 @@ try:
     emit({'type':'complete','size':len(raw)})
 except BaseException:
     emit({'type':'failed'})
-""".replace("__OUTPUT_BYTES__", str(CUTOVER_COMMAND_OUTPUT_BYTES))
+""".replace("__OUTPUT_BYTES__", str(CUTOVER_COMMAND_BYTES))
 
 
 class CutoverHostTransport:
@@ -60,11 +67,15 @@ class CutoverHostTransport:
             ) from error
 
     def _command(self, argv: tuple[str, ...], stdin: str | None, *, guarded: bool) -> str:
-        payload: dict[str, object] = {
+        command: dict[str, object] = {
             "argv": argv,
             "stdin": stdin,
             "timeout": self.timeout_seconds,
         }
+        raw = json.dumps(command, sort_keys=True).encode()
+        if len(raw) > CUTOVER_COMMAND_BYTES:
+            raise NativeSourceUnavailable("Cutover command exceeds its buffer bound.")
+        payload: dict[str, object] = {"command": base64.b64encode(zlib.compress(raw)).decode()}
         if len(base64.b64encode(json.dumps(payload, sort_keys=True).encode())) > 120 * 1024:
             raise NativeSourceUnavailable("Cutover command exceeds the admitted transport bound.")
         output = bytearray()
@@ -78,7 +89,7 @@ class CutoverHostTransport:
                 if frame.get("offset") != len(output) or not isinstance(frame.get("data"), str):
                     raise NativeSourceUnavailable("Cutover command output is incomplete.")
                 output.extend(base64.b64decode(str(frame["data"]), validate=True))
-                if len(output) > CUTOVER_COMMAND_OUTPUT_BYTES:
+                if len(output) > CUTOVER_COMMAND_BYTES:
                     raise NativeSourceUnavailable("Cutover command output exceeds its bound.")
             elif frame == {"type": "complete", "size": len(output)}:
                 completed = True

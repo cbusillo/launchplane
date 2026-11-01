@@ -1,5 +1,4 @@
 import hashlib
-import json
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import Literal
@@ -7,6 +6,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.delivery_apply_receipt import apply_reviewed_service_bundle
+from control_plane.contracts.merge_train_stall import (
+    STALL_WORKFLOW_REF_KEY,
+    STALL_WORKFLOW_REPOSITORY_KEY,
+    parse_merge_train_stall_ref,
+    parse_merge_train_stall_repository,
+)
 from control_plane.discussion_reminders import (
     SETTINGS_KEY as DISCUSSION_REMINDERS_SETTING,
     DiscussionReminderSettings,
@@ -16,8 +21,13 @@ from control_plane.dokploy.memory_capacity import (
     parse_preview_memory_floors,
 )
 from control_plane.product_config import plan_product_config_authority_bundle
+from control_plane.runner_host_hygiene_configuration import (
+    SETTINGS_KEY as RUNNER_HOST_HYGIENE_SETTING,
+    RunnerHostHygieneConfiguration,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 SERVICE_RUNTIME_SETTINGS_ROUTE = "/v1/service/runtime-settings"
 SERVICE_CONTEXT = "launchplane"
@@ -28,7 +38,10 @@ SETTING_VALUE_LIMIT = 65536
 DECLARED_SERVICE_SETTINGS: Mapping[str, Callable[[str], object]] = MappingProxyType(
     {
         PREVIEW_MEMORY_FLOORS_SETTING: parse_preview_memory_floors,
+        RUNNER_HOST_HYGIENE_SETTING: RunnerHostHygieneConfiguration.model_validate_json,
         DISCUSSION_REMINDERS_SETTING: DiscussionReminderSettings.model_validate_json,
+        STALL_WORKFLOW_REPOSITORY_KEY: parse_merge_train_stall_repository,
+        STALL_WORKFLOW_REF_KEY: parse_merge_train_stall_ref,
     }
 )
 
@@ -77,19 +90,15 @@ def plan_service_runtime_setting(
         for write in bundle.runtime_environment_writes
     ]
     value_sha256 = hashlib.sha256(request.value.encode()).hexdigest()
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "key": request.key,
-                "value_sha256": value_sha256,
-                "reason": request.reason,
-                "actor": actor,
-                "baseline": baseline,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "key": request.key,
+            "value_sha256": value_sha256,
+            "reason": request.reason,
+            "actor": actor,
+            "baseline": baseline,
+        }
+    )
     summary: dict[str, object] = {
         "status": "ok",
         "actor": actor,

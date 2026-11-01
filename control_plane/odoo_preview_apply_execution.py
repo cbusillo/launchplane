@@ -13,17 +13,30 @@ from __future__ import annotations
 from contextlib import ExitStack, contextmanager
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+import json
+import logging
 from pathlib import Path
 from typing import Any, cast
 
 import click
+from control_plane.copy_readback_diagnostics import (
+    copy_failure_marker_is_safe,
+    readback_marker_is_safe,
+)
+from control_plane.dokploy.post_deploy import _bounded_dokploy_evidence_id
 from control_plane.lane_movement import LaneMovementRefused
+from control_plane.preview_source import PreviewSourceDecision, require_source_free_preview_history
 
 from control_plane.contracts.idempotency_record import (
+    SUPERSEDED_PROVIDER_EFFECT_PHASE,
     build_launchplane_mutation_reservation_id,
     format_launchplane_mutation_timestamp,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.preview_fixture import (
+    PREVIEW_FIXTURE_CANCEL_PHASE,
+    PreviewFixtureIntent,
+)
 from control_plane.contracts.preview_execution import (
     odoo_preview_reconciliation_key,
     odoo_preview_target_key,
@@ -78,6 +91,27 @@ def _string_value(value: Any) -> str:
     return str(value)
 
 
+def _log_failed_preview_evidence(
+    driver_result: dict[str, object], *, operation_id: str, trace_id: str
+) -> None:
+    evidence = driver_result.get("module_install_update_evidence")
+    diagnostics: dict[str, str] = {}
+    if isinstance(evidence, dict):
+        for key, value in evidence.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
+            if copy_failure_marker_is_safe(key, value) or readback_marker_is_safe(key, value):
+                diagnostics[key] = value
+            elif key in {"schedule_id", "schedule_deployment_key", "schedule_deployment_id"}:
+                identifier = _bounded_dokploy_evidence_id(value)
+                if identifier:
+                    diagnostics[key] = identifier
+    logging.getLogger(__name__).warning(
+        "%s",
+        json.dumps({"operation_id": operation_id, "trace_id": trace_id, "evidence": diagnostics}),
+    )
+
+
 class OdooPreviewProviderMutationAdapter:
     def __init__(
         self,
@@ -119,6 +153,53 @@ class OdooPreviewProviderMutationAdapter:
         )
         self.execution_check: Callable[[], None] = lambda: None
         self.schedule_binding: dict[str, object] | None = None
+        self.source_decision: PreviewSourceDecision | None = None
+        self.fixture_cancellation: PreviewFixtureIntent | None = None
+
+    def capture_fixture_cancellation(self) -> None:
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        plan = self._issued_plan.dry_run_plan
+        if (
+            self._issued_plan.operation != "destroy"
+            or not plan.delete_volumes
+            or self._pre_mutation_guard is None
+        ):
+            return
+        self.fixture_cancellation = None
+        store = cast(PostgresRecordStore, self._record_store)
+        for reservation in store.list_held_odoo_preview_reservations(product=self._profile.product):
+            if reservation.provider_target_key != self.target_key():
+                continue
+            retained = store.read_original_mutation_intent(reservation)
+            if "fixture_cancellation" in retained:
+                raw_fixture = retained["fixture_cancellation"]
+            elif "fixture_binding" in retained:
+                raw_fixture = retained
+            else:
+                continue
+            intent = PreviewFixtureIntent.model_validate(raw_fixture)
+            binding = intent.fixture_binding
+            if (
+                intent.product == self._profile.product
+                and intent.maintenance.context == self._profile.preview.context
+                and intent.maintenance.instance == plan.compose_name
+                and binding.target_id == plan.compose_ref
+                and binding.anchor_pr_number == self._issued_plan.plan_request.pr_number
+            ):
+                if self.fixture_cancellation is not None:
+                    raise ValueError("Multiple held fixture cancellation intents are unavailable.")
+                self.fixture_cancellation = intent
+
+    def restore_fixture_cancellation(self, retained: object, *, allow_mutation: bool) -> None:
+        if (
+            self._issued_plan.operation != "destroy"
+            or not self._issued_plan.dry_run_plan.delete_volumes
+            or allow_mutation
+            and self._pre_mutation_guard is None
+        ):
+            raise ValueError("Fixture cancellation requires a guarded destructive preview destroy.")
+        self.fixture_cancellation = PreviewFixtureIntent.model_validate(retained)
 
     def capture_schedule_binding(self) -> None:
         from control_plane.dokploy import post_deploy, source
@@ -148,6 +229,39 @@ class OdooPreviewProviderMutationAdapter:
             return
         self.schedule_binding = binding.model_dump(mode="json")
 
+    def capture_source_decision(self) -> None:
+        from control_plane.odoo_preview_apply_http import (
+            _odoo_preview_base_environment,
+            resolve_preview_source_decision,
+        )
+
+        if self._issued_plan.operation != "refresh":
+            return
+        environment = (
+            _odoo_preview_base_environment(
+                control_plane_root_path=self._control_plane_root,
+                record_store=self._record_store,
+                profile=self._profile,
+                plan=self._issued_plan.dry_run_plan,
+                manifest=self._apply_request.apply.manifest,
+                database_url=self._database_url,
+            ).values
+            if self._profile.preview.data_transport_mode == "driver"
+            and not self._profile.preview.clean_testing_snapshot
+            else {}
+        )
+        try:
+            self.source_decision = resolve_preview_source_decision(
+                record_store=self._record_store,
+                profile=self._profile,
+                issued_plan=self._issued_plan,
+                environment=environment,
+            )
+        except (ValueError, FileNotFoundError, click.ClickException) as error:
+            raise OdooPreviewPlanProvenanceError(
+                code="odoo_preview_source_unavailable", message=str(error)
+            ) from error
+
     def original_intent(self) -> dict[str, object]:
         # The HTTP service resolves environment values from managed records;
         # caller values are ignored and must never become plaintext recovery data.
@@ -161,6 +275,16 @@ class OdooPreviewProviderMutationAdapter:
             "issued_plan": self._issued_plan.model_dump(mode="json"),
             "apply_request": retained_request.model_dump(mode="json"),
             **({"schedule_binding": self.schedule_binding} if self.schedule_binding else {}),
+            **(
+                {"fixture_cancellation": self.fixture_cancellation.model_dump(mode="json")}
+                if self.fixture_cancellation
+                else {}
+            ),
+            **(
+                {"effective_source": self.source_decision.model_dump(mode="json")}
+                if self.source_decision is not None
+                else {}
+            ),
         }
 
     def reconciliation_key(self) -> str:
@@ -180,6 +304,15 @@ class OdooPreviewProviderMutationAdapter:
         driver_result: dict[str, object],
     ) -> tuple[dict[str, object], dict[str, object], int]:
         self.execution_check()
+        if self.fixture_cancellation is not None:
+            from control_plane.preview_fixture import require_fixture_container_cancelled
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            require_fixture_container_cancelled(
+                store=cast(PostgresRecordStore, self._record_store),
+                root=self._control_plane_root,
+                intent=self.fixture_cancellation,
+            )
         if self._apply_request.preserve_original_reservation_id:
             from control_plane.preview_preservation import run_preview_preservation
             from control_plane.storage.postgres import PostgresRecordStore
@@ -229,13 +362,25 @@ class OdooPreviewProviderMutationAdapter:
     ) -> ProviderObservation:
         del reconciliation_key
         self.execution_check()
+        if self.fixture_cancellation is None and provider_effect_phase in {
+            SUPERSEDED_PROVIDER_EFFECT_PHASE,
+            PREVIEW_FIXTURE_CANCEL_PHASE,
+        }:
+            return ProviderObservation("unknown")
+        observed_effect_phase = (
+            ""
+            if self.fixture_cancellation is not None
+            and provider_effect_phase
+            in {SUPERSEDED_PROVIDER_EFFECT_PHASE, PREVIEW_FIXTURE_CANCEL_PHASE}
+            else provider_effect_phase
+        )
         observation_outcome, driver_result, retry_safe = self._observe_apply(
             control_plane_root_path=self._control_plane_root,
             profile=self._profile,
             request=self._apply_request,
             database_url=self._database_url,
             provider_operation_title=provider_operation_title(provider_operation_key),
-            provider_effect_phase=provider_effect_phase,
+            provider_effect_phase=observed_effect_phase,
         )
         if driver_result is None:
             from control_plane.preview_preservation import (
@@ -274,12 +419,23 @@ class OdooPreviewProviderMutationAdapter:
             )
         self.execution_check()
         driver_result.pop("provider_effect_attempted", None)
+        if self.fixture_cancellation is not None and driver_result.get("status") != "pass":
+            return ProviderObservation(outcome="unknown")
         response_status_code = 202
         records: dict[str, object] = {}
         if _string_value(driver_result.get("status", "")).strip() == "pass":
-            driver_result, records, response_status_code = self._finalize_successful_result(
-                driver_result
-            )
+            from control_plane.preview_fixture import FixtureContainerStillRunning
+
+            try:
+                driver_result, records, response_status_code = self._finalize_successful_result(
+                    driver_result
+                )
+            except FixtureContainerStillRunning:
+                if self.fixture_cancellation is None or self._issued_plan.operation != "destroy":
+                    raise
+                return ProviderObservation(
+                    outcome="absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
         terminal_failure = _string_value(driver_result.get("status", "")).strip() == "fail"
         return ProviderObservation(
             outcome="present",
@@ -325,6 +481,28 @@ class OdooPreviewProviderMutationAdapter:
                 self._pre_mutation_guard()
             except Exception as error:
                 raise ProviderMutationRejectedError(error) from error
+
+        if self._issued_plan.operation == "refresh" and self.source_decision is None:
+            raise ProviderMutationRejectedError(
+                OdooPreviewPlanProvenanceError(
+                    code="odoo_preview_source_history_unknown",
+                    message="Original effective source is unavailable; observe the original without replaying effects.",
+                )
+            )
+        try:
+            require_source_free_preview_history(
+                self._record_store,
+                profile=self._profile,
+                issued_plan=self._issued_plan,
+                operation_record_id=self._deployment_record_id,
+                effective_source=self.source_decision,
+            )
+        except ValueError as error:
+            raise ProviderMutationRejectedError(
+                OdooPreviewPlanProvenanceError(
+                    code="odoo_preview_source_history_unknown", message=str(error)
+                )
+            ) from error
 
         effect_started = False
 
@@ -377,6 +555,20 @@ class OdooPreviewProviderMutationAdapter:
                 stack.close()
 
         try:
+            if self.fixture_cancellation is not None:
+                from control_plane.preview_fixture import require_fixture_container_cancelled
+                from control_plane.storage.postgres import PostgresRecordStore
+
+                require_fixture_container_cancelled(
+                    store=cast(PostgresRecordStore, self._record_store),
+                    root=self._control_plane_root,
+                    intent=self.fixture_cancellation,
+                    cancel=True,
+                    before_provider_mutation=lambda _phase: checkpoint_effect(
+                        PREVIEW_FIXTURE_CANCEL_PHASE
+                    ),
+                    provider_mutation_guard=mutation_guard,
+                )
             driver_result = self._execute_apply(
                 control_plane_root_path=self._control_plane_root,
                 record_store=self._record_store,
@@ -389,6 +581,7 @@ class OdooPreviewProviderMutationAdapter:
                 provider_lease_check=lease.assert_current,
                 deployment_record_id=self._deployment_record_id,
                 runtime_identity=self._runtime_identity,
+                expected_source_decision=self.source_decision,
                 **(
                     {"recovery_reservation": lease.evidence_reservation()}
                     if self._apply_request.preserve_original_reservation_id
@@ -396,10 +589,12 @@ class OdooPreviewProviderMutationAdapter:
                     else {}
                 ),
                 **(
-                    {"qualify_existing_preview": True, "provider_mutation_guard": mutation_guard}
+                    {"provider_mutation_guard": mutation_guard}
                     if self._qualify_existing_preview
+                    or self._apply_request.preserve_original_reservation_id
                     else {}
                 ),
+                **({"qualify_existing_preview": True} if self._qualify_existing_preview else {}),
             )
         except LaneMovementRefused as error:
             from control_plane.lane_movement import LaneBuild, record_preview_refusal
@@ -428,6 +623,7 @@ class OdooPreviewProviderMutationAdapter:
                         "status": "blocked",
                         "error_code": f"lane_movement.{error.code}",
                         "error_message": error.record_failure().description,
+                        "provider_effect_attempted": False,
                     },
                 ),
                 durable=error.code != "source_order_unavailable",
@@ -443,9 +639,11 @@ class OdooPreviewProviderMutationAdapter:
         provider_effect_attempted = driver_result.pop("provider_effect_attempted", False) is True
         driver_status = _string_value(driver_result.get("status", "")).strip()
         if driver_status == "fail" and provider_effect_attempted:
+            _log_failed_preview_evidence(
+                driver_result, operation_id=self._deployment_record_id, trace_id=self._trace_id
+            )
             raise ProviderMutationUnknownError(
-                _string_value(driver_result.get("error_message", "")).strip()
-                or "Odoo preview provider outcome requires reconciliation."
+                "Odoo preview provider outcome requires reconciliation."
             )
         response_status_code = 202
         records: dict[str, object] = {}
@@ -535,7 +733,13 @@ class OdooPreviewApplyOperation:
             if check is None:
                 return DurableProviderOperationResult("in_progress", None, 409, {})
             check()
-            if self.disposable_cleanup and existing is None and allow_mutation:
+            if existing is None and allow_mutation:
+                self.adapter.capture_fixture_cancellation()
+            if (
+                (self.disposable_cleanup or self.adapter.fixture_cancellation is not None)
+                and existing is None
+                and allow_mutation
+            ):
                 if (
                     self.adapter._pre_mutation_guard is None
                     or self.adapter._issued_plan.operation != "destroy"
@@ -602,6 +806,16 @@ class OdooPreviewApplyOperation:
         from control_plane.storage.postgres import PostgresRecordStore
 
         postgres = cast(PostgresRecordStore, store)
+        existing = postgres.read_idempotency_record(
+            scope=self.reservation_scope,
+            route_path=self.route_path,
+            idempotency_key=self.idempotency_key,
+        )
+        retained_intent = postgres.read_original_mutation_intent(existing) if existing else {}
+        if "fixture_cancellation" in retained_intent:
+            self.adapter.restore_fixture_cancellation(
+                retained_intent["fixture_cancellation"], allow_mutation=allow_mutation
+            )
         with ExitStack() as locks:
             if not postgres.preview_refresh_is_excluded(preview_id=logical_id):
                 locks.enter_context(
@@ -641,6 +855,20 @@ class OdooPreviewApplyOperation:
                 is None
             ):
                 self.require_original_preservation()
+                if self.adapter._pre_mutation_guard is not None:
+                    self.adapter._pre_mutation_guard()
+                self.adapter.capture_source_decision()
+            else:
+                existing = postgres.read_idempotency_record(
+                    scope=self.reservation_scope,
+                    route_path=self.route_path,
+                    idempotency_key=self.idempotency_key,
+                )
+                intent = postgres.read_original_mutation_intent(existing) if existing else {}
+                decision = intent.get("effective_source")
+                self.adapter.source_decision = (
+                    PreviewSourceDecision.model_validate(decision) if decision is not None else None
+                )
             return run_durable_provider_operation(
                 store=store,
                 scope=self.reservation_scope,
@@ -706,6 +934,31 @@ def prepare_odoo_preview_apply_operation(
     def qualified_supersession(reservation: object) -> bool:
         if pre_mutation_guard is not None:
             pre_mutation_guard()
+        if adapter.fixture_cancellation is not None:
+            from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            if not (
+                issued_plan.operation == "destroy"
+                and issued_plan.dry_run_plan.delete_volumes
+                and pre_mutation_guard is not None
+                and isinstance(reservation, LaunchplaneIdempotencyRecord)
+            ):
+                return False
+            if cast(PostgresRecordStore, record_store).read_original_mutation_intent(
+                reservation
+            ) == adapter.fixture_cancellation.model_dump(mode="json"):
+                return True
+            return _original_supersession_is_quiescent(
+                reservation=reservation,
+                profile=profile,
+                request=apply_request,
+                root=control_plane_root,
+                database_url=database_url,
+                check=supersession_is_quiescent,
+                store=record_store,
+                carried=adapter.fixture_cancellation,
+            )
         if disposable_cleanup:
             from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
             from control_plane.preview_reservation_recovery import classify_preview_reservation
@@ -714,6 +967,8 @@ def prepare_odoo_preview_apply_operation(
                 issued_plan.operation != "destroy"
                 or pre_mutation_guard is None
                 or not isinstance(reservation, LaunchplaneIdempotencyRecord)
+                or reservation.provider_effect_phase
+                in {SUPERSEDED_PROVIDER_EFFECT_PHASE, PREVIEW_FIXTURE_CANCEL_PHASE}
             ):
                 return False
             classification = classify_preview_reservation(
@@ -761,13 +1016,14 @@ def prepare_odoo_preview_apply_operation(
             result={
                 "status": "fail",
                 "error_message": (
-                    "The earlier Odoo preview apply was superseded by an "
-                    f"authoritative {issued_plan.operation} after its recovery lease expired."
+                    "The earlier preview operation was superseded by an "
+                    f"authoritative {issued_plan.operation}; its original effects remain unverified."
                 ),
             },
         ),
         minimum_expired_seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
         quiescence_check=qualified_supersession,
+        retain_effect_custody=lambda _reservation: adapter.fixture_cancellation is not None,
     )
 
     return OdooPreviewApplyOperation(
@@ -790,6 +1046,7 @@ def _original_supersession_is_quiescent(
     database_url: str | None,
     check: OdooPreviewSupersessionQuiescenceCheck,
     store: object,
+    carried: PreviewFixtureIntent | None = None,
 ) -> bool:
     from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
     from control_plane.preview_reservation_recovery import original_preview_intent
@@ -800,15 +1057,21 @@ def _original_supersession_is_quiescent(
         store, PostgresRecordStore
     ):
         return False
+    retained = store.read_original_mutation_intent(reservation)
+    if (
+        carried is not None
+        or "fixture_cancellation" in retained
+        or reservation.provider_effect_phase
+        in {
+            SUPERSEDED_PROVIDER_EFFECT_PHASE,
+            PREVIEW_FIXTURE_CANCEL_PHASE,
+        }
+    ):
+        if carried is None or retained.get("fixture_cancellation") != carried.model_dump(
+            mode="json"
+        ):
+            return False
     try:
-        from control_plane.contracts.preview_execution import PREVIEW_IDLE_ROUTE
-
-        if reservation.route_path == PREVIEW_IDLE_ROUTE:
-            from control_plane.preview_idle import idle_reservation_is_quiescent
-
-            return idle_reservation_is_quiescent(
-                store, reservation, profile.product, request.apply.dry_run_plan.compose_ref, root
-            )
         original = original_preview_intent(reservation, profile=profile, store=store)
     except ValueError:
         return False
@@ -875,6 +1138,7 @@ def run_odoo_preview_apply_operation(
         odoo_preview_supersession_is_quiescent
     ),
     pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
+    qualify_existing_preview: bool = False,
     allow_mutation: bool = True,
     disposable_cleanup: bool = False,
 ) -> DurableProviderOperationResult:
@@ -898,5 +1162,6 @@ def run_odoo_preview_apply_operation(
         observe_apply=observe_apply,
         supersession_is_quiescent=supersession_is_quiescent,
         pre_mutation_guard=pre_mutation_guard,
+        qualify_existing_preview=qualify_existing_preview,
         disposable_cleanup=disposable_cleanup,
     ).run(store, allow_mutation=allow_mutation)

@@ -1,5 +1,6 @@
 import { EngineeringRuntimeSettingRemovalRoute } from "./EngineeringRuntimeSettingRemovalRoute";
 import { CredentialsRoute } from "./CredentialsRoute";
+import { RequestAttentionRoute } from "./RequestAttentionRoute";
 import {
   ArrowRight,
   KeyRound,
@@ -12,6 +13,7 @@ import { EngineeringGovernanceProjectionRoute } from "./EngineeringGovernancePro
 import { EngineeringPrivilegedOperationsRoute } from "./EngineeringPrivilegedOperationsRoute";
 import { EngineeringTenantAdmissionRoute } from "./EngineeringTenantAdmissionRoute";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
+import { EngineeringPreviewLifecycleRoute } from "./EngineeringPreviewLifecycleRoute";
 import { EngineeringGitHubDeliveryRoute } from "./EngineeringGitHubDeliveryRoute";
 import {
   AppLink,
@@ -24,8 +26,17 @@ import type { DevFixtureMode } from "./dev-fixture-loader";
 const ENGINEERING_SURFACES = [
   { detail: "Read credential names, source coverage, collection freshness and drift.",
     icon: KeyRound, label: "Director controls", title: "Credentials", view: "credentials" as const },
+  { detail: "Read waiting requests and their next actions. Unowned requests go to the Supervisor.",
+    icon: Wrench, label: "Read only", title: "Waiting requests", view: "request-attention" as const },
   { detail: "Review exact stored plain-setting removals and approve them as the signed-in administrator.",
     icon: KeyRound, label: "Director controls", title: "Remove stored settings", view: "runtime-setting-removal" as const },
+  {
+    detail: "Report orphaned previews or explicitly apply cleanup across preview-enabled products.",
+    icon: Wrench,
+    label: "Administrator controls",
+    title: "Preview cleanup",
+    view: "preview-lifecycle" as const,
+  },
   {
     detail: "Select the service's existing Delivery App key and review obsolete service-token retirement.",
     icon: KeyRound,
@@ -81,7 +92,11 @@ export function EngineeringOpsRoute({
   actorId: number;
 }) {
   if (view === "credentials") return <CredentialsRoute key={actorId} admin={administrator} />;
+  if (view === "request-attention") return <RequestAttentionRoute key={actorId} />;
   if (view === "runtime-setting-removal") return <EngineeringRuntimeSettingRemovalRoute admin={admin} actorId={actorId} />;
+  if (view === "preview-lifecycle") {
+    return <EngineeringPreviewLifecycleRoute key={actorId} actorId={actorId} admin={admin} fixtureMode={fixtureMode} />;
+  }
   if (view === "github-delivery") {
     return <EngineeringGitHubDeliveryRoute actorId={actorId} />;
   }

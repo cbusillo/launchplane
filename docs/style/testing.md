@@ -3,21 +3,12 @@ title: Testing Style
 ---
 
 - Add targeted unit tests for storage, contracts, and workflow mapping.
-- A test stays only if it fails when the product is broken and passes when
-  someone makes an intended change. A version, toolchain, or dependency bump,
-  or an edit to a workflow step's wording, should need no test edit.
-- Do not assert a literal defined elsewhere (versions, pins, image digests,
-  hashes, counts, operation tables). Check agreement with the one source, or
-  keep a byte-exact gate only on a real generated artifact or immutable
-  evidence.
-- Do not assert workflow, action, config, or docs text. Run the embedded script
-  with inputs and check what it does, or enforce a rule that holds for every
-  workflow (fork isolation, pinned actions, permissions).
+- Follow the shared [Tests rule](https://github.com/cbusillo/codex-skills/blob/main/instructions/global.md#tests).
+- Do not assert documentation text in tests.
 - CI's `repository_pins` job runs the shared
   [change-detector scanner](https://github.com/cbusillo/codex-skills/blob/main/skills/references/test-quality.md)
   as warnings only. Triage its annotations on tests you add or change.
-- Verification code must not depend on working-tree state; read live state
-  only on the path that acts on it.
+- Read live state only on the path that acts on it.
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
 - When a fixture follows a record written with the current clock, derive its
   timestamps from that persisted record. A distant future date only delays the
@@ -60,8 +51,11 @@ Use `.github/github.json` for the lint and type-check commands and inspection
 configuration. `qualityGate.test.local` is the focused command template;
 `qualityGate.test.localSafety` takes whole safety module names, and
 `qualityGate.test.ci` names the complete suite for CI only. For a documentation
-or metadata change with no affected code, record why behavior tests or IDE inspection do not apply; do not add tests that
-assert instruction wording or config text.
+or metadata change with no affected code, record why behavior tests or IDE inspection do not apply.
+
+Use `qualityGate.inspection.lanes` for native JetBrains routing and inspect
+each product's files separately. TypeScript compiler validation remains in
+`qualityGate.build.frontend`; headless WebStorm does not report compiler errors.
 
 For frontend changes, use `qualityGate.build.frontend` for frontend unit, type,
 and build validation, with browser smoke for UI changes as described below.
@@ -86,6 +80,15 @@ run and the unchanged independent required checks before landing. If a manual
 full run fails, re-run its failed jobs in that same run; a separate dispatch
 does not supersede the earlier full-gate failure. A rerun of the earlier focused
 PR run keeps its selection; use the manual full run.
+
+The same manual full run supports a canonical train candidate when its push
+execution is missing. Confirm the exact ref and SHA and complete execution
+inventory first. Train dispatch uses the verified protected first-parent
+comparison used by a train push; construction refs remain refused. The candidate
+must contain this workflow support. A repair on main makes an older candidate
+stale; let the controller replace it before dispatching its new exact ref.
+Keep and watch the original dispatched run on uncertainty rather than dispatching
+again. Candidate observation follows [the full-gate policy](../merge-train-policy.md#candidate-validation).
 
 `control_plane.ci_selection` reads only committed comparison and merge trees.
 For a same-repository PR targeting the default branch, it follows Python imports
@@ -374,7 +377,7 @@ Run the deterministic admin-journey smoke separately from the frontend unit,
 type, OpenAPI, and production-build gate:
 
 ```bash
-(cd frontend && pnpm exec playwright install chromium)
+(cd frontend && pnpm exec playwright install chromium webkit)
 (cd frontend && pnpm test:browser)
 (cd frontend && pnpm exec node --test tests/browser-support/server-isolation.test.mjs)
 ```
@@ -391,10 +394,10 @@ It runs as part of `test:browser`; the standalone command above is for focused
 diagnosis. Its scratch folders live under the OS temp directory and are removed
 after the run.
 
-CI uses a bounded worker count in `frontend/playwright.config.ts`, including
-self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
-budget. Local runs retain Playwright's default concurrency; use its `--workers`
-option for a measured diagnostic comparison.
+Local runs default to two workers and CI shards retain their four-worker cap
+in `frontend/playwright.config.ts`, including self-hosted candidate lanes.
+Shared-host CPU count is not a per-job browser budget. Use `--workers=1` to
+reduce a local diagnostic run further; do not increase concurrency on a shared host.
 
 CI partitions the unchanged suite across the [browser matrix](../../.github/workflows/ci.yml)
 with Playwright's built-in `--shard` option. Each job retains four workers, zero
@@ -449,24 +452,31 @@ failure deadlines live in `playwright-deadlines.mjs`: they bound a broken test,
 not successful synchronization. Do not add a sleep, retry or larger timeout
 to hide a flake.
 
+Assertions retain their 10-second watchdog and each test its 30-second
+watchdog, including actions and navigation. Server startup retains its
+two-minute watchdog. CI's 15-minute browser-job limit also bounds setup,
+isolation probes and execution. These limits fail incomplete work; they never
+turn it into a pass.
+
 The server-isolation harness uses a watchdog derived from the shared server
 startup and test deadlines. Its peer wait includes the peer's cold server
 startup; it cannot assume both independent servers become ready together.
-Ordinary browser assertion, test and server deadlines are unchanged.
-
-Use Playwright's built-in repetition with zero retries to qualify the complete
-suite under representative sibling host load. Record the revision, worker
-count, load samples and pass/fail totals on the owning issue or PR. For example:
-
-```bash
-(cd frontend && CI=true pnpm exec playwright test --repeat-each=5 --workers=4 --retries=0)
-```
-
-Use a focused repetition for diagnosis:
+Use CI for full-suite qualification of this shared-host investigation. The full
+manual local command remains supported; it runs the unsharded suite and checks
+all screenshots. For local diagnosis, use a short focused run with zero retries
+and at most a few browser workers. For example:
 
 ```bash
-(cd frontend && CI=true pnpm exec playwright test sidebar-freshness --repeat-each=30)
+(cd frontend && pnpm exec playwright test backup-credentials product-setup --repeat-each=2 --workers=2)
 ```
+
+Use the smallest load that reproduces the failure. Do not deliberately saturate
+the shared host. Stop every owned load generator as soon as its run ends and
+check that no owned load processes remain before another run. Record the
+revision, worker count, host load and pass/fail totals on the owning issue or PR.
+Under [Q967](https://github.com/cbusillo/launchplane/issues/3754#issuecomment-6447670525),
+an upstream symbol request is deferred unless a stall reproduces on an idle
+host; that requires a new Director question with the exact proposed text.
 
 The suite uses only repo-local
 development fixtures. Product-detail journeys use `?fixture=products`; product
@@ -552,8 +562,7 @@ than deterministic UI behavior.
 
 Workflows are checked where they execute: CI runs them, `security.yml` runs
 actionlint over every workflow, and `tests/test_github_actions_security.py`
-holds the rules that apply to all of them. Do not add a test that re-reads one
-workflow to check that it says what it says. Workflow tests take one of three
+holds the rules that apply to all of them. Workflow tests take one of three
 forms:
 
 - Run an embedded script step with inputs (through `tests/support/workflows.py`

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
+from control_plane.timestamps import utc_now_timestamp as _utc_now
+from control_plane.http_error_evidence import log_handled_error_cause
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
@@ -241,6 +243,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewApplyInputsRequest,
     OdooPreviewDokployApplyRequest,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 PRODUCT_RECONCILE_SWEEP_SECONDS = 30 * 60
 # A running reconcile renews its lease every third of it, so a long preview apply
@@ -250,6 +253,7 @@ TESTING_DEPLOY_MAX_FAILED_ATTEMPTS = 3
 PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS = 3
 TESTING_DEPLOY_MAX_ATTEMPT_CHAIN = 20
 PREVIEW_APPLY_TIMEOUT_SECONDS = 600
+PREVIEW_PLAN_RECOVERY_MAX_STEPS = 100
 # A generic-web refresh waits for the deploy and then for health, each up to this
 # long, inside the request's lease.
 GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS = 300
@@ -642,30 +646,9 @@ def reconcile_testing_target(
                         reason="testing_runtime_drift",
                         testing_runtime_drift_sha256=drift,
                     )
-    if (
-        isinstance(desired, VerifiedGenericWebBuild)
-        and declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE)
-        and plan.get("reason") == "already_deployed"
-    ):
-        from control_plane.workflows.verireel_testing_post_deploy import (
-            recorded_verireel_testing_qualification,
-        )
-
-        lane = next(lane for lane in profile.lanes if lane.instance == TESTING_INSTANCE)
-        qualification = recorded_verireel_testing_qualification(
-            cast(GenericWebDeployStore, record_store),
-            _current_testing_deployment_id(record_store=record_store, lane=lane),
-            desired.image_reference,
-            desired.manifest.source_commit,
-            _generic_web_testing_authority(record_store=record_store, lane=lane),
-        )
-        if qualification == "fail":
-            plan.update(post_deploy_status="fail", reason="testing_qualification_failed")
-            return ReconcileOutcome(
-                plan, error="This testing deployment failed product qualification."
-            )
-        if qualification != "pass":
-            plan.update(action="deploy", reason="testing_qualification_missing")
+    if declares_verireel_testing_extension(profile, instance=TESTING_INSTANCE):
+        plan.update(action="wait", held=True, reason="product_browser_checks_migration_required")
+        return ReconcileOutcome(plan)
     if desired is None or plan["action"] != "deploy":
         return ReconcileOutcome(plan)
     if isinstance(desired, VerifiedGenericWebBuild):
@@ -1838,6 +1821,18 @@ def _hold_preview_destroy(
     return ReconcileOutcome(plan)
 
 
+def _hold_preview_cleanup(plan: dict[str, object], reason: str) -> ReconcileOutcome:
+    if (
+        plan.get("preview_mutation_attempted") is not True
+        and plan.get("preview_operation_status") != "reconcile_required"
+    ):
+        plan.pop("disposal_original_reservation_id", None)
+    plan.pop("last_failed_error_code", None)
+    plan.pop("last_failed_error_summary", None)
+    plan.update(action="wait", held=True, reason=reason)
+    return ReconcileOutcome(plan)
+
+
 def reconcile_preview_target(
     *,
     record_store: ProductReconcileStore,
@@ -1854,30 +1849,35 @@ def reconcile_preview_target(
     from control_plane.preview_reservation_recovery import (
         classify_preview_reservation,
         held_preview_reservations,
+        interrupted_preview_restore,
         original_preview_intent,
         recover_held_preview,
+        recover_held_walkthrough,
+        preview_restore_originals,
+        preview_rebuild_already_failed,
     )
 
     held = held_preview_reservations(record_store, product=profile.product)
+    disposal_original = str((previous_plan or {}).get("disposal_original_reservation_id") or "")
+    if (previous_plan or {}).get("preview_result_status") == "pass":
+        disposal_original = ""
     recovery: list[dict[str, object]] = []
     retained_intent_invalid = False
     for reservation in held[:100]:
         classified = classify_preview_reservation(reservation, profile=profile, store=record_store)
-        from control_plane.contracts.preview_execution import PREVIEW_IDLE_ROUTE
-
-        if reservation.route_path == PREVIEW_IDLE_ROUTE:
-            if classified.get("target_pull_request_number") != pull_request_number:
-                continue
+        if (
+            classified["action"] == "odoo-walkthrough"
+            and classified["target_pull_request_number"] == pull_request_number
+            and control_plane_root is not None
+            and isinstance(record_store, PostgresRecordStore)
+        ):
             recovery.append(
-                recover_held_preview(
+                recover_held_walkthrough(
                     store=record_store,
                     reservation=reservation,
                     profile=profile,
                     root=control_plane_root,
-                    observe=preview_hooks.observe_apply,
                 )
-                if control_plane_root is not None and isinstance(record_store, PostgresRecordStore)
-                else classified
             )
             continue
         try:
@@ -1897,16 +1897,21 @@ def reconcile_preview_target(
         if control_plane_root is None or not isinstance(record_store, PostgresRecordStore):
             recovery.append(classified)
             continue
-        recovery.append(
-            recover_held_preview(
-                store=record_store,
-                reservation=reservation,
-                profile=profile,
-                root=control_plane_root,
-                observe=preview_hooks.observe_apply,
-                quiescence=preview_hooks.quiescence_check,
-            )
+        recovered = recover_held_preview(
+            store=record_store,
+            reservation=reservation,
+            profile=profile,
+            root=control_plane_root,
+            observe=preview_hooks.observe_apply,
+            quiescence=preview_hooks.quiescence_check,
         )
+        recovery.append(recovered)
+        if (
+            recovered.get("action") == "destroy"
+            and recovered.get("result_status") == "pass"
+            and recovered.get("settlement") in {"adopted", "completed", "replayed"}
+        ):
+            disposal_original = ""
     unresolved = [
         entry
         for entry in recovery
@@ -1935,6 +1940,8 @@ def reconcile_preview_target(
                 if key in {"destroy_retry_key", "destroy_failed_attempts"}
             }
         )
+        if disposal_original:
+            decision.plan["disposal_original_reservation_id"] = disposal_original
         return ReconcileOutcome(decision.plan)
     if (
         any(
@@ -1951,6 +1958,21 @@ def reconcile_preview_target(
                 "reason": "held_preview_recovery_required",
                 "held_reservations": recovery,
                 "held_reservations_truncated": len(held) > 100,
+                **{
+                    key: decision.plan[key]
+                    for key in (
+                        "head_sha",
+                        "pull_request_state",
+                        "build_run_id",
+                        "last_failed_error_code",
+                    )
+                    if key in decision.plan
+                },
+                **(
+                    {"disposal_original_reservation_id": disposal_original}
+                    if disposal_original
+                    else {}
+                ),
                 **{
                     key: value
                     for key, value in (previous_plan or {}).items()
@@ -1971,19 +1993,61 @@ def reconcile_preview_target(
         for entry in recovery
         if entry.get("settlement") in {"adopted", "completed", "replayed"}
     ]
-    if settled:
-        decision = _plan_preview_target(
-            record_store=record_store,
-            profile=profile,
-            repository_id=repository_id,
-            transport=transport,
-            pull_request_number=pull_request_number,
-        )
     plan = decision.plan
     plan["held_reservations"] = recovery
     if settled:
         plan["preview_operation_status"] = settled[-1]["settlement"]
         plan["preview_result_status"] = settled[-1].get("result_status", "")
+    if (
+        not disposal_original
+        and plan["action"] in {"apply", "destroy"}
+        and profile.preview.clean_testing_snapshot
+        and isinstance(record_store, PostgresRecordStore)
+        and control_plane_root is not None
+    ):
+        originals = preview_restore_originals(
+            record_store, profile=profile, number=pull_request_number
+        )
+        if (
+            plan["action"] == "apply"
+            and isinstance(decision.verified, VerifiedBuildArtifact)
+            and preview_rebuild_already_failed(
+                record_store,
+                profile=profile,
+                number=pull_request_number,
+                manifest=decision.verified.manifest,
+                originals=originals,
+            )
+        ):
+            plan.update(
+                action="wait",
+                held=True,
+                detail="This build failed again after reconstruction. Fix the build or rerun its CI build before retrying.",
+            )
+            return _preview_failure(plan, "preview_apply_failed")
+        if originals:
+            locator, _ = max(
+                originals,
+                key=lambda item: (
+                    item[1].issued_plan.plan_provenance.issued_at
+                    if item[1].issued_plan.plan_provenance is not None
+                    else datetime.min.replace(tzinfo=timezone.utc)
+                ),
+            )
+            if interrupted_preview_restore(
+                store=record_store,
+                profile=profile,
+                reservation=locator,
+                root=control_plane_root,
+            ):
+                disposal_original = locator.record_id
+    if disposal_original and decision.observed.get("state") in {"open", "closed"}:
+        plan.update(
+            action="destroy",
+            reason="interrupted_preview_restore",
+            held=False,
+            disposal_original_reservation_id=disposal_original,
+        )
     if plan["action"] not in {"apply", "destroy"}:
         if unresolved:
             plan.update(held=True, reason="held_preview_recovery_required")
@@ -2045,12 +2109,11 @@ def reconcile_preview_target(
             )
     except Exception as error:
         if (
-            cleanup
+            (cleanup or disposal_original)
             and isinstance(error, ProductReconcileError)
             and error.code.startswith("preview_cleanup_")
         ):
-            plan.update(action="wait", held=True, reason=error.code)
-            return ReconcileOutcome(plan)
+            return _hold_preview_cleanup(plan, error.code)
         if plan["action"] != "destroy" or (
             isinstance(error, ProductReconcileError) and error.code == "preview_lease_lost"
         ):
@@ -2064,10 +2127,7 @@ def reconcile_preview_target(
         )
         outcome = _preview_failure(plan, code)
     if plan.get("preview_result_error_code") == PREVIEW_CLEANUP_SAFETY_UNKNOWN:
-        plan.pop("last_failed_error_code", None)
-        plan.pop("last_failed_error_summary", None)
-        plan.update(action="wait", held=True, reason=PREVIEW_CLEANUP_SAFETY_UNKNOWN)
-        return ReconcileOutcome(plan)
+        return _hold_preview_cleanup(plan, PREVIEW_CLEANUP_SAFETY_UNKNOWN)
     if (
         plan["action"] == "destroy"
         and outcome.error
@@ -2087,9 +2147,9 @@ def _preview_cleanup_guard(
     store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
     number: int,
+    original_reservation_id: str = "",
 ) -> None:
     from control_plane.disposable_lanes import (
-        DisposableLaneSafetyUnknown,
         DisposableLaneStore,
         resolve_disposable_preview,
         require_lane_target_ownership,
@@ -2103,12 +2163,24 @@ def _preview_cleanup_guard(
         )
     instance = profile.preview.slug_template.format(number=number)
     try:
-        resolve_disposable_preview(
-            cast(DisposableLaneStore, store),
-            profile,
-            profile.preview.context,
-            instance,
-        )
+        if original_reservation_id:
+            from control_plane.preview_reservation_recovery import (
+                require_unrecorded_preview_original,
+            )
+
+            require_unrecorded_preview_original(
+                cast(PostgresRecordStore, store),
+                profile=profile,
+                number=number,
+                reservation_id=original_reservation_id,
+            )
+        else:
+            resolve_disposable_preview(
+                cast(DisposableLaneStore, store),
+                profile,
+                profile.preview.context,
+                instance,
+            )
         target_store = cast(PreviewTargetOwnershipStore, store)
         require_lane_target_ownership(
             (
@@ -2118,7 +2190,7 @@ def _preview_cleanup_guard(
             context=profile.preview.context,
             instance=instance,
         )
-    except DisposableLaneSafetyUnknown as error:
+    except ValueError as error:
         raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error
 
 
@@ -2162,6 +2234,7 @@ def _plan_preview_target(
     if not head_sha:
         raise ProductReconcileError(f"GitHub returned no head for PR {pull_request_number}.")
     plan["head_sha"] = head_sha.lower()
+    plan["pull_request_state"] = pull_request.get("state")
     observed.update(
         head_sha=head_sha.lower(),
         eligible=_preview_eligible(pull_request),
@@ -2171,6 +2244,29 @@ def _plan_preview_target(
         plan.update(action="wait", held=True, reason="preview_cleanup_pr_state_unknown")
         return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
     if pull_request.get("state") != "open":
+        if not live and isinstance(record_store, PostgresRecordStore):
+            from control_plane.preview_reservation_recovery import (
+                require_unrecorded_preview_original,
+            )
+
+            for reservation in record_store.list_odoo_preview_cleanup_originals(
+                product=profile.product, number=pull_request_number
+            ):
+                try:
+                    require_unrecorded_preview_original(
+                        record_store,
+                        profile=profile,
+                        number=pull_request_number,
+                        reservation_id=reservation.record_id,
+                    )
+                except ValueError:
+                    continue
+                live = True
+                lifecycle_token = (
+                    f"original:{reservation.record_id}:{reservation.request_fingerprint}"
+                )
+                plan["unrecorded_original_reservation_id"] = reservation.record_id
+                break
         return without_preview("pull_request_not_open")
     intent = change_client_review(
         body=str(pull_request.get("body") or ""),
@@ -2183,14 +2279,17 @@ def _plan_preview_target(
         ),
         director_standing=profile.release_on_acceptance == "director_standing",
     )
-    if not intent.explicit_override and recorded_train_candidate(
+    train_candidate = recorded_train_candidate(
         store=record_store,
         repository=profile.repository,
         head=pull_request.get("head"),
         base_branch=str(
             _object(pull_request.get("base", {}), "pull request base").get("ref") or ""
         ),
-    ):
+    )
+    if train_candidate and profile.driver_id == "odoo":
+        return without_preview("merge_train_candidate")
+    if train_candidate and not intent.explicit_override:
         intent = ClientTestNotes(False)
     plan["owner_review_requested"] = intent.review_required and (
         profile.owner.is_set
@@ -2230,8 +2329,13 @@ def _plan_preview_target(
             )
         )
     except BuildProvenanceError as error:
-        # A PR's build is untrusted input: an unprovable or malformed one is not built yet.
         plan.update(action="wait", reason="no_verified_build", detail=str(error), held=False)
+        if error.code == "build_run_failed":
+            plan.update(
+                reason="preview_build_failed",
+                build_run_id=error.run_id,
+                last_failed_error_code="preview_build_failed",
+            )
         return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
     manifest = verified.manifest
     desired_digest = manifest.image.digest.lower()
@@ -2311,8 +2415,12 @@ def _run_preview_operation(
     )
     if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
         operation_key += ":disposable-cleanup"
+    disposal_original = str(plan.get("disposal_original_reservation_id") or "")
+    if disposal_original:
+        operation_key += f":interrupted-{disposal_original}"
     reservation_scope = reconcile_reservation_scope(profile.product)
     plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
+    trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
     plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
     reservation = record_store.read_idempotency_record(
         scope=reservation_scope, route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key=plan_id
@@ -2330,8 +2438,10 @@ def _run_preview_operation(
     if operation == "destroy" and not allow_retry and not unknown_destroy:
         return _hold_preview_destroy(plan, previous_plan, failed_attempts)
     database_url = getattr(record_store, "database_url", None)
+    disposal_qualified = False
 
     def pre_mutation_guard() -> None:
+        nonlocal disposal_qualified
         # Holding the reservation, just before the provider apply: a PR that closed,
         # or moved its head since the plan releases with no effect.
         if decision.observed and _pull_request_moved(
@@ -2342,7 +2452,40 @@ def _run_preview_operation(
         ):
             raise _PullRequestMovedError
         if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
-            _preview_cleanup_guard(record_store, profile, pull_request_number)
+            _preview_cleanup_guard(
+                record_store,
+                profile,
+                pull_request_number,
+                str(plan.get("unrecorded_original_reservation_id") or ""),
+            )
+        if disposal_original:
+            from control_plane.preview_reservation_recovery import (
+                interrupted_preview_restore,
+                require_interrupted_preview_disposal,
+            )
+
+            store = cast(PostgresRecordStore, record_store)
+            try:
+                require_interrupted_preview_disposal(
+                    store,
+                    profile=profile,
+                    number=pull_request_number,
+                    original_reservation_id=disposal_original,
+                )
+            except ValueError as error:
+                raise ProductReconcileError(
+                    str(error), code=PREVIEW_CLEANUP_SAFETY_UNKNOWN
+                ) from error
+            if not disposal_qualified:
+                original = store.read_idempotency_record_by_id(disposal_original)
+                if original is None or not interrupted_preview_restore(
+                    store=store, profile=profile, reservation=original, root=control_plane_root
+                ):
+                    raise ProductReconcileError(
+                        "Interrupted preview custody changed before disposal.",
+                        code=PREVIEW_CLEANUP_SAFETY_UNKNOWN,
+                    )
+                disposal_qualified = True
 
     def execute_apply(**kwargs: object) -> dict[str, object]:
         checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
@@ -2401,11 +2544,12 @@ def _run_preview_operation(
             reservation_scope=reservation_scope,
             idempotency_key=plan_id,
             request_fingerprint=_fingerprint({"operation_key": operation_key}),
-            trace_id=f"{RECONCILE_SOURCE}-{uuid4().hex}",
+            trace_id=trace_id,
             execute_apply=execute_apply,
             observe_apply=preview_hooks.observe_apply,
             supersession_is_quiescent=preview_hooks.quiescence_check,
             pre_mutation_guard=pre_mutation_guard,
+            qualify_existing_preview=bool(disposal_original),
             disposable_cleanup=operation == "destroy"
             and plan.get("reason") == "pull_request_not_open",
             allow_mutation=allow_mutation,
@@ -2516,34 +2660,16 @@ def _run_preview_operation(
             plan["omitted_integration_credential_keys"] = list(
                 issued_plan.omitted_integration_credential_keys
             )
-        if reservation is not None and cast(
-            PostgresRecordStore, record_store
-        ).read_original_mutation_intent(reservation):
-            from control_plane.preview_reservation_recovery import original_preview_intent
-
-            original = original_preview_intent(reservation, profile=profile, store=record_store)
-            validate_odoo_preview_profile_authority(
-                profile=profile, issued_plan=original.issued_plan
-            )
-            if (
-                original.issued_plan.dry_run_plan != issued_plan.dry_run_plan
-                or original.issued_plan.plan_request.manifest != issued_plan.plan_request.manifest
-                or original.issued_plan.plan_request.image_reference
-                != issued_plan.plan_request.image_reference
-            ):
-                # Fresh target discovery has changed the request. Preserve the
-                # original reservation and use guarded different-key supersession.
-                binding_digest = _fingerprint(
-                    issued_plan.model_dump(mode="json", exclude={"plan_provenance"})
-                )
-                operation_key += f":binding-{binding_digest[:16]}"
-                plan_id = build_odoo_preview_plan_id(
-                    scope=reservation_scope, idempotency_key=operation_key
-                )
-                issued_plan = issue_odoo_preview_apply_plan(result=issued_plan, plan_id=plan_id)
-                plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
-            else:
-                issued_plan = original.issued_plan
+        operation_key, issued_plan = _retained_preview_operation_plan(
+            record_store=record_store,
+            profile=profile,
+            operation_key=operation_key,
+            reservation_scope=reservation_scope,
+            fresh_plan=issued_plan,
+        )
+        assert issued_plan.plan_provenance is not None
+        plan_id = issued_plan.plan_provenance.plan_id
+        plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
         result = run_issued_plan(issued_plan, allow_mutation=operation != "destroy" or allow_retry)
         return finish_result(result, issued_plan)
     except PreviewMemoryCapacityRefused as error:
@@ -2557,12 +2683,73 @@ def _run_preview_operation(
     except OdooPreviewApplyConfigError as error:
         plan["missing_keys"] = list(env_key_names(error.missing_keys))
         return _preview_failure(plan, "preview_config_refused")
-    except OdooPreviewPlanProvenanceError:
+    except OdooPreviewPlanProvenanceError as error:
+        plan["failure_trace_id"] = trace_id
+        plan["preview_result_error_code"] = error.code
+        log_handled_error_cause(error, trace_id, operation_id=plan_id)
         return _preview_failure(plan, "preview_provenance_refused")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
         return _preview_failure(plan, "preview_apply_failed")
+
+
+def _retained_preview_operation_plan(
+    *,
+    record_store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    operation_key: str,
+    reservation_scope: str,
+    fresh_plan: OdooPreviewApplyInputsResult,
+) -> tuple[str, OdooPreviewApplyInputsResult]:
+    from control_plane.preview_reservation_recovery import original_preview_intent
+
+    assert fresh_plan.plan_provenance is not None
+    base_key = operation_key
+    binding_key = f"{base_key}:binding-{_fingerprint(fresh_plan.model_dump(mode='json', exclude={'plan_provenance'}))[:16]}"
+    for _step in range(PREVIEW_PLAN_RECOVERY_MAX_STEPS):
+        plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
+        reservation = record_store.read_idempotency_record(
+            scope=reservation_scope,
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=plan_id,
+        )
+        if reservation is None or not cast(
+            PostgresRecordStore, record_store
+        ).read_original_mutation_intent(reservation):
+            return operation_key, issue_odoo_preview_apply_plan(result=fresh_plan, plan_id=plan_id)
+        original = original_preview_intent(reservation, profile=profile, store=record_store)
+        retained = original.issued_plan
+        validate_odoo_preview_profile_authority(profile=profile, issued_plan=retained)
+        same_binding = (
+            retained.dry_run_plan == fresh_plan.dry_run_plan
+            and retained.plan_request.manifest == fresh_plan.plan_request.manifest
+            and retained.plan_request.image_reference == fresh_plan.plan_request.image_reference
+        )
+        assert retained.plan_provenance is not None
+        result = reservation.response_payload.get("result")
+        superseded = (
+            reservation.state == "completed"
+            and reservation.response_status_code == 409
+            and isinstance(result, dict)
+            and result.get("status") == "fail"
+        )
+        successor_key = (
+            binding_key
+            if operation_key == base_key and not same_binding
+            else f"{binding_key}:after-{_fingerprint({'reservation': reservation.record_id})[:16]}"
+        )
+        if (
+            same_binding
+            and not superseded
+            and (
+                reservation.state == "completed"
+                or retained.plan_provenance.expires_at > fresh_plan.plan_provenance.issued_at
+            )
+        ):
+            return operation_key, retained
+        operation_key = successor_key
+    raise ProductReconcileError("Preview operation history exceeds the recovery bound.")
 
 
 def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
@@ -2869,7 +3056,7 @@ def reconcile_product_request(
             testing_hooks=testing_hooks,
         )
     assert request.pull_request_number is not None
-    return reconcile_preview_target(
+    outcome = reconcile_preview_target(
         previous_plan=dict(request.last_plan),
         lease_held=lease_held,
         record_store=record_store,
@@ -2880,6 +3067,15 @@ def reconcile_product_request(
         control_plane_root=control_plane_root,
         preview_hooks=preview_hooks,
     )
+    if (
+        outcome.plan.get("build_run_id")
+        and not outcome.deferred
+        and outcome.plan.get("reason")
+        in {"preview_build_failed", "held_preview_recovery_required", "interrupted_preview_restore"}
+        and (not outcome.error or outcome.plan.get("reason") == "held_preview_recovery_required")
+    ):
+        return _preview_failure(dict(outcome.plan), "preview_build_failed")
+    return outcome
 
 
 def _has_preview_reservation(
@@ -2919,6 +3115,7 @@ def run_product_reconcile_once(
     request = record_store.claim_next_product_reconcile_request(lease_owner, lease_seconds)
     if request is None:
         return None
+    started_at = _utc_now()
     try:
         with _LeaseHeartbeat(
             record_store=record_store,
@@ -2981,6 +3178,12 @@ def run_product_reconcile_once(
                 if key in request.last_plan:
                     outcome.plan[key] = request.last_plan[key]
     plan = dict(outcome.plan)
+    timing = {
+        "requested_at": request.requested_at,
+        "started_at": started_at,
+        "planning_finished_at": _utc_now(),
+    }
+    plan["timing"] = timing
     if (
         request.target_kind == "preview"
         and not outcome.error
@@ -3014,6 +3217,7 @@ def run_product_reconcile_once(
             ),
         ),
     )
+    timing["feedback_finished_at"] = _utc_now()
     if feedback is not None:
         plan[PR_FEEDBACK_PLAN_KEY] = feedback
     retired_failure = False
@@ -3021,6 +3225,7 @@ def run_product_reconcile_once(
         request.target_kind == "preview"
         and feedback is not None
         and feedback.get("status") == "failed"
+        and plan.get("last_failed_error_code") != "preview_build_failed"
         and (
             (
                 outcome.error
@@ -3215,11 +3420,60 @@ def request_product_reconcile_sweep(
         from control_plane.preview_reservation_recovery import (
             held_preview_reservations,
             original_preview_intent,
+            require_unrecorded_preview_original,
         )
 
-        for reservation in held_preview_reservations(record_store, product=profile.product):
+        previews = record_store.list_preview_records(anchor_repo=_preview_anchor_repo(profile))
+        originals = {
+            item.record_id: item
+            for item in held_preview_reservations(record_store, product=profile.product)
+        }
+        if isinstance(record_store, PostgresRecordStore) and product_profile_uses_odoo_driver(
+            profile
+        ):
+            from control_plane.preview_inventory_evidence import read_preview_inventory_evidence
+            from control_plane.workflows.generic_web_preview import preview_pr_number_from_slug
+
+            inventory = read_preview_inventory_evidence(
+                record_store=record_store,
+                context=profile.preview.context,
+                product=profile.product,
+                repository=profile.repository,
+            )
+            tracked = {
+                item.anchor_pr_number
+                for item in previews
+                if item.context == profile.preview.context
+                and item.state not in _ENDED_PREVIEW_STATES
+            }
+            if inventory.status in {"empty", "nonempty"}:
+                for slug in inventory.observed_slugs:
+                    number = preview_pr_number_from_slug(
+                        preview_slug=slug, slug_template=profile.preview.slug_template
+                    )
+                    if (
+                        number is None
+                        or number <= 0
+                        or number in tracked
+                        or profile.preview.slug_template.format(number=number) != slug
+                    ):
+                        continue
+                    originals.update(
+                        (item.record_id, item)
+                        for item in record_store.list_odoo_preview_cleanup_originals(
+                            product=profile.product, number=number
+                        )
+                    )
+        for reservation in originals.values():
             try:
                 original = original_preview_intent(reservation, profile=profile, store=record_store)
+                if reservation.state == "completed":
+                    require_unrecorded_preview_original(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        number=original.issued_plan.plan_request.pr_number,
+                        reservation_id=reservation.record_id,
+                    )
             except ValueError:
                 continue
             targets.append(
@@ -3237,7 +3491,6 @@ def request_product_reconcile_sweep(
                     product=profile.product, target_kind="preview", pull_request_number=number
                 )
             )
-        previews = record_store.list_preview_records(anchor_repo=_preview_anchor_repo(profile))
         for preview in previews:
             if preview.state not in _ENDED_PREVIEW_STATES:
                 targets.append(
@@ -3754,12 +4007,7 @@ def _labels(pull_request: dict[str, object]) -> set[str]:
 
 
 def _fingerprint(payload: dict[str, object]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def _artifact_digest(record_store: ProductReconcileStore, artifact_id: str) -> str:

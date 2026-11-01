@@ -30,6 +30,17 @@ test("punctuation-distinct lane scopes and operations cannot alias recovery", ()
   assert.notEqual(repairOperationScope(scope, "domain"), repairOperationScope({ ...scope, context: "example:testing" }, "domain"));
 });
 
+test("split custody survives exact request recovery", () => {
+  const external = { domains: ["business.example.test", "www.business.example.test"], custodian: "Office proxy operator", evidence_url: "https://example.test/proxy-report" };
+  const review = { operation: "reconcile-route-binding", expected_confirmation: "fixture-reviewed-confirmation", plan_sha256: "a".repeat(64), expected_current: { state: "absent", record_sha256: "" } };
+  const request = repairRequest(scope, "binding", "Preserve both paths", review, external);
+  assert.deepEqual(parseStoredRepairRequest(JSON.stringify(request), scope, "binding"), request);
+  assert.deepEqual(request.external_ingress, external);
+  for (const malformed of [null, {}, { ...external, custodian: "" }, { ...external, domains: [] }, { ...external, extra: "unexpected" }]) {
+    assert.equal(parseStoredRepairRequest(JSON.stringify({ ...request, external_ingress: malformed }), scope, "binding"), null);
+  }
+});
+
 test("an unchanged binding verdict requires the same current and proposed record", async () => {
   const { checkedRepairReview } = await import("../src/route-record-repair.ts");
   const record = { ...scope, record_sha256: "b".repeat(64), provider_target: { target_name: "Testing destination" },

@@ -4,9 +4,10 @@ from tests.support.auth import scoped_agent_test
 
 import hashlib
 import json
+from itertools import count
 import unittest
 import click
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from threading import Event, Thread, current_thread
 from typing import Any
 from unittest.mock import patch
@@ -39,6 +40,12 @@ from tests.test_generic_web_deploy_recovery import _create_recovery_app, _OPERAT
 from tests.test_service import _invoke_app
 from tests.support.auth import local_operator_policy
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.product_profile_record import ProductLaneHealthCheck
+from control_plane.workflows import public_ingress_monitor as monitor
+from control_plane.workflows.runtime_identity_health import (
+    wait_for_runtime_identity_healthcheck_with_retry,
+)
 
 
 class PromotionRecoveryTests(unittest.TestCase):
@@ -106,6 +113,29 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.case.advance()
         self.case.capture()
         self.path = f"/v1/admin/generic-web/promotion-recovery/{self.case.profile.product}/{self.decision.record_id}"
+
+    def test_recovery_requires_the_recorded_settings_as_well_as_the_artifact(self) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.case.context,
+                instance="prod",
+                env={"APP_CHANNEL": "accepted"},
+                updated_at=datetime.now(UTC).isoformat(),
+            )
+        )
+        self.decision = self.case.accept(suffix="-settings")
+        self.path = f"/v1/admin/generic-web/promotion-recovery/{self.case.profile.product}/{self.decision.record_id}"
+        self.case.advance()
+        self.case.capture()
+        self.interrupt_completion()
+        self.assertEqual(self.dry_run()["proposed_action"], "adopt_promotion")
+        self.provider.settings["APP_CHANNEL"] = "drift"
+        self.assertEqual(self.dry_run()["proposed_action"], "hold_unknown")
+        self.provider.settings["APP_CHANNEL"] = "accepted"
+        self.assertEqual(self.dry_run()["proposed_action"], "adopt_promotion")
 
     def observe_runtime(self, **kwargs: object) -> GenericWebRuntimeArtifactObservation:
         del kwargs
@@ -315,6 +345,86 @@ class PromotionRecoveryTests(unittest.TestCase):
         )
         assert run is not None
         self.assertEqual(run.state, "passed")
+
+    def assert_private_health_blocks_recovery(self, expected_action: str) -> None:
+        self.interrupt_completion()
+        profile = self.store.read_product_profile_record(self.case.profile.product)
+        lane = next(lane for lane in profile.lanes if lane.instance == "prod")
+        endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="recovery-runtime",
+            product=profile.product,
+            context=lane.context,
+            instance=lane.instance,
+            url="https://recovery.internal/health",
+            updated_at=profile.updated_at,
+        )
+        self.store.write_private_health_endpoint_record(endpoint)
+        policy = lane.health_monitoring.model_copy(
+            update={
+                "checks": (
+                    *lane.health_monitoring.checks,
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        private_endpoint_key=endpoint.endpoint_key,
+                    ),
+                )
+            }
+        )
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        item.model_copy(update={"health_monitoring": policy})
+                        if item == lane
+                        else item
+                        for item in profile.lanes
+                    )
+                }
+            )
+        )
+        healthy = True
+
+        def observe(url: str, _timeout: int, **_kwargs: Any) -> monitor.HttpObservation:
+            assert self.provider.running is not None
+            return monitor.HttpObservation(
+                status_code=200 if healthy else 503,
+                final_url=url,
+                redirect_count=0,
+                payload={"runtime_identity": self.provider.running.model_dump(mode="json")},
+            )
+
+        def check(**kwargs: Any) -> Any:
+            if "wait_once" not in kwargs:
+                return self.case.healthcheck(**kwargs)
+            clock = count()
+            return wait_for_runtime_identity_healthcheck_with_retry(
+                **{**kwargs, "sleep": lambda _seconds: None, "monotonic": lambda: next(clock)}
+            )
+
+        before = self.snapshot()
+        effects = list(self.provider.deployed_artifacts)
+        with (
+            patch.object(monitor, "fetch_private_health_url", side_effect=observe),
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
+                side_effect=check,
+            ),
+        ):
+            self.assertEqual(self.dry_run()["proposed_action"], expected_action)
+            healthy = False
+            self.assertEqual(self.dry_run()["proposed_action"], "hold_unknown")
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.provider.deployed_artifacts, effects)
+
+    def test_promotion_recovery_requires_private_health_even_when_public_health_passes(
+        self,
+    ) -> None:
+        self.assert_private_health_blocks_recovery("adopt_promotion")
+
+    def test_drill_recovery_requires_private_health_even_when_public_health_passes(self) -> None:
+        self.prepare_drill()
+        self.assert_private_health_blocks_recovery("adopt_rollback")
 
     def test_drill_recovery_requires_exact_records_runtime_and_reviewed_evidence(self) -> None:
         for drift in ("health", "runtime", "record", "race"):

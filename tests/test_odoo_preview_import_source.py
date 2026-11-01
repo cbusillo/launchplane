@@ -16,6 +16,7 @@ from control_plane.service_auth import (
 from tests.support.auth import _local_operator_policy, scoped_agent_test
 from tests.http_app_test_support import _asgi_request, _RejectingVerifier
 from tests.test_odoo_preview_apply_execution import _issued_plan
+from control_plane.odoo_preview_import_source import PreviewImportSourceError
 from control_plane import secrets
 from control_plane.odoo_runtime_source_prerequisites import (
     SourceConsumerResult,
@@ -174,6 +175,36 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         self.qualifier = qualifier.start()
         self.addCleanup(qualifier.stop)
 
+    def test_source_capture_does_not_resolve_import_secret_before_reservation(self) -> None:
+        from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
+
+        _write_odoo_preview_template_runtime_environment(store=self.store)
+        self.profile.preview.data_transport_mode = "driver"
+        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        issued = _issued_plan(request)
+        issued.plan_request.fishbowl_source = self.reference
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=request,
+            issued_plan=issued,
+            reservation_scope="source-capture",
+            idempotency_key="source-capture",
+            request_fingerprint="source-capture",
+            trace_id="source-capture",
+        )
+        with patch(
+            "control_plane.odoo_preview_apply_http.resolve_fishbowl_preview_source"
+        ) as deliver:
+            operation.adapter.capture_source_decision()
+        deliver.assert_not_called()
+        assert operation.adapter.source_decision is not None
+        self.assertTrue(operation.adapter.source_decision.fishbowl_import)
+        self.assertIsNone(
+            self.store.read_idempotency_record_by_id(operation.adapter._deployment_record_id)
+        )
+
     def resolve(self, *, include_secret_value: bool = False) -> FishbowlPreviewSource:
         return resolve_fishbowl_preview_source(
             store=self.store,
@@ -183,6 +214,61 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
             include_secret_value=include_secret_value,
             control_plane_root=self.root,
             database_url=self.store.database_url,
+        )
+
+    def test_exact_preview_withdrawal_also_controls_import_source_composition(self) -> None:
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooWebsiteBootstrapPayload,
+        )
+        from control_plane.odoo_instance_overrides import (
+            LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+        )
+
+        _write_odoo_preview_template_runtime_environment(store=self.store)
+        self.store.write_runtime_environment_record(
+            self.runtime.model_copy(
+                update={
+                    "env": {**self.runtime.env, "ODOO_DB_USER": "odoo"},
+                }
+            )
+        )
+        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        template = OdooInstanceOverrideRecord(
+            context=self.profile.preview.context,
+            instance=self.profile.preview.template_instance,
+            website_bootstrap=OdooWebsiteBootstrapPayload(name="Template site"),
+            updated_at=self.profile.updated_at,
+        )
+        self.store.write_odoo_instance_override_record(template)
+        self.store.write_odoo_instance_override_record(
+            OdooInstanceOverrideRecord(
+                context=self.profile.preview.context,
+                instance=request.apply.dry_run_plan.preview_slug,
+                apply_on=("preview",),
+                updated_at=self.profile.updated_at,
+            )
+        )
+        result = _odoo_preview_service_environment(
+            control_plane_root_path=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            plan=request.apply.dry_run_plan,
+            manifest=request.apply.manifest,
+            database_url=self.store.database_url,
+            fishbowl_source=self.reference,
+        )
+        payload = json.loads(
+            base64.b64decode(result.values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY])
+        )
+        self.assertFalse(payload.get("website_bootstrap"))
+        self.assertTrue(payload["config_parameters"])
+        self.assertNotIn(LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY, result.values)
+        self.assertEqual(
+            self.store.read_odoo_instance_override_record(
+                context_name=template.context,
+                instance_name=template.instance,
+            ),
+            template,
         )
 
     def test_only_selected_source_enters_normal_post_deploy_payload(self) -> None:
@@ -202,24 +288,24 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 "value": {"source": "literal", "value": "preview-client-fixture"},
             }
         ]
-        self.profile = self.profile.model_copy(
-            update={
-                "preview": self.profile.preview.model_copy(
-                    update={
-                        "override_env": {
-                            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
-                                json.dumps(
-                                    {
-                                        "context": "cm",
-                                        "instance": "preview",
-                                        "addon_settings": addon_settings,
-                                    }
-                                ).encode()
-                            ).decode()
-                        }
-                    }
-                )
-            }
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.profile.preview.context,
+                instance="preview",
+                env={
+                    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                        json.dumps(
+                            {
+                                "context": self.profile.preview.context,
+                                "instance": "preview",
+                                "addon_settings": addon_settings,
+                            }
+                        ).encode()
+                    ).decode()
+                },
+                updated_at="2026-10-26T00:00:00Z",
+            )
         )
         before = self.store.list_secret_bindings(limit=None)
         result = _odoo_preview_service_environment(
@@ -366,6 +452,33 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         self.qualification = self.qualification.model_copy(update={"runtime": "unknown"})
         with self.assertRaises(ValueError):
             self.resolve()
+
+    def test_unqualified_source_reports_only_proven_failure_stage(self) -> None:
+        original = self.qualification
+        for stage in ("capacity", "producer_inventory", "addon_state", "source_resolution", None):
+            with self.subTest(stage=stage):
+                self.qualification = original.model_copy(
+                    update={
+                        "runtime": "unknown" if stage == "capacity" else "verified",
+                        "failure_stage": stage if stage == "capacity" else None,
+                        "sources": (
+                            original.sources[0].model_copy(
+                                update={
+                                    "parameters": {},
+                                    "failure_stage": None if stage == "capacity" else stage,
+                                }
+                            ),
+                        ),
+                    }
+                )
+                with self.assertRaises(PreviewImportSourceError) as caught:
+                    self.resolve()
+                self.assertEqual(caught.exception.code, "source_unqualified")
+                self.assertEqual(caught.exception.failure_stage, stage)
+                if stage:
+                    self.assertIn(stage, str(caught.exception))
+                self.assertNotIn("source.example.test", str(caught.exception))
+                self.assertNotIn("private-fixture-source-password", str(caught.exception))
 
     @scoped_agent_test
     async def test_preview_read_and_standing_metadata_read_cannot_move_source_value(self) -> None:

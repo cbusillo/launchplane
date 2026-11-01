@@ -104,7 +104,6 @@ export function useEngineeringResource<T>(
   loader: (signal: AbortSignal, reason: EngineeringLoadReason) => Promise<T>,
   scopeKey: string,
   enabled = true,
-  clearOnDenied = false,
 ) {
   const [state, setState] = useState<EngineeringResourceState<T>>(
     emptyEngineeringResource,
@@ -161,7 +160,7 @@ export function useEngineeringResource<T>(
           }
           const failure = engineeringFailure(error);
           setState((current) =>
-            current.data && !(clearOnDenied && failure.denied)
+            current.data && !failure.denied
               ? {
                   ...current,
                   phase: "ready",
@@ -187,7 +186,7 @@ export function useEngineeringResource<T>(
           }
         });
     },
-    [loader, clearOnDenied],
+    [loader],
   );
 
   useEffect(() => {

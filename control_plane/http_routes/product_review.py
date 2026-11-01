@@ -31,6 +31,7 @@ from control_plane.product_review import (
 from control_plane.release_review import UNREAD_PULL_REQUEST_NOTES, PullRequestNotes
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.product_review_feedback import validate_owner_feedback_decision
+from control_plane.client_test_notes import CLIENT_REVIEW_NOTES_PENDING
 
 
 PRODUCT_REVIEW_ROUTE = "/v1/product-review"
@@ -40,6 +41,26 @@ PRODUCT_REVIEW_FEEDBACK_RETRY_ROUTE = "/v1/product-review/feedback/retry"
 _NO_OWNER_REASON = "No Client set for this product"
 _NOT_OWNER_REASON = "You are not this product's Client."
 _NO_PREVIEW_REASON = "No preview is ready for this pull request yet."
+
+
+def _client_review_notes_error(notes: PullRequestNotes) -> str:
+    if not notes.client_test_notes_error:
+        return ""
+    if notes.client_test_notes_error == UNREAD_PULL_REQUEST_NOTES.client_test_notes_error:
+        return notes.client_test_notes_error
+    return CLIENT_REVIEW_NOTES_PENDING
+
+
+def _cannot_accept_preview_reason(preview: ProductReviewPreview, notes: PullRequestNotes) -> str:
+    if not preview.preview_url:
+        return _NO_PREVIEW_REASON
+    if notes.state == "closed":
+        return "This change is closed. You can still share feedback on the preview."
+    if not notes.head_sha or notes.state != "open":
+        return "We could not check the latest version of this change. Refresh the review."
+    if preview.head_sha != notes.head_sha:
+        return "We are updating the preview for the latest change. We will let you know when it is ready to review."
+    return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +122,8 @@ class ProductReviewResponse(BaseModel):
     viewer_is_owner: bool
     can_decide: bool
     cannot_decide_reason: str
+    preview_is_current: bool
+    cannot_accept_reason: str
     latest_decision: ProductReviewDecisionRecord | None
 
 
@@ -183,6 +206,7 @@ def register_product_review_routes(
             store=store, profile=profile, pull_request_number=pull_request_number
         )
         viewer_is_owner = viewer_is_product_owner(profile=profile, identity=identity)
+        cannot_accept_reason = _cannot_accept_preview_reason(preview, notes)
         if not profile.owner.is_set:
             cannot_decide_reason = _NO_OWNER_REASON
         elif not viewer_is_owner:
@@ -202,7 +226,7 @@ def register_product_review_routes(
             ),
             pull_request_title=notes.title,
             client_test_notes=notes.client_test_notes,
-            client_test_notes_error=notes.client_test_notes_error,
+            client_test_notes_error=_client_review_notes_error(notes),
             preview_url=preview.preview_url,
             head_sha=preview.head_sha,
             preview_generation_id=preview.generation_id,
@@ -211,6 +235,8 @@ def register_product_review_routes(
             viewer_is_owner=viewer_is_owner,
             can_decide=not cannot_decide_reason,
             cannot_decide_reason=cannot_decide_reason,
+            preview_is_current=not cannot_accept_reason,
+            cannot_accept_reason=cannot_accept_reason,
             latest_decision=(
                 saved_decision(store, profile, pull_request_number, decision_id, trace_id)
                 if decision_id
@@ -323,24 +349,34 @@ def register_product_review_routes(
                 message=_NO_PREVIEW_REASON,
             )
         notes = dependencies.read_pull_request_notes(profile, envelope.pull_request, trace_id)
+        reviewed_preview = ProductReviewPreview(
+            head_sha=envelope.reviewed_head_sha,
+            preview_url=envelope.reviewed_preview_url,
+            generation_id=envelope.reviewed_generation_id,
+        )
         notes_error = notes.client_test_notes_error
         if envelope.decision == "accepted" and notes_error:
             raise common.http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="client_test_notes_required",
-                message=notes_error,
+                message=_client_review_notes_error(notes),
+            )
+        if envelope.decision == "accepted" and (
+            cannot_accept_reason := _cannot_accept_preview_reason(reviewed_preview, notes)
+        ):
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_review_preview_changed",
+                message=cannot_accept_reason,
             )
         try:
             record_product_review_decision(
                 store=store,
                 profile=profile,
                 pull_request_number=envelope.pull_request,
-                preview=ProductReviewPreview(
-                    head_sha=envelope.reviewed_head_sha,
-                    preview_url=envelope.reviewed_preview_url,
-                    generation_id=envelope.reviewed_generation_id,
-                ),
+                preview=reviewed_preview,
                 decision=envelope.decision,
                 reason=envelope.reason,
                 identity=identity,

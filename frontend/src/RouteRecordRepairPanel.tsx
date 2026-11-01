@@ -9,6 +9,7 @@ import {
   checkedRepairReview, parseStoredRepairRequest, repairOperationScope, repairReadbackMatches,
   repairRequest, repairStorageKey, verifyRepairReceipt,
   type RepairKind, type RepairRequest, type RepairResponse, type RepairReview, type RepairScope,
+  type ExternalIngress,
 } from "./route-record-repair";
 
 function executeRepair(request: RepairRequest, options: BrowserOperationOptions): Promise<RepairResponse> {
@@ -50,6 +51,7 @@ export function RouteRecordRepairPanel({ detail, fixtureMode, onRefresh, refresh
     {fixtureMode ? <p>Route-record controls are off in fixture mode.</p> : !admin ? <p role="status">{sessionError || "A verified administrator session is required to review and apply route records."}</p> : null}
     <div className="route-repair-sections">
       {(["domain", "binding"] as const).map(kind => <RepairDecision key={kind} kind={kind} scope={scope}
+        recordedExternal={detail.topology.provider_recorded.external_ingress ?? undefined}
         admin={admin && !fixtureMode} otherActive={active[kind === "domain" ? "binding" : "domain"]}
         setActive={value => setActive(current => current[kind] === value ? current : { ...current, [kind]: value })}
         refreshToken={`${refreshToken}:${revision}`} onSaved={() => { setRevision(value => value + 1); onRefresh(); }} />)}
@@ -57,9 +59,10 @@ export function RouteRecordRepairPanel({ detail, fixtureMode, onRefresh, refresh
   </section>;
 }
 
-function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshToken, onSaved }: {
+function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshToken, onSaved, recordedExternal }: {
   kind: RepairKind; scope: RepairScope; admin: boolean; otherActive: boolean;
   setActive: (value: boolean) => void; refreshToken: string; onSaved: () => void;
+  recordedExternal?: ExternalIngress;
 }) {
   const id = useId();
   const operationScope = repairOperationScope(scope, kind);
@@ -74,6 +77,15 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     } catch { return null; }
   });
   const [reason, setReason] = useState(pending?.reason ?? "");
+  const savedExternal = pending ? ("external_ingress" in pending ? pending.external_ingress : undefined) : recordedExternal;
+  const [externalDomains, setExternalDomains] = useState(savedExternal?.domains.join(", ") ?? "");
+  const [custodian, setCustodian] = useState(savedExternal?.custodian ?? "");
+  const [evidenceUrl, setEvidenceUrl] = useState(savedExternal?.evidence_url ?? "");
+  const [custodyDirty, setCustodyDirty] = useState(Boolean(pending));
+  const recordedCustody = JSON.stringify(recordedExternal ?? null);
+  const externalIngress: ExternalIngress | undefined = externalDomains.trim() ? {
+    domains: externalDomains.split(/[\s,]+/).filter(Boolean), custodian: custodian.trim(), evidence_url: evidenceUrl.trim(),
+  } : undefined;
   const [review, setReview] = useState<RepairReview | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [message, setMessage] = useState("");
@@ -103,11 +115,20 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
   const recovering = apply.state.requiresIdempotencyContinuity;
   const busy = readback === "pending" || [plan.state.phase, apply.state.phase].some(phase => phase === "queued" || phase === "submitting");
   const locked = !admin || busy || recovering || otherActive;
+  function loadCustody(custody: ExternalIngress | undefined) {
+    setExternalDomains(custody?.domains.join(", ") ?? "");
+    setCustodian(custody?.custodian ?? "");
+    setEvidenceUrl(custody?.evidence_url ?? "");
+  }
+  useEffect(() => {
+    if (kind !== "binding" || recovering || custodyDirty) return;
+    loadCustody(recordedExternal);
+  }, [recordedCustody]);
   useEffect(() => { setActive(busy); }, [busy]);
   useEffect(() => {
     revision.current += 1;
     if (!recovering) { setReview(null); setConfirmed(false); }
-  }, [refreshToken]);
+  }, [refreshToken, recordedCustody]);
   useEffect(() => {
     if (!recovering && apply.state.failure?.statusCode === 409 && apply.state.failure.code === "stale") {
       revision.current += 1; setReview(null); setConfirmed(false); setPending(null); setAccepted(null);
@@ -125,6 +146,8 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     if (!apply.abandon()) return;
     setEarlierRequest(unverified);
     revision.current += 1;
+    if (pending) setCustodyDirty(true);
+    else { loadCustody(recordedExternal); setCustodyDirty(false); }
     setReview(null); setConfirmed(false); setPending(null); setAccepted(null); setReadback("idle"); setMessage("");
     try { sessionStorage.removeItem(storageKey); } catch { /* Local release does not promise durable browser storage cleanup. */ }
   }
@@ -132,7 +155,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     if (locked || !reason.trim() || !apply.reset()) return;
     setReview(null); setConfirmed(false); setMessage(""); setAccepted(null); setReadback("idle");
     const generation = ++revision.current;
-    const response = await plan.run(repairRequest(scope, kind, reason));
+    const response = await plan.run(repairRequest(scope, kind, reason, undefined, externalIngress));
     if (!response || generation !== revision.current) return;
     try {
       const next = checkedRepairReview(response, scope, kind);
@@ -142,7 +165,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
   }
   async function save() {
     if (!admin || busy || otherActive || (recovering ? !pending : !review || review.status !== "ready" || !confirmed)) return;
-    const request = recovering && pending ? pending : repairRequest(scope, kind, reason, review!);
+    const request = recovering && pending ? pending : repairRequest(scope, kind, reason, review!, externalIngress);
     try {
       const serialized = JSON.stringify(request);
       sessionStorage.setItem(storageKey, serialized);
@@ -151,14 +174,16 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     setPending(request);
     const response = await apply.run(request);
     if (!response) return;
-    setReview(null); setPending(null); setConfirmed(false);
+    const receipt = verifyRepairReceipt(response, scope, kind, request);
+    if (receipt.operation === "reconcile-route-binding") loadCustody(receipt.proposed_record?.external_ingress ?? undefined);
+    setReview(null); setPending(null); setConfirmed(false); setCustodyDirty(false);
     try { sessionStorage.removeItem(storageKey); } catch { /* Settled state never recovers a leftover request. */ }
     // The verified receipt settles this apply. Later readback cannot make it uncertain again.
     setReadback("pending");
     const readbackGeneration = revision.current;
     setMessage("Apply accepted; current record readback pending. This is not a website health check.");
     try {
-      const readRequest = repairRequest(scope, kind, request.reason);
+      const readRequest = repairRequest(scope, kind, request.reason, undefined, "external_ingress" in request ? request.external_ingress : undefined);
       const readResponse = await plan.run(readRequest);
       if (readbackGeneration !== revision.current) {
         setReadback("unavailable");
@@ -168,7 +193,8 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
       if (!readResponse) throw new Error("Record readback unavailable. The original receipt still proves completion.");
       const current = checkedRepairReview(readResponse, scope, kind);
       if (current.applied) throw new Error("The readback was not an inert review.");
-      if (repairReadbackMatches(verifyRepairReceipt(response, scope, kind, request), current)) {
+      if (current.operation === "reconcile-route-binding") loadCustody(current.current_record?.external_ingress ?? undefined);
+      if (repairReadbackMatches(receipt, current)) {
         setReadback("verified");
         setMessage("Route record saved and current record readback verified. Website health has not been checked.");
       } else {
@@ -187,6 +213,13 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     <h3 id={`${id}-title`}>{title}</h3>
     <p>{kind === "domain" ? "Compare stored domains with the verified provider hosts before recognizing them." : "Join recorded destination, ingress and TLS ownership without inventing missing evidence."}</p>
     <label className="product-config-field">Reason<input aria-label={`${title} reason`} value={reason} disabled={locked} onChange={event => edited(event.target.value)} /></label>
+    {kind === "binding" && <details><summary role="button" aria-label="Edit external custody">Separate externally managed domains</summary>
+      <p>Keep the recovery route managed here. Name the business domains managed by another custodian and link their permanent configuration report. Saving attests custody and enables strict health and TLS checks for every recorded hostname.</p>
+      <label className="product-config-field">External domains<input aria-label="External domains" value={externalDomains} disabled={locked} onChange={event => { setCustodyDirty(true); setExternalDomains(event.target.value); edited(reason); }} /></label>
+      <label className="product-config-field">Proxy custodian<input aria-label="Proxy custodian" value={custodian} disabled={locked} onChange={event => { setCustodyDirty(true); setCustodian(event.target.value); edited(reason); }} /></label>
+      <label className="product-config-field">Configuration evidence URL<input aria-label="Configuration evidence URL" value={evidenceUrl} disabled={locked} onChange={event => { setCustodyDirty(true); setEvidenceUrl(event.target.value); edited(reason); }} /></label>
+    </details>}
+    {kind === "binding" && externalIngress && <p>Applying this decision attests the custodian's current report. Review the report before confirming. Each hostname must keep passing its strict health and TLS checks.</p>}
     <button type="button" className="button button-secondary" disabled={locked || !reason.trim()} onClick={() => void inspect()}>Review {title.toLowerCase()}</button>
     {review && <div className="product-owner-plan route-repair-review" aria-label={`${title} review`}>
       <p><strong>{review.status === "ready" ? "Ready for your decision" : review.status === "unchanged"
@@ -197,14 +230,17 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
       <div className="route-repair-comparison"><DomainList label="Current stored domains" domains={review.current_domains} /><DomainList label="Proposed domains" domains={review.proposed_domains} /></div>
       {review.operation === "repair-domain-authority" ? <DomainList label="Observed provider hosts" domains={review.observed_domains} /> : <>
         <p>Current binding: {review.current_record ? "present" : "absent"}. Decision: {review.binding_operation}.</p>
+        {review.current_record?.external_ingress && <p>Current external custody: {review.current_record.external_ingress.domains.join(", ")} · {review.current_record.external_ingress.custodian}. <a href={review.current_record.external_ingress.evidence_url} target="_blank" rel="noreferrer">Current configuration report</a>.</p>}
+        {review.current_record?.external_ingress && review.proposed_record && !review.proposed_record.external_ingress && <p>Remove external custody. Every domain will use the managed ingress and TLS authority shown below.</p>}
         {review.proposed_record && <p>Destination: {review.proposed_record.provider_target.target_name}. Ingress: {review.proposed_record.ingress.provider} · {review.proposed_record.ingress.endpoint_key || "no endpoint"}. TLS ownership: {review.proposed_record.tls.owner}.</p>}
+        {review.proposed_record?.external_ingress && <p>External ingress and TLS for {review.proposed_record.external_ingress.domains.join(", ")}: {review.proposed_record.external_ingress.custodian}. <a href={review.proposed_record.external_ingress.evidence_url} target="_blank" rel="noreferrer">Configuration evidence</a>. Other domains retain the managed ingress and TLS shown above.</p>}
         {review.findings.length > 0 && <ul>{review.findings.map(finding => <li key={finding.code}>{finding.detail}</li>)}</ul>}
       </>}
       <details><summary>Investigate evidence</summary><p>Lane: {scope.product} / {scope.context} / {scope.instance}</p><p>Reviewed digest: <code>{review.plan_sha256}</code></p>
         {review.operation === "repair-domain-authority" ? <p>Target: <code>{review.target_id}</code></p> : <p>Current record: <code>{review.current_record_sha256 || "absent"}</code></p>}
         <ul>{review.source_records.map(source => <li key={source.identity}><code>{source.identity}</code> · {source.version}</li>)}</ul>
       </details>
-      {review.status === "ready" && <><label className="confirmation-check"><input type="checkbox" disabled={locked} checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I reviewed this lane’s {title.toLowerCase()} and want to update its Launchplane records.</label>
+      {review.status === "ready" && <><label className="confirmation-check"><input type="checkbox" disabled={locked} checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />{review.operation === "reconcile-route-binding" && review.proposed_record?.external_ingress ? "I verified the custodian's current configuration report and want to record the shown custody." : <>I reviewed this lane’s {title.toLowerCase()} and want to update its Launchplane records.</>}</label>
         <button className="button button-primary" type="button" disabled={locked || !confirmed} onClick={() => void save()}>Apply reviewed {title.toLowerCase()}</button></>}
       <button className="button button-secondary" type="button" disabled={busy || recovering} onClick={() => { revision.current += 1; setReview(null); setConfirmed(false); }}>Leave records unchanged</button>
     </div>}

@@ -62,12 +62,14 @@ from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_depl
 from control_plane.workflows.generic_web_promotion import _verify_health_evidence_with_identity
 from control_plane.workflows.production_promotion_backup import (
     GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+    ProductionBackupNotAdmissible,
+    backup_capture_freshness_refusal,
     _read_operation,
     _source_key,
     require_production_promotion_backup,
 )
 from control_plane.dokploy import api, source
-from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.generic_web_source_qualification import GenericWebPromotionAdmissionRefused
 from control_plane.http_error_evidence import log_handled_error_cause
 from control_plane.outbound_http import _ValidatedAddressConnector, resolve_private_http_destination
 
@@ -78,6 +80,14 @@ from control_plane.production_recipient_evidence import (
 )
 
 CUTOVER_ROUTE = "/v1/products/{product}/production-recipient/cutover"
+
+
+def recipient_promotion_record_id(provider_operation_key: str) -> str:
+    return "promotion-recipient-" + canonical_sha256(provider_operation_key)[:24]
+
+
+def recipient_deployment_record_id(provider_operation_key: str) -> str:
+    return "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
 
 
 def cutover_reconciliation_key(preparation: str) -> str:
@@ -223,17 +233,10 @@ def cutover_intent(
         or not capture.evidence.get("independent_backup_id")
     ):
         raise ValueError("Destination capture is incomplete or unverified.")
-    now = datetime.now(UTC)
-    for key, maximum in (
-        ("snapshot_finished_at", bound.policy.fast_snapshot.max_evidence_age_seconds),
-        (
-            "independent_backup_finished_at",
-            bound.policy.independent_backup.max_evidence_age_seconds,
-        ),
+    if backup_capture_freshness_refusal(
+        bound, capture.evidence, now=datetime.now(UTC), check_freshness=check_freshness
     ):
-        observed = datetime.fromisoformat(capture.evidence.get(key, "").replace("Z", "+00:00"))
-        if check_freshness and not 0 <= (now - observed).total_seconds() <= maximum:
-            raise ValueError("Destination capture is stale or has a future observation.")
+        raise ValueError("Destination capture is stale or has a future observation.")
     binding = next(
         (
             row
@@ -430,6 +433,10 @@ def writer_action(
     binding: str | None = None,
     server_id: str | None = None,
 ) -> None:
+    if old and action == "resume":
+        from control_plane.production_recipient_retirement import require_before_retirement
+
+        require_before_retirement(record)
     host, token = source.read_dokploy_config(control_plane_root=root)
     target_id = record.retained_target_id.target_id if old else record.target_id
     payload = api.fetch_dokploy_target_payload(
@@ -751,7 +758,7 @@ def _attempt_execution_started(
         and record.execution.get("trigger_requested_at")
         and isinstance(attempt_identity, dict)
         and attempt_identity.get("deployment_record_id")
-        == "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
+        == recipient_deployment_record_id(provider_operation_key)
     )
 
 
@@ -880,6 +887,12 @@ class RecipientCutoverAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        from control_plane.production_recipient_retirement import require_before_retirement
+
+        try:
+            require_before_retirement(self.record)
+        except ValueError as error:
+            raise ProviderMutationRejectedError(error) from error
         if self.record.phase in {"reverting", "inverse_published"}:
             raise ProviderMutationRejectedError(
                 ValueError("Finish the original inverse before another forward operation.")
@@ -955,7 +968,11 @@ class RecipientCutoverAdapter:
         )
         with self.store.production_backup_source_lock(_source_key(operation)) as locked:
             if locked is None:
-                raise ProviderMutationRejectedError(ValueError("Production backup source is busy."))
+                raise ProviderMutationRejectedError(
+                    ProductionBackupNotAdmissible(
+                        "Production backup source is busy.", reason="busy"
+                    )
+                )
 
             def backup_check() -> BackupGateEvidence:
                 locked()
@@ -966,8 +983,9 @@ class RecipientCutoverAdapter:
                     instance="prod",
                     promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
                     backup_record_id=self.backup_record_id,
-                    active_promotion_record_id="promotion-recipient-"
-                    + canonical_sha256(provider_operation_key)[:24],
+                    active_promotion_record_id=recipient_promotion_record_id(
+                        provider_operation_key
+                    ),
                 )
 
             automatic_recovery = False
@@ -1117,8 +1135,8 @@ class RecipientCutoverAdapter:
                 != record.activation
             ):
                 raise ValueError("Reviewed cutover authority changed.")
-            deployment_id = "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
-            promotion_id = "promotion-recipient-" + canonical_sha256(provider_operation_key)[:24]
+            deployment_id = recipient_deployment_record_id(provider_operation_key)
+            promotion_id = recipient_promotion_record_id(provider_operation_key)
             if record.execution:
                 identity = RuntimeIdentity.model_validate(record.execution["runtime_identity"])
                 if (
@@ -1393,7 +1411,23 @@ class RecipientCutoverAdapter:
         except Exception as error:
             log_handled_error_cause(error, self.trace_id)
             if (
-                isinstance(error, GenericWebPromotionSourceRefused)
+                not started
+                and isinstance(lease, ProviderEvidenceLease)
+                and not attempt_has_effects()
+            ):
+                committed = custody(self.store, record.product, record.context)
+                if committed is None:
+                    raise ProviderMutationUnknownError(
+                        "Production recipient custody is unavailable."
+                    ) from error
+                if committed.plan_sha256 != record.plan_sha256:
+                    raise ProviderMutationRejectedError(
+                        GenericWebPromotionAdmissionRefused(
+                            "Production recipient custody changed before dispatch."
+                        )
+                    ) from error
+            if (
+                isinstance(error, GenericWebPromotionAdmissionRefused)
                 and not started
                 and isinstance(lease, ProviderEvidenceLease)
                 and not attempt_has_effects()
@@ -1582,9 +1616,7 @@ class RecipientCutoverAdapter:
         if not isinstance(lease, ProviderEvidenceLease):
             raise ValueError("Promotion failure evidence requires a live lease.")
         try:
-            pending = self.store.read_promotion_record(
-                "promotion-recipient-" + canonical_sha256(key)[:24]
-            )
+            pending = self.store.read_promotion_record(recipient_promotion_record_id(key))
         except FileNotFoundError:
             return
         with self.store.provider_evidence_guard(lease.evidence_reservation):
@@ -1604,7 +1636,7 @@ class RecipientCutoverAdapter:
         return self.result(
             "fail",
             provider_effect_performed=provider_effect_performed,
-            promotion_record_id="promotion-recipient-" + canonical_sha256(key)[:24],
+            promotion_record_id=recipient_promotion_record_id(key),
             **extra,
         )
 

@@ -3,12 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import hashlib
 import hmac
-import json
 import re
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from control_plane.contracts.record_fields import SHA256_PATTERN
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 SOLO_ADMINISTRATION_CONFIRMATION_SCHEMA_VERSION: Final[Literal[1]] = 1
@@ -110,9 +110,7 @@ def build_solo_administration_confirmation_id(
         ),
         "reviewed_plan_sha256": _normalize_sha256(reviewed_plan_sha256, "reviewed_plan_sha256"),
     }
-    digest = hashlib.sha256(
-        json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(binding)
     return f"solo-administration-confirmation-{digest}"
 
 

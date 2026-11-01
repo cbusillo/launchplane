@@ -8,7 +8,7 @@ name: Reusable Generic Web Onboarding Apply
         description: >-
           Closed allocation JSON: mode (readback or apply), optional original
           idempotency_key, retain_allocation, expected_allocation_custody_sha256.
-          Including mode selects recovery without product or authz record apply.
+          Including mode selects recovery without product-record apply.
         required: false
         default: ""
         type: string
@@ -22,11 +22,6 @@ name: Reusable Generic Web Onboarding Apply
         type: string
       onboarding_plan_sha256:
         description: Product-record plan digest from the planning job.
-        required: false
-        default: ""
-        type: string
-      authz_plan_sha256:
-        description: Managed-authz plan digest from the planning job.
         required: false
         default: ""
         type: string
@@ -53,7 +48,6 @@ jobs:
       PRODUCT: ${{ inputs.product }}
       REASON: ${{ inputs.reason }}
       ONBOARDING_PLAN_SHA256: ${{ inputs.onboarding_plan_sha256 }}
-      AUTHZ_PLAN_SHA256: ${{ inputs.authz_plan_sha256 }}
       TARGET_PLAN_SHA256: ${{ inputs.target_plan_sha256 }}
       TESTING_CONTEXT: ${{ inputs.testing_context }}
     steps:
@@ -123,24 +117,10 @@ jobs:
             exit 0
           fi
           artifact_onboarding_plan_sha256="$(jq -r '.result.plan_sha256 // empty' onboarding-plan.json)"
-          artifact_authz_plan_sha256="$(jq -r '.result.plan_sha256 // empty' authz-plan.json)"
           if [ "$artifact_onboarding_plan_sha256" != "$ONBOARDING_PLAN_SHA256" ]; then
             echo "Reviewed onboarding plan digest does not match its artifact." >&2
             exit 1
           fi
-          if [ "$artifact_authz_plan_sha256" != "$AUTHZ_PLAN_SHA256" ]; then
-            echo "Reviewed authz plan digest does not match its artifact." >&2
-            exit 1
-          fi
-          if ! diff -u \
-            <(jq -S '.result.configuration' authz-plan.json) \
-            <(jq -S . authz-reconcile-request.json); then
-            echo "Reviewed authz configuration does not match its plan artifact." >&2
-            exit 1
-          fi
-          jq --arg reviewed "$artifact_authz_plan_sha256" \
-            '.mode="apply" | .reviewed_plan_sha256=$reviewed' \
-            authz-reconcile-request.json > authz-apply-request.json
 
       - name: Create Dokploy application target
         id: target-apply
@@ -190,22 +170,6 @@ jobs:
           fail-result-paths: ""
           response-output-file: onboarding-apply.json
 
-      - name: Apply preview authorization
-        if: steps.requests.outputs.recovery != 'true'
-        id: authz-apply
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@dc9fb481d20c6e9a6ccf62b20f5416b237d46191 # launchplane-request
-        with:
-          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
-          audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
-          route-path: /v1/authz-policies/managed-rule-sets/reconcile
-          payload-file: authz-apply-request.json
-          idempotency-key: >-
-            ${{ format('authz-managed:operator.generic-web-preview:{0}',
-              inputs.authz_plan_sha256) }}
-          expected-status: "202"
-          fail-result-paths: ""
-          response-output-file: authz-apply.json
-
       - name: Summarize applied onboarding
         if: always()
         shell: bash
@@ -217,13 +181,9 @@ jobs:
             echo "- Product: $PRODUCT"
             echo "- Testing context: $TESTING_CONTEXT"
             echo "- Product plan: \`$ONBOARDING_PLAN_SHA256\`"
-            echo "- Authz plan: \`$AUTHZ_PLAN_SHA256\`"
             echo "- Provider plan: \`$TARGET_PLAN_SHA256\`"
             if [ -f target-apply.json ]; then
               echo "- Provider target: $(jq -r '.result.setup.target_record.target_name // ""' target-apply.json)"
-            fi
-            if [ -f authz-apply.json ]; then
-              echo "- Authz changed: $(jq -r '.result.changed // false' authz-apply.json)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -235,6 +195,5 @@ jobs:
           path: |
             target-apply.json
             onboarding-apply.json
-            authz-apply.json
           if-no-files-found: warn
           retention-days: 14

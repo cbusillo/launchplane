@@ -34,6 +34,9 @@ class ActionDeclaration:
 ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
     {
         AGENT_READ_ROLE_ACTION: ActionDeclaration("read", "service"),
+        "runner_relabel.read": ActionDeclaration("read", "service"),
+        "runner_relabel.plan": ActionDeclaration("plan", "service"),
+        "runner_relabel.apply": ActionDeclaration("write", "service", director_agent_write=True),
         "launchplane_service.metadata.read": ActionDeclaration("read", "service"),
         "agent_write_intent.plan": ActionDeclaration("plan"),
         "product_profile.preview_tls.plan": ActionDeclaration("plan"),
@@ -178,7 +181,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "owner_acceptance.read": ActionDeclaration("read"),
         "owner_acceptance_event.write": ActionDeclaration("write"),
         "preview.read": ActionDeclaration("read"),
-        "preview_desired_state.discover": ActionDeclaration("write"),
+        "preview_desired_state.discover": ActionDeclaration("plan"),
         "preview_destroy.execute": ActionDeclaration("write"),
         "preview_destroyed.write": ActionDeclaration("write"),
         "preview_generation.write": ActionDeclaration("write"),
@@ -186,7 +189,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "preview_inventory.read": ActionDeclaration("write"),
         "preview_lifecycle.cleanup": ActionDeclaration("write"),
         "preview_lifecycle.cleanup.secret": ActionDeclaration("write"),
-        "preview_lifecycle.plan": ActionDeclaration("write"),
+        "preview_lifecycle.plan": ActionDeclaration("plan"),
         "preview_pr_feedback.write": ActionDeclaration("write"),
         "preview_pr_feedback_notification_attempt.read": ActionDeclaration("read"),
         "preview_pr_feedback_notification_policy.apply": ActionDeclaration("write"),
@@ -227,11 +230,17 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "product_profile.prelaunch_rebuild.apply": ActionDeclaration("write"),
         "product_profile.prelaunch_rebuild.plan": ActionDeclaration("plan"),
         "product_profile.preview_tls.apply": ActionDeclaration("write"),
+        "product_profile.preview_transition.apply": ActionDeclaration(
+            "write", director_agent_write=True
+        ),
         "product_profile.read": ActionDeclaration("read"),
         "product_profile.write": ActionDeclaration("write"),
         # A pending-request withdrawal records the Director's routing decision.
         # It cannot replace a Client decision, accept a release or change access.
         "product_review.withdraw": ActionDeclaration("write", director_agent_write=True),
+        "product_review.integration_attestation": ActionDeclaration(
+            "write", director_agent_write=True
+        ),
         BACKUP_CONTINUATION_ACTION: ActionDeclaration("write", director_agent_write=True),
         "product_retirement.apply": ActionDeclaration("write"),
         "product_retirement.plan": ActionDeclaration("write"),
@@ -249,7 +258,9 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "route_binding.apply": ActionDeclaration("write"),
         "route_binding.external.apply": ActionDeclaration("write"),
         "route_binding.external.plan": ActionDeclaration("plan"),
-        "route_binding.odoo_testing_refresh.apply": ActionDeclaration("write"),
+        "route_binding.odoo_testing_refresh.apply": ActionDeclaration(
+            "write", director_agent_write=True
+        ),
         "route_binding.odoo_testing_refresh.plan": ActionDeclaration("plan"),
         "route_binding.read": ActionDeclaration("read"),
         "runner_host_hygiene_audit.read": ActionDeclaration("read"),

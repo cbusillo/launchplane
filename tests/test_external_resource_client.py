@@ -35,8 +35,9 @@ class ExternalResourceClientTests(unittest.TestCase):
         )
         self.reader = Mock(
             side_effect=lambda **_: {
+                "future_response_field": {"added": True},
                 "trace_id": "launchplane_req_fixture",
-                "profile": self.profile.model_dump(mode="json"),
+                "profile": {**self.profile.model_dump(mode="json"), "future_profile_field": True},
             }
         )
         self.writer = Mock(side_effect=self.write)
@@ -80,6 +81,7 @@ class ExternalResourceClientTests(unittest.TestCase):
                 ),
             )
         return {
+            "future_response_field": {"added": True},
             "status": "accepted",
             "trace_id": "launchplane_req_fixture",
             "records": {"product_profile": self.profile.product},
@@ -101,6 +103,16 @@ class ExternalResourceClientTests(unittest.TestCase):
         self.argv += ["--reviewed-dry-run", "--idempotency-key", "original-key"]
 
     def test_declares_without_values_then_verifies_apply_and_original_key_replay(self) -> None:
+        payload = self.profile.model_dump(mode="json")
+        payload["preview"].update(
+            transport_extension="verireel-postgres",
+            data_transport_mode="driver",
+            app_name_prefix="preview-app",
+            transport_database_prefix="preview_db",
+        )
+        self.profile = LaunchplaneProductProfileRecord.model_validate(
+            payload, context={"stored_product_profile": True}
+        )
         self.assertEqual(self.run_client()[0], 0)
         self.assertEqual(self.evidence.stat().st_mode & 0o777, 0o600)
         saved = json.loads(self.evidence.read_text())

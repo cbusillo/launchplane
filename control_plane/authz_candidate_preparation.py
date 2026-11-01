@@ -5,9 +5,6 @@ from __future__ import annotations
 import hashlib
 from typing import Final, Literal, assert_never
 
-from control_plane.contracts.ordinary_agent_activation import (
-    OrdinaryAgentDeliveryActivationRecord,
-)
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.authz_scope import DOKPLOY_TARGET_LANE_SETUP_ACTION
 from control_plane.contracts.product_profile_record import (
@@ -38,16 +35,11 @@ from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
     LocalOperatorIdentity,
     LocalOperatorPolicyRule,
-    TerminalAgentIdentity,
     TerminalAgentPolicyRule,
-    authz_selector_matches,
 )
 from control_plane.contracts.ordinary_agent_client import ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION
 
 
-ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID: Final = (
-    "ordinary-agent-delivery-administration"
-)
 ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID = (
     "operator.ordinary-agent-delivery-administration"
 )
@@ -59,10 +51,6 @@ ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS = (
     ORDINARY_AGENT_DELIVERY_ACTIVATION_READ_ACTION,
     ORDINARY_AGENT_DELIVERY_ACTIVATION_REVOKE_ACTION,
 )
-ORDINARY_AGENT_DELIVERY_ADMINISTRATION_REASON = (
-    "Prepare bounded ordinary-agent delivery administration."
-)
-ORDINARY_AGENT_DELIVERY_ADMINISTRATION_RELATED_ISSUE = "#2369"
 
 ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID: Final = "administrator-product-evidence-read"
 ADMINISTRATOR_PRODUCT_EVIDENCE_READ_MANAGED_SET_ID = "operator.product-evidence-read"
@@ -104,9 +92,7 @@ AGENT_POLICY_PROPOSER_RELATED_ISSUE = "#2586"
 
 AuthorizationCandidateId = Literal[
     "agent-policy-proposer",
-    "ordinary-agent-delivery-administration",
     "administrator-product-evidence-read",
-    "ordinary-agent-enrollment-requester",
     "agent-product-setup",
 ]
 AuthorizationCandidateIntent = Literal["add", "remove"]
@@ -117,9 +103,6 @@ _AdministratorProductEvidenceReadState = Literal["absent", "legacy", "current", 
 AuthorizationCandidatePreparationReason = Literal[
     "candidate_set_conflict",
     "candidate_action_overlap",
-    "current_activation_requires_stop",
-    "activation_storage_unavailable",
-    "activation_history_truncated",
     "candidate_principal_unavailable",
     "candidate_products_required",
     "candidate_product_unavailable",
@@ -166,161 +149,6 @@ TERMINAL_ENROLLMENT_POLICY_MANAGED_RULE_ID = "requester"
 TERMINAL_ENROLLMENT_POLICY_ACTIONS = (ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION,)
 TERMINAL_ENROLLMENT_POLICY_REASON = "Prepare terminal client connection requests."
 TERMINAL_ENROLLMENT_POLICY_RELATED_ISSUE = "#2369"
-TerminalEnrollmentCapabilityState = Literal[
-    "configured_identity_absent",
-    "ready",
-    "missing",
-    "unmanaged",
-    "mismatched",
-    "ambiguous",
-    "unavailable",
-]
-
-
-def terminal_enrollment_capability_state(
-    *,
-    policy: LaunchplaneAuthzPolicy,
-    identity: TerminalAgentIdentity | None,
-) -> TerminalEnrollmentCapabilityState:
-    """Classify the exact managed capability enforced by enrollment ingress."""
-    if identity is None:
-        return "configured_identity_absent"
-    if not _is_exact_terminal_selector(identity.subject) or not _is_exact_terminal_selector(
-        identity.token_label
-    ):
-        return "unavailable"
-    if policy.schema_version not in (2, 3):
-        return "unavailable"
-    matching = tuple(
-        rule
-        for rule in policy.terminal_agents
-        if rule.managed_set_id
-        and rule.managed_rule_id
-        and rule.allows(
-            identity=identity,
-            action=ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION,
-            product="launchplane",
-            context="launchplane",
-            target=AuthorizationTarget(scope="global"),
-            schema_version=policy.schema_version,
-        )
-    )
-    if len(matching) == 1:
-        return "ready"
-    if len(matching) > 1:
-        return "ambiguous"
-    occupied = tuple(
-        rule
-        for _principal_type, rule in _rules(policy)
-        if getattr(rule, "managed_set_id", None) == TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID
-    )
-    if occupied:
-        return "mismatched" if len(occupied) == 1 else "ambiguous"
-    overlapping_rules = tuple(
-        rule
-        for rule in policy.terminal_agents
-        if _terminal_identity_matches(rule, identity)
-        and rule.allows_scope(
-            action=ORDINARY_AGENT_ENROLLMENT_PROPOSE_ACTION,
-            product="launchplane",
-            context="launchplane",
-            target=AuthorizationTarget(scope="global"),
-            schema_version=policy.schema_version,
-        )
-    )
-    if not overlapping_rules:
-        return "missing"
-    if len(overlapping_rules) > 1:
-        return "ambiguous"
-    if not overlapping_rules[0].managed_set_id or not overlapping_rules[0].managed_rule_id:
-        return "unmanaged"
-    return "mismatched"
-
-
-def compile_terminal_enrollment_policy_candidate(
-    *,
-    current_policy: LaunchplaneAuthzPolicy,
-    identity: TerminalAgentIdentity | None,
-    intent: AuthorizationCandidateIntent = "add",
-) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
-    """Compile the one narrow terminal enrollment rule when it is unambiguous."""
-    owned_rules = tuple(
-        (principal_type, rule)
-        for principal_type, rule in _rules(current_policy)
-        if getattr(rule, "managed_set_id", None) == TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID
-    )
-    if intent == "remove":
-        if not owned_rules:
-            return "already_satisfied", None
-        if (
-            len(owned_rules) != 1
-            or owned_rules[0][0] != "terminal_agents"
-            or not isinstance(owned_rules[0][1], TerminalAgentPolicyRule)
-            or not _is_exact_terminal_enrollment_rule(owned_rules[0][1])
-        ):
-            raise OrdinaryAgentPolicyPreparationError(
-                "ordinary_agent_rule_conflict",
-                "The terminal enrollment capability is not the exact managed rule Launchplane prepared.",
-            )
-        return (
-            "planned",
-            ManagedAuthzPolicySetProposalInput(
-                managed_set_id=TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID,
-                desired_policy=LaunchplaneAuthzPolicy(schema_version=current_policy.schema_version),
-                reason=TERMINAL_ENROLLMENT_POLICY_REASON,
-                related_issue=TERMINAL_ENROLLMENT_POLICY_RELATED_ISSUE,
-            ),
-        )
-    desired_rule = (
-        TerminalAgentPolicyRule(
-            managed_set_id=TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID,
-            managed_rule_id=TERMINAL_ENROLLMENT_POLICY_MANAGED_RULE_ID,
-            subjects=(identity.subject,),
-            token_labels=(identity.token_label,),
-            products=("launchplane",),
-            contexts=("launchplane",),
-            actions=TERMINAL_ENROLLMENT_POLICY_ACTIONS,
-        )
-        if identity is not None
-        else None
-    )
-    state = terminal_enrollment_capability_state(policy=current_policy, identity=identity)
-    if state == "ready":
-        return "already_satisfied", None
-    errors: dict[TerminalEnrollmentCapabilityState, str] = {
-        "configured_identity_absent": "No configured terminal client identity is available.",
-        "unavailable": "Terminal enrollment requires authorization policy version 2 or 3.",
-        "unmanaged": "The configured terminal client has an unmanaged enrollment rule.",
-        "mismatched": "The configured terminal client has a different managed enrollment rule.",
-        "ambiguous": "The configured terminal client has ambiguous enrollment rules.",
-        "missing": "",
-        "ready": "",
-    }
-    if state != "missing":
-        raise OrdinaryAgentPolicyPreparationError("ordinary_agent_rule_conflict", errors[state])
-    if identity is None:
-        raise AssertionError("missing terminal identity was classified as missing")
-    assert desired_rule is not None
-    return (
-        "planned",
-        ManagedAuthzPolicySetProposalInput(
-            managed_set_id=TERMINAL_ENROLLMENT_POLICY_MANAGED_SET_ID,
-            desired_policy=LaunchplaneAuthzPolicy(
-                schema_version=current_policy.schema_version,
-                terminal_agents=(desired_rule,),
-            ),
-            reason=TERMINAL_ENROLLMENT_POLICY_REASON,
-            related_issue=TERMINAL_ENROLLMENT_POLICY_RELATED_ISSUE,
-        ),
-    )
-
-
-def _terminal_identity_matches(
-    rule: TerminalAgentPolicyRule, identity: TerminalAgentIdentity
-) -> bool:
-    return (not rule.subjects or authz_selector_matches(identity.subject, rule.subjects)) and (
-        not rule.token_labels or authz_selector_matches(identity.token_label, rule.token_labels)
-    )
 
 
 def _is_exact_terminal_selector(value: str) -> bool:
@@ -523,109 +351,6 @@ def ordinary_agent_delivery_administration_removed(
         github_id > 0
         and ordinary_agent_delivery_administration_state(candidate_policy, github_id=github_id)
         != "active"
-    )
-
-
-def _has_explicit_action_overlap(policy: LaunchplaneAuthzPolicy) -> bool:
-    actions = set(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS)
-    return any(
-        getattr(rule, "managed_set_id", None)
-        != ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID
-        and bool(actions.intersection(getattr(rule, "actions", ())))
-        for _principal_type, rule in _rules(policy)
-    )
-
-
-def _require_no_current_activation(record_store: object) -> None:
-    reader = getattr(record_store, "list_ordinary_agent_delivery_activation_records", None)
-    if not callable(reader):
-        raise AuthorizationCandidatePreparationError(
-            "activation_storage_unavailable", "Removal requires ordinary-agent activation storage."
-        )
-    try:
-        records = tuple(reader(limit=1001))
-        if len(records) > 1000:
-            raise AuthorizationCandidatePreparationError(
-                "activation_history_truncated",
-                "Removal cannot prove activation state within the bounded history read.",
-            )
-        activations = tuple(
-            record
-            if isinstance(record, OrdinaryAgentDeliveryActivationRecord)
-            else OrdinaryAgentDeliveryActivationRecord.model_validate(record)
-            for record in records
-        )
-    except AuthorizationCandidatePreparationError:
-        raise
-    except (RuntimeError, TypeError, ValueError) as error:
-        raise AuthorizationCandidatePreparationError(
-            "activation_storage_unavailable",
-            "Removal could not verify ordinary-agent activation state.",
-        ) from error
-    if any(
-        not activation.revoked_at and not activation.superseded_by_activation_id
-        for activation in activations
-    ):
-        raise AuthorizationCandidatePreparationError(
-            "current_activation_requires_stop",
-            "Removal is blocked while an ordinary-agent delivery activation is current.",
-        )
-
-
-def compile_ordinary_agent_delivery_administration_candidate(
-    *,
-    current_policy: LaunchplaneAuthzPolicy,
-    github_id: int,
-    intent: AuthorizationCandidateIntent,
-    record_store: object,
-) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
-    state = ordinary_agent_delivery_administration_state(
-        current_policy,
-        github_id=github_id,
-    )
-    if state == "conflict":
-        raise AuthorizationCandidatePreparationError(
-            "candidate_set_conflict",
-            "The authorization candidate conflicts with current policy state.",
-        )
-    if intent == "add" and _has_explicit_action_overlap(current_policy):
-        raise AuthorizationCandidatePreparationError(
-            "candidate_action_overlap",
-            "The authorization candidate actions overlap another policy rule.",
-        )
-    desired_active = intent == "add"
-    if (state == "active") == desired_active:
-        return "already_satisfied", None
-    if intent == "remove":
-        _require_no_current_activation(record_store)
-    desired_policy = LaunchplaneAuthzPolicy(
-        schema_version=current_policy.schema_version,
-        github_humans=(
-            (
-                GitHubHumanPolicyRule(
-                    managed_set_id=(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID),
-                    managed_rule_id=(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID),
-                    github_ids=(github_id,),
-                    roles=("admin",),
-                    products=("launchplane",),
-                    contexts=("launchplane",),
-                    actions=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
-                ),
-            )
-            if intent == "add"
-            else ()
-        ),
-    )
-    return (
-        "planned",
-        ManagedAuthzPolicySetProposalInput(
-            managed_set_id=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
-            desired_policy=desired_policy,
-            schema_migration="reject",
-            administrator_quorum_change=None,
-            reason=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_REASON,
-            related_issue=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_RELATED_ISSUE,
-        ),
     )
 
 
@@ -936,16 +661,21 @@ def _agent_product_setup_rule_state(
     return "present", grants
 
 
-def product_context_owners(record_store: object) -> dict[str, frozenset[str]]:
+def product_context_owners(
+    record_store: object, *, config_scopes: bool = False
+) -> dict[str, frozenset[str]]:
     """Map each lane or historical context, case-folded, to the products using it."""
     lister = getattr(record_store, "list_product_profile_records", None)
     if not callable(lister):
         raise TypeError("Agent product setup requires product profile storage.")
     return product_context_owner_map(
-        record
-        if isinstance(record, LaunchplaneProductProfileRecord)
-        else LaunchplaneProductProfileRecord.model_validate(record)
-        for record in lister()
+        (
+            record
+            if isinstance(record, LaunchplaneProductProfileRecord)
+            else LaunchplaneProductProfileRecord.model_validate(record)
+            for record in lister()
+        ),
+        config_scopes=config_scopes,
     )
 
 
@@ -1282,7 +1012,6 @@ def compile_authorization_candidate(
     github_id: int,
     intent: AuthorizationCandidateIntent,
     record_store: object,
-    configured_terminal_identity: TerminalAgentIdentity | None = None,
     configured_local_operator_identity: LocalOperatorIdentity | None = None,
     products: tuple[str, ...] = (),
 ) -> tuple[Literal["planned", "already_satisfied"], ManagedAuthzPolicySetProposalInput | None]:
@@ -1300,30 +1029,12 @@ def compile_authorization_candidate(
             products=products,
             record_store=record_store,
         )
-    if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
-        return compile_ordinary_agent_delivery_administration_candidate(
-            current_policy=current_policy,
-            github_id=github_id,
-            intent=intent,
-            record_store=record_store,
-        )
     if candidate_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID:
         return compile_administrator_product_evidence_read_candidate(
             current_policy=current_policy,
             github_id=github_id,
             intent=intent,
         )
-    if candidate_id == "ordinary-agent-enrollment-requester":
-        try:
-            return compile_terminal_enrollment_policy_candidate(
-                current_policy=current_policy,
-                identity=configured_terminal_identity,
-                intent=intent,
-            )
-        except OrdinaryAgentPolicyPreparationError as error:
-            raise AuthorizationCandidatePreparationError(
-                "candidate_set_conflict", str(error)
-            ) from error
     assert_never(candidate_id)
 
 
@@ -1380,12 +1091,8 @@ def authorization_candidate_request_matches(
             == normalize_agent_product_setup_products(products)
             and agent_product_setup_grants_match_records(record_store=record_store, grants=grants)
         )
-    if candidate_id == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_CANDIDATE_ID:
-        recognized = is_ordinary_agent_delivery_administration_request(request)
-    elif candidate_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID:
+    if candidate_id == ADMINISTRATOR_PRODUCT_EVIDENCE_READ_CANDIDATE_ID:
         recognized = is_administrator_product_evidence_read_request(request)
-    elif candidate_id == "ordinary-agent-enrollment-requester":
-        return is_terminal_enrollment_requester_request(request, intent=intent)
     else:
         assert_never(candidate_id)
     rules = request.desired_policy.github_humans

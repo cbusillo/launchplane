@@ -376,9 +376,23 @@ class HttpBoundaryTests(unittest.TestCase):
         from control_plane.production_recipient_release_recovery import RELEASE_RECOVERY_ROUTE
         from control_plane.production_recipient_inverse import INVERSE_ROUTE
         from control_plane.production_recipient_writer_fence import WRITER_FENCE_ROUTE
+        from control_plane.production_recipient_retirement import RETIREMENT_ROUTE
 
         self.identity = TerminalAgentIdentity("agent", "fixture", director_agent=True)
         requests = (
+            (
+                RETIREMENT_ROUTE,
+                {
+                    "context": self.fixture.context,
+                    "preparation_plan_sha256": "a" * 64,
+                    "publication_sha256": "b" * 64,
+                    "recovery_generation": "post-window",
+                    "backup_record_id": "fresh-current-backup",
+                    "reason": "review",
+                    "mode": "apply",
+                    "reviewed_plan_sha256": "c" * 64,
+                },
+            ),
             (
                 INVERSE_ROUTE,
                 {
@@ -584,9 +598,6 @@ class HttpBoundaryTests(unittest.TestCase):
 
 class TerminalClientTests(unittest.TestCase):
     def test_recovery_consumer_binds_saved_request_and_uses_existing_caller(self) -> None:
-        client = runpy.run_path(
-            str(Path(__file__).resolve().parents[1] / "scripts/prepare-production-recipient.py")
-        )
         draft = RecipientRecoveryRequest(
             context="fixture", preparation_plan_sha256="a" * 64, reason="Recover exact scoped data"
         )
@@ -595,6 +606,50 @@ class TerminalClientTests(unittest.TestCase):
             context=draft.context,
             preparation_plan_sha256=draft.preparation_plan_sha256,
             plan_sha256="b" * 64,
+        )
+        self.exercise_consumer("--recovery", draft, result, RECOVERY_ROUTE)
+
+    def test_retirement_consumer_keeps_review_and_original_key_in_all_modes(self) -> None:
+        from control_plane.production_recipient_retirement import (
+            RETIREMENT_ROUTE,
+            RecipientRetirementRequest,
+            RecipientRetirementPlan,
+        )
+
+        draft = RecipientRetirementRequest(
+            context="fixture",
+            preparation_plan_sha256="a" * 64,
+            publication_sha256="b" * 64,
+            recovery_generation="post-window",
+            backup_record_id="fresh-backup",
+            reason="Retire exact old resources",
+        )
+        result = RecipientRetirementPlan(
+            product="fixture",
+            context="fixture",
+            preparation_plan_sha256=draft.preparation_plan_sha256,
+            publication_sha256=draft.publication_sha256,
+            plan_sha256="c" * 64,
+            observation_window_ends_at="2026-01-01T00:00:00Z",
+        )
+        self.exercise_consumer(
+            "--retirement",
+            draft,
+            result,
+            RETIREMENT_ROUTE,
+            ("dry-run", "apply", "readback", "receipt"),
+        )
+
+    def exercise_consumer(
+        self,
+        flag: str,
+        draft: Any,
+        result: Any,
+        route: str,
+        modes: tuple[str, ...] = ("dry-run", "apply"),
+    ) -> None:
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/prepare-production-recipient.py")
         )
         post = Mock(
             return_value={
@@ -618,11 +673,11 @@ class TerminalClientTests(unittest.TestCase):
             helper.touch()
             request, evidence = root / "request.json", root / "evidence.json"
             request.write_text(draft.model_dump_json())
-            for mode in ("dry-run", "apply"):
+            for mode in modes:
                 args = [
                     "client",
                     mode,
-                    "--recovery",
+                    flag,
                     "--operator-helper",
                     str(helper),
                     "--product",
@@ -632,8 +687,10 @@ class TerminalClientTests(unittest.TestCase):
                     "--evidence-file",
                     str(evidence),
                 ]
+                if mode != "dry-run":
+                    args.extend(["--idempotency-key", "original-operation"])
                 if mode == "apply":
-                    args.extend(["--reviewed-dry-run", "--idempotency-key", "original-recovery"])
+                    args.append("--reviewed-dry-run")
                 output = io.StringIO()
                 with (
                     patch("runpy.run_path", return_value=transport),
@@ -642,12 +699,13 @@ class TerminalClientTests(unittest.TestCase):
                 ):
                     self.assertEqual(client["main"](), 0, output.getvalue())
                 self.assertNotIn("opaque-fixture-token", output.getvalue())
-                self.assertEqual(
-                    post.call_args.kwargs["path"], RECOVERY_ROUTE.format(product="fixture")
-                )
-            self.assertEqual(
-                post.call_args.kwargs["body"]["reviewed_plan_sha256"], result.plan_sha256
-            )
+                self.assertEqual(post.call_args.kwargs["path"], route.format(product="fixture"))
+            for call in post.call_args_list:
+                if call.kwargs["body"]["mode"] in {"apply", "readback"}:
+                    self.assertEqual(
+                        call.kwargs["body"]["reviewed_plan_sha256"], result.plan_sha256
+                    )
+                    self.assertEqual(call.kwargs["idempotency_key"], "original-operation")
             self.assertEqual(evidence.stat().st_mode & 0o077, 0)
 
     def test_saved_review_is_private_bound_and_original_key_replay_is_readable(self) -> None:

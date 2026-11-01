@@ -2,6 +2,13 @@
 title: Records
 ---
 
+Reviewed conflict integration records live in `launchplane_integration_attestations`.
+They bind the exact merge, tree and parents to applicable source and imported
+Client acceptance or engineering evidence, with the confirming model review and
+authenticated recorder. Writes are append-only and exact replay returns the
+original. They are separate from Client decisions; carried decisions reference
+their IDs. See [reviewed conflict integrations](owner-acceptance.md#reviewed-conflict-integrations).
+
 ## Storage Policy
 
 - Persist local-dev records as JSON files in a local state directory.
@@ -300,8 +307,12 @@ batch, per-binding CAS, parent replay and partial-progress recovery implementati
 The stable controller requires its own `route_binding.odoo_stable_refresh.plan`
 or `.apply` capability in the Launchplane service context plus the exact target's
 managed `route_binding.read` / `.apply` or external
-`route_binding.external.plan` / `.apply` authority. Every
-target is authorized before the first binding write. Its request accepts only
+`route_binding.external.plan` / `.apply` authority. Both controllers filter
+discovery by that existing authority before planning and the target limit, then
+reauthorize included targets before writing. Excluded targets are absent from
+results and unchanged. Finding bindings but no authorized target returns 403;
+an authorized blocked target still requires attention. Replay reauthorizes all
+stored outcomes even if the caller has since lost part of its scope. Its request accepts only
 schema version, mode, reason and confirmation. Apply requires
 `APPLY ODOO STABLE ROUTE BINDING REFRESH` and an Idempotency-Key. The new route
 grants no access and starts no schedule. Q193 declines a standing renewal clock;
@@ -933,6 +944,63 @@ an ORM column/table or remains only in the evidence payload.
   Product repositories must not own route bindings, TLS ownership, provider
   host ids, certificate ids, or edge topology.
 
+  A public generic-web lane may retain both an externally maintained business
+  ingress and a managed recovery route. Its optional `external_ingress` names
+  a proper subset of the tracked domains, the proxy custodian and an HTTPS
+  configuration-evidence URL. The top-level ingress and TLS fields describe
+  the remaining managed domains; per-domain readers resolve external edge
+  termination and external TLS for the named subset. The complete tracked
+  domain set stays in `domains`, with its primary/alias roles unchanged.
+  Legacy single-path records retain their existing serialized form and digest.
+
+  The existing signed-in Route binding review establishes, changes or removes
+  external custody with CSRF, review digest, current-record CAS and atomic source
+  comparisons. The managed audit must cover exactly the remaining hosts and join
+  the recorded target and active edge. The commit compares route-relevant profile
+  fields, including monitoring URLs, the fallback health path and public-site intent;
+  unrelated display edits do not invalidate it. Custody decisions cannot absorb
+  changes to destination, domain roles, managed ingress/TLS or status. Removing
+  external custody requires complete managed evidence. This operation changes
+  records only, never provider routes. Agents can refresh unchanged evidence.
+
+  Each recorded host gets a strict runtime-identity HTTP check and a TLS check
+  using its resolved custody. Derived HTTP checks retain the configured homepage,
+  health path/query, DNS expectations and recovery thresholds. Unsupported checks
+  or conflicting DNS policy block admission and remain no-network configuration
+  failures if introduced later. Disabled checks supply no policy.
+
+  The managed hosts in a split binding are recovery paths. Their HTTP and TLS
+  failures, missing observations and stale probes stay advisory. Business-domain
+  checks still gate runtime verification, promotion evidence and production-delivery
+  recovery; a recovery host never supplies their identity evidence. Topology and
+  readiness retain recovery warnings without treating them as blocking errors.
+  Monitoring records warning incidents for failed recovery HTTP/TLS checks, and
+  check summaries expose derived `advisory` status. The sidebar stays yellow while
+  the business paths are healthy, and turns red when a business path fails.
+  Route-binding custody and source-authority divergence and DNS-policy conflicts
+  remain blocking, including on recovery hosts. The bound primary domain is
+  required evidence even when it is managed by Launchplane. Profile URLs may
+  name a recovery alias; they do not replace the binding's primary role. Split
+  release post-deploy and rollback checks use that primary domain with the
+  existing exact runtime-identity verification.
+
+  Topology and runtime readers share observation applicability: current monitoring
+  intent, URLs, deployment identity, profile and relevant authority dates must agree.
+  The server preserves unchanged custody timestamps and stamps changed custody
+  itself; HTTP and TLS probes must strictly follow the decision. HTTP evidence also
+  carries a per-host custody digest so an external observation cannot qualify a
+  host reassigned to managed custody. Each HTTPS redirect is checked before
+  connection against the requested host's custody set, and its visited chain is
+  retained and rechecked. Legacy redirects without adequate proof stay unverified.
+  The route-record SHA separately fences incident transitions.
+
+  After managed evidence expires, readers may rerun the existing reconcile plan
+  without writing. Only identical current authority, custody and source evidence
+  refresh projected provenance. TLS uses existing per-host divergence checks and
+  exact source identities/versions, while certificate freshness remains independent.
+  Missing or changed sources retain their warnings. There is no periodic authority
+  write, scheduler or calendar re-attestation step.
+
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from
 it. Keep unstable provider envelopes, replay/debug context, and raw evidence in
@@ -966,7 +1034,12 @@ profiles; migration `a4c8e0f2b6d3` copied every one into
 then removed it. Repository inventory records were left in place.
 
 Repository mappings omit active repositories that two products share, naming
-them in `ambiguous_repositories`; other entries stay available.
+them in `ambiguous_repositories`; other entries stay available. Optional
+ambiguity references expose only product ids allowed by the caller's existing
+per-product profile-read scope. Their coverage distinguishes complete source
+collection reads, authorization-scoped results, limited sources, and unknown
+legacy evidence. Missing coverage capability remains unknown, and an empty
+reference list does not establish completeness.
 
 Full-profile writes cannot transfer standing acceptance to another repository
 or copied repository identity. Hold acceptance through the existing reviewed
@@ -1098,6 +1171,8 @@ The service exposes product profile records through `GET /v1/product-profiles`,
 `GET /v1/product-profiles/{product}`, and `POST /v1/product-profiles`. Writes
 require the `product_profile.write` action for the target product in the
 Launchplane service context; reads use `product_profile.read`.
+Stored profiles with retired preview settings remain readable in the catalog
+and declaration client; new writes still require the reviewed transition.
 An existing full-profile write preserves classification provenance when an
 older payload omits it, and refuses explicit classification or provenance
 changes. Use the reviewed production-use endpoint for those changes.
@@ -1257,6 +1332,13 @@ cannot change existing health-monitoring authority, and onboarding updates
 preserve it; admins use this bounded apply path instead. Concurrent profile
 edits fail stale instead of being overwritten.
 
+Preview TLS, prelaunch rebuild policy and repository identity planners validate
+each changed complete candidate with the same profile builder and write contract
+used by apply. Both modes return a redacted `invalid_product_profile` refusal
+before offering an invalid changed plan or writing it. Stored historical profiles
+remain readable, and unchanged requests do not rewrite or revalidate unrelated
+legacy fields.
+
 Odoo prelaunch rebuild policy changes use
 `POST /v1/product-profiles/prelaunch-rebuild/apply`. The request identifies one
 exact product/context/instance lane and can change only that lane's
@@ -1389,6 +1471,18 @@ locations, provider details and free-text diagnostics are omitted. Artifact,
 deployment and source references accompany the expected and observed identity
 result. A stored `match` is rechecked against its own expected/observed payloads.
 
+Health history and the incident list/detail routes accept `historical_context`
+to read a retired context retained in the active product's `historical_contexts`.
+Use the exact `testing` or `prod` instance and its existing
+`product_environment.read` permission on that product, historical context and
+instance. Without the selector, reads still address the current lane. Confirm
+the deployed OpenAPI exposes the selector before using it; older services ignore
+unknown query parameters. Responses retain the selected context, and incident
+detail also checks the stored product and instance. This reads retained evidence
+without reactivating the context or editing incidents. A historical context
+declaration alone supplies no past lane, check-policy or Live-roster timeline;
+empty or bounded reads do not establish that timeline or deleted-record coverage.
+
 The read includes up to two hours of lookback for evidence covering the start
 of the requested window. Save every response in cursor order and run:
 
@@ -1452,7 +1546,11 @@ Product environment detail and summary reads expose one provider-neutral
 `topology` projection for every driver. The projection keeps three evidence
 states separate:
 
-- `desired` is product-profile URL and public-domain intent.
+- `desired` is product-profile URL and public-domain intent. For published
+  native Odoo testing copies, retained aliases come from the applied original
+  publication and its effective address receipt. The profile's primary host
+  must still match that route. Missing, foreign or unapplied custody supplies
+  no aliases; arbitrary domains in the current binding never become intent.
 - `provider_recorded` is the current environment route-binding authority for
   placement, bound domains, ingress provider/path/termination, and TLS manager and
   terminator.
@@ -1675,42 +1773,28 @@ the original opening effect completed before its attempt record committed.
 Delivery attempts are the idempotency boundary for notifications, while incident
 records remain the source of truth for active public-ingress state.
 
-Discord pages only new critical incidents and material critical changes. Warnings
-and unchanged reminders use a plain-text, mention-free summary grouped by product,
-lane, check kind and failure code. Summaries reuse the notification outbox with
-aggregate type `public_ingress_discord_summary`, one record per policy,
-destination and fixed five-minute send window. A burst queues for its next
-boundary using its database enqueue time, so a slow probe cannot join an already
-sent batch; later observations cannot move that deadline. Overdue windows fold
-into one current window before a send attempt; retries retain their original
-identity, backoff and attempt budget. A new critical condition still pages at once.
+Discord pages only critical openings, material critical changes, and their
+resolutions after a delivered failure notice, even if the incident later downgraded
+to a warning. Warning openings, material warning changes, and unchanged reminders
+remain in Product Ops with their incident events and reminder state; they create
+no Discord delivery work. Discord warning/reminder summaries, batching windows,
+snapshot coverage, and summary-specific secret scope checks are removed.
 
-Before delivery, both paths re-read current state. Obsolete failure and material
-alerts are superseded. Discord uses the event-bound material state and
-final admission check instead of the old startup-backlog message rewrite. Email
-retains its existing backlog compaction. Summaries render current conditions and compare
-them with the latest posted or provider-started snapshot, ordered by send window.
-An older window cannot post after a newer one starts. Changing the destination
-secret identity starts coverage for that destination; rotating a version under
-the same secret identity does not replay unknown effects.
-An empty, unchanged or subset snapshot sends nothing; clearing a condition alone
-does not re-post those that remain. A returning material state and an expired
-silence can appear in a later window. Silenced and acknowledged
-conditions are excluded. Lane-scoped destinations summarize only the conditions
-their managed secret covers. Routing revisions can retry previously unavailable
-destinations in a later window. The rendered snapshot is persisted atomically
-with its provider marker. Final coverage and current open/active incident-state
-checks run under the existing database write lock and incident row locks to prevent adjacent-window workers duplicating one state. Summary
-receipts live in the outbox independently of per-incident attempt records. Global
-outbox inspection gives active work and newest failures separate bounded slots,
-including their error codes; critical
-delivery failures also remain visible in the owning incident detail.
-An interrupted Discord summary retains its send
-marker and cannot replay an unknown provider effect. DNS and connection failures
-before any request bytes, and explicit rate-limit refusals, may retry. Discord
-reminder cadence no longer repeats the same material state after it was summarized.
-Notification routing never changes measured health, incident
-severity, acknowledgement, resolution or provider-operation fences.
+Before delivery, current state is re-read and obsolete failure and material alerts
+are superseded. Discord retains event-bound material state and the final atomic
+open/active incident-state admission check. Silenced and acknowledged failure
+conditions do not page; a recovery still closes their previously delivered failure
+notice. Email retains its existing backlog compaction.
+
+Retained `public_ingress_discord_summary` outbox rows complete without a send.
+Rows with an existing provider marker retain their unknown-effect evidence and
+fail without replay. Already queued warning/reminder incident notices are skipped.
+DNS and connection failures before any request bytes, and explicit rate-limit
+refusals, may retry critical notices. Unknown provider effects never replay.
+Outbox inspection retains active work and newest failures in separate bounded
+slots; critical delivery failures also remain visible in the owning incident.
+Notification routing never changes measured health, severity, acknowledgement,
+resolution, access authority, or provider-operation fences.
 
 ## Every Code Feedback Resume Evidence
 
@@ -1753,23 +1837,8 @@ decision (`accepted` or `changes_requested` with its reason), the Client's GitHu
 id and login, and `decided_at`. The newest record for a repository and pull
 request is the current decision. The record authorizes nothing.
 
-A record with `carried_from` was not decided again: it carries an acceptance to
-a new head after an unchanged-feature base update, rebase, or declared invisible
-follow-up commits (see
-[carried acceptance](owner-acceptance.md#carried-acceptance)). `carried_from`
-names the decision record and head it came from, the reason
-(`merge_train_base_refresh`, `unchanged_patch_base_update`, or
-`client_impact_none`), the immutable
-`comparison_base_sha`, and any merge train branch refresh records that produced
-the new head. Older train carries remain readable without a comparison base;
-their refresh records supply it. An unchanged-patch rebase carry requires a full
-comparison base revision and needs no train refresh record. A `client_impact_none`
-carry instead names every intervening commit SHA and its `client_impact: none`
-trailer value in `commits`, oldest first, ending at the carried head. It leaves
-`comparison_base_sha` empty because no patch comparison was used. Its `decided_at` is
-when Launchplane carried it.
-`base_branch` is the pull request's base branch when the decision was first shown
-on it; an acceptance carries, and a carried acceptance applies, only on that base.
+A record with `carried_from` preserves an earlier acceptance. The authoritative
+rules are in [carried acceptance](owner-acceptance.md#carried-acceptance).
 
 ## Product Reconcile Request Records
 
@@ -3208,6 +3277,18 @@ branch matching stay compatible.
   `register` from `retire` through the typed operation field. Records preserve
   dry-run or apply evidence without storing GitHub runner registration tokens or
   other credentials.
+- Native runner relabel policy revisions and immutable review/planned/terminal
+  custody use dedicated `runner-relabel-policy` and `runner-relabel-custody`
+  namespaces in the existing idempotency table. Frozen contracts in
+  `control_plane.contracts.runner_relabel` bind the original immutable actor,
+  exact repository/runner identity, reviewed host/root and protected routing,
+  before/desired labels and policy/review digests. Insert-only custody never
+  reads legacy audit upserts as authority. Numeric revisions and policy CAS
+  serialize under the same transaction lock used for checked dispatch; explicit
+  same-transaction lease validation fences planned/terminal evidence. Existing
+  durable provider reservations fence the repository numeric ID/runner ID across
+  actors and keys. Unknown outcomes retain that fence. Records have no automatic
+  expiry or purge; source adds no table or held-schema activation.
 - Scoped agent write-intent evaluation is exposed at
   `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
   intent to an exact existing policy action, evaluates authorization, and returns

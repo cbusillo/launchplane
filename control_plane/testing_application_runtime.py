@@ -5,13 +5,14 @@ import time
 from collections.abc import Callable
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from typing import Any
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
     compare_runtime_identity,
     health_payload_runtime_identity_status,
 )
-from control_plane.dokploy.native_copy_stream import _read_remote
+from control_plane.dokploy.native_copy_stream import _read_remote, NATIVE_PROGRAM_SOURCE_SITE_LIMIT
 from control_plane.testing_application_capabilities import runtime_capability_program_header
 
 
@@ -38,10 +39,12 @@ def inspect_application_runtime(
     volume_binding: str = "",
     mount_path: str = "",
     health_path: str,
+    qualify_backend: bool = True,
 ) -> dict[str, Any]:
     """Values stay internal; the provider request carries only comparison digests."""
     observed_at = observation_clock()
     deadline = observed_at + observation_window_seconds()
+    last_error: ValueError | OSError | RuntimeError | None = None
     while True:
         try:
             frames: list[dict[str, object]] = []
@@ -64,6 +67,7 @@ def inspect_application_runtime(
                     "volume_binding": volume_binding,
                     "mount_path": mount_path,
                     "health_path": health_path,
+                    "qualify_backend": qualify_backend,
                 },
                 receive=frames.append,
                 timeout_seconds=max(1, min(120, int(deadline - observed_at))),
@@ -87,14 +91,15 @@ def inspect_application_runtime(
                 result["verified_failure"] = False
                 return result
             result["verified_failure"] = True
-        except (ValueError, OSError, RuntimeError):
+        except (ValueError, OSError, RuntimeError) as error:
             # A later unavailable sample clears an earlier provisional failure.
             result = None
+            last_error = error
         observed_at = observation_clock()
         if observed_at >= deadline:
             if result is not None:
                 raise VerifiedApplicationRuntimeFailure(result)
-            raise ValueError("Application runtime proof remains unknown.")
+            raise ValueError("Application runtime proof remains unknown.") from last_error
         pause_observation()
 
 
@@ -136,6 +141,8 @@ def qualify_edge_health(
 
 APPLICATION_RUNTIME_PROGRAM = (
     runtime_capability_program_header()
+    + f"\nNATIVE_PROGRAM_SOURCE_SITE_LIMIT={NATIVE_PROGRAM_SOURCE_SITE_LIMIT}\n"
+    + f"NATIVE_READ_PREDICATE={ReadbackPredicate.NATIVE_READ.value!r}\n"
     + r"""
 import base64,hashlib,http.client,io,ipaddress,json,subprocess,sys
 
@@ -212,7 +219,8 @@ try:
         for item in tasks:
             inspect_attributed_task(item, True)
     container,identifier=inspect_attributed_task(task, task_failed)
-    address='http://'+spec['application']+':'+str(spec['port'])+spec['health_path']
+    backend_host=spec['application']
+    address='http://'+backend_host+':'+str(spec['port'])+spec['health_path']
     failed=task_failed
     health=None
     http_status=0
@@ -225,15 +233,32 @@ try:
         proxy=one('inspect',proxies[0])
         if proxy.get('State',{}).get('Status')!='running' or spec['network'] not in proxy.get('NetworkSettings',{}).get('Networks',{}):
             raise ValueError('private health network unavailable')
-        address='http://'+endpoint['IPAddress']+':'+str(spec['port'])+spec['health_path']
         endpoint_address=str(ipaddress.ip_address(endpoint['IPAddress']))
         if ':' in endpoint_address or not isinstance(spec['port'],int) or not 1<=spec['port']<=65535:
             raise ValueError('private HTTP endpoint unavailable')
         path=spec['health_path']
         if not isinstance(path,str) or not path.startswith('/') or path.startswith('//') or any(character.isspace() for character in path) or '?' in path or '#' in path:
             raise ValueError('private HTTP path unavailable')
+        def require_owned_backend_address():
+            resolved=docker('exec',proxies[0],'nslookup','-type=A',spec['application']+'.')
+            addresses=set()
+            answered=False
+            for line in resolved.splitlines():
+                line=line.strip()
+                if line.startswith('Name:'):
+                    if line.partition(':')[2].strip().rstrip('.').casefold()!=spec['application'].casefold():
+                        raise ValueError('application backend DNS name changed')
+                    answered=True
+                elif answered and line.startswith('Address'):
+                    match=re.fullmatch(r'Address(?:\s+\d+)?:\s+(\S+)(?:\s+.*)?',line)
+                    if match is None: raise ValueError('application backend DNS answer unavailable')
+                    addresses.add(str(ipaddress.IPv4Address(match[1])))
+            if addresses!={endpoint_address}: raise ValueError('application backend DNS ownership changed')
+        if spec['qualify_backend']: require_owned_backend_address()
+        backend_host=spec['application'] if spec['qualify_backend'] else endpoint_address
+        address='http://'+backend_host+':'+str(spec['port'])+path
         request=('GET '+path+' HTTP/1.1\r\nHost: '+endpoint_address+':'+str(spec['port'])+'\r\nConnection: close\r\nAccept: application/json\r\nAccept-Encoding: identity\r\n\r\n').encode('ascii')
-        reply=subprocess.run(['docker','exec','-i',proxies[0],'nc','-n','-w','10',endpoint_address,str(spec['port'])],input=request,capture_output=True,timeout=15,check=True)
+        reply=subprocess.run(['docker','exec','-i',proxies[0],'nc',*([] if spec['qualify_backend'] else ['-n']),'-w','10',backend_host,str(spec['port'])],input=request,capture_output=True,timeout=15,check=True)
         if len(reply.stdout)>327680: raise ValueError('private HTTP response exceeds bound')
         class Socket:
             def makefile(self,*arguments): return io.BytesIO(reply.stdout)
@@ -249,11 +274,17 @@ try:
             if not isinstance(health,dict): raise ValueError('private health document unavailable')
     if (one('service','inspect',spec['application'])!=service or one('inspect',identifier)!=container
         or one('inspect','--type','task',task['ID'])!=task): raise ValueError('runtime changed during proof')
+    if not failed and spec['qualify_backend']: require_owned_backend_address()
     print(sys.argv[2]+json.dumps({'type':'complete','service_id':service['ID'],'task_id':task['ID'],'container_id':identifier,
-        'backend':'http://'+spec['application']+':'+str(spec['port']),'identity':spec['identity'],'health_url':address,
+        'backend':'http://'+backend_host+':'+str(spec['port']),'identity':spec['identity'],'health_url':address,
         'task_failed':task_failed,'http_status':http_status,'health_payload':health}))
-except Exception:
-    print(sys.argv[2]+json.dumps({'type':'refused'}))
+except Exception as error:
+    sites=[]
+    failure_traceback=error.__traceback__
+    while failure_traceback is not None:
+        if failure_traceback.tb_frame.f_code.co_filename=='<string>': sites.append(failure_traceback.tb_lineno)
+        failure_traceback=failure_traceback.tb_next
+    print(sys.argv[2]+json.dumps({'type':'failed','kind':'unavailable','predicate':NATIVE_READ_PREDICATE,'sites':sites[-NATIVE_PROGRAM_SOURCE_SITE_LIMIT:]}))
     sys.exit(1)
 """
 )

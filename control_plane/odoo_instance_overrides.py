@@ -1,6 +1,8 @@
 import base64
+import hashlib
+import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
@@ -13,6 +15,7 @@ from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
+    odoo_override_intent_payload,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
 from control_plane.contracts.product_profile_record import (
@@ -29,7 +32,10 @@ from control_plane.runtime_key_safety import runtime_key_safety_environment_clas
 from control_plane.contracts.public_hosts import resolve_origin_base_url, resolve_public_base_url
 from control_plane.odoo_import_overrides import import_runtime_value, runtime_values_for_override
 
-ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
+from control_plane.contracts.odoo_post_deploy_payload import (
+    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY as ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+)
+
 LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY = "LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED"
 LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY = "LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED"
 ODOO_OVERRIDE_SECRET_ENV_PREFIX = "ODOO_OVERRIDE_SECRET__"
@@ -536,6 +542,43 @@ def build_post_deploy_environment(
         required_container_environment_keys=payload.required_container_environment_keys,
         payload=payload,
     )
+
+
+class PreviewBootstrapStore(Protocol):
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord: ...
+
+
+def resolve_preview_website_bootstrap(
+    store: PreviewBootstrapStore, *, context: str, template_instance: str, preview_slug: str
+) -> tuple[OdooInstanceOverrideRecord | None, str]:
+    try:
+        record = store.read_odoo_instance_override_record(
+            context_name=context, instance_name=preview_slug
+        )
+    except FileNotFoundError:
+        record = None
+    if record is not None and "preview" in record.apply_on:
+        if (
+            record.context != context
+            or record.instance != preview_slug
+            or record.apply_on != ("preview",)
+            or record.config_parameters
+            or record.addon_settings
+            or record.website_settings is not None
+        ):
+            raise ValueError("Exact preview bootstrap intent contains conflicting settings.")
+        digest = hashlib.sha256(
+            json.dumps(odoo_override_intent_payload(record), sort_keys=True).encode()
+        ).hexdigest()
+        return record.model_copy(update={"apply_on": ("deploy",)}), digest
+    try:
+        return store.read_odoo_instance_override_record(
+            context_name=context, instance_name=template_instance
+        ), ""
+    except FileNotFoundError:
+        return None, ""
 
 
 def build_preview_website_bootstrap_environment(

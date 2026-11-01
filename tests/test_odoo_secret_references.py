@@ -1,11 +1,12 @@
 import asyncio
 import contextlib
 import io
+import json
 import runpy
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import click
 from fastapi import FastAPI
@@ -670,6 +671,108 @@ class SecretReferenceHttpTests(unittest.IsolatedAsyncioTestCase):
             context_name="cm", instance_name="prod"
         )
         self.assertEqual(stored.config_parameters[0].value.secret_binding_id, "lane-password")
+
+
+class SecretReferenceScriptTests(unittest.TestCase):
+    def test_apply_requires_complete_agreeing_reviewed_keys(self) -> None:
+        reviewed_keys = ("first.password", "second.password", "third.password")
+        cases = (
+            (reviewed_keys, reviewed_keys, "already_agrees", True, True),
+            (tuple(reversed(reviewed_keys)), reviewed_keys, "already_agrees", True, True),
+            ((), reviewed_keys, "already_agrees", True, False),
+            (reviewed_keys[:-1], reviewed_keys, "already_agrees", True, False),
+            ((*reviewed_keys, "extra.password"), reviewed_keys, "already_agrees", True, False),
+            ((*reviewed_keys[:-1], "extra.password"), reviewed_keys, "already_agrees", True, False),
+            (reviewed_keys, reviewed_keys, "reconcile_reference", True, False),
+            (reviewed_keys, reviewed_keys, "already_agrees", False, False),
+            (reviewed_keys[:-1], reviewed_keys[:-1], "already_agrees", True, False),
+        )
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/reconcile-odoo-secret-references.py")
+        )
+
+        def response(
+            keys: tuple[str, ...], action: str, *, read_back_matches: bool = True
+        ) -> dict[str, object]:
+            return {
+                "trace_id": "launchplane_req_fixture",
+                "result": {
+                    "product": "fixture-product",
+                    "context": "fixture-context",
+                    "instance": "prod",
+                    "entries": [
+                        {
+                            "key": key,
+                            "runtime_key": f"fixture.{key}",
+                            "action": action,
+                        }
+                        for key in keys
+                    ],
+                    "review_digest": "fixture-review",
+                    "read_back_matches": read_back_matches,
+                },
+            }
+
+        for keys, review_entries, action, matches, verified in cases:
+            with self.subTest(keys=keys, action=action, matches=matches):
+                review = response(review_entries, "reconcile_reference")
+                write = Mock(
+                    return_value=response(
+                        reviewed_keys, "reconcile_reference", read_back_matches=matches
+                    )
+                )
+                read = Mock(
+                    side_effect=(
+                        response(reviewed_keys, "reconcile_reference"),
+                        response(keys, action),
+                    )
+                )
+                transport = {
+                    "resolve_settings": lambda _: {
+                        "service_url": "https://fixture.invalid",
+                        "token": "fixture-token",
+                    },
+                    "validate_service_url": lambda _: None,
+                    "request_launchplane_read": read,
+                    "request_launchplane": write,
+                    "public_trace_id": lambda value: value,
+                }
+                with TemporaryDirectory() as directory:
+                    helper = Path(directory) / "launchplane-write-action.py"
+                    helper.touch()
+                    evidence = Path(directory) / "review.json"
+                    evidence.write_text(
+                        json.dumps({"request": {"keys": reviewed_keys}, "response": review})
+                    )
+                    output = io.StringIO()
+                    with (
+                        patch("runpy.run_path", return_value=transport),
+                        patch(
+                            "sys.argv",
+                            [
+                                "client",
+                                "apply",
+                                "--operator-helper",
+                                str(helper),
+                                "--product",
+                                "fixture-product",
+                                "--environment",
+                                "prod",
+                                "--evidence-file",
+                                str(evidence),
+                                "--reviewed-dry-run",
+                            ],
+                        ),
+                        contextlib.redirect_stdout(output),
+                    ):
+                        result = client["main"]()
+                self.assertEqual(result, 0 if verified else 1)
+                self.assertEqual(
+                    json.loads(output.getvalue())["status"],
+                    "verified" if verified else "accepted_unverified",
+                )
+                write.assert_called_once()
+                self.assertEqual(write.call_args.kwargs["body"]["keys"], list(reviewed_keys))
 
 
 class SecretReferenceCliTests(unittest.TestCase):

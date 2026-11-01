@@ -265,6 +265,9 @@ def _execute_launchplane_self_deploy(
     )
     raw_env_text = str(target_payload.get("env") or "")
     previous_env_map = dokploy_api.parse_dokploy_env_text(raw_env_text)
+    from control_plane.deployment_maintenance import require_deployment_available
+
+    require_deployment_available(previous_env_map)
     if request.target_type == "compose":
         _validate_launchplane_compose_target(
             target_payload=target_payload, env_map=previous_env_map

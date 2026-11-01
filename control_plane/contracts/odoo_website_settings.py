@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from urllib.parse import urlsplit
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 class OdooWebsiteSettings(BaseModel):
@@ -68,9 +68,7 @@ class OdooWebsiteSettings(BaseModel):
 
     @property
     def digest(self) -> str:
-        return hashlib.sha256(
-            json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        return nonvalidating_compact_sorted_json_sha256(self.model_dump(mode="json"))
 
 
 class OdooWebsiteSettingsIntent(BaseModel):

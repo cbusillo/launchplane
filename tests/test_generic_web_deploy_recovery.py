@@ -77,6 +77,7 @@ def _create_recovery_app(
     actions: tuple[str, ...] = ("generic_web_deploy.execute",),
     contexts: tuple[str, ...] = ("sellyouroutboard-testing",),
     authz_policy: LaunchplaneAuthzPolicy | None = None,
+    bearer_identity_config: BearerIdentityConfig | None = None,
 ) -> Any:
     return create_launchplane_fastapi_test_app(
         local_record_store_for_tests=store,
@@ -89,7 +90,7 @@ def _create_recovery_app(
             contexts=contexts,
         ),
         control_plane_root_path=root,
-        bearer_identity_config=_recovery_bearer_config(),
+        bearer_identity_config=bearer_identity_config or _recovery_bearer_config(),
     )
 
 

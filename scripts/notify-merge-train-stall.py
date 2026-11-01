@@ -9,12 +9,9 @@ from control_plane.notifications import post_discord_webhook
 
 def send_stall_alert() -> None:
     repository = os.environ["STALL_REPOSITORY"]
-    issue_number = os.environ["STALL_ISSUE_NUMBER"]
     state = os.environ["STALL_STATE"]
     if (
         not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
-        or not issue_number.isdecimal()
-        or int(issue_number) < 1
         or state not in {"open", "closed"}
         or not re.fullmatch(r"[a-f0-9]{64}", os.environ["STALL_NOTIFICATION_KEY"])
     ):
@@ -28,7 +25,8 @@ def send_stall_alert() -> None:
                     "title": "Merge train stalled"
                     if state == "open"
                     else "Merge train moving again",
-                    "description": f"{repository}: https://github.com/{repository}/issues/{issue_number}",
+                    "description": f"{repository}: see Launchplane controller status "
+                    "(`/v1/work-graph/merge-train/controller/status`, `stall`).",
                 }
             ],
         },

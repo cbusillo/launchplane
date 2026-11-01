@@ -93,7 +93,7 @@ def main() -> int:
                 query={},
                 timeout=120,
             )
-            identification = DiscordIdentityResponse.model_validate(raw)
+            identification = DiscordIdentityResponse.model_validate(raw, extra="ignore")
             print(identification.model_dump_json())
             return (
                 0
@@ -120,7 +120,7 @@ def main() -> int:
                 if args.product
                 else TestingCredentialInventoryResponse
             )
-            return model.model_validate(response)
+            return model.model_validate(response, extra="ignore")
 
         report = read()
         trace = transport["public_trace_id"](report.trace_id)
@@ -165,7 +165,7 @@ def main() -> int:
             saved = json.loads(evidence.read_text())
             if saved["request"] != payload:
                 raise ValueError("The reviewed credential target changed.")
-            review = ProductConfigApplyResponse.model_validate(saved["response"])
+            review = ProductConfigApplyResponse.model_validate(saved["response"], extra="ignore")
             if review.result.mode != "dry-run":
                 raise ValueError("Dry-run evidence required.")
             payload["mode"] = "apply"
@@ -178,7 +178,7 @@ def main() -> int:
             timeout=120,
             idempotency_key=args.idempotency_key if submitted else "",
         )
-        receipt = ProductConfigApplyResponse.model_validate(result)
+        receipt = ProductConfigApplyResponse.model_validate(result, extra="ignore")
         trace = transport["public_trace_id"](receipt.trace_id)
         if (
             (

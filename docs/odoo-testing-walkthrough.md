@@ -8,8 +8,9 @@ password is generated inside the service, encrypted in an instance-scoped
 account driver and the isolated browser service. This integration is separate
 from product runtime secrets: the password is never delivered as an application
 environment variable or exposed through an admin/helper response. Restored
-staff and admin passwords are preserved. Production and preview instances are
-rejected before provider or secret resolution.
+staff and admin passwords are preserved. Production is rejected before provider
+or secret resolution. General task accounts accept testing only; the read-only
+product identity below also accepts an exact preview generation.
 
 The API is `POST /v1/drivers/odoo/testing-walkthrough`. Its operations are
 `provision`, `run`, and `cleanup`, each with `mode=dry-run` followed by
@@ -30,7 +31,7 @@ product, context and `testing` instance. The inert dry run uses
 `odoo_testing_walkthrough.plan`. Declaring these actions installs no policy
 rules, grants or credentials. A machine denial remains `authorization_denied`;
 record its trace and exact action under [denial handling](authorization-authority.md#denial-handling).
-terminal-agent and GitHub Actions identities are not accepted on this mutation
+Terminal-agent and GitHub Actions identities are not accepted on this mutation
 surface. Use the existing `local_operator` transport selected by the Director.
 Do not switch identities or use another operation to carry a denied call.
 The Director decides any new grant through the existing policy approval path.
@@ -54,8 +55,8 @@ isolation passes, the account remains active and its native sessions are not
 revoked by the service consumption deadline. Outcome reconciliation remains
 read-only and does not require passing isolation to observe an already
 dispatched operation.
-Dry runs take only a transient lane reservation and perform authenticated
-provider/host reads; they create no account, secret or operative request.
+Dry runs perform authenticated provider/host reads without taking an execution
+reservation; they create no account, secret or operative request.
 
 Prerequisite refusals return HTTP 409 with a fixed `error.code` and trace ID.
 Neither private exception text nor provider output is returned. Diagnose the
@@ -84,6 +85,7 @@ new record, account, policy change or alternate identity:
 | `testing_task_copy_witness_changed` | The running database does not carry this generation's copy witness. Preserve the copy and inspect its original operation. |
 | `testing_task_isolation_refused` | The native connection-isolation readback refused on the running copy. Use the supported isolation repair and readback; protected-use rules still apply. |
 | `testing_task_protected_signin_observed` | A successful sign-in since preparation, by anyone except a natively witnessed task account on this copy, was observed. Preserve that use; do not clear history. |
+| `testing_task_account_changed` | The fixed read-only preview identity shell is absent or changed. Apply the image-owned fixture before provisioning or running. Cleanup remains available. |
 | `testing_task_credential_custody_unavailable` | Task secret metadata is unreadable, closed, expired or missing for a browser run. Follow this task's supported lifecycle; do not read or replace passwords. |
 
 Native predicate errors from execution append `_refused` or `_unavailable` to
@@ -199,7 +201,9 @@ the returned user ID before opening the web client. Supply bounded `steps`:
 ```
 
 Use the product's actual checklist selectors; these are illustrative. The
-driver accepts no evaluated script, arbitrary URL, query string, dot-segment or
+browser uses Playwright's bounded strict locator resolution for controls that
+render after the web client. Missing, ambiguous or sensitive controls refuse.
+The driver accepts no evaluated script, arbitrary URL, query string, dot-segment or
 encoded-path escape, staff credentials or non-TEST input. It blocks external network requests, login and
 password-reset pages, service workers, websockets, downloads and sensitive
 controls. Screenshots are available only on the signed-in web client, with
@@ -269,7 +273,7 @@ dispatch journals live in the original host's private
 `/tmp/launchplane-walkthrough` directory. Preserve them until the original
 receipt is settled; host temporary-file disposal can remove old recovery proof.
 An ambiguous commit or failed post-commit readback stays `unknown`. Browser-step
-errors also stay `unknown`: earlier business writes may already have completed.
+errors in an ordinary task also stay `unknown`: earlier business writes may already have completed.
 Retrying the original key settles evidence without repeating those steps, then
 cleanup remains available. Browser work holds the existing heartbeat lease and
 Odoo lane reservation; recovery never replays browser commands.
@@ -290,3 +294,113 @@ and resource qualification; select `source_mode=ssh` if that is the intended cop
 source (the default is `container-export`). Each failure has a plain description
 and fix kind. Dependent or unselected evidence stays unknown. See the
 [path-check contract](service-boundary.md#product-retirement) for the read boundary.
+
+## Read-only product identities
+
+Use the same route with `read_only: true` and the fixed product task ID,
+`canonical_json_sha256(product)[:32]`. The login uses the existing prefix.
+The password stays encrypted in the existing `odoo_walkthrough` integration,
+separately bound to each testing copy or exact preview generation. It is never
+inherited as a usable credential, delivered as runtime environment, or returned.
+This standing product identity has no four-hour consumption limit. Explicit
+cleanup revokes its account and all of its older-copy secrets on the current
+lane. Provision can reopen the same qualified account with a fresh password
+and secret version, without rebuilding the preview. Provisioning a new
+generation also disables its older-generation service credentials. Retained
+old databases remain under their existing custody; cleanup never redirects to
+them. Ordinary task accounts keep their existing lifetime.
+
+Testing retains its copy, isolation, use and authorization checks. A preview
+requires its native `instance`, `preview_id` and `generation_id`, matching its
+active serving identity. On the same administrator transports, it uses existing Director-agent preview authority or
+`odoo_preview_apply.execute` for its product preview context. Inert planning
+uses the existing `odoo_testing_walkthrough.plan` read action. Neither adds a
+grant or expands testing-only execution rules. Planning checks the selected runtime,
+database isolation and presence of the fixed login through native read-only queries;
+it executes no product fixture or schedule. Provisioning retains fixture protected-use and exclusive target-ownership
+checks, including the preview's protected-use facts. A coordinated activation
+window is required when a Client is using it. Cleanup can revoke its own account under a hold, while keeping current
+runtime, unique target ownership and production-separation checks. Browser work retains
+current identity and isolation checks. The preview uses its existing execution
+lock and durable provider fence. Recovery observes the original receiver/key;
+it never redirects or repeats a browser transaction.
+If the original browser request is unavailable, the product's existing preview
+reconciliation observes its retained walkthrough intent. It waits for lease
+grace and native journal/quiescence proof, then settles the original operation
+as unknown without signing in or dispatching account work. The original key
+still returns a valid walkthrough receipt. Missing proof retains the shared
+preview fence; refresh, destruction and fixtures cannot bypass it.
+
+First apply the image-owned `read-only-test-identity` fixture through the
+[preview-fixture route](preview-fixtures.md). It creates only an inactive account
+shell and ownership witness, without receiving a password. Planning binds
+the fixed login, database, container, target and generation; the fixed native
+consumer then sets a service-generated password over private non-echo stdin.
+No fixture schedule or retained original intent carries a credential. A snapshot
+restore is insufficient: new previews restore a frozen full database and run the
+sanitizer again, while existing previews retain their data and Client edits.
+
+The product artifact supplies `launchplane_readonly.group_user` and private
+`res.users._launchplane_readonly_test_identity(identity, login, create=False)`.
+Provision and run call this method. It returns only its owned, qualified user and refuses a staff account
+or absent guard. Its direct/implied groups must contain only the read-only
+role's declared closure and ordinary internal-user support, never extra stock,
+accounting, printing or administration roles. Testing may pass `create=True`
+to create that product's shell;
+previews always pass `create=False` and require the fixture. A new generation
+may rebind only the same qualified owned user. The ownership witness must be
+created by the product fixture/service contract, never inferred from a reserved
+login or adopted from a staff record or production restore. Caller-selected
+business groups and form-filling steps are refused. The product sanitizer must
+deactivate/scramble copied test identities, remove their API keys and clear
+operative walkthrough markers before a restored copy can serve. A retained
+nonsecret product-ownership witness may support a new preview fixture; it never
+supplies a usable password or current-generation authority.
+Cleanup uses only the native service marker and matching owned login, without
+depending on the product hook, role or fixture still working. It cannot adopt
+another account and still requires the current isolated receiver.
+
+The product owns and tests its business permissions. Odoo ACLs add rights, so
+read-only ACL entries alone cannot enforce this contract. Its server guard must
+refuse business create/write/unlink, sudo business paths, scans, quantity/count
+changes, validation, accounting, imports, preference saves, messages, server
+actions and reports/printing. Only sign-in/out bookkeeping may write. The guard
+must still allow the service superuser to activate, revoke and set the password
+of its owned test account. Product tests prove negative business operations
+before activation; Launchplane never probes business writes on a Client preview,
+even inside a database savepoint.
+
+| CM check | Minimum permission |
+| --- | --- |
+| Sign in, sign out, sign in again | Internal web client and authentication bookkeeping |
+| Inventory and Repair Tickets menus | Menu/action/view reads and displayed-record reads; no stock operations role |
+| Three SAMPLE parts | Product/template, unit, displayed stock and location reads; no quantity/count writes |
+| `WH/IN/00001` | Receipt, move, move-line, picking-type and location reads; no validation |
+| Label controls and My printers | Action/view, printer metadata and own-user form reads; no print, preference or credential writes |
+| Open Scan parts | Action/view reads only; no scan submission |
+
+The product defines the exact models and record rules. Fix missing menu access
+in its read-only role, without granting full inventory operations. An absent
+PrintNode credential or empty printer list is expected.
+
+The product server guard is the read-only authority. The browser applies the
+same known-business-write method filter to ordinary and button RPCs. Pure
+button openers still require the product's read-only routing and SQL guard.
+The browser blocks server actions, reports/downloads, mail posting, external
+requests and websockets. It leaves
+localization, ordinary read methods and menu loading to the product web client,
+without maintaining a second list of every Odoo read. Menu clicks remain
+available within this transport. `sign_out` and `sign_in`
+steps use fixed private session endpoints for the same managed identity; they
+accept neither selectors nor credentials. Screenshots retain existing masking
+and private custody, and every run closes its browser without exporting sessions.
+A failed read-only observation completes as `fail` only after the browser and
+its context have closed. Replaying its key returns that result without another
+sign-in; a new observation uses a new key. Runtime, isolation, lease and browser
+closure uncertainty retain reconciliation. Recovery of an interrupted read-only
+run records an unverified observation, rather than requiring account cleanup.
+
+Deploy normally, then qualify the image-owned role/fixture. Coordinate an
+existing Client preview's serving tuple and activation window with its lead
+before account changes. Preserve samples, receipt state and recorded acceptance.
+A source test or provision receipt never establishes a real authenticated UI pass.

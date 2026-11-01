@@ -5,11 +5,10 @@ Normal previews still receive no source settings or integration allowances.
 """
 
 from dataclasses import dataclass
-import hashlib
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
+from control_plane.odoo_source_prerequisite_programs import FailureStage
 from control_plane.provider_key_adoption import looks_like_credential
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
@@ -31,6 +30,7 @@ from control_plane.product_secret_copy import (
 from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 if TYPE_CHECKING:
     from control_plane.odoo_runtime_source_prerequisites import PrerequisiteStore
@@ -40,9 +40,14 @@ FISHBOWL_CONNECTION_PARAMETERS = ("host", "user", "db", "port", "ssl_verify", "p
 
 
 class PreviewImportSourceError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, *, failure_stage: FailureStage | None = None
+    ) -> None:
+        if failure_stage is not None:
+            message = f"{message} Failure stage: {failure_stage}."
         super().__init__(message)
         self.code = code
+        self.failure_stage = failure_stage
 
 
 PREVIEW_FISHBOWL_SOURCE_ENV_KEY = "LAUNCHPLANE_PREVIEW_FISHBOWL_SOURCE"
@@ -174,7 +179,8 @@ def resolve_fishbowl_preview_source(
     if qualified.runtime != "verified" or source is None or not source.parameters:
         raise PreviewImportSourceError(
             "source_unqualified",
-            "The testing import source requires current producer and payload agreement.",
+            "The testing import source requires current installed producer and payload agreement.",
+            failure_stage=qualified.failure_stage or (source.failure_stage if source else None),
         )
     current = resolve_copy_source(
         store,
@@ -221,9 +227,7 @@ def resolve_fishbowl_preview_source(
         "allowance": allowances[0].model_dump(mode="json"),
         "parameters": selected_values,
     }
-    digest = hashlib.sha256(
-        json.dumps(authority, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(authority)
     return FishbowlPreviewSource(
         context=profile.preview.context,
         instance=preview_slug,

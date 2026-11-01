@@ -2,9 +2,7 @@
 
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from datetime import datetime, timezone
 import hashlib
-import json
 import logging
 from pathlib import Path
 from typing import Protocol, cast
@@ -34,6 +32,8 @@ from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_SOURCE_BO
 from control_plane.launchplane_reconcile_authorization import (
     launchplane_reconcile_authorization_allows,
 )
+from control_plane.timestamps import utc_now_timestamp
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 class TestingRecoveryStore(Protocol):
@@ -81,9 +81,7 @@ class TestingRecoveryStore(Protocol):
 
 
 def recovery_binding_fingerprint(bindings: Sequence[object]) -> str:
-    return hashlib.sha256(
-        json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(bindings)
 
 
 def source_exceeds_current_capacity(journal: TestingReplacementRecoveryJournal) -> bool:
@@ -151,7 +149,7 @@ def service_testing_operation(operation: OdooStableTargetReplacementOperationRec
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return utc_now_timestamp()
 
 
 @contextmanager

@@ -50,15 +50,16 @@ not describe runtime authority until it is implemented, deployed, and activated.
   memory floors and read-only preview-start admission.
 - [service-runtime-settings.md](service-runtime-settings.md) — reviewed writes
   of declared non-secret settings on Launchplane's own service context.
-- [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
-  preview workflow event, idempotency, feedback, and lifecycle contract.
+- [preview-workflow-contract.md](preview-workflow-contract.md) — existing preview compatibility, data-source safety, recovery, and Client-review contract.
 - [product-retirement.md](product-retirement.md) — reviewed product retirement,
   including owned previews, disposable-lane eligibility, and resumable execution.
+- [retained-volume-sweep.md](retained-volume-sweep.md) — private kept-volume custody and reviewed service cleanup after retirement.
 - [disposable-lanes.md](disposable-lanes.md) — usage/data/isolation facts, safe
   testing writes and replacement of stranded testing operations.
 - [odoo-shopify-identity.md](odoo-shopify-identity.md) — hash-only held-testing Shopify identity and applied-production comparison.
 - [odoo-testing-walkthrough.md](odoo-testing-walkthrough.md) — testing task
   accounts, opaque service-owned browser sign-in, receipts and cleanup.
+- [preview-fixtures.md](preview-fixtures.md) — image-owned, repeatable sample data through the existing audited preview maintenance operation.
 - [legacy-preview-reconciliation.md](legacy-preview-reconciliation.md) — reviewed
   reconciliation of provider-absent generic-web and Odoo preview history.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
@@ -74,6 +75,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   graph.
 - [discussion-topics.md](discussion-topics.md) — product-scoped neutral topics,
   supported add/close API, and separate page/reminder delivery slices.
+- [request-attention.md](request-attention.md) — original-source waiting requests,
+  Supervisor routing and explicit collection coverage.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
   train policy contract, enqueue authority, and smoke-target policy.
 - [merge-train-events.md](merge-train-events.md) — signed App events, worker wake hints,
@@ -136,7 +139,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — standing public-source posture,
   image and secret boundary, and ongoing public hygiene.
-- [preview-settings.md](preview-settings.md) — reviewed private-file saves of one preview runtime override.
+- [preview-settings.md](preview-settings.md) — managed preview settings, secrets, precedence and migration.
+- [copy-aggregates.md](copy-aggregates.md) — read-only counts from frozen sanitized snapshots with source provenance.
 - [clean-testing-snapshots.md](clean-testing-snapshots.md) — independent sanitized testing snapshots, preview copies and transition prerequisites.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
@@ -166,3 +170,5 @@ not describe runtime authority until it is implemented, deployed, and activated.
   code-quality guardrails.
 - [codex-lab-workers.md](codex-lab-workers.md) — historical worker compatibility
   and retained engineering-review transport.
+
+- [host-program-package.md](host-program-package.md) — versioned host programs, installation and readback.

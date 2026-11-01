@@ -31,6 +31,42 @@ from tests.test_postgres_store import _inventory_record, _merge_train_run_record
 
 
 class StoredRecordSnapshotTests(unittest.TestCase):
+    def test_retired_postgres_transport_survives_raw_row_snapshot_and_storage_read(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneProductProfileRow
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        profile = _driver_profile()
+        self.store.write_product_profile_record(profile)
+        legacy = profile.model_dump(mode="json")
+        legacy["preview"]["transport_extension"] = "verireel-postgres"
+        legacy["preview"].pop("generated_secret_env", None)
+        legacy["preview"]["preview_url_env_keys"] = []
+        legacy["preview"]["preview_domain_env_keys"] = []
+        with self.store._engine.begin() as connection:
+            connection.execute(
+                update(LaunchplaneProductProfileRow)
+                .where(LaunchplaneProductProfileRow.product == profile.product)
+                .values(payload=legacy)
+            )
+        snapshot = self.store.export_stored_record_snapshot()
+        scrubbed = snapshot.tables["launchplane_product_profiles"][0]["payload"]
+        self.assertEqual(
+            scrubbed["preview"]["transport_extension"], legacy["preview"]["transport_extension"]
+        )
+        restored = self.store._read_product_profile_payload(scrubbed)
+        self.assertEqual(
+            restored.preview.generated_secret_env, legacy["preview"].get("generated_secret_env", {})
+        )
+        self.assertEqual(
+            restored.preview.transport_extension, legacy["preview"]["transport_extension"]
+        )
+        self.assertEqual(
+            self.store.read_product_profile_record(profile.product),
+            LaunchplaneProductProfileRecord.model_validate(
+                legacy, context={"stored_product_profile": True}
+            ),
+        )
+
     def setUp(self) -> None:
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -91,6 +127,47 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         profile = snapshot.tables["launchplane_product_profiles"][0]["payload"]
         LaunchplaneProductProfileRecord.model_validate(profile)
         self.assertEqual(before, self.store.list_authz_policy_records()[0].model_dump_json())
+
+    def test_encoded_preview_export_keeps_unsafe_values_invalid_without_exposing_them(self) -> None:
+        import base64
+        from control_plane.contracts.odoo_post_deploy_payload import (
+            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        )
+        from control_plane.preview_settings import validate_preview_scope
+        from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
+
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
+        encoded = base64.b64encode(
+            json.dumps(
+                {
+                    "context": profile.preview.context,
+                    "instance": "preview",
+                    "addon_settings": [
+                        {
+                            "addon": "connector",
+                            "setting": "api_token",
+                            "value": {"source": "literal", "value": "private-sentinel"},
+                        }
+                    ],
+                }
+            ).encode()
+        ).decode()
+        profile.preview.override_env = {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: encoded}
+        self.store.write_product_profile_record(profile)
+        for version in (1, 2):
+            with self.subTest(version=version):
+                exported = self.store.export_stored_record_snapshot(format_version=version)
+                row = next(
+                    row
+                    for family, row in iter_snapshot_rows(exported)
+                    if family == "launchplane_product_profiles"
+                )
+                scrubbed = row["payload"]["preview"]
+                with self.assertRaises(ValueError):
+                    validate_preview_scope(scrubbed["override_env"], context=scrubbed["context"])
+                self.assertNotIn("private-sentinel", json.dumps(row))
+                self.assertNotIn(encoded, json.dumps(row))
+        self.assertEqual(profile, self.store.read_product_profile_record(profile.product))
 
     def test_lifecycle_schedules_and_preview_suffix_remain_readable_after_scrubbing(self) -> None:
         from control_plane.stored_record_snapshot_codec import iter_snapshot_rows

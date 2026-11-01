@@ -71,6 +71,19 @@ See [Traefik's file-provider documentation](https://doc.traefik.io/traefik/v3.3/
 
 ## Compatible and database-changing paths
 
+Private readiness executes the selected image's shipped readiness helper.
+Synthetic cutover images inherit that helper from their immutable base without
+installing a separate readiness implementation.
+
+The local synthetic image builder accepts an explicit `target_platform` for a
+published multi-platform base. Select an already-local immutable parent and an
+available `linux/amd64` or `linux/arm64` child; inspection, graph/version probes,
+wheel selection and builds use that same platform. A missing or unsupported
+selection refuses without guessing the host architecture or another child.
+Concrete single-platform images keep the existing default inspection path.
+The rehearsal treats response header names case-insensitively while still
+requiring HTML and exact served-mode/public-copy evidence.
+
 A compatible release runs the full planned credential/settings/readback
 sequence with no install or update, warms the candidate, and obtains fresh
 private database/Host/render/asset/browser/identity evidence. The old slot keeps
@@ -484,6 +497,11 @@ delay without charging another deployment attempt. Missing, ended, foreign or un
 held. A failing candidate health probe can be switched back after retained-slot
 private readiness; positive foreign identity still refuses rollback.
 
+The cutover transport compresses command envelopes within its existing wire
+bound. Decoded commands and output share a bounded buffer; incomplete or trailing
+compressed input refuses before execution. Native argv, stdin and sealed
+maintenance payloads retain their original bytes and authority.
+
 The installed qualification uses isolated representative Odoo 20 data and the
 shipped web/scheduler commands. It must prove real scheduled ticks without HTTP,
 physical drain, coherent capture/restore, browser readiness, persisted prepared
@@ -585,6 +603,12 @@ If `aborted` was saved before the terminal worker write, the same path verifies
 the old route and finishes the failure audit without creating another rollback.
 Expired-lease recovery reads the complete checkpoint history and production-write
 evidence, including death before the first dispatch of a reclaimed lease.
+An interrupted compatible inverse remains claimable before its pause is first
+saved, during fencing, and after writer resumption. Its prepared snapshot and
+any persisted pause must still belong to the original plan. Reclaiming does not
+prove drain or permit startup: those effect gates continue to require their
+complete native evidence. Inverse reconciliation retains the original operation,
+attempt and checkpoints after the forward attempt budget is exhausted.
 
 Before aborting an absent capture, the host atomically seals its native claim as
 cancelled, preventing delayed original dispatch from capturing later. Archive

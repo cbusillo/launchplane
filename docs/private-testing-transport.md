@@ -32,12 +32,28 @@ creates the application's HTTP hostname and its own edge route; it does not
 rewrite existing application domains or an unrelated edge route. A successful
 receipt owns later disablement. The active private endpoint is the hostname's
 recorded claim; the public-host write guard also checks that claim before any
-provider effect for another lane. Successful creation or original-key adoption
+provider effect for another lane. Retained DNS claims compare with ASCII case folding
+after trimming surrounding whitespace and trailing dots, including target domains and
+pending hostname effects. Retained URL-form domains contribute their hostname rather
+than their scheme, port or path. PostgreSQL target/name fences use that same identity; this
+does not rewrite stored claims or relax new public-host input validation.
+Successful creation or original-key adoption
 also records it in the application's `domains`, under the existing name fences,
 without making it a public website. The edge retains its certificate, key, renewal
 and access list. The application owns its HTTP paths and bearer checks; the edge
 preserves authorization and WebSocket headers. Provider readback retains the
 access list, certificate and complete route configuration. No DNS operation is performed.
+
+Private routes forward only the application's Bearer authorization header through
+a fixed provider location setting. The shared access list, source restrictions,
+Basic authentication and its credential stripping stay unchanged. A reviewed
+`create` can upgrade the exact receipt-owned legacy route to this setting; it
+cannot overwrite other configuration differences. An uncertain update retains
+its original operation key for observation and readback before any continuation.
+Source delivery preserves legacy activation bindings and the original header
+intent of a pending route operation. Finish that original operation before
+reviewing a forwarding upgrade; the upgrade creates a new route receipt and
+changes the binding that a later activation must capture.
 The NPMplus collection read validates every host ID and hostname claim before
 selection, retaining duplicate claims across hosts, wildcards and regex claims. Malformed claims
 refuse the read. Configuration on unrelated hosts is not qualified as a

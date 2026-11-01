@@ -30,7 +30,7 @@ const FAILURE_LABELS = {
 export function CredentialsRoute({ admin }: { admin: boolean }) {
   const loader = useCallback((signal: AbortSignal) => readCredentialInventory(signal), []);
   const { state, refresh, cancel } = useEngineeringResource<CredentialInventoryResponse>(
-    loader, "credential-inventory", admin, true,
+    loader, "credential-inventory", admin,
   );
   useEffect(() => {
     if (!admin || state.phase === "denied") return;

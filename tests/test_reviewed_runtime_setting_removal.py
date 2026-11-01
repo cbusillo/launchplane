@@ -1,24 +1,33 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.product_reconcile import ProductReconcileTarget
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
+)
 from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.runtime_setting_removal import (
     RuntimeSettingRemovalRequest,
     RuntimeSettingRemovalPlan,
+    RuntimeSettingRemovalStale,
     REVIEW_ROUTE,
     ROUTE,
 )
 from control_plane.service_auth import (
     GitHubHumanIdentity,
     LocalAdminIdentity,
+    LocalOperatorIdentity,
+    TerminalAgentIdentity,
     LaunchplaneAuthzPolicy,
 )
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import PostgresRecordStore, LaunchplaneProductionRecipientRow
 from tests.test_authz_administration_read import (
     _record,
     _database_app,
@@ -27,6 +36,7 @@ from tests.test_authz_administration_read import (
 )
 from tests.support.http import lifespan_client
 from tests.support.stored_profiles import persist_historical_preview_transport
+from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 
 
 def admin() -> GitHubHumanIdentity:
@@ -82,6 +92,32 @@ def request(**changes: object) -> RuntimeSettingRemovalRequest:
     )
 
 
+def preview_policy() -> LaunchplaneAuthzPolicy:
+    payload = policy().model_dump(mode="json")
+    rule = {
+        "subjects": ["record-reader"],
+        "token_labels": ["record-reader-label"],
+        "products": ["site"],
+        "contexts": ["cm"],
+        "instances": ["preview", "testing", "prod"],
+        "actions": ["product_config.apply"],
+    }
+    payload["local_operators"] = [rule]
+    payload["terminal_agents"] = [rule]
+    return LaunchplaneAuthzPolicy.model_validate(payload)
+
+
+def preview_removal(
+    store: PostgresRecordStore,
+) -> tuple[RuntimeEnvironmentRecord, RuntimeSettingRemovalRequest]:
+    store.write_product_profile_record(
+        LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload_with_prod_lane("site"))
+    )
+    record = runtime(scope="instance", context="cm", instance="preview")
+    store.write_runtime_environment_record(record)
+    return record, request(product="site", scope="instance", context="cm", instance="preview")
+
+
 class RuntimeRemovalTests(unittest.TestCase):
     database_url: str = ""
 
@@ -110,6 +146,278 @@ class RuntimeRemovalTests(unittest.TestCase):
             review_id=dry["review_id"],
             reviewed_plan_sha256=dry["plan_sha256"],
         )
+
+    def reviewed_preview(
+        self,
+    ) -> tuple[RuntimeSettingRemovalRequest, LocalOperatorIdentity]:
+        replacement = _record(policy=preview_policy(), revision=self.active.revision + 1)
+        self.store.compare_and_write_authz_policy_record(
+            expected_record=self.active, replacement_record=replacement
+        )
+        self.active = replacement
+        _, body = preview_removal(self.store)
+        operator = LocalOperatorIdentity(
+            subject="record-reader", token_label="record-reader-label", director_agent=True
+        )
+        dry = self.store.runtime_setting_removal(request=body, identity=operator, trace_id="trace")
+        return body.model_copy(
+            update={
+                "mode": "apply",
+                "review_id": dry.review_id,
+                "reviewed_plan_sha256": dry.plan_sha256,
+            }
+        ), operator
+
+    def reviewed_testing(self) -> tuple[RuntimeSettingRemovalRequest, GitHubHumanIdentity]:
+        payload = policy().model_dump(mode="json")
+        payload["github_humans"].append(
+            {
+                "github_ids": [101],
+                "roles": ["admin"],
+                "products": ["site"],
+                "contexts": ["cm"],
+                "instances": ["testing"],
+                "actions": ["product_config.apply", "secret.list"],
+            }
+        )
+        replacement = _record(
+            policy=LaunchplaneAuthzPolicy.model_validate(payload), revision=self.active.revision + 1
+        )
+        self.store.compare_and_write_authz_policy_record(
+            expected_record=self.active, replacement_record=replacement
+        )
+        self.active = replacement
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(
+                _odoo_profile_payload_with_prod_lane("site")
+            )
+        )
+        self.store.write_runtime_environment_record(
+            runtime(scope="instance", context="cm", instance="testing")
+        )
+        body = request(product="site", scope="instance", context="cm", instance="testing")
+        identity = admin()
+        dry = self.store.runtime_setting_removal(request=body, identity=identity, trace_id="trace")
+        return body.model_copy(
+            update={
+                "mode": "apply",
+                "review_id": dry.review_id,
+                "reviewed_plan_sha256": dry.plan_sha256,
+            }
+        ), identity
+
+    def test_preview_review_omits_context_fallback_and_ignores_context_edits(self) -> None:
+        body, operator = self.reviewed_preview()
+        self.store.write_runtime_environment_record(
+            runtime(scope="context", context="cm", env={"REMOVE": "different-private-value"})
+        )
+        result = self.store.runtime_setting_removal(
+            request=body, identity=operator, trace_id="apply", idempotency_key="preview-context"
+        )
+        self.assertTrue(result.applied)
+        self.assertIsNone(result.instance_plain_setting_effects)
+        self.assertIsNone(result.context_values_sha256)
+
+    def test_instance_review_reports_context_fallback_without_values(self) -> None:
+        body, operator = self.reviewed_testing()
+        self.store.write_runtime_environment_record(
+            runtime(scope="context", context="cm", env={"REMOVE": "different-private-value"})
+        )
+        result = self.store.runtime_setting_removal(
+            request=body.model_copy(update={"mode": "dry-run"}), identity=operator, trace_id="trace"
+        ).model_dump(mode="json", exclude_none=True)
+        self.assertEqual(
+            result["instance_plain_setting_effects"],
+            [{"key": "REMOVE", "source_after": "context", "effect": "changed"}],
+        )
+        self.assertNotIn("private-value", json.dumps(result))
+
+    def test_instance_apply_refuses_changed_or_new_context_fallback(self) -> None:
+        for original_context in (None, "original-context-value"):
+            with self.subTest(original_context=original_context):
+                if original_context is not None:
+                    self.store.write_runtime_environment_record(
+                        runtime(scope="context", context="cm", env={"REMOVE": original_context})
+                    )
+                body, operator = self.reviewed_testing()
+                self.store.write_runtime_environment_record(
+                    runtime(scope="context", context="cm", env={"REMOVE": "changed-context-value"})
+                )
+                with self.assertRaises(RuntimeSettingRemovalStale):
+                    self.store.runtime_setting_removal(
+                        request=body,
+                        identity=operator,
+                        trace_id="apply",
+                        idempotency_key=f"drift-{original_context is not None}",
+                    )
+                remaining = self.store.list_runtime_environment_records(
+                    context_name="cm", instance_name="testing"
+                )
+                lane = next(record for record in remaining if record.scope == "instance")
+                self.assertIn("REMOVE", lane.env)
+
+    def test_instance_review_compares_normalized_site_values_without_global_fallback(self) -> None:
+        body, operator = self.reviewed_testing()
+        self.store.write_runtime_environment_record(
+            runtime(scope="context", context="cm", env={"SAME": 1, "EMPTY": ""})
+        )
+        self.store.write_runtime_environment_record(
+            runtime(
+                scope="instance",
+                context="cm",
+                instance="testing",
+                env={"SAME": "1", "EMPTY": "", "GLOBAL_ONLY": "global-value"},
+            )
+        )
+        self.store.write_runtime_environment_record(runtime(env={"GLOBAL_ONLY": "global-value"}))
+        result = self.store.runtime_setting_removal(
+            request=body.model_copy(
+                update={"mode": "dry-run", "keys": ("SAME", "GLOBAL_ONLY", "EMPTY")}
+            ),
+            identity=operator,
+            trace_id="trace",
+        )
+        effects = result.instance_plain_setting_effects
+        assert effects is not None
+        self.assertEqual(
+            {item.key: (item.source_after, item.effect) for item in effects},
+            {
+                "EMPTY": ("context", "unchanged"),
+                "GLOBAL_ONLY": (None, "absent"),
+                "SAME": ("context", "unchanged"),
+            },
+        )
+
+    def test_instance_apply_ignores_unselected_context_and_global_changes(self) -> None:
+        body, operator = self.reviewed_testing()
+        self.store.write_runtime_environment_record(
+            runtime(scope="context", context="cm", env={"UNRELATED": "new-context-value"})
+        )
+        self.store.write_runtime_environment_record(runtime(env={"REMOVE": "new-global-value"}))
+        result = self.store.runtime_setting_removal(
+            request=body, identity=operator, trace_id="apply", idempotency_key="unrelated-context"
+        )
+        self.assertTrue(result.applied)
+        self.assertTrue(result.readback_matches)
+
+    def test_preview_removal_refuses_other_scopes_and_identity_types(self) -> None:
+        body, operator = self.reviewed_preview()
+        before = self.store.list_runtime_environment_records()
+        for changes in (
+            {"scope": "global", "product": "launchplane", "context": "", "instance": ""},
+            {"scope": "context", "instance": ""},
+            {"instance": "testing"},
+            {"instance": "prod"},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(PermissionError):
+                self.store.runtime_setting_removal(
+                    request=body.model_copy(update=changes),
+                    identity=operator,
+                    trace_id="trace",
+                    idempotency_key="other-scope",
+                )
+        for identity in (
+            replace(operator, director_agent=False),
+            TerminalAgentIdentity(
+                subject=operator.subject, token_label=operator.token_label, director_agent=True
+            ),
+            replace(operator, subject="ungranted"),
+        ):
+            with self.subTest(identity=type(identity).__name__), self.assertRaises(PermissionError):
+                self.store.runtime_setting_removal(
+                    request=body,
+                    identity=identity,
+                    trace_id="trace",
+                    idempotency_key="other-caller",
+                )
+        self.assertEqual(self.store.list_runtime_environment_records(), before)
+
+    def test_preview_removal_requires_enabled_unaliased_preview_after_fresh_review(self) -> None:
+        body, operator = self.reviewed_preview()
+        profile = self.store.read_product_profile_record(body.product)
+        before = self.store.list_runtime_environment_records()
+        profiles = (
+            profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"enabled": False})}
+            ),
+            profile.model_copy(
+                update={
+                    "lanes": (
+                        *profile.lanes,
+                        ProductLaneProfile(context=body.context, instance=body.instance),
+                    )
+                }
+            ),
+        )
+        for current in profiles:
+            with self.subTest(enabled=current.preview.enabled, lanes=len(current.lanes)):
+                self.store.write_product_profile_record(current)
+                dry = self.store.runtime_setting_removal(
+                    request=body.model_copy(update={"mode": "dry-run"}),
+                    identity=operator,
+                    trace_id="trace",
+                )
+                with self.assertRaises(PermissionError):
+                    self.store.runtime_setting_removal(
+                        request=body.model_copy(
+                            update={
+                                "review_id": dry.review_id,
+                                "reviewed_plan_sha256": dry.plan_sha256,
+                            }
+                        ),
+                        identity=operator,
+                        trace_id="trace",
+                        idempotency_key="unqualified-preview",
+                    )
+        self.assertEqual(self.store.list_runtime_environment_records(), before)
+
+    def test_preview_removal_rechecks_eligibility_and_write_authority_on_replay(self) -> None:
+        body, operator = self.reviewed_preview()
+        before = self.store.list_runtime_environment_records(
+            scope=body.scope, context_name=body.context, instance_name=body.instance
+        )[0]
+        self.store.runtime_setting_removal(
+            request=body, identity=operator, trace_id="trace", idempotency_key="preview"
+        )
+        after = self.store.list_runtime_environment_records()
+        written = self.store.list_runtime_environment_records(
+            scope=body.scope, context_name=body.context, instance_name=body.instance
+        )[0]
+        self.assertEqual(written.env, {"KEEP": before.env["KEEP"]})
+        profile = self.store.read_product_profile_record(body.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"enabled": False})}
+            )
+        )
+        with self.assertRaises(PermissionError):
+            self.store.runtime_setting_removal(
+                request=body, identity=operator, trace_id="trace", idempotency_key="preview"
+            )
+        self.store.write_product_profile_record(profile)
+        self.store.compare_and_write_authz_policy_record(
+            expected_record=self.active,
+            replacement_record=_record(policy=policy(), revision=self.active.revision + 1),
+        )
+        with self.assertRaises(PermissionError):
+            self.store.runtime_setting_removal(
+                request=body, identity=operator, trace_id="trace", idempotency_key="preview"
+            )
+        self.assertEqual(self.store.list_runtime_environment_records(), after)
+
+    def test_preview_removal_retains_exclusive_current_product_ownership(self) -> None:
+        body, operator = self.reviewed_preview()
+        before = self.store.list_runtime_environment_records()
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(
+                _odoo_profile_payload_with_prod_lane("other-product")
+            )
+        )
+        with self.assertRaises(ValueError):
+            self.store.runtime_setting_removal(
+                request=body, identity=operator, trace_id="trace", idempotency_key="ambiguous-owner"
+            )
+        self.assertEqual(self.store.list_runtime_environment_records(), before)
 
     def test_exact_deletion_survivors_archive_readback_and_lost_reply_replay(self) -> None:
         body = self.reviewed()
@@ -352,6 +660,129 @@ class RuntimeRemovalTests(unittest.TestCase):
 
 
 class RuntimeRemovalHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_inventory_row_is_not_reported_as_a_stale_removal_review(self) -> None:
+        with _database_app(policy(), director_agent=True) as (store, _, app):
+            store.write_runtime_environment_record(runtime())
+            with patch.object(
+                store,
+                "global_setting_consumer_inventory",
+                side_effect=ValueError("invalid inventory row"),
+            ):
+                async with lifespan_client(app) as client:
+                    with self.assertRaisesRegex(ValueError, "invalid inventory row"):
+                        await client.post(
+                            ROUTE,
+                            json=request().model_dump(mode="json"),
+                            headers={"Authorization": "Bearer reader-token"},
+                        )
+
+    async def test_global_review_inventories_orphan_records_only_after_authorization(self) -> None:
+        with _database_app(policy(), director_agent=True) as (store, _, app):
+            records = (
+                runtime(),
+                runtime(scope="instance", context="historical", instance="retained"),
+            )
+            for record in records:
+                store.write_runtime_environment_record(record)
+            store.request_product_reconcile(
+                ProductReconcileTarget(product="unknown-product", target_kind="testing"),
+                requested_at=runtime().updated_at,
+            )
+            with store._session_factory() as session:
+                session.add(
+                    LaunchplaneProductionRecipientRow(
+                        product="retained-product",
+                        context="old-context",
+                        payload={
+                            "phase": "prepared",
+                            "authority_snapshot": {"runtime": "private-captured-value"},
+                        },
+                    )
+                )
+                session.commit()
+            headers = {"Authorization": "Bearer reader-token"}
+            async with lifespan_client(app) as client:
+                with patch.object(
+                    store,
+                    "global_setting_consumer_inventory",
+                    wraps=store.global_setting_consumer_inventory,
+                ) as inventory_read:
+                    denied = await client.post(
+                        ROUTE,
+                        json=request().model_dump(mode="json"),
+                        headers={"Authorization": "Bearer admin-token"},
+                    )
+                    self.assertEqual(denied.status_code, 403)
+                    inventory_read.assert_not_called()
+                    dry = await client.post(
+                        ROUTE, json=request().model_dump(mode="json"), headers=headers
+                    )
+                    self.assertEqual(dry.status_code, 200, dry.text)
+                    inventory_read.assert_called_once()
+                inventory = dry.json()["result"]["consumer_inventory"]
+                self.assertEqual(inventory["runtime_record_count"], len(records))
+                self.assertTrue(any(c["context"] == "historical" for c in inventory["consumers"]))
+                self.assertEqual(
+                    {c["product"] for c in inventory["authority_records"]},
+                    {"unknown-product", "retained-product"},
+                )
+                self.assertNotIn("private-captured-value", dry.text)
+                for record in records:
+                    for value in record.env.values():
+                        self.assertNotIn(str(value), dry.text)
+                self.assertEqual(store.list_runtime_environment_records(), records)
+
+    async def test_director_operator_removes_reviewed_preview_key_and_replays_receipt(self) -> None:
+        with _database_app(preview_policy(), director_agent=True) as (store, _, app):
+            before, body = preview_removal(store)
+            headers = {"Authorization": "Bearer reader-token"}
+            async with lifespan_client(app) as client:
+                dry = await client.post(ROUTE, json=body.model_dump(mode="json"), headers=headers)
+                self.assertEqual(dry.status_code, 200, dry.text)
+                plan = dry.json()["result"]
+                apply = body.model_copy(
+                    update={
+                        "mode": "apply",
+                        "review_id": plan["review_id"],
+                        "reviewed_plan_sha256": plan["plan_sha256"],
+                    }
+                )
+                apply_headers = {**headers, "Idempotency-Key": "preview-removal"}
+                applied = await client.post(
+                    ROUTE, json=apply.model_dump(mode="json"), headers=apply_headers
+                )
+                self.assertEqual(applied.status_code, 200, applied.text)
+                self.assertTrue(applied.json()["result"]["applied"])
+                after = store.list_runtime_environment_records(
+                    scope="instance", context_name=before.context, instance_name=before.instance
+                )[0]
+                self.assertEqual(after.env, {"KEEP": before.env["KEEP"]})
+                self.assertEqual(after.source_label, before.source_label)
+                replay = await client.post(
+                    ROUTE, json=apply.model_dump(mode="json"), headers=apply_headers
+                )
+                self.assertEqual(replay.status_code, 200, replay.text)
+                self.assertTrue(replay.json()["result"]["replayed"])
+                readback = await client.post(
+                    ROUTE,
+                    json=apply.model_copy(update={"mode": "readback"}).model_dump(mode="json"),
+                    headers=headers,
+                )
+                self.assertTrue(readback.json()["result"]["readback_matches"])
+                operator = LocalOperatorIdentity(
+                    subject="record-reader", token_label="record-reader-label", director_agent=True
+                )
+                self.assertIsNotNone(
+                    store.read_idempotency_record(
+                        scope=idempotency_scope(operator),
+                        route_path=ROUTE,
+                        idempotency_key=apply_headers["Idempotency-Key"],
+                    )
+                )
+                for response in (applied, replay, readback):
+                    for value in before.env.values():
+                        self.assertNotIn(str(value), response.text)
+
     async def test_director_can_plan_and_bearer_cannot_apply(self) -> None:
         with _database_app(policy(), director_agent=True) as (store, _, app):
             store.write_runtime_environment_record(runtime())

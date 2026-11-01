@@ -1,3 +1,9 @@
+from control_plane._preview_fixture_program import PREVIEW_FIXTURE_RESULT_MARKER
+from control_plane.host_package_runtime import (
+    HOST_PACKAGE_VERSION_MARKER,
+    HOST_PROGRAM_VERSION_MARKER,
+)
+from control_plane.host_package_installer import HOST_PACKAGE_INSTALLED_MARKER
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_script
 from control_plane.filestore_permissions import FILESTORE_PERMISSION_SHELL
@@ -53,6 +59,7 @@ from control_plane.integration_readback import (
     INTEGRATION_READBACK_CHECKED_MARKER,
     INTEGRATION_READBACK_OK_MARKER,
     INTEGRATION_READBACK_PASSED_PATH,
+    INTEGRATION_READBACK_NAME_LIST_MARKERS,
     INTEGRATION_READBACK_PROGRAM,
     IntegrationReadbackPolicy,
     integration_readback_marker_is_safe,
@@ -64,7 +71,11 @@ from control_plane.runtime_key_safety import runtime_key_safety_environment_clas
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
 from control_plane.copy_readback_diagnostics import (
     READBACK_FAILURE_MARKERS,
+    COPY_FAILURE_EXIT_MARKER,
+    COPY_FAILURE_EVIDENCE_MARKER,
+    COPY_FAILURE_STAGE_MARKER,
     ReadbackPredicate,
+    copy_failure_marker_is_safe,
     readback_failure_evidence,
     readback_marker_is_safe,
 )
@@ -195,6 +206,7 @@ print("{ODOO_COMPANY_EMAIL_CONTRACT_MARKER}=" + str(supported).lower())
 '''
 ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
     {
+        HOST_PACKAGE_INSTALLED_MARKER,
         "log_available",
         "odoo_module_update_completed",
         "odoo_module_update_image_match",
@@ -249,12 +261,16 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS
     | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
     | {
+        HOST_PACKAGE_VERSION_MARKER,
+        HOST_PROGRAM_VERSION_MARKER,
         "website_settings_sha256",
         "clean_snapshot_database_sha256",
         "clean_snapshot_filestore_sha256",
         "clean_preview_snapshot_id",
+        PREVIEW_FIXTURE_RESULT_MARKER,
     }
     | READBACK_FAILURE_MARKERS
+    | INTEGRATION_READBACK_NAME_LIST_MARKERS
 )
 ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
     "odoo_module_update_completed",
@@ -424,9 +440,14 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
             and int(site) > 0
             for site in sites
         )
-    if readback_marker_is_safe(key, value):
+    if readback_marker_is_safe(key, value) or copy_failure_marker_is_safe(key, value):
         return True
-    if key in {"rehearsal_result", "rehearsal_child_failure", "recipient_recovery_retained"}:
+    if key in {
+        "rehearsal_result",
+        "rehearsal_child_failure",
+        "recipient_recovery_retained",
+        PREVIEW_FIXTURE_RESULT_MARKER,
+    }:
         return bool(
             re.fullmatch(
                 r"(?:[a-f0-9]{2}){1," + str(NATIVE_OPERATION_RESULT_MAX_BYTES) + "}", value
@@ -455,7 +476,7 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None
     if key in {"connection_isolation_resource_sha256", "connection_isolation_operation_sha256"}:
         return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
-    if key == "website_settings_sha256":
+    if key in {HOST_PACKAGE_VERSION_MARKER, HOST_PROGRAM_VERSION_MARKER, "website_settings_sha256"}:
         return bool(re.fullmatch(r"[0-9a-f]{64}", value))
     if key == "website_bootstrap_company_email_skip_reason":
         return value == ODOO_COMPANY_EMAIL_SKIP_REASON
@@ -560,9 +581,24 @@ def run_manual_data_schedule(
     resolved_schedule_execution_timeout_seconds: int,
     before_provider_mutation: Callable[[str], None] | None = None,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    installed_host_package_version: str | None = None,
     on_observation: Callable[[str, str], None] | None = None,
 ) -> dict[str, str]:
     api.validate_dokploy_schedule_script(schedule_payload)
+    from control_plane.dokploy.host_package import ensure_schedule_host_package
+
+    from control_plane.host_package import host_invocation
+
+    invocation = host_invocation(schedule_payload.get("script"))
+    if invocation is None or invocation.package_version != installed_host_package_version:
+        ensure_schedule_host_package(
+            host=host,
+            token=token,
+            target_id=schedule_lookup_id,
+            schedule_type=schedule_type,
+            payload=schedule_payload,
+            provider_mutation_guard=provider_mutation_guard,
+        )
     with (provider_mutation_guard or nullcontext)():
         if before_provider_mutation is not None:
             before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
@@ -642,6 +678,16 @@ def run_manual_data_schedule(
         deployment_id=completed_schedule_deployment_key,
         deployment=completed_schedule_deployment,
     )
+    from control_plane.host_package import host_invocation
+
+    invocation = host_invocation(schedule_payload.get("script"))
+    if invocation is not None and (
+        evidence.get(HOST_PACKAGE_VERSION_MARKER) != invocation.package_version
+        or evidence.get(HOST_PROGRAM_VERSION_MARKER) != invocation.program_version
+    ):
+        raise OdooPostDeployReadbackFailure(
+            "Host program package version is unverified.", evidence=evidence
+        )
     return evidence
 
 
@@ -963,6 +1009,29 @@ def run_compose_post_deploy_update(
             "appName": schedule_app_name,
         }
     )
+    from control_plane.dokploy.host_package import ensure_schedule_host_package
+
+    ensure_schedule_host_package(
+        host=host,
+        token=token,
+        target_id=schedule_lookup_id,
+        schedule_type=schedule_type,
+        payload={
+            "script": schedule_script,
+            "serverId": schedule_server_id,
+            "userId": schedule_lookup_id if schedule_type == "dokploy-server" else None,
+            "cronExpression": DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+            "shellType": "bash",
+            "scheduleType": schedule_type,
+            "command": "control-plane host package",
+            "timezone": "UTC",
+            "enabled": False,
+        },
+        provider_mutation_guard=provider_mutation_guard,
+    )
+    from control_plane.host_package import host_invocation
+
+    installed_invocation = host_invocation(schedule_script)
     if desired_env_map != current_env_map:
         env_text = api.serialize_dokploy_env_text(
             desired_env_map,
@@ -1060,6 +1129,9 @@ def run_compose_post_deploy_update(
         schedule_name=schedule_name,
         schedule_app_name=schedule_app_name,
         schedule_payload=schedule_payload,
+        installed_host_package_version=(
+            installed_invocation.package_version if installed_invocation is not None else None
+        ),
         resolved_schedule_execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
         before_provider_mutation=before_provider_mutation,
         provider_mutation_guard=provider_mutation_guard,
@@ -2541,6 +2613,13 @@ def extract_odoo_post_deploy_readback_markers(deployment: api.JsonObject | None)
             continue
         if not _safe_odoo_post_deploy_marker(normalized_key, normalized_value):
             continue
+        if normalized_key in {
+            COPY_FAILURE_STAGE_MARKER,
+            COPY_FAILURE_EXIT_MARKER,
+            COPY_FAILURE_EVIDENCE_MARKER,
+        }:
+            markers.setdefault(normalized_key, normalized_value)
+            continue
         markers[normalized_key] = normalized_value
     return markers
 
@@ -2982,7 +3061,7 @@ enforce_integration_readback() {{
     fi
     echo "Checking integration settings for ${{database_name}}"
     local readback_status=0
-    docker exec -i "${{script_runner_container_id}}" python3 - "${{database_name}}" "${{integration_readback_spec}}" <<'PY' || readback_status=$?
+    docker exec -i "${{workflow_environment[@]}}" "${{script_runner_container_id}}" python3 - "${{database_name}}" "${{integration_readback_spec}}" <<'PY' || readback_status=$?
 {INTEGRATION_READBACK_PROGRAM}PY
     if [ "${{readback_status}}" -ne 0 ]; then
         echo "integration_readback_ok=false"

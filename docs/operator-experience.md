@@ -268,6 +268,13 @@ unknown even when a count is recorded; zero recorded is not verified empty.
 Recorded counts remain labelled recorded, stale and unsupported evidence retain
 their uncertainty, and only verified inventory uses active or empty wording.
 
+An observed preview without a successful lifecycle record may still have a
+retained provider operation. The overview reads that operation's recovery status
+under the existing product preview-read permission before suggesting cleanup.
+Missing original proof is shown as a resource-retention hold, not missing status.
+These warnings neither settle the operation nor establish safe disposal, and
+the recorded/observed mismatch remains visible until recovery actually completes.
+
 Product Ops labels combined lane evidence (route records and runtime observations)
 separately from operational health. A product profile's edit date is labelled as
 a profile update, never presented as the age of its lanes' verification.
@@ -699,6 +706,14 @@ fingerprint survive navigation/reload; a pre-dispatch failure or explicit client
 refusal remains definitive. A retry that began uncertain still requires evidence
 that the original operation settled before its identity can be discarded.
 
+Unreadable API responses show a plain-language failure and HTTP status instead
+of browser JSON parser text or the response body. This includes a gateway page
+during a service restart and a failed session refresh before dispatch. A fresh
+route-record review can be requested after the service recovers. An unreadable
+apply response is never proof of a refusal or completion, even with a 2xx or 4xx
+status; original-request recovery retains its key. Structured service errors
+still show their specific reason and trace.
+
 The environment Managed secrets form can also select a credential supplied by the
 named Client. The Client receives the focused `/ui/owner-secrets` page, containing
 only profile-declared input requests. It exposes no existing values or admin
@@ -844,6 +859,27 @@ types remain only for UI state and view models.
 
 ### Browser Route Contract
 
+The signed-in Route binding review can record separate external business-domain
+custody and managed recovery ingress. Expand **Separate externally managed
+domains**, name the custodian and configuration report, and review the complete
+hostname set. The remaining managed hosts still need their exact applied audit
+and active edge join. A blocked plan offers no Apply. A ready decision shows
+both custodians and binds their exact evidence; it changes no live route.
+Review a changed custodian or configuration report in the same card. Current
+health, runtime identity and TLS checks qualify every hostname without monthly
+re-attestation. Unchanged stored managed sources are rechecked on reads for
+both managed-only and split ingress, without rewriting the binding or its TLS
+snapshot. Changed or missing source evidence still warns; current TLS probes
+keep their own freshness deadline. Route changes retain their reviewed safety
+checks.
+Saving also enables strict runtime-identity HTTP checks and TLS checks for
+every hostname. The lane stays unverified until those observations are current.
+Evidence refreshes reload untouched custody fields. If saved custody changes
+while fields are edited, choose the saved custody or keep the edits before
+reviewing again. An uncertain Apply retains its original request and key across
+refreshes and reloads. Removing external custody is shown explicitly and needs
+managed evidence for every hostname.
+
 The light/dark switch saves only an explicit choice in browser local storage,
 scoped to the browser profile and Launchplane origin. The saved choice applies
 before the first render on every UI route, survives return visits, and updates
@@ -974,8 +1010,10 @@ labels and the accessible status name identify the lane, state and known
 diagnostic layers. A warning-severity production delivery failure or deploy fence
 shows yellow when the current production release has fresh passing health,
 matching runtime identity and the required public DNS/TLS observations. The
-incident and its inspection link remain visible. Missing or stale runtime proof,
-failed health, wrong identity and other active incidents retain their existing
+incident and its inspection link remain visible. On production lanes with public
+or private monitoring, missing or stale runtime proof is red even when no incident
+is open. Prelaunch and testing lanes retain their unverified-evidence states.
+Failed health, wrong identity and other active incidents retain their existing
 alert treatment. Colors are tuned separately for light and dark themes;
 fresh sidebar signals use the same operational health calculation as the product view.
 Amber hover labels explain missing runtime identity, incomplete public DNS/TLS
@@ -1039,3 +1077,19 @@ Database-backed declaration apply also refuses a concurrent product-profile
 change rather than overwriting it with an earlier profile snapshot.
 Existing workflow callers receive the same concurrent-change refusal; review
 current metadata and run a new dry run before retrying a stale apply.
+
+## Lane status for the sidebar and agents
+
+Product overviews and environment reads include `lane_status`, derived by the
+service from health checks, open incidents, runtime identity, TLS, warnings and
+evidence freshness. The sidebar and other lane signals render its `current`
+result. Its ordered `transitions` contain only changes caused by evidence expiry;
+clients select the last transition whose `after` timestamp has passed. An open
+page therefore expires cached evidence without a second health algorithm.
+
+The catalog's `product-status-read` reads the same product
+inventory once and returns each caller-visible product and every recorded lane's sidebar tone and description,
+sidebar reasons and attention and warning reasons, plus the product's warnings. Missing lane status
+fails the read rather than implying healthy. Omitted lanes are not recorded,
+as shown by the sidebar's absent-lane icon. The read does not change a lane,
+resolve an incident or authorize a deployment.

@@ -1,8 +1,6 @@
 """Metadata-only service controls; Director confirmation retires selected PAT bindings."""
 
 from datetime import UTC, datetime
-import hashlib
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -29,6 +27,7 @@ from control_plane.storage.product_authority_bundle import (
     SecretBindingSetExpectation,
     SecretCopySourceExpectation,
 )
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 SERVICE_GITHUB_DELIVERY_ROUTE = "/v1/service/github-delivery"
 SERVICE_GITHUB_DELIVERY_OPERATION = OperationDescriptor(
@@ -232,23 +231,19 @@ def plan_service_token_retirement(
     reviewed_request = request.model_dump(
         mode="json", exclude={"mode", "expected_plan_digest", "director_confirmed"}
     )
-    digest = hashlib.sha256(
-        json.dumps(
-            {
-                "actor": actor,
-                "request": reviewed_request,
-                "records": [record.model_dump(mode="json") for record in records],
-                "bindings": [
-                    [binding.model_dump(mode="json") for binding in items] for items in binding_sets
-                ],
-                "runtime": [record.model_dump(mode="json") for record in runtime],
-                "key": key_record.model_dump(mode="json"),
-                "key_binding": key_binding.model_dump(mode="json"),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    digest = nonvalidating_compact_sorted_json_sha256(
+        {
+            "actor": actor,
+            "request": reviewed_request,
+            "records": [record.model_dump(mode="json") for record in records],
+            "bindings": [
+                [binding.model_dump(mode="json") for binding in items] for items in binding_sets
+            ],
+            "runtime": [record.model_dump(mode="json") for record in runtime],
+            "key": key_record.model_dump(mode="json"),
+            "key_binding": key_binding.model_dump(mode="json"),
+        }
+    )
     now = datetime.now(UTC).isoformat()
     bundle = ProductAuthorityBundle(
         runtime_environment_read_sets=(

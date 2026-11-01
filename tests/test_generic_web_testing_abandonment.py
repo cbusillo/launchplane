@@ -87,7 +87,7 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
         self.store.write_product_profile_record(fixture.profile)
         self.key = f"{RECONCILE_SOURCE}:{fixture.profile.product}:{lane.context}:testing:original"
 
-        def execute_verireel_testing_post_deploy(
+        def execute_fixture_post_deploy(
             _root: object, _store: object, _context: object, guard: GenericWebPostDeployGuard
         ) -> None:
             guard.checkpoint_effect("post_deploy_fixture_signup")
@@ -95,8 +95,8 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
 
         self.enterContext(
             patch(
-                "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-                execute_verireel_testing_post_deploy,
+                "control_plane.drivers.generic_web_dispatch.generic_web_post_deploy_executor_for_profile",
+                return_value=execute_fixture_post_deploy,
             )
         )
         adapter = fixture.normal_adapter()
@@ -778,7 +778,7 @@ class GenericWebTestingAbandonmentTests(unittest.TestCase):
 
     def test_reviewed_abandonment_preserves_unknown_execution_and_lifecycle(self) -> None:
         plan = self.inspect()
-        self.assertEqual(plan["proposed_action"], "abandon_testing_original")
+        self.assertEqual(plan["proposed_action"], "abandon_testing_original", plan)
         with patch(
             "control_plane.generic_web_deploy_provider_adapter.execute_generic_web_deploy_result"
         ) as deploy:
@@ -1166,20 +1166,9 @@ class TestingAbandonmentReconcileTests(unittest.TestCase):
         self.addCleanup(scenario.doCleanups)
         triggered = scenario.prepare_application_runtime_test()
         scenario.application_input_schedule()
-        profile = scenario.store.read_product_profile_record("site")
-        lane = profile.lanes[0].model_copy(
-            update={
-                "generic_web_extensions": profile.lanes[0].generic_web_extensions.model_copy(
-                    update={"verification_extension": "verireel-testing"}
-                )
-            }
-        )
-        scenario.store.write_product_profile_record(
-            profile.model_copy(update={"lanes": (lane, *profile.lanes[1:])})
-        )
         calls: list[str] = []
 
-        def execute_verireel_testing_post_deploy(*args: object) -> PostDeployUpdateEvidence:
+        def execute_fixture_post_deploy(*args: object) -> PostDeployUpdateEvidence:
             context = cast(GenericWebPostDeployContext, args[2])
             guard = cast(GenericWebPostDeployGuard, args[3])
             calls.append(context.deployment_record_id)
@@ -1190,8 +1179,8 @@ class TestingAbandonmentReconcileTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-                execute_verireel_testing_post_deploy,
+                "control_plane.drivers.generic_web_dispatch.generic_web_post_deploy_executor_for_profile",
+                return_value=execute_fixture_post_deploy,
             ),
             patch(
                 "control_plane.product_reconcile._current_testing_deployment_id", return_value=None
@@ -1245,7 +1234,7 @@ class TestingAbandonmentReconcileTests(unittest.TestCase):
                     headers={"Idempotency-Key": original.idempotency_key},
                 )
                 self.assertEqual(status, 200, plan)
-                self.assertEqual(plan["proposed_action"], "abandon_testing_original")
+                self.assertEqual(plan["proposed_action"], "abandon_testing_original", plan)
 
                 def abandon() -> None:
                     status, applied = _invoke_app(

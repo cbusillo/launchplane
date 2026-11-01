@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.product_profile_record import product_config_target
+
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -8,7 +10,6 @@ from control_plane import product_config_service as control_plane_product_config
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
     ProductEnvironmentReadModelStore,
-    ProductReadModelStore,
     ProductSiteOverview,
     build_product_activity_read_model,
     build_product_environment_config_status,
@@ -68,20 +69,6 @@ def require_product_environment_read_model_store(
     return cast(ProductEnvironmentReadModelStore, record_store)
 
 
-def build_product_profile_list_service_payload(
-    *, record_store: ProductReadModelStore, driver_id: str
-) -> dict[str, object]:
-    profiles = tuple(
-        profile
-        for profile in record_store.list_product_profile_records(driver_id=driver_id)
-        if profile.is_active
-    )
-    return {
-        "driver_id": driver_id,
-        "profiles": [profile.model_dump(mode="json") for profile in profiles],
-    }
-
-
 def build_product_environment_read_service_result(
     *,
     record_store: ProductEnvironmentReadModelStore,
@@ -112,9 +99,7 @@ def build_product_environment_read_service_result(
     if params.get("config_status") == "true":
         environment = params["environment"]
         try:
-            lane = next(
-                candidate for candidate in profile.lanes if candidate.instance == environment
-            )
+            lane = product_config_target(profile, environment)
             config_status = build_product_environment_config_status(
                 record_store=record_store,
                 product=product,
@@ -128,7 +113,7 @@ def build_product_environment_read_service_result(
                     )
                 ),
             )
-        except (FileNotFoundError, StopIteration) as error:
+        except FileNotFoundError as error:
             raise FileNotFoundError(
                 f"Product '{product}' has no environment '{environment}'."
             ) from error

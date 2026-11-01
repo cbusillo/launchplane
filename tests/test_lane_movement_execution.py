@@ -27,11 +27,11 @@ class LaneMovementExecutionTests(unittest.TestCase):
         from urllib.error import HTTPError
         from email.message import Message
         from control_plane.lane_movement import LaneBuild
-        from control_plane.drivers.verireel_postgres_transport import (
-            VeriReelPreviewRefreshEnvelope,
-            apply_verireel_preview_refresh_result,
+        from control_plane.drivers.postgres_preview_transport import (
+            PostgresPreviewRefreshEnvelope,
+            apply_postgres_preview_refresh_result,
         )
-        from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshRequest
+        from control_plane.workflows.postgres_preview import PostgresPreviewRefreshRequest
         from control_plane.generic_web_preview_http import (
             apply_generic_web_preview_refresh_result,
             should_store_generic_web_preview_idempotency,
@@ -65,10 +65,10 @@ class LaneMovementExecutionTests(unittest.TestCase):
             ),
             patch("control_plane.lane_movement._source_transport", return_value=transport),
             patch(
-                "control_plane.drivers.verireel_postgres_transport.execute_verireel_preview_refresh"
+                "control_plane.drivers.postgres_preview_transport.execute_postgres_preview_refresh"
             ) as provider,
             patch(
-                "control_plane.drivers.verireel_postgres_transport.resolve_next_launchplane_preview_generation_identity"
+                "control_plane.drivers.postgres_preview_transport.resolve_next_launchplane_preview_generation_identity"
             ) as generation,
         ):
             for outage in (False, True):
@@ -84,12 +84,13 @@ class LaneMovementExecutionTests(unittest.TestCase):
                 for entry in ("native", "driver"):
                     with self.subTest(entry=entry, outage=outage):
                         if entry == "native":
-                            records, result = apply_verireel_preview_refresh_result(
+                            records, result = apply_postgres_preview_refresh_result(
+                                execution_profile=profile,
                                 control_plane_root=Path("."),
                                 record_store=store,
-                                request=VeriReelPreviewRefreshEnvelope(
+                                request=PostgresPreviewRefreshEnvelope(
                                     product=profile.product,
-                                    refresh=VeriReelPreviewRefreshRequest(
+                                    refresh=PostgresPreviewRefreshRequest(
                                         context=profile.preview.context,
                                         anchor_repo="verireel",
                                         anchor_pr_number=42,

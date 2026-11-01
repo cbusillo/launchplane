@@ -5,11 +5,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from types import SimpleNamespace
+from typing import Callable, cast
 import click
 from unittest.mock import Mock, patch
 
 from control_plane import secrets as control_plane_secrets
 from control_plane import odoo_preview_apply_http as preview_http
+from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 from control_plane.contracts.artifact_identity import ArtifactBuildFlags
 
 from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
@@ -127,7 +129,120 @@ def _issued_plan(apply_request: OdooPreviewApplyEnvelope) -> OdooPreviewApplyInp
     return issue_odoo_preview_apply_plan(result=planned, plan_id=_PLAN_ID)
 
 
+def _validated_refresh_request() -> tuple[OdooPreviewApplyEnvelope, OdooPreviewApplyInputsResult]:
+    request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+    issued = _issued_plan(request)
+    return (
+        validate_odoo_preview_issued_plan(plan_id=_PLAN_ID, issued_plan=issued, request=request),
+        issued,
+    )
+
+
 class RunOdooPreviewApplyOperationTests(unittest.TestCase):
+    def test_failed_native_diagnostics_survive_without_repeating_provider_effects(self) -> None:
+        from control_plane.copy_readback_diagnostics import CopyFailureStage, ReadbackPredicate
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_sqlite_database_url(root / "state.sqlite3"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            request, issued = _validated_refresh_request()
+            evidence = {
+                "schedule_id": "fixture-schedule",
+                "schedule_deployment_key": "fixture-job",
+                "schedule_deployment_id": "fixture-deployment",
+                "copy_failure_stage": CopyFailureStage.MODULE_UPDATE,
+                "copy_failure_exit_status": "1",
+                "copy_failure_evidence_id": "e" * 32,
+                "readback_failed_predicate": ReadbackPredicate.SETTINGS,
+                "readback_failure_kind": "unavailable",
+            }
+
+            def failed_apply(**kwargs: object) -> dict[str, object]:
+                checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
+                checkpoint(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+                return {
+                    "status": "fail",
+                    "provider_effect_attempted": True,
+                    "error_message": "private failure text",
+                    "module_install_update_evidence": {
+                        **evidence,
+                        "unrecognized": "private result",
+                    },
+                }
+
+            execute = Mock(side_effect=failed_apply)
+            observe = Mock(return_value=("unknown", None, False))
+            with self.assertLogs(level="WARNING") as logs:
+                results = [
+                    run_odoo_preview_apply_operation(
+                        store=store,
+                        control_plane_root=root,
+                        record_store=store,
+                        profile=profile,
+                        apply_request=request,
+                        issued_plan=issued,
+                        reservation_scope=_WORKER_SCOPE,
+                        idempotency_key=_PLAN_ID,
+                        request_fingerprint="failed-native-diagnostics",
+                        trace_id="fixture-trace",
+                        execute_apply=execute,
+                        observe_apply=observe,
+                    )
+                    for _ in range(2)
+                ]
+            execute.assert_called_once()
+            self.assertTrue(all(result.status == "reconcile_required" for result in results))
+            self.assertEqual(store.list_preview_records(), ())
+            record = store.read_idempotency_record(
+                scope=_WORKER_SCOPE,
+                route_path=ODOO_PREVIEW_APPLY_ROUTE,
+                idempotency_key=_PLAN_ID,
+            )
+            assert record is not None
+            self.assertEqual(record.state, "reconcile_required")
+            self.assertEqual(record.provider_effect_phase, ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+            diagnostics = [
+                json.loads(entry.getMessage())
+                for entry in logs.records
+                if entry.name == "control_plane.odoo_preview_apply_execution"
+            ]
+            self.assertEqual(len(diagnostics), 1)
+            self.assertEqual(diagnostics[0]["operation_id"], record.record_id)
+            self.assertEqual(diagnostics[0]["trace_id"], "fixture-trace")
+            self.assertEqual(diagnostics[0]["evidence"], evidence)
+            self.assertNotIn("private", " ".join(logs.output))
+
+    def test_failed_native_diagnostics_reject_unvalidated_values(self) -> None:
+        from control_plane.odoo_preview_apply_execution import _log_failed_preview_evidence
+
+        for evidence in (
+            {
+                "schedule_id": "private\nforged log",
+                "schedule_deployment_key": "private" * 100,
+                "schedule_deployment_id": {"private": "payload"},
+                "copy_failure_stage": "private",
+                "copy_failure_exit_status": "private",
+                "copy_failure_evidence_id": "private",
+                "readback_failed_predicate": "private",
+                "readback_failure_kind": "private",
+            },
+            "private",
+            None,
+        ):
+            with self.subTest(evidence=evidence), self.assertLogs(level="WARNING") as logs:
+                _log_failed_preview_evidence(
+                    {"module_install_update_evidence": evidence},
+                    operation_id="fixture-operation",
+                    trace_id="fixture-trace",
+                )
+            self.assertEqual(json.loads(logs.records[0].getMessage())["evidence"], {})
+            self.assertNotIn("private", " ".join(logs.output))
+
     def test_preservation_reference_survives_plan_validation_and_retained_intent(self) -> None:
         original = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
         original.apply.dry_run_plan.operation = "destroy"
@@ -174,7 +289,8 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         profile.preview.clean_testing_snapshot = True
         envelope = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
         issued = _issued_plan(envelope)
-        store = Mock(spec=["read_clean_testing_snapshot"])
+        store = Mock(spec=["read_clean_testing_snapshot", "read_odoo_instance_override_record"])
+        store.read_odoo_instance_override_record.side_effect = FileNotFoundError
         store.read_clean_testing_snapshot.side_effect = AssertionError(
             "A retained preview needs no source lookup"
         )
@@ -230,6 +346,40 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         self.assertTrue(execute.call_args.kwargs["preserve_existing_data"])
         self.assertFalse(execute.call_args.kwargs["restore_upstream"])
         self.assertFalse(execute.call_args.kwargs["restore_clean_snapshot"])
+
+    def test_changed_effective_source_refuses_before_the_driver_effect(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+        profile.preview.data_transport_mode = "driver"
+        envelope = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        issued = _issued_plan(envelope)
+        expected = preview_http.resolve_preview_source_decision(
+            record_store=Mock(), profile=profile, issued_plan=issued, environment={}
+        )
+        with (
+            patch.object(preview_http, "refresh_odoo_preview_issued_plan", return_value=envelope),
+            patch.object(
+                preview_http,
+                "_odoo_preview_service_environment",
+                return_value=preview_http._OdooPreviewServiceEnvironment(
+                    values={"ODOO_UPSTREAM_HOST": "source.example.test"}
+                ),
+            ),
+            patch("control_plane.lane_movement.require_forward_preview_build"),
+            patch.object(preview_http, "preview_has_completed_restore", return_value=False),
+            patch.object(preview_http, "execute_odoo_preview_dokploy_apply") as execute,
+            self.assertRaises(ValueError),
+        ):
+            preview_http.execute_odoo_preview_apply_result(
+                control_plane_root_path=Path("."),
+                record_store=Mock(),
+                profile=profile,
+                request=envelope,
+                issued_plan=issued,
+                database_url=None,
+                deployment_record_id="fixture-changed-source",
+                expected_source_decision=expected,
+            )
+        execute.assert_not_called()
 
     def test_completed_restore_receipt_preserves_copy_and_unknown_binding_refuses_reset(
         self,
@@ -383,6 +533,45 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             )
             observe.assert_not_called()
 
+    def test_source_capture_refusal_keeps_its_reason_without_reserving_or_dispatching(self) -> None:
+        from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
+        from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = PostgresRecordStore(database_url=_sqlite_database_url(root / "state.db"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+            execute = Mock()
+            operation = prepare_odoo_preview_apply_operation(
+                control_plane_root=root,
+                record_store=store,
+                profile=profile,
+                apply_request=request,
+                issued_plan=_issued_plan(request),
+                reservation_scope=_WORKER_SCOPE,
+                idempotency_key=_PLAN_ID,
+                request_fingerprint="source-refusal",
+                trace_id="source-refusal",
+                execute_apply=execute,
+            )
+            cause = click.ClickException("Original source proof is unavailable")
+            with (
+                patch.object(preview_http, "resolve_preview_source_decision", side_effect=cause),
+                self.assertRaises(OdooPreviewPlanProvenanceError) as refused,
+            ):
+                operation.run(store)
+            self.assertIs(refused.exception.__cause__, cause)
+            self.assertEqual(str(refused.exception), str(cause))
+            self.assertIsNone(
+                store.read_idempotency_record_by_id(operation.adapter._deployment_record_id)
+            )
+            execute.assert_not_called()
+
     def test_capacity_or_provider_denial_releases_unused_preview_key(self) -> None:
         from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
         from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
@@ -395,11 +584,7 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             profile = LaunchplaneProductProfileRecord.model_validate(
                 _odoo_preview_profile_payload()
             )
-            request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
-            issued = _issued_plan(request)
-            request = validate_odoo_preview_issued_plan(
-                plan_id=_PLAN_ID, issued_plan=issued, request=request
-            )
+            request, issued = _validated_refresh_request()
             observe = Mock()
             failures = (
                 BridgeNetworkCapacityRefused("host_bridge_network_capacity_short"),
@@ -442,11 +627,7 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             profile = LaunchplaneProductProfileRecord.model_validate(
                 _odoo_preview_profile_payload()
             )
-            request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
-            issued = _issued_plan(request)
-            request = validate_odoo_preview_issued_plan(
-                plan_id=_PLAN_ID, issued_plan=issued, request=request
-            )
+            request, issued = _validated_refresh_request()
             execute = Mock(side_effect=LaneMovementRefused("source_order_unavailable"))
             observe = Mock()
             results = [
@@ -485,11 +666,7 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             profile = LaunchplaneProductProfileRecord.model_validate(
                 _odoo_preview_profile_payload()
             )
-            request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
-            issued = _issued_plan(request)
-            request = validate_odoo_preview_issued_plan(
-                plan_id=_PLAN_ID, issued_plan=issued, request=request
-            )
+            request, issued = _validated_refresh_request()
             execute = Mock(side_effect=LaneMovementRefused("ancestor_build"))
             observe = Mock()
             results = [
@@ -515,6 +692,12 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
             self.assertEqual(result["status"], "blocked")
             self.assertEqual(result["error_code"], "lane_movement.ancestor_build")
             self.assertTrue(result["error_message"])
+            assert results[0].record is not None
+            persisted = store.read_idempotency_record_by_id(results[0].record.record_id)
+            assert persisted is not None
+            persisted_result = persisted.response_payload["result"]
+            assert isinstance(persisted_result, dict)
+            self.assertIs(persisted_result["provider_effect_attempted"], False)
             self.assertEqual(store.list_preview_records(), ())
             execute.assert_called_once()
             observe.assert_not_called()
@@ -619,6 +802,7 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
         website_bootstrap: bool = False,
         snapshot_enabled: bool = False,
         template_extra: dict[str, str] | None = None,
+        preview_override: OdooInstanceOverrideRecord | None = None,
     ) -> dict[str, str]:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -632,17 +816,17 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
                 ]
             }
             profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            if preview_override is not None:
+                store.write_odoo_instance_override_record(preview_override)
             if preview_payload:
-                profile = profile.model_copy(
-                    update={
-                        "preview": profile.preview.model_copy(
-                            update={
-                                "override_env": {
-                                    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: preview_payload
-                                }
-                            }
-                        )
-                    }
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context=profile.preview.context,
+                        instance="preview",
+                        env={ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: preview_payload},
+                        updated_at="2026-10-26T00:00:00Z",
+                    )
                 )
             if snapshot_enabled:
                 profile.preview.clean_testing_snapshot = True
@@ -748,6 +932,122 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
             self._service_environment(manifest_odoo_version="")
 
         self.assertEqual(refusal.exception.missing_keys, ("ODOO_VERSION",))
+
+    def test_template_addon_settings_do_not_enter_generated_preview_bootstrap(self) -> None:
+        values = self._service_environment(manifest_odoo_version="19.0", website_bootstrap=True)
+        decoded = json.loads(base64.b64decode(values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))
+        self.assertEqual(decoded["addon_settings"], [])
+
+    def test_exact_preview_can_withdraw_inherited_website_intent(self) -> None:
+        from control_plane.odoo_instance_overrides import (
+            LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+        )
+
+        plan = OdooPreviewApplyEnvelope.model_validate(_refresh_payload()).apply.dry_run_plan
+        values = self._service_environment(
+            manifest_odoo_version="19.0",
+            website_bootstrap=True,
+            preview_override=OdooInstanceOverrideRecord(
+                context="cm",
+                instance=plan.preview_slug,
+                apply_on=("preview",),
+                updated_at="2026-10-28T00:00:00Z",
+            ),
+        )
+        self.assertNotIn(LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY, values)
+        if encoded := values.get(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY):
+            self.assertFalse(json.loads(base64.b64decode(encoded)).get("website_bootstrap"))
+
+    def test_exact_preview_intent_does_not_change_a_sibling(self) -> None:
+        expected = self._service_environment(manifest_odoo_version="19.0", website_bootstrap=True)
+        actual = self._service_environment(
+            manifest_odoo_version="19.0",
+            website_bootstrap=True,
+            preview_override=OdooInstanceOverrideRecord(
+                context="cm",
+                instance="pr-99",
+                apply_on=("preview",),
+                updated_at="2026-10-28T00:00:00Z",
+            ),
+        )
+        self.assertEqual(actual, expected)
+
+    def test_exact_preview_bootstrap_uses_its_own_intent_and_generated_url(self) -> None:
+        bootstrap = OdooWebsiteBootstrapPayload(
+            name="Own website", canonical_url="https://invalid.example"
+        )
+        plan = OdooPreviewApplyEnvelope.model_validate(_refresh_payload()).apply.dry_run_plan
+        values = self._service_environment(
+            manifest_odoo_version="19.0",
+            website_bootstrap=True,
+            preview_override=OdooInstanceOverrideRecord(
+                context="cm",
+                instance=plan.preview_slug,
+                apply_on=("preview",),
+                website_bootstrap=bootstrap,
+                updated_at="2026-10-28T00:00:00Z",
+            ),
+        )
+        payload = json.loads(base64.b64decode(values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))
+        self.assertEqual(payload["instance"], plan.preview_slug)
+        self.assertEqual(payload["website_bootstrap"]["name"], bootstrap.name)
+        self.assertEqual(payload["website_bootstrap"]["canonical_url"], plan.preview_url)
+
+    def test_exact_preview_withdrawal_refuses_conflicting_carried_intent(self) -> None:
+        from control_plane.odoo_instance_overrides import (
+            LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+        )
+
+        plan = OdooPreviewApplyEnvelope.model_validate(_refresh_payload()).apply.dry_run_plan
+        for extra in (
+            {LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true"},
+            {
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                    json.dumps(
+                        {
+                            "context": "cm",
+                            "instance": "testing",
+                            "website_bootstrap": {"name": "Explicit carried website"},
+                        }
+                    ).encode()
+                ).decode()
+            },
+        ):
+            with self.subTest(extra_keys=list(extra)), self.assertRaises(ValueError):
+                self._service_environment(
+                    manifest_odoo_version="19.0",
+                    site_odoo_version="19.0",
+                    template_extra=extra,
+                    preview_override=OdooInstanceOverrideRecord(
+                        context="cm",
+                        instance=plan.preview_slug,
+                        apply_on=("preview",),
+                        updated_at="2026-10-28T00:00:00Z",
+                    ),
+                )
+
+    def test_exact_preview_intent_refuses_mixed_phases_and_unrelated_settings(self) -> None:
+        plan = OdooPreviewApplyEnvelope.model_validate(_refresh_payload()).apply.dry_run_plan
+        for changes in (
+            {"apply_on": ("preview", "deploy")},
+            {
+                "addon_settings": (
+                    OdooAddonSettingOverride(
+                        addon="authentik_sso",
+                        setting="client_id",
+                        value=OdooOverrideValue(source="literal", value="must-not-be-dropped"),
+                    ),
+                )
+            },
+        ):
+            record = OdooInstanceOverrideRecord(
+                context="cm",
+                instance=plan.preview_slug,
+                apply_on=("preview",),
+                updated_at="2026-10-28T00:00:00Z",
+            ).model_copy(update=changes)
+            with self.subTest(changes=list(changes)), self.assertRaises(ValueError):
+                self._service_environment(manifest_odoo_version="19.0", preview_override=record)
 
     def test_preview_addon_settings_survive_website_bootstrap(self) -> None:
         settings = [

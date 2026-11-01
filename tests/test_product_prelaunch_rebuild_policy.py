@@ -92,8 +92,16 @@ class ProductPrelaunchRebuildPolicyTests(unittest.TestCase):
         self.assertEqual(apply_plan.plan_sha256, plan.plan_sha256)
 
     def test_unchanged_disabled_policy_is_a_no_op(self) -> None:
+        profile = _profile()
+        profile = profile.model_copy(
+            update={
+                "preview": profile.preview.model_copy(
+                    update={"override_env": {"LEGACY_SETTING": "private-value"}}
+                )
+            }
+        )
         plan = build_product_prelaunch_rebuild_policy_plan(
-            profile=_profile(),
+            profile=profile,
             request=_request(enabled=False),
         )
 

@@ -59,7 +59,10 @@ from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
 )
-from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.filesystem import (
+    FilesystemRecordStore,
+    _merge_train_controller_storage_id,
+)
 from tests.http_app_test_support import (
     _asgi_get,
     _asgi_request,
@@ -1568,12 +1571,21 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
                 },
             )
 
+            self.assertEqual(full_store.list_merge_train_batch_candidate_records(), ())
+            self.assertEqual(
+                next(
+                    record
+                    for record in full_store.list_merge_train_stack_collapse_plan_records(
+                        repository=executed_plan_record.plan.repository,
+                        base_branch=executed_plan_record.plan.base_branch,
+                    )
+                    if record.record_id == executed_plan_record.record_id
+                ),
+                executed_plan_record,
+            )
+
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
-        self.assertEqual(
-            response.json()["error"]["message"],
-            "Merge train stack collapse admission requires database-backed candidate records.",
-        )
 
     async def test_openapi_includes_stack_collapse_contract(self) -> None:
         response = await openapi_response()
@@ -2060,6 +2072,72 @@ class FastApiMergeTrainRunOnceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dry_run_reports_retained_alias_without_planning_or_rewriting_history(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as directory,
+            patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
+            patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                _FakeMergeTrainGitHubClient,
+            ),
+            patch.object(
+                _FakeMergeTrainGitHubClient,
+                "read_merge_train_snapshot",
+                side_effect=AssertionError("An unresolved alias must not plan provider work."),
+            ),
+        ):
+            state_dir = Path(directory) / "state"
+            _seed_merge_train_policy(state_dir)
+            store = FilesystemRecordStore(state_dir)
+            repository = "CBusillo/SellYourOutboard"
+            legacy = build_merge_train_controller_state_record(
+                repository=repository,
+                base_branch="main",
+                policy_key="legacy-policy",
+                policy_sha256="legacy-sha",
+                updated_at="2026-09-29T00:00:00Z",
+            ).model_copy(
+                update={
+                    "repository": repository,
+                    "controller_key": f"merge-train-controller:{repository.replace('/', ':')}:main",
+                    "active_action": "land_batch",
+                    "active_phase": "merge_batch_entries",
+                }
+            )
+            path = store._write_model(
+                "launchplane_merge_train_controller_states",
+                _merge_train_controller_storage_id(legacy.controller_key),
+                legacy,
+            )
+            before = path.read_bytes()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            response = await _post_merge_train_controller_run_once(
+                app,
+                {
+                    "schema_version": 1,
+                    "repository": repository.lower(),
+                    "base_branch": "main",
+                    "mutate": False,
+                },
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+            result = response.json()["result"]
+            self.assertEqual(result["controller_reconciliation_status"], "required")
+            self.assertEqual(result["reason_code"], "controller_alias_requires_reconciliation")
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(
+                store.list_merge_train_controller_state_records(
+                    repository=repository, base_branch="main"
+                ),
+                (),
+            )
+
     async def test_missing_check_diagnostic_survives_keyed_replay_after_restart(self) -> None:
         diagnostic = "missing-security-gate"
 

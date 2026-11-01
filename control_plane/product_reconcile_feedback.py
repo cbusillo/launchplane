@@ -24,6 +24,7 @@ from urllib.parse import quote
 import click
 
 from control_plane.child_process_errors import redact_untrusted_text
+from control_plane.client_test_notes import CLIENT_REVIEW_NOTES_PENDING
 from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackDeliveryStatus,
     PreviewPrFeedbackRecord,
@@ -94,11 +95,12 @@ def post_reconcile_feedback(
     previous = request.last_plan.get(PR_FEEDBACK_PLAN_KEY)
     previous_entry = cast(dict[str, object], previous) if isinstance(previous, dict) else None
     feedback: _Feedback | None = None
+    retaining_failure = False
     try:
         profile = cast(ReconcileFeedbackStore, record_store).read_product_profile_record(
             request.product
         )
-        feedback = _decide_feedback(
+        candidate = _decide_feedback(
             request=request,
             profile=profile,
             plan=plan,
@@ -106,6 +108,15 @@ def post_reconcile_feedback(
             public_origin=public_origin,
             owner_review_status=owner_review_status,
         )
+        feedback = _retain_preview_failure(
+            record_store=record_store,
+            request=request,
+            profile=profile,
+            plan=plan,
+            candidate=candidate,
+            previous=previous_entry,
+        )
+        retaining_failure = feedback is not None and feedback is not candidate
         if feedback is None:
             return previous_entry
         body_sha256 = f"sha256:{hashlib.sha256(feedback.body.encode()).hexdigest()}"
@@ -134,6 +145,13 @@ def post_reconcile_feedback(
             "Reconcile PR feedback for %s failed: %s", request.target_key, feedback_error
         )
         failed_entry: dict[str, object] = {
+            **(
+                previous_entry
+                if (feedback is None or retaining_failure)
+                and previous_entry is not None
+                and previous_entry.get("status") == "failed"
+                else {}
+            ),
             "delivery_status": "failed",
             "error": f"Unexpected {type(feedback_error).__name__} while posting PR feedback.",
         }
@@ -142,6 +160,48 @@ def post_reconcile_feedback(
         elif previous_entry is not None and "status" in previous_entry:
             failed_entry["status"] = previous_entry["status"]
         return failed_entry
+
+
+def _retain_preview_failure(
+    *,
+    record_store: object,
+    request: ProductReconcileRequestRecord,
+    profile: LaunchplaneProductProfileRecord,
+    plan: dict[str, object],
+    candidate: _Feedback | None,
+    previous: dict[str, object] | None,
+) -> _Feedback | None:
+    if (
+        request.target_kind != "preview"
+        or previous is None
+        or previous.get("status") != "failed"
+        or plan.get("reason")
+        in {"pull_request_not_open", "merge_train_candidate", "preview_not_configured"}
+        or (candidate is not None and candidate.status not in {"pending", "destroyed"})
+        or (candidate is not None and plan.get("pull_request_state") != "open")
+    ):
+        return candidate
+    feedback_id = previous.get("feedback_id")
+    if not isinstance(feedback_id, str) or not feedback_id:
+        raise ValueError("The saved preview failure has no feedback record.")
+    record = cast(_PreviewFeedbackStore, record_store).read_preview_pr_feedback_record(feedback_id)
+    if (
+        record.feedback_id != feedback_id
+        or record.product != profile.product
+        or record.repository.casefold() != profile.repository.casefold()
+        or record.anchor_pr_number != request.pull_request_number
+        or record.context != profile.preview.context
+        or record.status != "failed"
+        or record.marker != PREVIEW_FEEDBACK_MARKER
+    ):
+        raise ValueError("The saved preview failure does not match this change.")
+    return _Feedback(
+        status=record.status,
+        marker=record.marker,
+        body=record.comment_markdown,
+        revision=record.revision,
+        failure_summary=record.failure_summary,
+    )
 
 
 def _decide_feedback(
@@ -197,14 +257,19 @@ def _preview_feedback(
     failure_summary = ""
     waiting_for = ""
     status: PreviewPrFeedbackStatus
-    if action == "wait" and plan.get("reason") == "client_test_notes_required":
+    if (action == "apply" and error) or (
+        error
+        and plan.get("last_failed_error_code") == "preview_build_failed"
+        and plan.get("build_run_id")
+    ):
+        status = "failed"
+        failure_summary = _failure_summary(error)
+    elif action == "wait" and plan.get("reason") == "client_test_notes_required":
         status = "pending"
-        waiting_for = _text(plan.get("detail"))
+        waiting_for = CLIENT_REVIEW_NOTES_PENDING
     elif action == "wait" and plan.get("reason") == "no_verified_build":
         status = "pending"
         waiting_for = "a verified build of this commit"
-    elif action == "apply" and error:
-        status, failure_summary = "failed", _failure_summary(error)
     elif action == "destroy" and error:
         status, failure_summary = "cleanup_failed", _failure_summary(error)
     elif action == "apply" and plan.get("preview_result_status") == "pass":
@@ -223,10 +288,11 @@ def _preview_feedback(
         status, revision = "destroyed", ""
     elif (
         action == "none"
-        and plan.get("reason") == "pull_request_not_open"
+        and plan.get("reason")
+        in {"pull_request_not_open", "merge_train_candidate", "preview_not_configured"}
         and not error
         and isinstance(previous := request.last_plan.get(PR_FEEDBACK_PLAN_KEY), dict)
-        and previous.get("status") in {"pending", "cleared"}
+        and previous.get("status") in {"pending", "failed", "cleared"}
     ):
         status, revision = "cleared", ""
     else:
@@ -362,6 +428,8 @@ class _Delivery:
 
 
 class _PreviewFeedbackStore(Protocol):
+    def read_preview_pr_feedback_record(self, feedback_id: str) -> PreviewPrFeedbackRecord: ...
+
     def write_preview_pr_feedback_record(self, record: PreviewPrFeedbackRecord) -> object: ...
 
 

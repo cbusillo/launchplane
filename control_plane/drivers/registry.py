@@ -45,6 +45,7 @@ from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
     resolve_production_backup_authority,
 )
+from control_plane.timestamps import utc_now_timestamp
 
 
 PROVIDER_BOUNDARY_NOTE = (
@@ -487,7 +488,6 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
                 "preview.required_template_env_keys",
                 "preview.copied_env_keys",
                 "preview.omitted_env_keys",
-                "preview.override_env",
                 "preview.preview_url_env_keys",
                 "preview.preview_domain_env_keys",
             ),
@@ -552,7 +552,7 @@ ODOO_DRIVER = DriverDescriptor(
         _action(
             "app_maintenance",
             "Run app maintenance",
-            "Run narrow Odoo app maintenance through the product-driver reusable surface.",
+            "Run stable post-deploy maintenance, or an image-owned preview fixture using existing preview-apply authority.",
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/odoo/app-maintenance",
@@ -1373,9 +1373,7 @@ def _production_backup_authorities(
         )
     ):
         return ()
-    generated_at = (
-        datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    )
+    generated_at = utc_now_timestamp()
     try:
         authority_store = require_production_backup_authority_store(record_store)
     except TypeError:

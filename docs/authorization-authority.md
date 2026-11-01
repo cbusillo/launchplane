@@ -109,9 +109,9 @@ standing permission for the product's declared lanes, including testing and
 production. It stays classified as
 `write`, with an explicit standing declaration in the same action catalog. It
 changes Launchplane's monitoring records, not the live site, credentials, access
-or merge authority. Only this monitoring route admits the Director's terminal
-transport to its existing browser/bearer mutation path; other terminal mutation
-restrictions remain. Exact product/lane/check and private endpoint validation,
+or merge authority. Terminal admission follows the
+[authentication and endpoint contracts](service-boundary.md#authentication).
+Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
@@ -143,20 +143,13 @@ authority or a product's lanes. The Director's `local_operator` may apply;
 terminal transport is refused. Reviewed plan digest, idempotency and
 current-record comparison still govern apply.
 
-The expected-config declaration path remains additive for the authenticated
-Director agent. It may add a positive external-provider purpose to an existing
-nonlocal requirement, preserving its other metadata. Clearing purpose, enabling
-or retiring existing generation intent, or adding a provider declaration that
-shadows a local key requires the existing `product_profile.expected_config.apply`
-authority; a live product also retains its admin boundary. Inert planning retains
-its existing read/plan permission. Completed exact-key receipts replay before
-current-state retirement checks, while a new write compares the same captured
-profile that passed those checks. Odoo's driver-owned local passwords cannot
-be declared external through any profile input path. No grant is added here.
+Expected-configuration declaration authority and its authenticated Director-agent
+declaration exception are defined in the
+[product profile contract](service-boundary.md#product-profile-endpoints).
 
 The existing testing-retry route also admits the authenticated Director agent
 through the existing `local_operator` bearer transport under the standing
-permission. Terminal-agent credentials retain their read-only transport boundary.
+permission. Terminal-agent credentials are not admitted on this retry route.
 This is a testing-only reconciler wakeup, not
 inherited authority for `odoo_target_replacement_apply.execute`, whose mixed
 production/testing scope keeps its policy checks. Other callers still require
@@ -167,6 +160,9 @@ in force. See [testing retry](testing-deploy-retry.md).
 
 The [same-artifact testing service restart](lane-service-restart.md#supported-lane-and-identity)
 also has a bounded Director-agent path; that contract owns its safety and recovery rules.
+
+The [health alert drill](health-alert-drills.md) also has a bounded Director-agent
+send path; that contract owns its authorization and delivery rules.
 
 Generic-web deploy recovery dry runs authorize the instance-scoped
 `generic_web_deploy_recovery.plan` action, with the existing execute grant as a
@@ -221,12 +217,6 @@ caller-supplied claim. Product-level metadata uses the `launchplane` context;
 separate context and instance rules support both scopes. Requests authorize
 the returned product and collections filter each returned record. Revocation
 continues to apply to these scoped rules and to all explicit write permissions.
-
-Expected-configuration dry runs also preserve existing explicit grants: a
-`local_operator` granted `product_profile.expected_config.apply` may inspect the inert
-plan for a live product without changing its profile. The corresponding apply
-still refuses with `live_product_requires_operator`; browser CSRF and read-only
-identity restrictions remain in force.
 
 Product-config likewise lets the authenticated Director agent plan undeclared
 non-secret settings on a Live product, including testing, production and context
@@ -903,12 +893,6 @@ Production policy changes are a Director decision made through the supported
 DB-native administration route; total-lockout recovery remains explicitly
 deferred.
 
-The ordinary-agent delegated-delivery pilot is retired (see
-[DIRECTION.md](../DIRECTION.md#retired)); issue
-[#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes its code.
-Do not stage or install its `operator.ordinary-agent-delivery-administration`
-managed set.
-
 After parity and administration gates pass, protected desired-set secrets and
 routine authorization workflows must be retired. GitHub may remain an identity
 provider and transport for already-authorized workloads. No total-lockout
@@ -1047,45 +1031,15 @@ schema-v3 seed and unbound replacement stay fenced. Historical
 `runtime_capability_at_setup` and `policy_v3_write_supported` values on stored
 records are history only, not authority.
 
-### Preparing Agent Delivery Administration
+### Retained Agent Delivery Administration Records
 
-The Access policy workbench can prepare the closed
-`ordinary-agent-delivery-administration` candidate with an add or remove intent.
-Preparation derives the immutable GitHub ID from the signed-in browser session
-and the schema from the single active policy record. It requires existing
-managed `authz_policy_operation.propose` authority and strict immutable-ID
-administrator authority; it cannot repair missing policy-administration access.
-The browser supplies no principal, policy fragment, managed IDs, scope, actions,
-quorum change, or routine reason.
-
-The candidate owns a separate managed set for one pilot administrator. Its rule
-contains exactly the five explicit Agent delivery activation lifecycle actions,
-the authenticated immutable ID, the admin role, and global Launchplane scope.
-An occupied set with a different identity or shape refuses preparation. Adding
-access also refuses conflicting explicit activation authority; overlapping
-authority does not prevent removing this isolated set. Legacy empty-action rules remain
-unchanged and do not count as explicit activation authority. The foundational
-policy-operation set and all unrelated policy content remain untouched.
-
-Both intents create ordinary `managed-authz-policy-set` plans through the
-existing planner. Preparation may persist a planned operation and event; it
-does not write policy, approve a plan, change schema or quorum, enroll an agent,
-start a worker, or call a provider. Existing approval, current-policy checks,
-worker execution, CAS, and read-back still govern any policy change. Already
-satisfied intents create no new plan. Removal proposes an empty desired fragment
-for only this set and refuses while an unstopped current activation could lose
-its stop controls. Revoking an operation approval before worker claim and
-removing an already-installed administration rule are different operations.
-If an activation starts after removal was prepared, the policy write refuses
-under the shared authorization lock. Stop that activation before preparing a
-fresh removal; re-planning alone does not clear this condition.
-
-The five lifecycle actions are prepared together because an approved activation
-setup still writes only a qualification-only intent. They do not authorize the
-separate ordinary-agent policy, provider, or worker changes. The pilot is
-retired, so do not install this set; only its removal remains supported. This
-composer is a constrained input path for an existing
-admin, not a replacement bootstrap or total-lockout recovery.
+The retired `ordinary-agent-delivery-administration` candidate and its replay
+are no longer accepted by authorization-candidate preparation. Stored records
+remain readable, and administration-rule removal stays guarded by activation
+history. Do not stage or install the retired
+`operator.ordinary-agent-delivery-administration` managed set; remove existing
+rules through a managed-policy-set plan or managed-rule-set reconcile. Schema-3
+parsing and retained request validation remain supported.
 
 ### Preparing Administrator Product Evidence Access
 
@@ -1197,17 +1151,19 @@ The set deliberately leaves out:
   panel keeps the reviewed request frozen for Apply. Image Apply checks the
   starting repository; production-use and release Apply verify the full reviewed
   plan digest.
-  The existing profile POST separately admits authenticated Director agents
-  setting one nonsecret `preview.override_env` key on an existing enabled
-  Odoo preview. It requires a strong matching revision and idempotency key,
-  reconstructs the change from the stored profile, and preserves all other
-  profile authority with atomic CAS. It adds no policy grant. Deletions,
-  secret-bearing settings, Shopify payloads and broader edits remain outside
-  this bounded admission; see [preview settings](preview-settings.md).
+  Preview runtime settings use the existing product-config plan/apply authority
+  on the product's preview context and exact instance `preview`. Product-profile
+  POST rejects nonempty `preview.override_env`; its old one-key conditional
+  admission is retired. The other bounded profile operations retain their
+  existing checks. See [preview settings](preview-settings.md).
 
 - `product_onboarding.apply`. It is checked on product `launchplane` with no
   product or lane scope, so it would reach every product. Adding the lane record
-  stays with Launchplane's own onboarding workflow.
+  uses Launchplane's onboarding record route, through the compatibility workflow
+  or a signed-in admin session. Browser generic-web apply requires the recorded
+  testing application from target setup.
+  The Director agent's bounded new-product path follows the
+  [native onboarding contract](operations.md#native-target-allocation).
 - `dokploy_target.setup`. It is checked on product and context `launchplane`,
   so it reaches every product's Dokploy targets. `dokploy_target.lane_setup` is
   the lane-scoped alternative (see the Dokploy target setup section in
@@ -1322,8 +1278,14 @@ grant, so it is a Director decision.
 
 The dedicated ordinary-agent preparation routes and browser callers are removed.
 Historical preparation context remains readable; new generic proposals cannot
-supply it. Remaining domain/storage retirement is tracked by
-[launchplane#2437](https://github.com/cbusillo/launchplane/issues/2437).
+supply it. Terminal enrollment candidate production and its candidate ID are
+removed from the generic candidate endpoint as well. Exact historical terminal
+request recognition remains for privileged-operation semantic review. The
+ordinary-agent delivery-policy compiler remains in use by
+`privileged_operation_registry` to validate retained prepared-request shapes;
+its removal needs a replacement for that validation. Remaining source tracing
+is tracked by [launchplane#5245](https://github.com/cbusillo/launchplane/issues/5245).
+The data retirement on #2437 is complete and is not reopened.
 
 
 ### Preparing The First Ordinary Client Policy

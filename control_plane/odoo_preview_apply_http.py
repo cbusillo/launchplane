@@ -15,13 +15,19 @@ from control_plane import odoo_instance_overrides as control_plane_odoo_instance
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import runtime_platform_credentials
+from control_plane.preview_source import PreviewSourceDecision
+
 from control_plane.clean_testing_snapshot import preview_snapshot
 from control_plane.odoo_testing_restore import preflight_fresh_testing_intent
 from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.product_secret_copy import ProductSecretCopyFrom
 from control_plane.contracts.dokploy_target_record import DokployTargetIntegrationAllowance
-from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    OdooWebsiteBootstrapPayload,
+)
+from control_plane.preview_settings import validate_preview_scope
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.odoo_addon_settings_override import (
     OdooAddonSettingsStore,
@@ -143,6 +149,12 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
         pattern=r"^(?:mutation-reservation-[a-f0-9]{64})?$",
         exclude_if=lambda value: not value,
     )
+    unrecorded_original_reservation_id: str = Field(
+        default="",
+        max_length=128,
+        pattern=r"^(?:mutation-reservation-[a-f0-9]{64})?$",
+        exclude_if=lambda value: not value,
+    )
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooPreviewApplyEnvelope":
@@ -151,6 +163,11 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
             raise ValueError("Odoo preview apply requires matching product values.")
         if self.preserve_original_reservation_id and self.apply.dry_run_plan.operation != "destroy":
             raise ValueError("Original preview preservation requires a destroy operation.")
+        if (
+            self.unrecorded_original_reservation_id
+            and self.apply.dry_run_plan.operation != "refresh"
+        ):
+            raise ValueError("Unrecorded preview recovery requires a refresh operation.")
         return self
 
 
@@ -219,6 +236,13 @@ def _build_odoo_preview_apply_inputs(
     )
     if result.status != "ready" or result.operation != "refresh":
         return result
+    _, bootstrap_sha256 = control_plane_odoo_instance_overrides.resolve_preview_website_bootstrap(
+        cast(Any, record_store),
+        context=profile.preview.context,
+        template_instance=profile.preview.template_instance,
+        preview_slug=result.preview_slug,
+    )
+    result = result.model_copy(update={"preview_website_bootstrap_sha256": bootstrap_sha256})
     if profile.preview.clean_testing_snapshot:
         if request.fishbowl_source is not None:
             raise ValueError("Snapshot previews cannot connect to an import source.")
@@ -468,6 +492,7 @@ def execute_odoo_preview_apply_result(
     qualify_existing_preview: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     recovery_reservation: object = None,
+    expected_source_decision: PreviewSourceDecision | None = None,
 ) -> dict[str, object]:
     from control_plane.preview_preservation import (
         PREVIEW_PRESERVATION_PHASES,
@@ -553,16 +578,17 @@ def execute_odoo_preview_apply_result(
             "smoke_check": service_dry_run_plan.operation == "refresh",
         }
     )
-    upstream_source = preview_uses_upstream_restore(profile, resolved_environment_values)
-    snapshot_source = (
-        profile.preview.clean_testing_snapshot and service_dry_run_plan.operation == "refresh"
-    )
-    retained_copy = (upstream_source or snapshot_source) and preview_has_completed_restore(
+    decision = resolve_preview_source_decision(
         record_store=record_store,
         profile=profile,
-        plan=service_dry_run_plan,
-        pr_number=issued_plan.plan_request.pr_number,
+        issued_plan=issued_plan,
+        environment=resolved_environment_values,
     )
+    if expected_source_decision is not None and decision != expected_source_decision:
+        raise ValueError("Preview effective source changed before execution; plan again.")
+    upstream_source = decision.source == "upstream"
+    snapshot_source = decision.source == "clean_snapshot"
+    retained_copy = decision.source == "retained"
     if snapshot_source and not retained_copy and service_dry_run_plan.clean_snapshot is None:
         raise ValueError("A new snapshot preview requires its issued clean source.")
     effective_mutation_guard = provider_mutation_guard
@@ -591,6 +617,8 @@ def execute_odoo_preview_apply_result(
                 mode="verify",
                 timeout_seconds=current_request.apply.timeout_seconds,
                 check=provider_lease_check,
+                effect_checkpoint=provider_effect_checkpoint,
+                mutation_guard=provider_mutation_guard,
             )
 
         @contextmanager
@@ -646,6 +674,33 @@ def execute_odoo_preview_apply_result(
         provider_mutation_guard=effective_mutation_guard,
     )
     return driver_result.model_dump(mode="json")
+
+
+def resolve_preview_source_decision(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: OdooPreviewApplyInputsResult,
+    environment: dict[str, str],
+) -> PreviewSourceDecision:
+    upstream = preview_uses_upstream_restore(profile, environment)
+    snapshot = profile.preview.clean_testing_snapshot and issued_plan.operation == "refresh"
+    retained = (upstream or snapshot) and preview_has_completed_restore(
+        record_store=record_store,
+        profile=profile,
+        plan=issued_plan.dry_run_plan,
+        pr_number=issued_plan.plan_request.pr_number,
+    )
+    return PreviewSourceDecision(
+        source="retained"
+        if retained
+        else "clean_snapshot"
+        if snapshot
+        else "upstream"
+        if upstream
+        else "none",
+        fishbowl_import=issued_plan.plan_request.fishbowl_source is not None,
+    )
 
 
 def preview_uses_upstream_restore(
@@ -1264,7 +1319,15 @@ class _OdooPreviewServiceEnvironment:
     fishbowl_source_sha256: str = ""
 
 
-def _odoo_preview_service_environment(
+@dataclass(frozen=True)
+class _OdooPreviewBaseEnvironment:
+    values: dict[str, str]
+    omitted_keys: tuple[str, ...]
+    encoded_preview: str
+    website_bootstrap: OdooWebsiteBootstrapPayload | None
+
+
+def _odoo_preview_base_environment(
     *,
     control_plane_root_path: Path,
     record_store: object,
@@ -1272,12 +1335,7 @@ def _odoo_preview_service_environment(
     plan: OdooPreviewDokployDryRunPlan,
     manifest: ArtifactIdentityManifest | None,
     database_url: str | None,
-    fishbowl_source: ProductSecretCopyFrom | None = None,
-) -> _OdooPreviewServiceEnvironment:
-    if plan.operation == "destroy":
-        return _OdooPreviewServiceEnvironment(values={})
-    if profile.preview.clean_testing_snapshot and fishbowl_source is not None:
-        raise ValueError("Snapshot previews cannot receive source credentials.")
+) -> _OdooPreviewBaseEnvironment:
     preview_profile = profile.preview
     template_instance = preview_profile.template_instance.strip()
     # The preview runs unmerged code, so it gets only the template lane's site
@@ -1290,23 +1348,58 @@ def _odoo_preview_service_environment(
             database_url=database_url,
         ).values
     )
-    environment_values = dict(template_values)
-    runtime_platform_credentials.refuse_platform_credentials(
-        preview_profile.override_env,
-        target=f"{profile.product} preview {plan.compose_name}",
-        source="the product profile preview override_env",
-    )
-    environment_values.update(preview_profile.override_env)
-    try:
-        template_override_record = cast(Any, record_store).read_odoo_instance_override_record(
+    preview_environment = (
+        control_plane_runtime_environments.resolve_preview_runtime_environment_from_store(
+            record_store=cast(
+                control_plane_runtime_environments.SiteRuntimeEnvironmentStore, record_store
+            ),
             context_name=preview_profile.context,
-            instance_name=template_instance,
+            template_values=template_values,
         )
-    except FileNotFoundError:
-        template_override_record = None
+    )
+    environment_values = dict(preview_environment.values)
+    payload_key = control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+    encoded_preview = (
+        environment_values.get(payload_key, "")
+        if payload_key in preview_environment.setting_keys
+        else ""
+    )
+    bootstrap_record, bootstrap_sha256 = (
+        control_plane_odoo_instance_overrides.resolve_preview_website_bootstrap(
+            cast(Any, record_store),
+            context=preview_profile.context,
+            template_instance=template_instance,
+            preview_slug=plan.preview_slug,
+        )
+    )
+    if (
+        bootstrap_sha256
+        and bootstrap_record is not None
+        and bootstrap_record.website_bootstrap is None
+    ):
+        required = (
+            environment_values.get(
+                control_plane_odoo_instance_overrides.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+                "",
+            )
+            .strip()
+            .lower()
+        )
+        carried = environment_values.get(payload_key, "")
+        if required not in {"", "0", "false", "no", "off"}:
+            raise ValueError("Carried Website intent conflicts with exact preview withdrawal.")
+        if carried:
+            try:
+                payload = OdooPostDeployPayload.model_validate_json(
+                    base64.b64decode(carried, validate=True)
+                )
+            except ValueError:
+                raise ValueError("Carried preview settings could not be validated.") from None
+            if payload.website_bootstrap is not None or payload.website_settings is not None:
+                raise ValueError("Carried Website intent conflicts with exact preview withdrawal.")
     preview_bootstrap_environment = (
         control_plane_odoo_instance_overrides.build_preview_website_bootstrap_environment(
-            template_override_record,
+            bootstrap_record,
             preview_url=plan.preview_url,
         )
     )
@@ -1380,10 +1473,46 @@ def _odoo_preview_service_environment(
             key: value
             for key, value in template_values.items()
             if environment_values.get(key) == value
+            and key not in preview_environment.setting_keys | preview_environment.secret_keys
         },
     )
     for key in omitted_keys:
         environment_values[key] = ""
+    return _OdooPreviewBaseEnvironment(
+        values=environment_values,
+        omitted_keys=omitted_keys,
+        encoded_preview=encoded_preview,
+        website_bootstrap=preview_bootstrap_environment.payload.website_bootstrap
+        if preview_bootstrap_environment is not None
+        else None,
+    )
+
+
+def _odoo_preview_service_environment(
+    *,
+    control_plane_root_path: Path,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    plan: OdooPreviewDokployDryRunPlan,
+    manifest: ArtifactIdentityManifest | None,
+    database_url: str | None,
+    fishbowl_source: ProductSecretCopyFrom | None = None,
+) -> _OdooPreviewServiceEnvironment:
+    if plan.operation == "destroy":
+        return _OdooPreviewServiceEnvironment(values={})
+    if profile.preview.clean_testing_snapshot and fishbowl_source is not None:
+        raise ValueError("Snapshot previews cannot receive source credentials.")
+    prepared = _odoo_preview_base_environment(
+        control_plane_root_path=control_plane_root_path,
+        record_store=record_store,
+        profile=profile,
+        plan=plan,
+        manifest=manifest,
+        database_url=database_url,
+    )
+    environment_values = prepared.values
+    omitted_keys = prepared.omitted_keys
+    preview_profile = profile.preview
     import_source = None
     if fishbowl_source is not None:
         import_source = resolve_fishbowl_preview_source(
@@ -1400,11 +1529,7 @@ def _odoo_preview_service_environment(
             context=preview_profile.context,
             instance=plan.preview_slug,
             config_parameters=import_source.parameters,
-            website_bootstrap=(
-                preview_bootstrap_environment.payload.website_bootstrap
-                if preview_bootstrap_environment is not None
-                else None
-            ),
+            website_bootstrap=prepared.website_bootstrap,
             updated_at=profile.updated_at,
         )
         environment_values.update(
@@ -1417,7 +1542,12 @@ def _odoo_preview_service_environment(
         environment_values.update(import_source.environment)
         environment_values[PREVIEW_FISHBOWL_SOURCE_ENV_KEY] = "true"
         omitted_keys = tuple(key for key in omitted_keys if key not in import_source.environment)
-    _merge_preview_addon_settings(environment_values, profile=profile, record_store=record_store)
+    _merge_preview_addon_settings(
+        environment_values,
+        profile=profile,
+        record_store=record_store,
+        encoded_preview=prepared.encoded_preview,
+    )
     if preview_profile.clean_testing_snapshot:
         environment_values.update(
             {
@@ -1445,24 +1575,21 @@ def _odoo_preview_service_environment(
 
 
 def _merge_preview_addon_settings(
-    environment: dict[str, str], *, profile: LaunchplaneProductProfileRecord, record_store: object
+    environment: dict[str, str],
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    record_store: object,
+    encoded_preview: str,
 ) -> None:
     key = control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
-    encoded_preview = profile.preview.override_env.get(key, "")
-    if not encoded_preview.strip() or environment.get(key) == encoded_preview:
+    if not encoded_preview.strip():
         return
     try:
-        preview = OdooPostDeployPayload.model_validate_json(
-            base64.b64decode(encoded_preview, validate=True)
-        )
+        preview = validate_preview_scope({key: encoded_preview}, context=profile.preview.context)
+        if preview is None:
+            return
         if not preview.addon_settings:
             return
-        generated = OdooPostDeployPayload.model_validate_json(
-            base64.b64decode(environment[key], validate=True)
-        )
-        pairs = [(item.addon, item.setting) for item in preview.addon_settings]
-        if len(pairs) != len(set(pairs)):
-            raise ValueError("Conflicting preview addon settings")
         if any(item.addon == "shopify" for item in preview.addon_settings):
             if control_plane_odoo_instance_overrides.odoo_instance_is_production(
                 profile.preview.template_instance
@@ -1485,20 +1612,16 @@ def _merge_preview_addon_settings(
                         shop_url_key=item.value.value.strip().lower(),
                         protected_store_keys=protected,
                     )
-        for item in preview.addon_settings:
-            if (
-                item.value.source == "secret_binding"
-                and item.value.environment_variable
-                != control_plane_odoo_instance_overrides.addon_setting_secret_env_key(
-                    addon_name=item.addon, setting_name=item.setting
-                )
-            ):
-                raise ValueError("Preview addon secret requires canonical transport")
         if any(
             not environment.get(name, "").strip()
             for name in preview.required_container_environment_keys
         ):
             raise ValueError("Preview addon secret is not delivered")
+        if environment.get(key) == encoded_preview:
+            return
+        generated = OdooPostDeployPayload.model_validate_json(
+            base64.b64decode(environment[key], validate=True)
+        )
     except (ValueError, binascii.Error):
         raise click.ClickException("Invalid preview addon settings payload.") from None
     merged = generated.model_copy(update={"addon_settings": preview.addon_settings})

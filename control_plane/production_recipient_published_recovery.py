@@ -82,7 +82,7 @@ def published_current(
     record = custody(adapter.store, adapter.product, adapter.request.context)
     if (
         record is None
-        or record.phase != "published"
+        or record.phase not in {"published", "retiring_old", "old_retired"}
         or not record.qualified_at
         or (record.actor, record.scope, record.plan_sha256)
         != (adapter.actor, adapter.scope, adapter.request.preparation_plan_sha256)

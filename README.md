@@ -6,15 +6,18 @@ package is `control_plane`; its CLI is `launchplane`.
 
 Read the Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md),
 then this repository's [DIRECTION.md](DIRECTION.md) for purpose, priorities,
-roles, stop boundaries, and retired designs. Overall direction takes precedence;
-issues track work. [AGENTS.md](AGENTS.md) is the agent execution guide and the only
+roles, stop boundaries, and retired designs.
+[AGENTS.md](AGENTS.md) is the agent execution guide and the only
 agent-instruction filename, including any directory-specific guidance.
 
 ## Development
 
 Use `uv` with the interpreter pinned in [.python-version](.python-version), and
-Node 22.12 or later with the pnpm version in
-[frontend/package.json](frontend/package.json). CI uses the same Python pin.
+Node with the major pinned in [.node-version](.node-version). The compatibility
+floors remain in the package metadata, and Corepack reads the exact pnpm version
+from [frontend/package.json](frontend/package.json). CI reads both runtime pins.
+Docker base-image majors remain reviewed copies because `FROM` must resolve before
+a build can `COPY` repository version files.
 From the repository root:
 
 ```bash
@@ -25,10 +28,10 @@ uv run launchplane service serve --help
 (cd frontend && pnpm validate)
 ```
 
-Frontend validation runs unit tests, the agent-contract drift check, TypeScript,
-and the production Vite build. The canonical OpenAPI JSON, UI slice and TypeScript
-client are ignored build artifacts generated from Python source before frontend
-tests, development, type checks and production builds, including Docker and CI.
+`pnpm validate` prepares generated OpenAPI artifacts once; standalone commands
+prepare their own. The canonical OpenAPI JSON, UI slice and TypeScript client
+are ignored build artifacts generated from Python source before frontend tests, development, type
+checks and production builds, including Docker and CI.
 Python contract tests and inventory scripts also derive schemas from source.
 After a backend contract change, run `(cd frontend && pnpm generate:openapi)`
 and commit only the agent contract. CI still rejects drift in that runtime contract.
@@ -46,9 +49,7 @@ Replace `tests.test_module_name` with the module for the changed behavior.
 Follow [testing style](docs/style/testing.md#local-test-loop) for local safety
 module selection, the Q778 focused PR pilot and the full candidate merge gate.
 
-Implementation goes through a task branch and PR. Once required checks pass and
-review findings are accounted for, follow [AGENTS.md](AGENTS.md) to hand the PR
-to the merge train. Follow DIRECTION.md for merge and release authority.
+Follow [AGENTS.md](AGENTS.md) for source delivery and DIRECTION.md for merge and release authority.
 
 ## Service and runtime records
 

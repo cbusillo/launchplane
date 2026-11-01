@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-import hashlib
 import json
-from typing import Any, TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
+from control_plane.contracts.canonical_json import (
+    canonical_model_sha256,
+    nonvalidating_compact_sorted_json_sha256,
+)
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooMaintenanceReceipt
-from control_plane.contracts.canonical_json import canonical_model_sha256
 from control_plane.dokploy.slot_website_settings import StartupSettings, run_slot_website_settings
 
 if TYPE_CHECKING:
@@ -43,9 +45,7 @@ def maintenance_payload(plan: OdooCutoverPlan) -> dict[str, Any]:
 
 
 def payload_digest(payload: dict[str, Any]) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def slot_run_directory(plan: OdooCutoverPlan) -> str:

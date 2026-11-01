@@ -27,10 +27,12 @@
     "driverDescriptors": "docs/driver-descriptors.md",
     "driverDevelopment": "docs/driver-development.md",
     "previewWorkflowContract": "docs/preview-workflow-contract.md",
+    "previewFixtures": "docs/preview-fixtures.md",
     "legacyPreviewReconciliation": "docs/legacy-preview-reconciliation.md",
     "productRepoContract": "docs/product-repo-contract.md",
     "newProductRepo": "docs/new-product-repo.md",
     "operatorExperience": "docs/operator-experience.md",
+    "requestAttention": "docs/request-attention.md",
     "postV2Audit": "docs/post-v2-audit.md",
     "uiStandards": "docs/ui-standards.md",
     "mergeTrainPolicy": "docs/merge-train-policy.md",
@@ -55,6 +57,7 @@
     "storedRecordPreflight": "docs/stored-record-preflight.md",
     "laneServiceRestart": "docs/lane-service-restart.md",
     "records": "docs/records.md",
+    "hostProgramsPackage": "docs/host-program-package.md",
     "secrets": "docs/secrets.md",
     "credentialInventory": "docs/credential-inventory.md",
     "testingLocalConsumer": "docs/testing-local-consumer.md",
@@ -89,6 +92,7 @@
     "test": {
       "local": "uv run --extra dev python -m unittest {modules}",
       "localSafety": "uv run --extra dev python -m unittest {safety_modules}",
+      "privateBearerRehearsal": "LAUNCHPLANE_TEST_NGINX_IMAGE=\"${LAUNCHPLANE_TEST_NGINX_IMAGE:?select an already-local immutable Nginx image}\" uv run --extra dev python -m unittest tests.test_private_bearer_forwarding -v",
       "odooStartupRehearsal": "LAUNCHPLANE_TEST_STARTUP_IMAGE=\"${LAUNCHPLANE_TEST_STARTUP_IMAGE:?select an already-local immutable image}\" uv run --extra dev python -m unittest tests.test_odoo_slot_startup_rehearsal -v",
       "testingRouteReaderRehearsal": "LAUNCHPLANE_TEST_TRAEFIK_IMAGE=\"${LAUNCHPLANE_TEST_TRAEFIK_IMAGE:?select an already-local immutable Traefik image}\" uv run --extra dev python -m unittest tests.test_testing_route_rehearsal.TestingRouteRehearsalTests.test_api_reader_works_with_no_bridge_or_published_port tests.test_testing_application_activation.ApplicationRuntimeImageTests.test_private_http_program_uses_selected_proxy_without_following_redirects -v",
       "dokployComposeEnvironment": "bash scripts/qualify-dokploy-compose-environment.sh",
@@ -147,7 +151,6 @@
     },
     "inspection": {
       "tool": "jetbrains",
-      "ide": "PyCharm",
       "prepare": {
         "python": {
           "version": "3.14",
@@ -169,6 +172,35 @@
         "changed_files",
         "directory",
         "whole_project"
+      ],
+      "profile": ".idea/inspectionProfiles/Project_Default.xml",
+      "lanes": [
+        {
+          "id": "frontend",
+          "ide": "WebStorm",
+          "required": true,
+          "projectPath": "frontend",
+          "include": [
+            "frontend/**/*.ts",
+            "frontend/**/*.tsx",
+            "frontend/**/*.mts",
+            "frontend/**/*.cts",
+            "frontend/**/*.js",
+            "frontend/**/*.jsx",
+            "frontend/**/*.mjs",
+            "frontend/**/*.cjs"
+          ]
+        },
+        {
+          "id": "python",
+          "ide": "PyCharm",
+          "required": true,
+          "include": [
+            "**/*.py",
+            "**/*.yaml",
+            "**/*.yml"
+          ]
+        }
       ]
     },
     "docsRequiredWhen": [

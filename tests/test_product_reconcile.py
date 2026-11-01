@@ -4,7 +4,7 @@ from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.dokploy.api import DokployRequestFailed, DokployScheduleExecutionFailed
 from control_plane.contracts.record_failures import record_failure_summary
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from dataclasses import replace
 from control_plane.dokploy.application_runtime import (
@@ -20,7 +20,7 @@ from contextlib import closing, contextmanager, nullcontext
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event, current_thread, main_thread
+from threading import Event, Thread, current_thread, main_thread
 from typing import Any, Literal, cast
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -400,6 +400,8 @@ class FakePreviewProvider:
 
     def __init__(self) -> None:
         self.applied: list[tuple[str, int]] = []
+        self.targets: dict[tuple[str, str], str] = {}
+        self.allocations = 0
         self.omitted_integration_credential_keys: tuple[str, ...] = ()
 
     def hooks(self) -> PreviewProviderHooks:
@@ -415,10 +417,25 @@ class FakePreviewProvider:
         *,
         profile: LaunchplaneProductProfileRecord,
         request: OdooPreviewApplyInputsRequest,
+        record_store: Any = None,
         **_kwargs: object,
     ) -> dict[str, object]:
         slug = f"pr-{request.pr_number}"
         url = f"https://{slug}.example.test"
+        compose_name = request.preview_slug or f"cm-odoo-preview-{slug}"
+        creating = False
+        if record_store is not None and request.operation == "refresh":
+            from control_plane.workflows.launchplane import find_preview_record
+
+            preview = find_preview_record(
+                record_store=record_store,
+                context_name=profile.preview.context,
+                anchor_repo=profile.repository.partition("/")[2],
+                anchor_pr_number=request.pr_number,
+            )
+            creating = (profile.preview.context, compose_name) not in self.targets and (
+                preview is None or preview.state == "destroyed"
+            )
         return OdooPreviewApplyInputsResult(
             status="ready",
             product=profile.product,
@@ -447,19 +464,35 @@ class FakePreviewProvider:
                 repository=profile.repository,
                 preview_slug=slug,
                 preview_url=url,
-                compose_ref=f"cm-odoo-preview-{slug}",
-                compose_name=f"cm-odoo-preview-{slug}",
+                compose_ref=f"${{created.composeId:{compose_name}}}"
+                if creating
+                else self.targets.get((profile.preview.context, compose_name), compose_name),
+                compose_name=compose_name,
                 summary="ready",
             ),
             omitted_integration_credential_keys=self.omitted_integration_credential_keys,
             source=request.source,
         ).model_dump(mode="json")
 
+    def allocate_target(self, issued_plan: OdooPreviewApplyInputsResult) -> str:
+        plan = issued_plan.dry_run_plan
+        target = plan.compose_ref
+        if target.startswith("${created."):
+            self.allocations += 1
+            target = f"{plan.compose_name}-allocation-{self.allocations}"
+        self.targets[(issued_plan.context, plan.compose_name)] = target
+        return target
+
     def execute_apply(
         self, *, issued_plan: OdooPreviewApplyInputsResult, **_kwargs: object
     ) -> dict[str, object]:
         self.applied.append((issued_plan.operation, issued_plan.plan_request.pr_number))
         dry_run_plan = issued_plan.dry_run_plan
+        key = (issued_plan.context, dry_run_plan.compose_name)
+        if issued_plan.operation == "refresh":
+            target = self.allocate_target(issued_plan)
+        else:
+            target = self.targets.pop(key, dry_run_plan.compose_ref)
         return {
             "status": "pass",
             "operation": issued_plan.operation,
@@ -469,6 +502,7 @@ class FakePreviewProvider:
             "preview_url": dry_run_plan.preview_url,
             "domain_host": dry_run_plan.preview_url.removeprefix("https://"),
             "compose_name": dry_run_plan.compose_name,
+            "compose_id": target,
         }
 
     def observe_apply(self, **_kwargs: object) -> tuple[str, None, bool]:
@@ -2275,6 +2309,30 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.request()
             repeated = self.run_once()
         self.assertEqual(first.last_plan["deploy_status"], "fail")
+        from control_plane.product_path_check import (
+            PathCheckInputs,
+            _testing_reconcile_plan,
+            build_product_path_check,
+        )
+
+        check = build_product_path_check(
+            product="site",
+            path="testing",
+            inputs=PathCheckInputs(
+                profile=_generic_web_profile(),
+                testing_reconcile_plan=_testing_reconcile_plan(self.store, _generic_web_profile()),
+            ),
+        )
+        self.assertEqual(check.steps[-1].state, "blocked")
+        self.assertEqual(check.steps[-1].code, "deploy_failed")
+        self.assertTrue(
+            any(
+                check.steps[-1].code in incident.summary
+                for incident in self.store.list_public_ingress_incident_records(
+                    product="site", instance_name="testing", status="open"
+                )
+            )
+        )
         self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
         self.assertEqual(len(triggered), 1)
         records = self.store.list_deployment_records(context_name="cm", instance_name="testing")
@@ -4606,31 +4664,6 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             after, _generic_web_testing_authority(record_store=self.store, lane=changed)
         )
 
-    def prepare_unqualified_verireel_testing(self) -> str:
-        self.github.add_run(20, DEPLOYABLE)
-        self.github.add_run(30, OLDER)
-        self.request()
-        plan = self.reconcile()
-        self.store.write_product_profile_record(
-            _generic_web_profile().model_copy(
-                update={
-                    "lanes": tuple(
-                        lane.model_copy(
-                            update={
-                                "generic_web_extensions": GenericWebLaneExtensions(
-                                    verification_extension="verireel-testing"
-                                )
-                            }
-                        )
-                        if lane.instance == "testing"
-                        else lane
-                        for lane in _generic_web_profile().lanes
-                    )
-                }
-            )
-        )
-        return cast(str, plan["deployment_record_id"])
-
     def test_fresh_image_only_native_settlement_permits_event_successor(self) -> None:
         from control_plane.provider_operations import ProviderMutationUnknownError
 
@@ -4750,319 +4783,42 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
     @staticmethod
     def _testing_qualification_evidence(*args: object) -> object:
         from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
-        from control_plane.workflows.generic_web_deploy import (
-            GenericWebPostDeployContext,
-            GenericWebDeployStore,
-        )
+        from control_plane.workflows.generic_web_deploy import GenericWebPostDeployContext
 
         context = cast(GenericWebPostDeployContext, args[2])
-        from control_plane.workflows.verireel_testing_post_deploy import (
-            testing_qualification_authority,
-        )
-
-        authority = testing_qualification_authority(cast(GenericWebDeployStore, args[1]), context)
         return PostDeployUpdateEvidence(
             attempted=True,
             status="pass",
             evidence={
-                "authority_digest": authority,
-                "driver_id": "generic-web",
-                "extension_id": "verireel-testing",
                 "deployment_record_id": context.deployment_record_id,
                 "artifact_id": context.artifact_id,
                 "source_git_ref": context.source_git_ref,
-                "migration_status": "pass",
-                "creator_verification_status": "pass",
-                "admin_verification_status": "pass",
-                "cleanup_status": "pass",
             },
         )
 
-    def test_verireel_unqualified_image_uses_existing_deploy_once_then_stops(self) -> None:
-        deployment_id = self.prepare_unqualified_verireel_testing()
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-            side_effect=self._testing_qualification_evidence,
-        ) as qualify:
-            self.request()
-            first = self.reconcile()
-            self.request()
-            repeated = self.reconcile()
-        self.assertEqual(first["action"], "deploy")
-        self.assertEqual(first["post_deploy_status"], "pass")
-        self.assertNotEqual(first["deployment_record_id"], deployment_id)
-        self.assertEqual(repeated["reason"], "already_deployed")
-        qualify.assert_called_once()
-        self.assertEqual(len(self.deploys.runtime_identities), 2)
-        record = self.store.read_deployment_record(cast(str, first["deployment_record_id"]))
-        self.assertEqual(record.post_deploy_update.evidence["source_git_ref"], DEPLOYABLE)
-        inventory = self.store.read_environment_inventory(
-            context_name="cm", instance_name="testing"
-        )
-        self.assertEqual(inventory.post_deploy_update, record.post_deploy_update)
-
-    def test_verireel_failed_qualification_is_not_repeated_or_called_healthy(self) -> None:
-        from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
-
-        self.prepare_unqualified_verireel_testing()
-
-        def failure(*args: object) -> PostDeployUpdateEvidence:
-            result = cast(PostDeployUpdateEvidence, self._testing_qualification_evidence(*args))
-            result.evidence["creator_verification_status"] = "fail"
-            return result.model_copy(update={"status": "fail"})
-
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-            side_effect=failure,
-        ) as qualify:
-            self.request()
-            first = self.run_once()
-            self.request()
-            repeated = self.run_once()
-        self.assertEqual(first.state, "failed")
-        self.assertEqual(repeated.last_plan["reason"], "testing_qualification_failed")
-        self.assertEqual(repeated.state, "failed")
-        qualify.assert_called_once()
-        self.assertEqual(len(self.deploys.runtime_identities), 2)
-
-    def test_verireel_qualification_respects_staff_testing_hold(self) -> None:
-        self.prepare_unqualified_verireel_testing()
-        self.store.write_dokploy_target_record(
-            DokployTargetRecord(
-                context="cm",
-                instance="testing",
-                target_type="application",
-                target_name="site-testing-app",
-                updated_at="2026-10-12T00:00:00Z",
-                policies=DokployTargetPolicies(
-                    staff_testing_hold=DokployTargetStaffTestingHold(
-                        reason="staff test",
-                        recorded_by="director",
-                        recorded_at="2026-10-12T00:00:00Z",
-                    )
-                ),
-            )
-        )
-        self.request()
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy"
-        ) as qualify:
-            plan = self.reconcile()
-        self.assertEqual(plan["reason"], "staff_testing")
-        qualify.assert_not_called()
-
-    def test_verireel_failure_before_authority_snapshot_has_bounded_retries(self) -> None:
-        from control_plane.workflows.verireel_testing_post_deploy import (
-            MAX_TRANSIENT_QUALIFICATION_ATTEMPTS,
-        )
-
-        self.prepare_unqualified_verireel_testing()
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.testing_qualification_authority",
-            side_effect=FileNotFoundError("authority temporarily unavailable"),
-        ) as authority:
-            for _ in range(MAX_TRANSIENT_QUALIFICATION_ATTEMPTS):
-                self.request()
-                self.assertEqual(self.run_once().state, "failed")
-            self.request()
-            final = self.run_once()
-        self.assertEqual(final.last_plan["reason"], "testing_qualification_failed")
-        self.assertEqual(authority.call_count, MAX_TRANSIENT_QUALIFICATION_ATTEMPTS)
-
-    def test_verireel_transient_qualification_failure_has_bounded_retries(self) -> None:
-        from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
-        from control_plane.workflows.generic_web_deploy import GenericWebPostDeployContext
-        from control_plane.workflows.verireel_testing_post_deploy import (
-            MAX_TRANSIENT_QUALIFICATION_ATTEMPTS,
-            previous_transient_attempts,
-        )
-
-        self.prepare_unqualified_verireel_testing()
-
-        def transient(*args: object) -> PostDeployUpdateEvidence:
-            context = cast(GenericWebPostDeployContext, args[2])
-            result = cast(PostDeployUpdateEvidence, self._testing_qualification_evidence(*args))
-            result.evidence.update(
-                failure_kind="transient",
-                transient_attempts=str(previous_transient_attempts(context) + 1),
-                creator_verification_status="fail",
-            )
-            return result.model_copy(update={"status": "fail"})
-
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-            side_effect=transient,
-        ) as qualify:
-            for _ in range(MAX_TRANSIENT_QUALIFICATION_ATTEMPTS):
-                self.request()
-                self.assertEqual(self.run_once().state, "failed")
-            self.request()
-            final = self.run_once()
-        self.assertEqual(final.last_plan["reason"], "testing_qualification_failed")
-        self.assertEqual(qualify.call_count, MAX_TRANSIENT_QUALIFICATION_ATTEMPTS)
-
-    def test_verireel_configuration_repair_permits_a_failed_candidate_to_qualify(self) -> None:
-        from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
-
-        self.prepare_unqualified_verireel_testing()
-        self.application_input_provider()
-
-        def failure(*args: object) -> PostDeployUpdateEvidence:
-            result = cast(PostDeployUpdateEvidence, self._testing_qualification_evidence(*args))
-            result.evidence["creator_verification_status"] = "fail"
-            return result.model_copy(update={"status": "fail"})
-
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-            side_effect=failure,
-        ):
-            self.request()
-            self.assertEqual(self.run_once().state, "failed")
-        self.store.write_runtime_environment_record(
-            RuntimeEnvironmentRecord(
-                scope="instance",
-                context="cm",
-                instance="testing",
-                env={"SYNC_INTERVAL_SECONDS": 1800},
-                updated_at="2026-10-12T00:00:00Z",
-            )
-        )
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-            side_effect=self._testing_qualification_evidence,
-        ) as qualify:
-            self.request()
-            self.assertEqual(self.reconcile()["post_deploy_status"], "pass")
-            self.request()
-            self.assertEqual(self.reconcile()["reason"], "already_deployed")
-        qualify.assert_called_once()
-
-    def test_unknown_declared_qualification_stays_fenced_without_repeating_post_deploy(
-        self,
-    ) -> None:
-        from control_plane.provider_operations import ProviderMutationUnknownError
-
-        self.prepare_unqualified_verireel_testing()
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-            side_effect=ProviderMutationUnknownError("lost fence"),
-        ) as qualify:
-            self.request()
-            self.assertEqual(self.run_once().state, "failed")
-            self.request()
-            repeated = self.run_once()
-        self.assertEqual(repeated.last_plan["deploy_operation_status"], "reconcile_required")
-        self.assertEqual(repeated.state, "failed")
-        self.assertEqual(len(self.store.list_held_provider_target_reservations()), 1)
-        qualify.assert_called_once()
-
-    def test_declared_generic_web_profile_requalifies_then_reuses_complete_evidence(self) -> None:
-        from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
-
-        self.prepare_unqualified_verireel_testing()
+    def test_retired_browser_declaration_holds_reconcile_without_provider_effects(self) -> None:
         profile = self.store.read_product_profile_record("site")
-        profile = profile.model_copy(
+        lane = profile.lanes[0].model_copy(
             update={
-                "driver_id": "generic-web",
-                "lanes": tuple(
-                    lane.model_copy(
-                        update={
-                            "generic_web_extensions": GenericWebLaneExtensions(
-                                verification_extension="verireel-testing"
-                            )
-                        }
-                    )
-                    if lane.instance == "testing"
-                    else lane
-                    for lane in profile.lanes
+                "generic_web_extensions": GenericWebLaneExtensions(
+                    verification_extension="verireel-testing"
                 ),
             }
         )
-        self.store.write_product_profile_record(profile)
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-            side_effect=self._testing_qualification_evidence,
-        ) as qualify:
-            self.request()
-            first = self.run_once()
-            self.request()
-            repeated = self.run_once()
-        self.assertEqual(first.state, "done")
-        self.assertEqual(repeated.last_plan["reason"], "already_deployed")
-        qualify.assert_called_once()
-
-    def test_a_runtime_change_during_qualification_cannot_credit_new_authority(
-        self,
-    ) -> None:
-
-        self.prepare_unqualified_verireel_testing()
-        self.application_input_provider()
-        transitioned = False
-
-        def qualify_then_transition(*args: object) -> object:
-            nonlocal transitioned
-            if not transitioned:
-                transitioned = True
-                profile = self.store.read_product_profile_record("site")
-                lane = next(lane for lane in profile.lanes if lane.instance == "testing")
-                self.store.write_runtime_environment_record(
-                    RuntimeEnvironmentRecord(
-                        scope="instance",
-                        context=lane.context,
-                        instance=lane.instance,
-                        env={"SYNC_INTERVAL_SECONDS": 1800},
-                        updated_at=profile.updated_at,
-                    )
-                )
-            return self._testing_qualification_evidence(*args)
-
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-            side_effect=qualify_then_transition,
-        ) as qualify:
-            self.request()
-            before_transition = self.reconcile()
-            self.request()
-            after_transition = self.reconcile()
-            self.request()
-            repeated = self.reconcile()
-        self.assertEqual(after_transition["action"], "deploy")
-        self.assertNotEqual(
-            before_transition["deployment_record_id"], after_transition["deployment_record_id"]
-        )
-        self.assertEqual(after_transition["post_deploy_status"], "pass")
-        self.assertEqual(repeated["reason"], "already_deployed")
-        self.assertEqual(qualify.call_count, 2)
-
-    def test_a_changed_runtime_input_requalifies_previously_passing_testing(self) -> None:
-        self.prepare_unqualified_verireel_testing()
-        self.application_input_provider()
-        with patch(
-            "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
-            side_effect=self._testing_qualification_evidence,
-        ) as qualify:
-            self.request()
-            previous = self.reconcile()
-            profile = self.store.read_product_profile_record("site")
-            lane = next(lane for lane in profile.lanes if lane.instance == "testing")
-            self.store.write_runtime_environment_record(
-                RuntimeEnvironmentRecord(
-                    scope="instance",
-                    context=lane.context,
-                    instance=lane.instance,
-                    env={"SYNC_INTERVAL_SECONDS": 1800},
-                    updated_at=profile.updated_at,
-                )
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": (lane, *profile.lanes[1:]),
+                }
             )
-            self.request()
-            changed = self.reconcile()
-            self.request()
-            repeated = self.reconcile()
-        self.assertEqual(changed["action"], "deploy")
-        self.assertNotEqual(previous["deployment_record_id"], changed["deployment_record_id"])
-        self.assertEqual(changed["post_deploy_status"], "pass")
-        self.assertEqual(repeated["reason"], "already_deployed")
-        self.assertEqual(qualify.call_count, 2)
+        )
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        plan = self.reconcile()
+        self.assertEqual(plan["action"], "wait")
+        self.assertTrue(plan["held"])
+        self.assertFalse(self.deploys.runtime_identities)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
 
     def setUp(self) -> None:
         super().setUp()
@@ -6017,6 +5773,126 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def test_changed_preview_binding_keeps_its_original_plan_until_guarded_renewal(self) -> None:
+        from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_PLAN_TTL_SECONDS
+        from control_plane.workflows.odoo_preview_runtime import (
+            ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
+        )
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        build = self.provider.build_inputs
+        execute = self.provider.execute_apply
+        changed = False
+        finished = False
+        dispatches = 0
+
+        def inputs(**kwargs: Any) -> dict[str, object]:
+            result = build(**kwargs)
+            if changed:
+                cast(dict[str, object], result["dry_run_plan"])["no_cache"] = True
+            return result
+
+        def apply(**kwargs: Any) -> dict[str, object]:
+            nonlocal dispatches
+            dispatches += 1
+            if finished:
+                return execute(**kwargs)
+            return {"status": "fail", "provider_effect_attempted": True}
+
+        def expire(plan: Mapping[str, object]) -> None:
+            from sqlalchemy import select
+            from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+            from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+            plan_id = plan["preview_plan_id"]
+            assert isinstance(plan_id, str)
+            record = self.store.read_idempotency_record(
+                scope=reconcile_reservation_scope("site"),
+                route_path=ODOO_PREVIEW_APPLY_ROUTE,
+                idempotency_key=plan_id,
+            )
+            assert record is not None
+            expired = LaunchplaneIdempotencyRecord.model_validate(
+                {
+                    **record.model_dump(),
+                    "lease_expires_at": (
+                        datetime.now(timezone.utc)
+                        - timedelta(seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS + 1)
+                    ).isoformat(),
+                }
+            )
+            with self.store._session_factory.begin() as session:
+                row = session.scalar(
+                    select(LaunchplaneIdempotencyRow).where(
+                        LaunchplaneIdempotencyRow.record_id == record.record_id
+                    )
+                )
+                assert row is not None
+                self.store._sync_idempotency_row(row, expired)
+
+        with (
+            patch.object(self.provider, "build_inputs", side_effect=inputs),
+            patch.object(self.provider, "execute_apply", side_effect=apply),
+            patch.object(self.provider, "observe_apply", return_value=("unknown", None, False)),
+        ):
+            self.request("preview", 5)
+            first = self.run_once().last_plan
+            original = self.store.list_held_odoo_preview_reservations(product="site")[0]
+            original_intent = self.store.read_original_mutation_intent(original)
+            expire(first)
+            changed = True
+            self.request("preview", 5)
+            successor = self.run_once().last_plan
+            self.assertEqual(successor["preview_operation_status"], "reconcile_required")
+            self.assertNotEqual(successor["preview_plan_id"], first["preview_plan_id"], successor)
+            expire(successor)
+            successor_dispatches = dispatches
+            self.request("preview", 5)
+            observed = self.run_once().last_plan
+            self.assertEqual(observed["preview_operation_status"], "reconcile_required")
+            self.assertEqual(observed["preview_plan_id"], successor["preview_plan_id"])
+            self.assertEqual(dispatches, successor_dispatches)
+            _MinuteClock.ticks += ODOO_PREVIEW_PLAN_TTL_SECONDS // 60 + 1
+            self.request("preview", 5)
+            renewed = self.run_once().last_plan
+            self.assertEqual(renewed["preview_operation_status"], "reconcile_required")
+            self.assertNotEqual(renewed["preview_plan_id"], successor["preview_plan_id"])
+            expire(renewed)
+            renewal_dispatches = dispatches
+            self.request("preview", 5)
+            observed_renewal = self.run_once().last_plan
+            self.assertEqual(observed_renewal["preview_operation_status"], "reconcile_required")
+            self.assertEqual(observed_renewal["preview_plan_id"], renewed["preview_plan_id"])
+            self.assertEqual(dispatches, renewal_dispatches)
+            changed = False
+            self.request("preview", 5)
+            restored_binding = self.run_once().last_plan
+            self.assertEqual(restored_binding["preview_operation_status"], "reconcile_required")
+            self.assertNotEqual(restored_binding["preview_plan_id"], first["preview_plan_id"])
+            expire(restored_binding)
+            changed = True
+            self.request("preview", 5)
+            changed_again = self.run_once().last_plan
+            self.assertEqual(changed_again["preview_operation_status"], "reconcile_required")
+            expire(changed_again)
+            _MinuteClock.ticks += ODOO_PREVIEW_PLAN_TTL_SECONDS // 60 + 1
+            finished = True
+            self.request("preview", 5)
+            completed = self.run_once().last_plan
+            self.assertEqual(completed["preview_result_status"], "pass")
+            self.assertEqual(self.store.list_preview_records()[0].state, "active")
+            self.assertEqual(self.provider.applied, [("refresh", 5)])
+            self.assertEqual(self.store.read_original_mutation_intent(original), original_intent)
+
+    def test_recorded_train_candidate_does_not_allocate_a_preview(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch("control_plane.product_reconcile.recorded_train_candidate", return_value=True):
+            plan = self.reconcile()
+        self.assertEqual(plan["action"], "none")
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.store.list_preview_records())
+
     def test_memory_refusal_reports_headroom_and_retries_without_a_new_build(self) -> None:
         from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
 
@@ -6604,7 +6480,52 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile()["preview_result_status"], "pass")
         self.assertEqual(self.provider.applied, [("destroy", 5)])
 
-    def test_reopened_pr_is_not_held_by_an_exhausted_destroy(self) -> None:
+    def test_legacy_preview_source_refusal_keeps_serving_evidence_and_logs_its_cause(self) -> None:
+        from control_plane import http_error_evidence, preview_source
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        before = self.snapshot()
+        applied = list(self.provider.applied)
+        read_original = self.store.read_original_mutation_intent
+        legacy_ids = {
+            original.record_id
+            for original in self.store.list_odoo_preview_originals(product="site", number=5)
+        }
+
+        def legacy_intent(reservation: Any) -> dict[str, Any]:
+            intent = read_original(reservation)
+            if reservation.record_id not in legacy_ids:
+                return intent
+            return {key: value for key, value in intent.items() if key != "effective_source"}
+
+        self.github.add_run(51, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with (
+            patch.object(self.store, "read_original_mutation_intent", side_effect=legacy_intent),
+            patch(
+                "control_plane.product_reconcile.log_handled_error_cause",
+                wraps=http_error_evidence.log_handled_error_cause,
+            ) as log_cause,
+            self.assertLogs(http_error_evidence.__name__, "WARNING") as captured,
+        ):
+            failed = self.run_once()
+
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(self.provider.applied, applied)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(
+            failed.last_plan["preview_result_error_code"], log_cause.call_args.args[0].code
+        )
+        evidence = json.loads(captured.records[0].getMessage())
+        self.assertIn(preview_source.__name__, {site["module"] for site in evidence["sites"]})
+        self.assertEqual(evidence["operation_id"], failed.last_plan["preview_plan_id"])
+        self.assertEqual(evidence["trace_id"], failed.last_plan["failure_trace_id"])
+
+    def test_reopened_pr_retains_unknown_source_fence_after_exhausted_destroy(self) -> None:
+        from control_plane.preview_source import require_source_free_preview_history
+
         self.write_preview()
         self.github.pull_request["state"] = "closed"
         with patch.object(self.provider, "build_inputs", side_effect=ValueError("refused")):
@@ -6617,10 +6538,15 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.github.pull_request["state"] = "open"
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)
-        # The legacy generation has no exact build proof; reopening refreshes it.
-        self.assertEqual(self.reconcile()["action"], "apply")
-        self.request("preview", 5)
-        self.assertEqual(self.reconcile()["reason"], "already_serving")
+        with patch(
+            "control_plane.odoo_preview_apply_execution.require_source_free_preview_history",
+            wraps=require_source_free_preview_history,
+        ) as source_guard:
+            refused = self.run_once()
+        source_guard.assert_called_once()
+        self.assertEqual(refused.state, "failed")
+        self.assertEqual(refused.last_plan["last_failed_error_code"], "preview_provenance_refused")
+        self.assertFalse(self.provider.applied)
 
     def test_busy_destroy_does_not_consume_a_failure_attempt(self) -> None:
         from tests.test_product_review_status import _GitHub, _publisher
@@ -7246,6 +7172,151 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.driver.changes, [("refresh", 5)])
 
         self.assertEqual(self.artifact_scanner.call_count, 1)
+
+    def test_failed_build_is_reported_until_the_current_head_preview_publishes(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.runs[50]["conclusion"] = "failure"
+        self.request("preview", 5)
+        failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.last_plan["last_failed_error_code"], "preview_build_failed")
+        self.assertEqual(failed.last_plan["build_run_id"], 50)
+        self.assertFalse(self.driver.changes)
+        self.github.pull_request["state"] = "closed"
+        self.request("preview", 5)
+        closed = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(closed, dict)
+        self.assertEqual(closed["status"], "cleared")
+        self.assertFalse(self.comments.on(5))
+        self.github.pull_request["state"] = "open"
+        self.request("preview", 5)
+        self.run_once()
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=OSError("Source unavailable")):
+            self.run_once()
+        self.request("preview", 5)
+        with patch(
+            "control_plane.product_reconcile.reconcile_product_request",
+            return_value=ReconcileOutcome(
+                {
+                    "action": "destroy",
+                    "reason": "interrupted_preview_restore",
+                    "pull_request_state": "open",
+                    "preview_result_status": "pass",
+                }
+            ),
+        ):
+            self.run_once()
+        self.assertEqual(self.store.list_preview_pr_feedback_records(limit=1)[0].status, "failed")
+        self.github.runs.clear()
+        next_head = "c" * 40
+        self.github.pull_request["head"] = {"sha": next_head}
+        self.request("preview", 5)
+        waiting = self.run_once()
+        feedback_record = self.store.list_preview_pr_feedback_records(limit=1)[0]
+        self.assertEqual(feedback_record.revision, PR_HEAD)
+        self.github.add_run(51, next_head, event="pull_request")
+        self.request("preview", 5)
+        published = self.run_once()
+        for completed, status in ((failed, "failed"), (waiting, "failed"), (published, "ready")):
+            feedback = completed.last_plan["pr_feedback"]
+            assert isinstance(feedback, dict)
+            self.assertEqual(feedback["status"], status)
+        self.assertNotIn("last_failed_error_code", published.last_plan)
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=OSError("Source unavailable")):
+            self.run_once()
+        self.github.runs.clear()
+        self.github.pull_request["head"] = {"sha": "d" * 40}
+        self.request("preview", 5)
+        self.run_once()
+        unknown_origin = self.store.list_preview_pr_feedback_records(limit=1)[0]
+        self.assertEqual(unknown_origin.status, "pending")
+        self.assertEqual(unknown_origin.failure_summary, "")
+
+    def test_retained_failure_read_errors_preserve_identity_and_recover_delivery(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.runs[50]["conclusion"] = "failure"
+        self.request("preview", 5)
+        failed = self.run_once()
+        previous = failed.last_plan["pr_feedback"]
+        assert isinstance(previous, dict)
+        feedback_id = str(previous["feedback_id"])
+        original = self.store.read_preview_pr_feedback_record(feedback_id)
+        writes = list(self.comments.writes)
+        self.github.runs.clear()
+        for failure in (
+            {"side_effect": OSError("Feedback record unavailable")},
+            {"return_value": original.model_copy(update={"product": "other-product"})},
+        ):
+            with (
+                self.subTest(failure=failure),
+                patch.object(self.store, "read_preview_pr_feedback_record", **failure),
+            ):
+                self.request("preview", 5)
+                blocked = self.run_once().last_plan["pr_feedback"]
+                assert isinstance(blocked, dict)
+                self.assertEqual(blocked["status"], previous["status"])
+                self.assertEqual(blocked["feedback_id"], feedback_id)
+                self.assertEqual(self.comments.writes, writes)
+        self.request("preview", 5)
+        with patch.object(
+            self.store, "write_preview_pr_feedback_record", side_effect=OSError("Write unavailable")
+        ):
+            write_failed = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(write_failed, dict)
+        self.assertEqual(write_failed["feedback_id"], feedback_id)
+        self.request("preview", 5)
+        recovered = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(recovered, dict)
+        self.assertEqual(recovered["delivery_status"], "delivered")
+        self.assertEqual(recovered["status"], "failed")
+
+        new_head = "e" * 40
+        self.github.pull_request["head"] = {"sha": new_head}
+        self.github.add_run(51, new_head, event="pull_request")
+        self.github.runs[51]["conclusion"] = "failure"
+        self.request("preview", 5)
+        with patch.object(
+            self.store, "write_preview_pr_feedback_record", side_effect=OSError("Write unavailable")
+        ):
+            self.run_once()
+        self.request("preview", 5)
+        restored = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(restored, dict)
+        saved = self.store.read_preview_pr_feedback_record(str(restored["feedback_id"]))
+        self.assertEqual(saved.revision, new_head)
+        self.assertEqual(saved.delivery_status, "delivered")
+
+    def test_successful_cleanup_replaces_its_failure_for_an_open_change(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        for result, error, status in (
+            ("fail", "Cleanup attempt failed", "cleanup_failed"),
+            ("pass", "", "destroyed"),
+        ):
+            with (
+                self.subTest(result=result),
+                patch(
+                    "control_plane.product_reconcile.reconcile_product_request",
+                    return_value=ReconcileOutcome(
+                        {
+                            "action": "destroy",
+                            "reason": "interrupted_preview_restore",
+                            "pull_request_state": "open",
+                            "preview_result_status": result,
+                            "head_sha": PR_HEAD,
+                        },
+                        error=error,
+                    ),
+                ),
+            ):
+                self.request("preview", 5)
+                feedback = self.run_once().last_plan["pr_feedback"]
+                assert isinstance(feedback, dict)
+                self.assertEqual(feedback["status"], status)
 
     def test_a_failed_refresh_keeps_driver_text_out_and_waits_for_a_new_build(self) -> None:
         self.driver.refresh_status = "fail"
@@ -8033,6 +8104,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
 
     def test_notes_without_label_invite_client_and_missing_notes_are_visible(self) -> None:
         from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+        from control_plane.client_test_notes import CLIENT_REVIEW_NOTES_PENDING
 
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
@@ -8052,7 +8124,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.request("preview", 5)
         result = self.reconcile()
         self.assertEqual(result["reason"], "client_test_notes_required")
-        self.assertIn("Client test notes are missing", self.comment_body())
+        self.assertIn(CLIENT_REVIEW_NOTES_PENDING, self.comment_body())
         self.assertEqual(
             tuple(self.owner_review_status_calls), calls_before_refusal + (("site", 5),)
         )
@@ -8170,6 +8242,18 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             )
             self.assertEqual(self.owner_review_status_calls, [("site", 5)])
             self.assertEqual(self.comments.writes, writes)
+
+            self.github.runs[50]["conclusion"] = "failure"
+            self.request("preview", 5)
+            build_failed = self.run_once()
+            self.assertTrue(build_failed.last_plan["held"])
+            self.assertEqual(
+                build_failed.last_plan["last_failed_error_code"], "preview_build_failed"
+            )
+            self.assertEqual(
+                self.store.list_held_odoo_preview_reservations(product="site"), held_before
+            )
+            self.assertEqual(apply.call_count, 1)
 
     def test_review_publication_failure_preserves_preview_feedback(self) -> None:
         previous = self.reconcile_preview()["pr_feedback"]
@@ -9279,6 +9363,47 @@ class _ClaimOrderStore:
 
 
 class ProductReconcileWorkerTests(ProductReconcileTestCase):
+    def test_persists_queue_planning_and_feedback_boundaries(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        target = self.request()
+        requested = self.store.read_product_reconcile_request(target).requested_at
+        queue_wait, planning, publication = (timedelta(seconds=value) for value in (20, 7, 3))
+        clock = [datetime.fromisoformat(requested) + queue_wait]
+
+        def reconcile(**_kwargs: object) -> ReconcileOutcome:
+            clock[0] += planning
+            return ReconcileOutcome({"target": "testing", "action": "none"})
+
+        def feedback(**_kwargs: object) -> None:
+            clock[0] += publication
+
+        with (
+            patch(
+                "control_plane.product_reconcile._utc_now", side_effect=lambda: clock[0].isoformat()
+            ),
+            patch(
+                "control_plane.product_reconcile.reconcile_product_request", side_effect=reconcile
+            ),
+            patch("control_plane.product_reconcile.post_reconcile_feedback", side_effect=feedback),
+        ):
+            completed = self.run_once()
+
+        timing = cast(dict[str, str], completed.last_plan["timing"])
+        boundaries = [
+            datetime.fromisoformat(timing[key])
+            for key in (
+                "requested_at",
+                "started_at",
+                "planning_finished_at",
+                "feedback_finished_at",
+            )
+        ]
+        self.assertEqual(
+            [end - start for start, end in zip(boundaries, boundaries[1:])],
+            [queue_wait, planning, publication],
+        )
+
     def test_worker_tries_reconcile_only_after_every_operation_kind(self) -> None:
         store = _ClaimOrderStore()
 
@@ -9322,9 +9447,21 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
 
     def test_worker_loop_sweeps_at_most_every_thirty_minutes(self) -> None:
         clock = [0.0]
+        interval = 1800
+        swept = Event()
+        sweep_threads: list[Thread] = []
+
+        def discover(*_args: object, **_kwargs: object) -> None:
+            sweep_threads.append(current_thread())
+            swept.set()
 
         def advance(_result: OdooStableOperationWorkerResult) -> None:
-            clock[0] += 900
+            if clock[0] % interval == 0:
+                self.assertTrue(swept.wait(10))
+                sweep_threads[-1].join(10)
+                self.assertFalse(sweep_threads[-1].is_alive())
+                swept.clear()
+            clock[0] += interval / 2
 
         with (
             patch(
@@ -9332,7 +9469,8 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
                 return_value=OdooStableOperationWorkerResult(status="worked"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep"
+                "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep",
+                side_effect=discover,
             ) as sweep,
         ):
             run_odoo_stable_operation_worker_loop(
@@ -9340,6 +9478,7 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
                 control_plane_root_path=Path("."),
                 lease_owner="worker-a",
                 max_iterations=4,
+                reconcile_sweep_seconds=interval,
                 iteration_callback=advance,
                 monotonic=lambda: clock[0],
             )
@@ -9370,7 +9509,15 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
         self.assertFalse(self.provider.applied)
 
     def test_unavailable_and_vulnerable_scans_hold_before_testing_or_preview_effects(self) -> None:
-        from control_plane.artifact_scan import ArtifactScanResult
+        from control_plane.artifact_scan import ArtifactScanFinding, ArtifactScanResult
+
+        finding = ArtifactScanFinding(
+            vulnerability_id="CVE-2026-12345",
+            package_name="libssl3",
+            installed_version="3.0.1",
+            fixed_version="3.0.2",
+            severity="HIGH",
+        )
 
         for target in ("testing", "preview"):
             for status in ("fail", "unavailable"):
@@ -9380,6 +9527,8 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
                         status=cast(Any, status),
                         reason="fixture",
                         scanned_at="2026-10-16T12:00:00Z",
+                        high=1 if status == "fail" else 0,
+                        findings=(finding,) if status == "fail" else (),
                     )
                     commit = PR_HEAD if target == "preview" else DEPLOYABLE
                     self.github.add_run(
@@ -9391,6 +9540,11 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
                     plan = self.reconcile()
                     self.assertTrue(plan["held"])
                     self.assertEqual(plan["action"], "wait")
+                    scan = cast(dict[str, object], plan["artifact_scan"])
+                    self.assertEqual(
+                        scan["findings"],
+                        [finding.model_dump(mode="json")] if status == "fail" else [],
+                    )
                     self.assertEqual(
                         self.artifact_scanner.call_args.args,
                         (f"{IMAGE_REPOSITORY}@{_digest(commit)}",),

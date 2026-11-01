@@ -1,8 +1,17 @@
 import base64
+from contextlib import redirect_stdout
+import hashlib
+import io
+import json
+import random
+import subprocess
+import zlib
 from collections.abc import Callable
 import unittest
 from unittest.mock import Mock, patch
+from typing import cast
 
+from control_plane.dokploy import cutover_transport
 from control_plane.dokploy.cutover_transport import CutoverHostTransport
 from control_plane.dokploy.cutover_execution import (
     bind_cutover_execution,
@@ -64,10 +73,98 @@ class CutoverHostTransportTests(unittest.TestCase):
                 transport(("docker", "stop", "fixture"), None)
         sent.assert_not_called()
 
+    @staticmethod
+    def host_frames(payload: object, child: Mock) -> list[dict[str, object]]:
+        output = io.StringIO()
+        with (
+            patch(
+                "sys.argv",
+                ["python", base64.b64encode(json.dumps(payload).encode()).decode(), "frame:"],
+            ),
+            patch("subprocess.run", child),
+            redirect_stdout(output),
+        ):
+            exec(cutover_transport.CUTOVER_COMMAND_PROGRAM, {})
+        return [json.loads(line.removeprefix("frame:")) for line in output.getvalue().splitlines()]
+
+    def test_full_inventory_command_preserves_exact_stdin_through_host_execution(self) -> None:
+        stdin = (
+            json.dumps(
+                {
+                    "files": [
+                        {
+                            "path": f"addons/native/file-{index}.py",
+                            "sha256": hashlib.sha256(str(index).encode()).hexdigest(),
+                        }
+                        for index in range(1000)
+                    ],
+                    "label": "café-λ",
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        argv = ("docker", "exec", "-i", "native-runner", "python3", "-c", "print('inert')")
+        child = Mock(
+            return_value=subprocess.CompletedProcess(argv, 0, stdout="native-result\n", stderr="")
+        )
+        guard = Mock()
+        transport = self.transport(guard)
+
+        def remote(**kwargs: object) -> None:
+            dispatch = cast(Callable[[Callable[[], None]], None], kwargs["dispatch_guard"])
+            receive = cast(Callable[[dict[str, object]], None], kwargs["receive"])
+
+            def send() -> None:
+                for frame in self.host_frames(kwargs["payload"], child):
+                    receive(frame)
+
+            dispatch(send)
+
+        with patch("control_plane.dokploy.cutover_transport._read_remote", side_effect=remote):
+            self.assertEqual(transport(argv, stdin), "native-result\n")
+        guard.assert_called_once()
+        child.assert_called_once_with(
+            list(argv),
+            input=stdin,
+            text=True,
+            capture_output=True,
+            timeout=transport.timeout_seconds,
+        )
+
     def test_oversize_payload_refuses_before_any_remote_dispatch(self) -> None:
         with patch("control_plane.dokploy.cutover_transport._read_remote") as remote:
             with self.assertRaises(RuntimeError):
-                self.transport(Mock())(("docker", "exec", "fixture"), "x" * 120_000)
+                self.transport(Mock())(
+                    ("docker", "exec", "fixture"),
+                    base64.b64encode(random.Random(0).randbytes(120_000)).decode(),
+                )
+        remote.assert_not_called()
+
+    def test_malformed_or_expanded_command_never_executes_on_host(self) -> None:
+        raw = json.dumps(
+            {"argv": ["docker", "exec", "native-runner"], "stdin": "inert", "timeout": 600}
+        ).encode()
+        compressed = zlib.compress(raw)
+        oversized = json.dumps(
+            {
+                "argv": ["docker", "exec", "native-runner"],
+                "stdin": "x" * cutover_transport.CUTOVER_COMMAND_BYTES,
+                "timeout": 600,
+            }
+        ).encode()
+        for content in (compressed[:-1], compressed + b"trailing", zlib.compress(oversized)):
+            with self.subTest(size=len(content)):
+                child = Mock()
+                frames = self.host_frames({"command": base64.b64encode(content).decode()}, child)
+                self.assertEqual(frames, [{"type": "failed"}])
+                child.assert_not_called()
+        with patch("control_plane.dokploy.cutover_transport._read_remote") as remote:
+            with self.assertRaises(RuntimeError):
+                self.transport(Mock())(
+                    ("docker", "exec", "native-runner"),
+                    "x" * cutover_transport.CUTOVER_COMMAND_BYTES,
+                )
         remote.assert_not_called()
 
     def test_execution_cannot_cross_original_plan_or_outlive_the_accepted_call(self) -> None:

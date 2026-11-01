@@ -8,14 +8,43 @@ from control_plane._odoo_snapshot_files import (
 )
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 
+PREVIEW_RESTORE_DISPOSAL_REQUIRED = "preview_restore_disposal_required"
+PREVIEW_RESTORE_CUSTODY_UNKNOWN = "preview_restore_custody_unknown"
+
+
+class PreviewRestoreDisposalRequired(click.ClickException):
+    def __init__(self) -> None:
+        super().__init__(
+            f"{PREVIEW_RESTORE_DISPOSAL_REQUIRED}: Interrupted preview restore requires qualified disposal and rebuild."
+        )
+
+
+class PreviewRestoreCustodyUnknown(click.ClickException):
+    def __init__(self) -> None:
+        super().__init__(
+            f"{PREVIEW_RESTORE_CUSTODY_UNKNOWN}: Preserve this interrupted preview. "
+            "Its receipt lacks start proof. Resolve use and data custody, then use the "
+            "supported preview preservation or qualified preview-apply destroy path."
+        )
+
 
 PREVIEW_FILESTORE_LIBRARY = (
     f"CLEAN_SNAPSHOT_STATE_DIRECTORY = {CLEAN_SNAPSHOT_STATE_DIRECTORY!r}\n"
+    f"PREVIEW_RESTORE_DISPOSAL_REQUIRED = {PREVIEW_RESTORE_DISPOSAL_REQUIRED!r}\n"
+    f"PREVIEW_RESTORE_CUSTODY_UNKNOWN = {PREVIEW_RESTORE_CUSTODY_UNKNOWN!r}\n"
     + r"""
 import json
 import os
 from pathlib import Path
 import re
+
+
+class InterruptedPreviewRestore(RuntimeError):
+    pass
+
+
+class PreviewRestoreCustodyUnavailable(RuntimeError):
+    pass
 
 
 def preview_docker_text(*arguments):
@@ -99,6 +128,17 @@ def require_unused_preview_upper(private):
         raise RuntimeError('Preserve preview filestore without an owned unreleased attempt')
 
 
+def require_unused_preview_backing(data):
+    filestore = Path(data['Mountpoint']) / 'filestore'
+    if filestore.is_symlink() or filestore.exists() and (
+        filestore.resolve(strict=True) != filestore.absolute() or not filestore.is_dir()):
+        raise RuntimeError('Preview filestore backing custody is aliased')
+    if filestore.exists() and any(
+        child.is_symlink() or not child.is_dir() or any(child.iterdir())
+        for child in filestore.iterdir()):
+        raise RuntimeError('Preserve an existing preview filestore beneath the overlay')
+
+
 def preview_attempt_binding(project, database, volumes, snapshot):
     binding = {'compose_project': project, 'database_name': database, 'preview_volumes': volumes,
         **{key: snapshot[key] for key in ('server_id', 'product', 'context')}, 'volume_backings': {}}
@@ -117,7 +157,7 @@ def preview_attempt_binding(project, database, volumes, snapshot):
     return binding
 
 
-def preview_restore_attempt(project, database, volumes, snapshot, root):
+def preview_restore_attempt(project, database, volumes, snapshot, root, *, inspect_interrupted=False):
     binding = preview_attempt_binding(project, database, volumes, snapshot)
     attempt_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
     path = root / 'preview-attempts' / (attempt_id + '.json')
@@ -133,8 +173,24 @@ def preview_restore_attempt(project, database, volumes, snapshot, root):
     witness = hashlib.sha256(json.dumps(['preview-restore-v1', attempt_id, snapshot['snapshot_id']]).encode()).hexdigest()
     if previous is not None and previous.get('restore_witness') != witness:
         raise RuntimeError('Preview restore attempt witness differs')
+    if previous is not None and not previous['completed'] and previous.get('started') is not False:
+        if previous.get('started') is True:
+            if not inspect_interrupted:
+                raise InterruptedPreviewRestore('Interrupted preview restore requires disposal')
+        else:
+            raise PreviewRestoreCustodyUnavailable('Interrupted preview start proof is unavailable')
     return {'binding': binding, 'attempt_id': attempt_id, 'path': path, 'previous': previous,
         'snapshot': snapshot, 'witness': witness}
+
+
+def write_preview_restore_attempt(attempt, *, completed, started=True, overlay_filestore=True):
+    path = attempt['path']
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    if path.parent.resolve(strict=True) != path.parent.absolute():
+        raise RuntimeError('Preview restore attempt custody is aliased')
+    write_snapshot_receipt(path, {'binding': attempt['binding'], 'snapshot': attempt['snapshot'],
+        'restore_witness': attempt['witness'], 'completed': completed,
+        'started': started, 'overlay_filestore': overlay_filestore})
 
 
 def preview_restore_database_custody(container, database, parameter, attempt):
@@ -144,9 +200,9 @@ def preview_restore_database_custody(container, database, parameter, attempt):
         'psql -X -qAt -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
         '_', database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
     previous = attempt['previous'] if attempt is not None else None
-    if present not in {'0', '1'} or present == '1' and previous is None:
+    if present not in {'0', '1'} or present == '1' and (
+        previous is None or previous.get('completed') is not True):
         raise RuntimeError('An existing preview database cannot be overwritten by a snapshot')
-    restart = False
     if present == '1':
         probe = ['exec', '-i', container, 'sh', '-c',
             'psql -X -qAt -v ON_ERROR_STOP=1 -v marker="$2" -U "$POSTGRES_USER" -d "$1"',
@@ -156,12 +212,10 @@ def preview_restore_database_custody(container, database, parameter, attempt):
             raise RuntimeError('Preview restore witness inspection is ambiguous')
         stored = docker(*probe, stdin=b"SELECT value FROM ir_config_parameter WHERE key=:'marker';\n").decode().strip() if table == 't' else ''
         if stored != attempt['witness']:
-            if previous.get('completed') is not False or stored not in {'', attempt['snapshot']['snapshot_id']}:
-                raise RuntimeError('Preserve preview data without this attempt restore witness')
-            restart = True
+            raise RuntimeError('Preserve preview data without this attempt restore witness')
     if present == '0' and previous is not None and previous.get('completed'):
         raise RuntimeError('A completed preview lost its database; preserve its retained data')
-    return {'present': present, 'restart': restart}
+    return present
 """
 )
 
@@ -210,7 +264,21 @@ def prepare_preview_filestore(
         timeout_seconds=120,
         dispatch_guard=dispatch_guard,
     )
-    if len(frames) != 1 or frames[0].get("type") != "complete":
+    if len(frames) == 1 and frames[0] == {
+        "type": "complete",
+        "restore_disposition": PREVIEW_RESTORE_DISPOSAL_REQUIRED,
+    }:
+        raise PreviewRestoreDisposalRequired()
+    if len(frames) == 1 and frames[0] == {
+        "type": "complete",
+        "restore_disposition": PREVIEW_RESTORE_CUSTODY_UNKNOWN,
+    }:
+        raise PreviewRestoreCustodyUnknown()
+    if (
+        len(frames) != 1
+        or frames[0].get("type") != "complete"
+        or set(frames[0]) != {"type", "declaration"}
+    ):
         raise click.ClickException("Preview filestore preparation is unavailable.")
     declaration = frames[0].get("declaration")
     if declaration is None:
@@ -292,9 +360,8 @@ def prepare_locked(spec, root):
                 'labels': {'io.launchplane.preview-snapshot': volume['Labels']['io.launchplane.preview-snapshot']}}
             if spec['snapshot'] is None:
                 return declaration
-        attempt = preview_restore_attempt(project, database, spec['volumes'], spec['snapshot'], root) if set(spec['volumes'].values()) <= names else None
+        attempt = preview_restore_attempt(project, database, spec['volumes'], spec['snapshot'], root, inspect_interrupted=True) if set(spec['volumes'].values()) <= names else None
         previous = attempt['previous'] if attempt is not None else None
-        owned = previous is not None and previous.get('completed') is False
         if declaration is None and previous is not None and previous.get('completed'):
             raise RuntimeError('Retained preview overlay is missing')
         snapshot = attempt['snapshot'] if attempt is not None else spec['snapshot']
@@ -314,7 +381,7 @@ def prepare_locked(spec, root):
         databases = []
         for container in containers:
             labels = container.get('Config', {}).get('Labels') or {}
-            if any(mount.get('Name') in spec['volumes'].values() for mount in container.get('Mounts', [])) and labels.get('com.docker.compose.project') != project:
+            if any(mount.get('Name') in {*spec['volumes'].values(), name} for mount in container.get('Mounts', [])) and labels.get('com.docker.compose.project') != project:
                 raise RuntimeError('Preview backing has another consumer')
             if labels.get('com.docker.compose.project') == project and labels.get('com.docker.compose.service') == 'database':
                 databases.append(container)
@@ -328,9 +395,14 @@ def prepare_locked(spec, root):
                 or spec['volumes']['database'] not in names
                 or attempt is not None and mounts[0].get('Source') != attempt['binding']['volume_backings']['database']['path']):
                 raise RuntimeError('Preview database physical binding differs')
-            custody = preview_restore_database_custody(databases[0]['Id'], database,
+        if previous is not None and not previous['completed'] and previous.get('started') is True:
+            data = json.loads(docker('volume', 'inspect', data_name))[0]
+            require_unused_preview_backing(data)
+            raise InterruptedPreviewRestore('Interrupted preview restore requires disposal')
+        if databases:
+            present = preview_restore_database_custody(databases[0]['Id'], database,
                 spec['copy_witness_parameter'], attempt)
-            if declaration is None and custody['present'] == '1' and not custody['restart']:
+            if declaration is None and present == '1':
                 if spec.get('require_existing'):
                     raise RuntimeError('Retained preview overlay is missing')
                 return None
@@ -342,15 +414,13 @@ def prepare_locked(spec, root):
                 raise RuntimeError('Preview database custody is unavailable')
         if declaration is not None:
             if previous is None:
-                _, _, _, private = inspect_preview_filestore(data_name, project)
+                _, data, _, private = inspect_preview_filestore(data_name, project)
+                require_unused_preview_backing(data)
                 require_unused_preview_upper(private)
             return declaration
         data, lower, private, options = preview_filestore_layout(data_name, project, snapshot['snapshot_id'], allow_missing=True)
-        filestore = Path(data['Mountpoint']) / 'filestore'
-        if filestore.is_symlink() or filestore.exists() and any(filestore.iterdir()) and not owned:
-            raise RuntimeError('Preserve an existing preview filestore')
-        if not owned:
-            require_unused_preview_upper(private)
+        require_unused_preview_backing(data)
+        require_unused_preview_upper(private)
         if not lower.is_dir():
             raise RuntimeError('Preview snapshot source is unavailable')
         receipt_path = lower.parent / 'receipt.json'
@@ -380,14 +450,8 @@ def prepare_locked(spec, root):
                 compose_role = {'data': 'odoo_data', 'database': 'odoo_db', 'logs': 'odoo_logs'}[role]
                 docker('volume', 'create', '--label', 'com.docker.compose.project=' + project,
                     '--label', 'com.docker.compose.volume=' + compose_role, volume_name)
-        binding = preview_attempt_binding(project, database, spec['volumes'], snapshot)
-        attempt_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
-        attempts = root / 'preview-attempts'
-        attempts.mkdir(mode=0o700, exist_ok=True)
-        if attempts.resolve(strict=True) != attempts.absolute():
-            raise RuntimeError('Preview restore attempt custody is aliased')
-        witness = hashlib.sha256(json.dumps(['preview-restore-v1', attempt_id, snapshot['snapshot_id']]).encode()).hexdigest()
-        write_snapshot_receipt(attempts / (attempt_id + '.json'), {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False, 'overlay_filestore': True})
+        attempt = preview_restore_attempt(project, database, spec['volumes'], snapshot, root)
+        write_preview_restore_attempt(attempt, completed=False, started=False)
         for directory in (private, private / 'upper', private / 'work'):
             directory.mkdir(mode=0o700, exist_ok=True)
             if directory.resolve(strict=True) != directory.absolute():
@@ -404,6 +468,10 @@ def prepare_locked(spec, root):
 try:
     declaration = prepare(json.loads(base64.b64decode(sys.argv[1], validate=True)))
     print(sys.argv[2] + json.dumps({'type': 'complete', 'declaration': declaration}), flush=True)
+except InterruptedPreviewRestore:
+    print(sys.argv[2] + json.dumps({'type': 'complete', 'restore_disposition': PREVIEW_RESTORE_DISPOSAL_REQUIRED}), flush=True)
+except PreviewRestoreCustodyUnavailable:
+    print(sys.argv[2] + json.dumps({'type': 'complete', 'restore_disposition': PREVIEW_RESTORE_CUSTODY_UNKNOWN}), flush=True)
 except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
     print(sys.argv[2] + json.dumps({'type': 'failed'}), flush=True)
 """

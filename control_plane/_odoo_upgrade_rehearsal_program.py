@@ -203,9 +203,9 @@ def stamp(spec,containers,database):
 
 
 def snapshot(spec,root,containers,database):
+    if database.endswith('_final_upgrade'):
+        require_passing_business_validation(spec['record'])
     validations=business_validation_history(spec['record'])
-    if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
-        raise RuntimeError('Product validation has not passed')
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     expected=spec['record']['source_odoo_version'] if database.endswith('_source') else spec['versions'][spec['target_image']]
     if version.split('.')[0]!=expected.split('.')[0]:
@@ -224,7 +224,7 @@ def snapshot(spec,root,containers,database):
         'database_sha256':digest(path/'database.dump'),'filestore_sha256':digest(path/'filestore.tar'),
         'source_capture_sha256':digest(root/'capture.json'),
         'sanitized':True,'odoo_version':version,'captured_at':datetime.now(timezone.utc).isoformat()}
-    if database.endswith('_final_upgrade') and validations:
+    if database.endswith('_final_upgrade'):
         receipt['business_validation_sha256']=hashlib.sha256(
             json.dumps(validations,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
     save(path/'receipt.json',receipt)
@@ -525,9 +525,6 @@ def capture(spec,root,containers,database):
     sanitize_capture(spec,containers,database,raw)
     spec['phase_elapsed']['source-sanitization']=time.monotonic()-started
     phase_stamp(spec,'source_sanitized')
-    validations=spec['record'].get('business_validations',[])
-    if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
-        raise RuntimeError('Product validation has not passed')
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     if version.split('.')[0] != spec['record']['source_odoo_version'].split('.')[0]:
         raise RuntimeError('Captured source version differs from the selected source version')
@@ -577,6 +574,7 @@ def refusal_receipt(spec, root, code):
     if not all(re.fullmatch(r'[a-f0-9]{64}',value) for value in (attempt,binding)):
         return None
     kind={'rehearsal_storage_capacity_insufficient':'capacity',
+        'rehearsal_artifact_unavailable':'artifact',
         'rehearsal_rebuild_capacity_insufficient':'rebuild-capacity',
         'rehearsal_rebuild_precheck_refused':'rebuild-precheck',
         'rehearsal_precheck_refused':'precheck'}[code]
@@ -613,7 +611,7 @@ def emit_refusal(spec,root,code):
 
 def read_refusal(spec, root):
     result=None
-    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_rebuild_capacity_insufficient','rehearsal_rebuild_precheck_refused','rehearsal_precheck_refused'):
+    for code in ('rehearsal_artifact_unavailable','rehearsal_storage_capacity_insufficient','rehearsal_rebuild_capacity_insufficient','rehearsal_rebuild_precheck_refused','rehearsal_precheck_refused'):
         path=refusal_receipt(spec,root,code)
         if path is None:
             continue
@@ -808,6 +806,10 @@ def observe(spec, root, receipt, lock_held=False):
     return
 
 
+def migration_copy_supported(containers):
+    return docker('exec',containers['script-runner'][0],'python3','-c',"import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import LocalServerSettings as S, OdooDataWorkflowRunner as R;print('true' if 'copy_purpose' in getattr(S,'model_fields',{}) and callable(getattr(R,'verify_isolated_copy_before_registry',None)) else 'false')").strip()==b'true'
+
+
 def prepare_runtime(spec,root,database):
     compose(spec,root,image=spec['source_image'],database=database)
     deadline=time.monotonic()+120
@@ -992,9 +994,13 @@ def main():
                     emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
                     return
                 try:
-                    capacity=rehearsal_storage_capacity(spec,root,containers,'rebuild-final')
+                    supported=migration_copy_supported(containers)
+                    capacity=supported and rehearsal_storage_capacity(spec,root,containers,'rebuild-final')
                 except Exception:
                     emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
+                    return
+                if not supported:
+                    emit_refusal(spec,root,'rehearsal_artifact_unavailable')
                     return
                 if not capacity:
                     emit_refusal(spec,root,'rehearsal_rebuild_capacity_insufficient')
@@ -1012,7 +1018,11 @@ def main():
                 validate_snapshots(spec,root,containers,record['copies'])
                 if action=='validate-business':
                     business_validation_precheck(spec,containers)
-                if action in {'execute','simulate-final','verify'} and not rehearsal_storage_capacity(
+                if action=='verify':
+                    require_passing_business_validation(record)
+                if action in {'execute','simulate-final'} and not migration_copy_supported(containers):
+                    code='rehearsal_artifact_unavailable'
+                elif action in {'execute','simulate-final','verify'} and not rehearsal_storage_capacity(
                     spec,root,containers,action):
                     code='rehearsal_storage_capacity_insufficient'
                 if action=='retire' and not {names['final_source'],names['final_upgrade']} <= {copy['database'] for copy in record['copies']}:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.retained_volume_sweep import RETAINED_VOLUME_SWEEP_ROUTE
+from control_plane.contracts.integration_attestation import INTEGRATION_ATTESTATION_ROUTE
 from control_plane.contracts.release_request import RELEASE_REQUEST_ROUTE
 from control_plane.testing_retry import TESTING_RETRY_ROUTE
 from control_plane.client_release_backup_continuation import BACKUP_CONTINUATION_ROUTE
@@ -106,6 +108,87 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        "/v1/product-profiles/{product}/generic-web-transition",
+        "Review shared-web declarations; Director agents may apply preview-only changes on an existing generic-web product, preserving every stable declaration and existing credential gates.",
+        ("service_api", "browser"),
+        ("dry-run", "apply"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/runner-relabel/{policy_id}/policy",
+        "Read a service-owned repository/host runner roster policy without provider effects.",
+        ("service_api",),
+        (),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        "/v1/runner-relabel/{policy_id}/policy",
+        "Save an inert policy candidate; applying an exact saved CAS review requires its own immutable-ID administrator.",
+        ("service_api",),
+        ("dry-run", "apply"),
+        "none",
+        ("expected_plan_sha256", "expected_policy_sha256"),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/runner-relabel/{policy_id}/reviews/{review_id}",
+        "Read a scope-authorized stored runner review and original operation receipt without provider calls.",
+        ("service_api",),
+        (),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        "/v1/runner-relabel/{policy_id}/reviews",
+        "Review one approved roster runner label replacement under the authenticated actor and stored service policy; no runner mutation.",
+        ("service_api",),
+        ("dry-run",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        "/v1/runner-relabel/{policy_id}/operations",
+        "Apply an actor-bound stored runner review once, or reconcile the original operation without repeating a label write.",
+        ("service_api",),
+        ("apply", "reconcile", "recover-evidence"),
+        "required",
+        ("review_id", "expected_review_sha256"),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/preview-snapshot-version",
+        "Read only recorded base-module version from an exact original-bound immutable snapshot without restore or database access.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/aggregate-counts",
+        "Read bounded aggregate counts from a qualified sanitized disposable testing copy with provenance and no data writes.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        INTEGRATION_ATTESTATION_ROUTE,
+        "Record an exact-merge engineering attestation with a confirming independent model review; records no new Client decision and never promotes.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "body",
+        ("reviewed_evidence_sha256", "review"),
+    ),
     OperationSpec(
         "POST",
         RELEASE_REQUEST_ROUTE,
@@ -330,6 +413,15 @@ OPERATION_SPECS = (
         ("dry-run", "apply", "reconcile"),
         "apply",
         ("reviewed_plan_digest", "current_artifact_identity", "release_lane_exclusion"),
+    ),
+    OperationSpec(
+        "POST",
+        RETAINED_VOLUME_SWEEP_ROUTE,
+        "Inspect, apply, or read back one reviewed retained-volume retirement sweep without exposing provider bindings.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256", "retirement_record_id", "minimum_age_seconds"),
     ),
     OperationSpec(
         "GET",

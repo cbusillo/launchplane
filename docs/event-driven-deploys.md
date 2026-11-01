@@ -15,7 +15,7 @@ Launchplane receives the webhook of the GitHub App its merge train already
 uses (the App is installed on every product repository). One receiver,
 `POST /v1/github/app-webhook`, takes `workflow_run` and `pull_request`
 deliveries for deploy reconciliation. Opted-in source checks also consume
-`push` and `merge_group` deliveries as described below. Other events are
+`push` and `merge_group` deliveries as described below. Message events also wake the existing [attention readers](request-attention.md#message-events). Other events are
 acknowledged and ignored.
 
 Events carry no instructions. An event only says which target to look at
@@ -231,55 +231,13 @@ reservation. The webhook request never waits on a deploy.
     evidence without backfilling a legacy attempt from today's inputs. See
     [application testing delivery](private-testing-transport.md) for retirement,
     platform-credential and unchanged-reconcile behavior.
-    For VeriReel testing, a matching image without deployment-bound migration and
-    creator/admin qualification gets one normal deploy of that same verified
-    artifact to run the testing-only post-deploy extension. Passing qualification
-    is reused only when its authority digest matches the current lane. The
-    deployment captures this digest before target preparation and provider
-    effects, and carries it into qualification rather than reading a newer
-    authority after deployment. This binds the expected starting authority;
-    it does not provide an atomic snapshot of every runtime read. Changing consumed
-    runtime settings or secret versions also requires fresh qualification. Declaring
-    a new shared-web lifecycle therefore requalifies a previously passing legacy
-    deployment even when the artifact is unchanged; a matching qualification then
-    stops at `already_deployed`. A failed qualification with unchanged
-    stored lane authority remains failed; a supported configuration repair can
-    permit a fresh attempt. Transient infrastructure failures get bounded fresh
-    attempts through the same deploy lifecycle. A cleanup failure remains failed,
-    with the reserved fixture email recorded for the existing maintenance cleanup
-    intent. An administrator can retry the exact verified artifact using the
-    existing testing deploy surface after resolving the recorded failure; no grant
-    is added for a retry. Interrupted effects retain the existing provider
-    reservation and generic-web recovery path. After interruption, the recovery
-    admin can derive the reserved fixture email from the deployment ID using
-    `fixture_email`; no cleanup mutation runs after its effect fence is lost.
-    Unknown VeriReel exchanges emit a fixed reason and catch site in service logs,
-    with allowlisted method, route, HTTP status and resource type when observable.
-    Verification routes omit their fixture identifier; queries, request values and
-    exception text are never logged. The verifier logs the deployment record ID
-    separately for correlation. These diagnostics leave qualification unknown and
-    do not release the reservation or permit cleanup or replay.
-    The verifier buffers each tracked same-origin request using Playwright's
-    upstream fetch, with no retries or redirect following and a finite deadline.
-    Its full response body and successful status acknowledge the exact intercepted
-    request before delivery to the browser. Browser cancellation cannot erase that
-    receipt. Missing bodies, unsuccessful status and write redirects stay unknown;
-    signup, server actions and public verification (which records a scan) share
-    this rule. Native read redirects retain actual browser navigation. Each known
-    same-origin read descendant requires its own successful response and matching
-    finished request, because Playwright does not route redirect descendants.
-    A cancelled native descendant remains unknown. Same-origin sign-in redirects
-    retain their own receipt, so a lost application session can fail the product
-    check and clean up its acknowledged fixture.
-    Closing fences new routed requests before upstream dispatch and waits for
-    handlers already in flight. No cancelled-read or page-close inference completes
-    an exchange. A failed page close remains unknown, with cleanup skipped.
-    Service workers are blocked so they cannot bypass interception. The billing
-    page must render its main heading after signup; transport receipts do not
-    replace the product assertions.
-    No new caller capability or
-    product-repository call-in is involved. Production and rollback do not select
-    this extension.
+    Product browser behavior is checked by the product Build before its artifact
+    manifest is published. Launchplane performs shared runtime and identity
+    qualification. Retired VeriReel browser declarations hold reconciliation
+    before provider effects until explicitly migrated through the reviewed
+    generic-web transition after a checked product Build is available. Stored
+    historical execution receipts and unknown-effect recovery remain readable;
+    removing the browser executor does not settle or replay interrupted effects.
   - If the lane is busy, the reconcile stays pending and runs again after it.
   - While the testing lane is held for staff testing, the reconcile records
     its plan as held (`action: wait`, reason `staff_testing`) and deploys
@@ -299,6 +257,12 @@ reservation. The webhook request never waits on a deploy.
   - The manifest is not recorded in the artifact store. The preview's slug
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
+  - An Odoo `preview_provenance_refused` retains its specific
+    `preview_result_error_code` and `failure_trace_id`. The existing
+    `handled_error_cause` service log binds that trace and plan ID to bounded
+    source locations, without exception text or record contents. Follow the
+    [existing-preview source-history contract](disposable-lanes.md) for missing
+    origin evidence and its independent-recipient review route.
   - A snapshot Odoo preview without its Launchplane lifecycle record needs
     native restore custody before a refresh can supersede its original operation.
     The receipt, physical storage binding and database witness must prove an
@@ -349,6 +313,18 @@ reservation. The webhook request never waits on a deploy.
     waivers or preview collectors. Open PR previews remain; unavailable PR state
     is held. Teardown preserves resources shared with another lane or production,
     including target aliases and credentials outside the destroy set.
+    A failed creation with no lifecycle record remains a cleanup candidate when
+    its retained original identifies the exact preview, including a completed
+    failed creation or a failed recreation after an earlier retirement. The
+    sweep stops revisiting completed originals once newer retirement is recorded.
+    It uses the existing fresh provider inventory to select untracked PRs before
+    reading their failed originals, rather than scanning all historical failures.
+    Closed-PR reconciliation
+    uses that original as its lifecycle token and rechecks its product, context,
+    PR, target naming and exclusive ownership before effects. Existing executor
+    exclusion, recovery grace, original schedule quiescence, target supersession
+    and physical resource inspection still apply. Missing original proof holds
+    the operation; the cleanup never invents a serving generation.
     A qualified destroy may supersede a missing-original-intent reservation
     under the same target execution lock, expired-lease grace and exact-record
     compare-and-swap. It records the earlier operation as superseded, never as
@@ -366,8 +342,8 @@ reservation. The webhook request never waits on a deploy.
     The first qualified cleanup has its own bounded retry budget. Reopened PRs,
     active executors and unknown provider outcomes remain protected. No
     production or whole-product retirement is authorized by this behavior.
-  - Odoo preview addon settings explicitly supplied in the product profile's
-    `preview.override_env.ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64` survive generated
+  - Odoo preview addon settings explicitly supplied as
+    `ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64` in the managed preview scope survive generated
     website-bootstrap and import-source payloads. Generated bootstrap retains
     the preview's canonical URL, and template addon settings remain excluded.
     Only preview addon settings are carried over; other preview payload fields
@@ -380,6 +356,13 @@ reservation. The webhook request never waits on a deploy.
     reservation scope `launchplane-reconcile:<product>`. Its key is the PR,
     the verified build's run id and attempt (or `destroy`), and the preview's
     current lifecycle state, so a repeated reconcile replays it.
+    Reconciliation reuses the retained issued plan for the same target binding,
+    including an existing successor, while it is valid or completed without
+    being superseded. Superseded attempts are followed to their successor.
+    Changed bindings and expired unfinished plans receive a deterministic
+    successor derived from the retained operation. That successor still requires
+    the existing executor exclusion, original observation, grace, quiescence and
+    compare-and-swap before any provider effect.
   - **Generic-web:** the build is verified with `verify_generic_web_build`
     (`purpose` `preview`), and the refresh or destroy runs in-process as the
     generic-web preview refresh and destroy routes do, driver extensions
@@ -402,6 +385,18 @@ returns them to a caller with `product_profile.read` on the product, so an
 event-driven preview or testing deploy can be checked without service logs.
 It includes every recorded target for that product rather than using the
 worker's queue page limit.
+The last plan's `timing` records `requested_at`, `started_at`,
+`planning_finished_at` and `feedback_finished_at`. These boundaries separate
+the time this pass became pending, reconcile work and comment publication.
+Coalescing can preserve an earlier pending time or requeue at completion of
+an earlier pass. `requested_at` is not a webhook receipt timestamp; use the
+persisted delivery record for that boundary. An Odoo deployment's queued
+operation has its own start and terminal timestamps.
+They describe the latest attempt, not a retained history of earlier passes.
+Completed in-place Odoo replacements retain `provider_deploy`, `post_deploy`,
+`readiness` and, when required, `runtime_identity` start/finish timestamp pairs
+in the deployment's `runtime_source`. A missing finish marks an incomplete
+phase. The deployment finish follows required identity verification.
 Exact commit SHAs and `sha256:` digests come back as they are, and so do the
 ids Launchplane records itself: the GitHub delivery id and the plan's top-level
 `*_id` fields, when they are a UUID or a `name-<hex>` id; those ids also stay
@@ -429,6 +424,15 @@ needs no workflow to report previews or testing deploys.
   build arrives removes its pending comment and records terminal cleared feedback;
   a closed PR without feedback history posts nothing. Other plans that change
   nothing, are deferred, or are held for another driver say nothing.
+  A completed failed Build for the exact head is recorded as a preview failure,
+  with its run ID, rather than an ordinary build wait. A retry waiting on another
+  build retains that failure in the existing feedback until a current-head
+  preview is ready. An unfinished run or a run from another repository does not
+  establish a failed build.
+  Retention reads the original feedback record, keeping its failed revision and
+  reason through temporary source-read errors, recovery holds and interrupted
+  cleanup. A successful cleanup is not a published preview. Failed delivery can
+  retry from that same record; unavailable or mismatched history stays failed.
 - **Testing:** one comment on the PR GitHub merged as the desired commit
   (`merge_commit_sha` equals it), marked `<!-- launchplane-reconcile-testing -->`:
   the deploy is queued, the testing lane runs it, it is waiting because the
@@ -692,6 +696,11 @@ testing lanes, preview enablement, and preview context. Its existing installatio
 tracked repository inventory and managed credential binding must be available;
 an unavailable read is reported and retried on the next sweep, without another
 identity or a new grant.
+
+Discovery runs on one background thread, so slow repository or provider reads
+cannot delay the worker's operation and reconcile polls. An unfinished sweep
+prevents another sweep from starting, and shutdown joins the admitted sweep
+before closing the record store. The interval and target coalescing are unchanged.
 
 A PR without configured previews and without existing preview lifecycle work or
 retained reservations takes a PR-only reconcile path. It rereads the PR's state

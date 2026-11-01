@@ -37,6 +37,7 @@ from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
     build_generic_web_rollback_plan,
 )
+from control_plane.generic_web_release_settings import verify_recorded_release_settings
 from control_plane.generic_web_promotion_provider_adapter import (
     require_generic_web_promotion_target,
     generic_web_promotion_deployment_id,
@@ -54,7 +55,7 @@ from control_plane.workflows.generic_web_deploy_provider import (
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
     _result_from_record,
-    _verify_health_evidence_with_identity,
+    _verify_lane_health_evidence,
     _health_evidence_for_lane,
     _build_promotion_record,
     _mark_health_failed,
@@ -358,6 +359,13 @@ def inspect_promotion(
                 )
             }
         )
+        settings_digest = verify_recorded_release_settings(
+            store=store,
+            provider=provider,
+            control_plane_root=root,
+            target=effective_target,
+            record=effective,
+        )
         runtime = provider.observe_runtime_artifact(
             control_plane_root=root, resolved_deploy_target=effective_target
         )
@@ -367,18 +375,25 @@ def inspect_promotion(
             expected_deployment_record_id=effective.record_id,
             expected_provider_reference=effective_target.ship_request.deploy_reference,
         )
-        checked = _verify_health_evidence_with_identity(
+        checked = _verify_lane_health_evidence(
             _health_evidence_for_lane(
+                record_store=store,
+                profile=profile,
                 lane=lane,
                 request=promotion_request,
                 health_path=profile.health_path,
                 status="pending",
             ),
+            record_store=store,
+            profile=profile,
+            lane=lane,
+            control_plane_root=root,
             expected_runtime_identity=effective.runtime_identity,
         )
         if checked.status != "pass" or checked.runtime_identity_status != "match":
             return inspection
         inspection.provider_evidence = {
+            **({"runtime_settings_sha256": settings_digest} if settings_digest else {}),
             "runtime": runtime.model_dump(mode="json"),
             "health_status": checked.status,
             "runtime_identity_status": checked.runtime_identity_status,
@@ -642,6 +657,13 @@ def inspect_rollback_drill(
         provider = default_generic_web_deploy_provider(record_store=store, control_plane_root=root)
         if not isinstance(provider, GenericWebDeployRuntimeArtifactProvider):
             return inspection
+        settings_digest = verify_recorded_release_settings(
+            store=store,
+            provider=provider,
+            control_plane_root=root,
+            target=target,
+            record=deployed,
+        )
         runtime = provider.observe_runtime_artifact(
             control_plane_root=root, resolved_deploy_target=target
         )
@@ -651,8 +673,10 @@ def inspect_rollback_drill(
             expected_deployment_record_id=deployed.record_id,
             expected_provider_reference=target.ship_request.deploy_reference,
         )
-        checked = _verify_health_evidence_with_identity(
+        checked = _verify_lane_health_evidence(
             _health_evidence_for_lane(
+                record_store=store,
+                profile=profile,
                 lane=lane,
                 request=GenericWebProdPromotionRequest(
                     product=product,
@@ -662,11 +686,16 @@ def inspect_rollback_drill(
                 health_path=profile.health_path,
                 status="pending",
             ),
+            record_store=store,
+            profile=profile,
+            lane=lane,
+            control_plane_root=root,
             expected_runtime_identity=identity,
         )
         if checked.status != "pass" or checked.runtime_identity_status != "match":
             return inspection
         inspection.provider_evidence = {
+            **({"runtime_settings_sha256": settings_digest} if settings_digest else {}),
             "runtime": runtime.model_dump(mode="json"),
             "health": checked.model_dump(mode="json"),
         }

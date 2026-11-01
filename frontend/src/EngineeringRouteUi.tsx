@@ -20,10 +20,12 @@ import type { EngineeringResourceState } from "./engineering-resource";
 
 const ENGINEERING_VIEWS: Exclude<EngineeringView, "hub">[] = [
   "credentials",
+  "request-attention",
   "merge-train",
   "tenant-admission",
   "governance-projection",
   "github-delivery",
+  "preview-lifecycle",
   "privileged-operations",
   "runtime-setting-removal",
 ];

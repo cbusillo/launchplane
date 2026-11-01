@@ -47,6 +47,7 @@ from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneIdentity,
     director_agent_identity,
+    launchplane_identity_actor,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_preflight import TestingRebuildPreflight, inspect_testing_rebuild
@@ -290,6 +291,7 @@ def register_testing_rebuild_routes(
                 store=store,
                 request=request,
                 verified_manifest=verified.manifest,
+                actor=launchplane_identity_actor(identity),
             )
             return TestingRebuildInspection(
                 **inspection.model_dump(mode="python"), original_scope=idempotency_scope(identity)
@@ -369,6 +371,7 @@ def register_testing_rebuild_routes(
                 store=store,
                 request=request,
                 verified_manifest=verified.manifest,
+                actor=launchplane_identity_actor(identity),
             )
             record_verified_build_artifact(record_store=store, verified=verified)
         except (

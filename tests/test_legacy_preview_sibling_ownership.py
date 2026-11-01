@@ -178,6 +178,10 @@ class LegacyGenericSiblingOwnershipTests(LegacyPreviewReconciliationFixture):
         with self.provider_inventory():
             plan = await self.plan()
             self.assertTrue(plan["apply_eligible"])
+            name = self.application["name"]
+            self.application["name"] = "renamed-sibling"
+            self.assertEqual((await self.call("inspect")).status_code, 409)
+            self.application["name"] = name
             for changed in (
                 receipt.model_copy(update={"response_status_code": 409}),
                 receipt.model_copy(
@@ -280,11 +284,12 @@ class LegacyGenericSiblingOwnershipTests(LegacyPreviewReconciliationFixture):
                 )
             }
         )
-        self.store.write_product_profile_record(self.profile)
-        self.assertEqual((await self.call("inspect")).status_code, 202)
-        with self.provider_inventory():
-            self.assertEqual((await self.call("inspect")).status_code, 409)
-        self.store.write_product_profile_record(original_profile)
+        with self.assertRaises(ValueError):
+            self.store.write_product_profile_record(self.profile)
+        with patch.object(self.store, "read_product_profile_record", return_value=self.profile):
+            self.assertEqual((await self.call("inspect")).status_code, 202)
+            with self.provider_inventory():
+                self.assertEqual((await self.call("inspect")).status_code, 409)
         sibling = self.store.read_preview_record(self.sibling_id)
         with patch.object(
             self.store,

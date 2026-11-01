@@ -1,6 +1,25 @@
 import { validateRemovalResponse } from "./runtime-setting-removal";
 import type { CredentialInventoryResponse } from "./generated/openapi.ts";
 
+import type { RequestAttentionPage } from "./generated/openapi.ts";
+
+
+import type { ApplyIntegrationAllowancesData, ApplyIntegrationAllowancesResponse, ReadIntegrationAllowancesData, ReadIntegrationAllowancesResponse } from "./generated/openapi.ts";
+
+export function readRequestAttention(repository?: string, signal?: AbortSignal): Promise<RequestAttentionPage> {
+  const query = new URLSearchParams();
+  if (repository) query.set("repository", repository);
+  return requestJson(`/v1/attention/requests?${query}`, "GET", undefined, signal);
+}
+export function readIntegrationAllowances(query: NonNullable<ReadIntegrationAllowancesData["query"]>, signal?: AbortSignal): Promise<ReadIntegrationAllowancesResponse> {
+  return requestJson(`/v1/product-config/integration-allowances?${new URLSearchParams(query as Record<string, string>)}`, "GET", undefined, signal);
+}
+
+export function applyIntegrationAllowances(body: ApplyIntegrationAllowancesData["body"], options: BrowserOperationOptions): Promise<ApplyIntegrationAllowancesResponse> {
+  const request: ApplyIntegrationAllowancesData = { url: BROWSER_WRITE_ROUTES.integrationAllowances, body,
+    headers: { "Idempotency-Key": options.idempotencyKey } };
+  return requestGeneratedPost(request, options.signal, options.onDispatch);
+}
 import type { BackupCredentialBindingRequest, AcceptedEvidenceResponse, QualifyProductionBackupPreflightData } from "./generated/openapi.ts";
 import type { DiscussionTopicsResponse } from "./generated/openapi.ts";
 import type { ApplyTestingHoldData, ApplyTestingHoldResponse, ReadTestingHoldData, ReadTestingHoldResponse } from "./generated/openapi.ts";
@@ -18,6 +37,7 @@ export function applyTestingHold(body: ApplyTestingHoldData["body"], options: Br
     headers: { "Idempotency-Key": options.idempotencyKey } };
   return requestGeneratedPost(request, options.signal, options.onDispatch);
 }
+import type { ReconcileOdooSecretReferencesData, SecretReferenceResponse } from "./generated/openapi.ts";
 import type {
   ApiErrorPayload,
   AuthSessionPayload,
@@ -137,6 +157,25 @@ export class LaunchplaneApiError extends Error {
   }
 }
 
+export class LaunchplaneResponseError extends Error {
+  code = "unreadable_response";
+  traceId = "";
+  statusCode: number;
+
+  constructor(statusCode: number) {
+    const reason = statusCode >= 500
+      ? "Launchplane is temporarily unavailable"
+      : "Launchplane returned an unreadable response";
+    super(`${reason} (HTTP ${statusCode}).`);
+    this.name = "LaunchplaneResponseError";
+    this.statusCode = statusCode;
+  }
+}
+
+export function isLaunchplaneHttpError(error: unknown): error is LaunchplaneApiError | LaunchplaneResponseError {
+  return error instanceof LaunchplaneApiError || error instanceof LaunchplaneResponseError;
+}
+
 let browserMutationQueue: Promise<void> = Promise.resolve();
 const sessionExpiryListeners = new Set<() => void>();
 
@@ -214,7 +253,16 @@ async function performJsonRequest<T>(
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
   });
-  const payload = (await response.json()) as T | ApiErrorPayload;
+  let payload: T | ApiErrorPayload;
+  try {
+    payload = await response.json() as T | ApiErrorPayload;
+  } catch (error) {
+    if (signal?.aborted || error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new LaunchplaneResponseError(response.status);
+  }
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new LaunchplaneResponseError(response.status);
+  }
   if (!response.ok) {
     const errorPayload = payload as ApiErrorPayload;
     const errorMessage =
@@ -563,6 +611,17 @@ export function applyProductEnvironmentConfig(
     generatedIdempotencyKey(request.headers),
     options.onDispatch,
   );
+}
+
+export function readOdooReferenceMetadata(product: string, environment: string, signal?: AbortSignal): Promise<SecretReferenceResponse> {
+  return requestJson(`/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/odoo-secret-references/reconcile`, "GET", undefined, signal);
+}
+
+export function reconcileOdooReferenceMetadata(
+  product: string, environment: string, body: ReconcileOdooSecretReferencesData["body"], options: BrowserOperationOptions,
+): Promise<SecretReferenceResponse> {
+  const route = BROWSER_WRITE_ROUTES.odooSecretReferences.replace("{product}", encodeURIComponent(product)).replace("{environment}", encodeURIComponent(environment));
+  return requestJson(route, "POST", body, options.signal, options.idempotencyKey, options.onDispatch);
 }
 
 export function applyProductHealthMonitoring(
@@ -1241,4 +1300,12 @@ export function reviewPromotionRecovery(target: PromotionRecoveryTarget, reason:
 
 export function applyPromotionRecovery(target: PromotionRecoveryTarget, body: import("./generated/openapi.ts").PromotionRecoveryApply): Promise<import("./generated/openapi.ts").PromotionRecoveryApplied> {
   return requestJson(promotionRecoveryPath(target, BROWSER_WRITE_ROUTES.promotionRecoveryApply) + promotionRecoveryQuery(target), "POST", body);
+}
+
+export function sweepPreviewLifecycle(
+  body: import("./generated/openapi.ts").ApplyPreviewLifecycleSweepData["body"],
+  options: BrowserOperationOptions,
+): Promise<AcceptedEvidenceResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.previewLifecycleSweep, "POST", body,
+    options.signal, options.idempotencyKey, options.onDispatch);
 }

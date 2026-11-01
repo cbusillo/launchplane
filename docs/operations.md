@@ -425,12 +425,8 @@ notification-policy ownership alone does not settle those effects.
 Starting or replacing this composition immediately attempts due queued work;
 deploying it is activation, not a diagnostic read.
 
-Queued incident deliveries whose incident is already resolved complete without
-a provider call. Their terminal outbox action and durable skipped attempt record
-say `superseded_incident_resolved`. This includes queued recovery messages.
-An existing provider-start marker remains an unknown outcome instead of being
-reported as superseded.
-The first dispatcher claim groups the existing pending email and Discord
+Resolved-incident delivery follows the [incident record contract](records.md#public-ingress-incident-records).
+The first dispatcher claim groups the existing pending email
 incident deliveries by incident, policy and destination in one transaction.
 It includes expired unmarked claims and excludes provider-start markers and
 active leases. Each group retains one summary delivery; the other rows complete
@@ -445,8 +441,6 @@ The selection receipt does not prove delivery. Activation readback must inspect
 all selected incidents for failed deliveries or exhausted retries as well as
 successful and skipped attempts; an unavailable destination or exhausted summary
 leaves a visible failure and does not revive the superseded backlog.
-GitHub issue lifecycle deliveries and marked unknown outcomes are unchanged.
-Resolved GitHub rows also retain unknown outcomes without provider reconciliation.
 
 Historical provider retirement records may retain an empty target list. They
 remain skipped reconciliation evidence with `monitoring_intent_changed`, never
@@ -629,7 +623,9 @@ mutation_in_progress`; a completed effect replays; a different request
 
 For a held event-driven testing deploy, a scoped admin can first call
 `GET /v1/admin/generic-web/deploy-recovery/{product}/testing` under the existing
-`product_environment.read` authority. This database-only read returns one opaque
+`product_environment.read` authority. An authenticated Director agent's existing
+service marker also admits only this GET without a product grant; ordinary terminal
+agents and all terminal-agent recovery POSTs remain refused. This database-only read returns one opaque
 `recovery_reference`, lane and reservation state/attempt. It requires one exact
 held reservation in the event reconciler's scope and an original deploy request
 whose retained request or saved reconcile inputs match the reservation fingerprint.
@@ -860,6 +856,22 @@ deployment record id and finish time, and it writes no deployment or inventory
 record because no provider deployment was observed. The target is then free for
 the next normal deploy, which records fresh deployment evidence.
 
+The same `close_out_observed` disposition can retain an exact failed testing
+Compose attempt that was refused before dispatch but whose failure publication
+incorrectly checkpointed `records_commit`. It requires the original first
+attempt's expired lease, matching original request and current target bindings,
+and its attributable `lane_movement.ancestor_build` or
+`lane_movement.older_artifact` record. The record must have the unobserved
+deployment sentinel and no runtime identity, bootstrap, post-deploy, dispatch,
+execution, lifecycle or delivered-input evidence. Its start cannot predate the
+original reservation's creation second. Provider absence and `records_commit`
+alone never qualify it; conflicting provider observation retains the hold.
+Apply takes product and testing execution exclusion, compares the original
+intent and evidence rows transactionally, and preserves the typed failure as
+the terminal HTTP 409 result. No provider deploy, inventory update or record
+rewrite occurs. Ordinary pre-effect refusals check lease ownership without
+creating an effect checkpoint; earlier real effects remain fenced.
+
 The bounded provider-evidence route reports failed correlation invariants as
 `provider_status_unknown`; provider request failures remain `provider_read_failed`
 with only the existing bounded read-error class.
@@ -1046,27 +1058,6 @@ provider payload data.
 > described in this doc remain only until their deletion (#2606, #2740); do not
 > extend them or onboard a product onto them.
 
-The original communication model was:
-
-- Launchplane runs as a long-running service behind an admin-owned stable
-  host.
-- Product workflows communicate with Launchplane over authenticated HTTP.
-- GitHub Actions OIDC is the default machine-to-machine trust boundary.
-- Launchplane authorizes requests from GitHub-issued identity claims such as repo,
-  workflow, ref, environment, and event context.
-- Typed evidence payloads are the stable contract; CLI commands are service
-  clients, DB-backed admin tools, or explicit local-only rehearsal and
-  inspection helpers.
-
-Launchplane should eventually expose API ingress for at least:
-
-- deployment evidence
-- promotion evidence
-- inventory refresh triggers or derived writes
-- preview generation evidence
-- preview destroyed evidence
-- driver-triggered runtime actions where Launchplane owns execution
-
 The first explicit version of that boundary, including the OIDC claim mapping
 and endpoint list, lives in [`service-boundary.md`](service-boundary.md).
 Agent-facing read context and scoped write-intent consumption rules live in
@@ -1082,8 +1073,7 @@ uv run launchplane service serve \
 ```
 
 The service needs an explicit minimal bootstrap policy input, but the repo no
-longer tracks the live policy. Product and workflow grants should be represented
-as DB-backed authz policy records. Omitting `LAUNCHPLANE_DATABASE_URL` always fails closed,
+longer tracks the live policy. Omitting `LAUNCHPLANE_DATABASE_URL` always fails closed,
 including loopback local development, rather than using file-backed JSON state
 as authority. The GitHub OIDC audience is explicit admin/process wiring;
 production code must not default it to a live domain.
@@ -1134,9 +1124,6 @@ runtime memos belong in product repos; this repo keeps only the shared driver
 and record contracts.
 
 The service uses GitHub OIDC bearer tokens and DB-backed authz policy records.
-Additional evidence routes should land against the same authn/authz boundary
-rather than creating separate ad hoc ingress patterns.
-
 Managed authz policy reconciliation is a native FastAPI service route. It
 requires DB-backed policy storage, enforces `authz_policy_grant.write`,
 preserves signed-in GitHub human-session callers, and keeps dry-runs stateless.
@@ -1434,24 +1421,41 @@ product, context, instance, domain, or provider selectors. The service derives
 its bounded target set from DB-backed Odoo product profiles, keeps only exact
 `testing` lanes with active service-owned route bindings, and skips absent,
 disabled, externally managed, non-Odoo, and production bindings. The target
-limit is 25 and exceeding it fails the whole plan before any write.
+set is restricted to the caller's existing exact-instance authority before
+planning or counting toward the limit of 25. Exceeding that limit fails the
+whole plan before any write; unrelated products cannot consume it.
 
 Controller dry-run requires the service-scoped
 `route_binding.odoo_testing_refresh.plan` action plus `route_binding.read` for
-every discovered exact instance. Apply requires the separate service-scoped
+each included exact instance. Apply requires the separate service-scoped
 `route_binding.odoo_testing_refresh.apply` action, `route_binding.apply` for
-every discovered exact instance, a unique `Idempotency-Key`, and confirmation
-`APPLY ODOO TESTING ROUTE BINDING REFRESH`. All discovered binding grants are
-checked before the first write. The controller then invokes the same
+each included exact instance, a unique `Idempotency-Key`, and confirmation
+`APPLY ODOO TESTING ROUTE BINDING REFRESH`. Included binding grants are
+checked again before the first write. If bindings exist but none is authorized,
+the controller returns 403 rather than an empty success. Excluded bindings are
+neither planned, observed, written nor included in the response. The controller invokes the same
 provider-neutral planner as manual reconcile and writes due refreshes
 sequentially through each binding's PostgreSQL CAS/transaction lock. A parent
 mutation reservation fences concurrent same-key controller runs and is completed
 only after the bounded child loop. Unchanged, blocked, and conflict outcomes are
-returned without mutation; one denied target blocks the whole batch. The
+returned without mutation. Replays reauthorize every stored outcome, including
+targets no longer in the caller's discovery scope. The
 reusable workflow accepts only mode, reason, and an idempotency key, preserves a
 30-day request/response artifact, and fails after artifact upload when any target
 requires attention. Production enrollment is a separate change and cannot be
 selected through this endpoint.
+
+The authenticated Director agent using the `local_operator` credential may also
+apply this testing-only controller through its declared standing action, without a
+controller grant. The Director's standing read authority is evaluated and audited
+for each native published binding. Renewal requires original publication custody and a fresh
+matching managed-route and running-backend observation before the atomic evidence
+write. Recorded host and alias roles follow that observed owned publication;
+immutable publication/address receipts and provider routes do not change. Drift
+or missing custody stays blocked. This
+alternative neither admits legacy bindings without their existing apply authority
+nor applies to the production-capable stable controller, scoped agents or terminal
+mutations. It changes no provider route or access policy and adds no renewal clock.
 
 The [record contract](records.md) documents the separate remaining-stable
 controller for bindings outside this testing-only slice.
@@ -1644,6 +1648,39 @@ completion deadlines remain unchanged. Failed probes and mismatched identities
 remain failures immediately, and stopped probes become stale at their original
 observation's deadline. Qualify actual completion latency and storage growth
 on the deployed service before starting a continuous-green observation clock.
+Each observation is dated when its probe starts, including confirmation retries,
+rather than at the beginning of target discovery. Deployment authority includes
+the newest attempt by start time, so a pending attempt cannot be hidden behind
+an older completed record. Pending and terminal deployment changes trigger a
+fresh check even when inventory has not changed.
+
+A new HTTP/identity incident is deferred for at most five minutes from its own
+lane's recorded deploy start while replacement readiness remains unproven.
+Provider completion can precede the actual container replacement. A passing
+probe with the replacement's matching runtime identity, or identity-verified
+release health, ends deferral immediately. A plain pass or the old runtime's
+identity cannot prove the replacement ready. The lane must belong exclusively
+to one active product; any recorded deployment identity must agree with it.
+A pending record must have no finish; a provider-completed record must have a
+valid finish between its start and the probe. Recorded failures are never
+deferred. Unorderable deployment history retains
+normal alerts; comparable start times are ordered in UTC. Only deploy identity,
+start, status, finish and failure presence enter scheduler revisions, so
+checkpoint-only evidence rewrites do not start another probe.
+Failed probes remain failed, retained evidence and cannot earn green time.
+Their summary identifies the deploy. Readiness, failure or expiry ends the
+deferral; the next failed probe opens the incident and its normal alert outbox.
+Existing incidents and failures preceding a new attempt stay alertable, so
+successive attempts cannot renew the window over an outage. DNS, TLS,
+configuration, dependency, delivery, fence and cadence failures are not deferred.
+No deployment, merge-train or recovery admission gate is added; monitoring does
+not change a deployment or settle its effects. Unsupported deployment reads
+retain normal incident behavior.
+Lanes that never report matching identity retain the full original deferral
+bound; a passing response without identity does not shorten it. Unorderable
+stored observation history retains normal alerts instead of interrupting the
+monitor run.
+
 A long change-triggered run can still delay a subsequent scheduled slot; multiple
 probe waves can also exceed the publication budget. Those are scheduler latency
 limits, not permission to renew old proof or hide a missed completion.
@@ -1672,7 +1709,7 @@ and route `service:health-monitor-scheduler`; testing slot keys are namespaced
 separately. The v2 activation starts a new evidence epoch: older half-hour
 receipts remain in storage but cannot prove the faster schedule.
 Service logs identify completed and missed slots; incident and notification
-records show alert delivery, recovery and superseded resolved-incident deliveries.
+records show alert delivery, recovery and superseded failure alerts.
 Watchdog reporting has its own renewed lease and DB-backed per-slot receipts,
 so replicas and restarts share miss/recovery delivery state.
 
@@ -1908,9 +1945,8 @@ material change clears acknowledgement and is immediately eligible for delivery.
 A bounded silence preserves all observations/events but suppresses material
 updates and reminders until `silenced_until`; after expiry the next unresolved
 failure can emit the current reminder. Resolution remains a durable incident
-event; the outbox supersedes delivery once the incident is resolved. External
-GitHub issues are therefore not automatically closed by durable recovery
-delivery. Public, private, and provider checks use the configured consecutive-pass recovery
+event; delivery follows the [incident record contract](records.md#public-ingress-incident-records).
+Public, private, and provider checks use the configured consecutive-pass recovery
 threshold; only the threshold-crossing pass creates the single recovery event.
 
 Inspect active incident state from Product Ops before following an external
@@ -2013,6 +2049,21 @@ notification. It neither changes production nor resolves any existing incident.
 Failures after a deploy starts, other rejections, and uncertain outcomes remain
 delivery incidents.
 An artifact's later successful production delivery resolves its delivery incident.
+A fully completed Client-accepted native recipient release can also recover its
+own or an older recipient's delivery incident. Its entire release plan, including any
+rollback drill, must pass. The currently published authority must still belong
+to that recipient, with fresh health and matching runtime identity observed
+after final completion. Every retained failure must identify that release or a
+retained recipient's settled native operation. All steps of a retained decision
+must have settled effects before its shared trace qualifies. A failed promotion
+needs a terminal receipt proving no writer effect or successful protective rollback.
+An abandoned preflight refusal qualifies only through the native exact-attempt
+proof and its failed undeployed promotion; absence of a reservation alone is
+insufficient. Failed backups qualify only through the existing positive
+pre-capture absence proof; provider timeouts and uncertain captures stay fenced.
+Unknown effects, unrecognized traces,
+newer failures, incomplete releases and later unaccepted decisions keep the
+incident open. Historical failures and original operation receipts remain.
 A failed generic-web rollback deployment also recovers when a later rollback on
 the same production lane passes, even when its target artifact differs. Every
 failure retained in the incident must identify a failed rollback deployment for
@@ -2027,7 +2078,7 @@ time. Different failures at the same time retain distinct observations, while an
 exact replay is idempotent. A concurrent new failure defers recovery to the next
 monitor pass without opening a monitoring-unavailable incident.
 Recovery uses the ordinary passing observation and preserves the original failure.
-Runtime health alone, a newer forward delivery of another artifact, an unsuccessful
+Runtime health alone, an unrelated forward delivery of another artifact, an unsuccessful
 rollback, or a rollback on another lane cannot resolve that failure.
 The service's independent delivery-monitor thread checks terminal deployment,
 promotion and queued Odoo release failures once per minute, including products
@@ -2200,9 +2251,8 @@ or receipt evidence keeps the incident open. The monitor locks and rechecks the
 proof with the existing provider-source gate before publication. This changes no
 provider resource, replays no executor, invents no nonce and supplies no deployment
 verification; health, identity, TLS and freshness retain their separate gates.
-The outbox worker sends email and Discord as well as GitHub notifications for
-still-open incidents. Recovery does not manufacture another notification to
-resume delivery; resolved-incident deliveries are superseded. Each delivery keeps the original event and rendered body;
+The outbox worker sends email and Discord as well as GitHub notifications.
+Each delivery keeps the original event and rendered body;
 email/Discord payloads reference the policy destination without copying credentials
 or secret references. The worker resolves that destination from current enabled
 policy and the existing managed-secret resolver at send time.
@@ -2224,8 +2274,7 @@ stable incident marker for issue recovery. Updates and reminders
 search the incident marker when their queued payload predates the committed
 opening attempt record, then comment on the recovered issue rather than
 creating a duplicate. File-backed rehearsals retain synchronous resolution
-delivery and issue closure. Durable deliveries for resolved incidents are
-superseded instead. Do not clear provider markers or outbox rows to force a retry.
+delivery and issue closure. Do not clear provider markers or outbox rows to force a retry.
 GitHub issue notification delivery uses the managed automation token projected
 as `LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN`; it does not fall back to active
 local `gh` authentication. Verify the configured actor with a token-scoped
@@ -2851,30 +2900,123 @@ handoff; a record-backed report does not establish current provider health.
 
 ### Conventional generic-web onboarding
 
-Use the manual `Product Onboarding` workflow for a new generic-web product.
-Start with `mode=dry_run` when admin review of the exact plan is useful, or
-use `mode=apply` for one dispatch that pauses at the protected
-`launchplane-authz-admin` environment before any writes. Provide product,
-repository, image repository, runtime port, health path, preview base URL, and a
-reason/issue reference; optional names derive from the product key. The preview
-base URL must be a root URL. Its wildcard DNS and ingress namespace must already
-route to the selected Dokploy server because onboarding owns Launchplane and
-Dokploy records, not public ingress provisioning.
+#### Native target allocation
 
-The workflow resolves immutable GitHub identity, plans one non-production
-Dokploy application, plans Launchplane records including the context-scoped
-`LAUNCHPLANE_PREVIEW_BASE_URL`, and plans the complete
-`operator.generic-web-preview` managed authz set. The apply job reuses the
-reviewed plan artifact and digests. Do not copy target ids, manifests, authz
-JSON, or database credentials into the conventional workflow.
+`POST /v1/dokploy-targets/setup` accepts an `onboarding` intent for a new
+generic-web product. A CSRF-checked signed-in administrator or authenticated
+Director agent can use this bounded path without a workflow caller grant.
+It allocates an empty testing application in a new project and environment;
+it does not apply product profiles, runtime settings, policy or deployments.
 
-Planning authority is read-only and distinct: the plan job uses
-`dokploy_target.plan`, `generic_web_onboarding.plan`, and
-`generic_web_preview_authz.plan`. Only the protected apply worker receives
-`dokploy_target.setup`, `product_onboarding.apply`, and
-`authz_policy_grant.write`. Both protected workers are called by immutable
-full-SHA reusable-workflow refs so policy-admin grants never depend on a mutable
-branch identity.
+Before constructing the intent, read the target repository with the catalog's
+configured automation identity, which must already have read access:
+
+```bash
+set -euo pipefail
+mkdir -p state/onboarding
+<catalog>/skills/github/scripts/gh-with-env-token api "repos/$PRODUCT_REPOSITORY" > state/onboarding/repository.json
+jq -e '
+  (.id | type == "number" and . > 0) and
+  (.owner.id | type == "number" and . > 0) and
+  (.default_branch | type == "string" and length > 0)
+' state/onboarding/repository.json
+jq '{repository: .full_name, repository_id: (.id | tostring),
+     repository_owner_id: (.owner.id | tostring), default_branch}' \
+  state/onboarding/repository.json > state/onboarding/repository-identity.json
+```
+
+Here `<catalog>` is the installed codex-skills checkout. Bind the returned
+`repository`, `repository_id`, `repository_owner_id` and `default_branch` into
+the intent used by both operations. Keep the saved response with the reviewed
+request. Missing or inaccessible metadata stays UNKNOWN; do not guess IDs,
+substitute credentials or request a caller grant. Missing read access follows
+the existing access stop boundary.
+The preview base URL must be a root URL whose wildcard DNS and ingress already
+route to the selected server; onboarding does not provision public ingress.
+
+Supply the typed `GenericWebOnboardingIntent` and the corresponding ordinary
+target request with `operation: create-application`, `target_type: application`,
+`instance: testing`, `environment_name: testing` and an explicit `server_id`.
+Context, target, project, server, health path and source ref must match the
+intent. Existing placement ids, domains, repository source setup, replacement
+targets and state volumes are refused. Both testing and preview contexts must
+be unowned and free of target/deployment records, including previous product use.
+Those facts are checked before each provider write and under the authority
+guard before adoption.
+Provider names are service allocation markers; product-record apply preserves
+the adopted names.
+
+Start with `mode: dry-run` and a chosen `Idempotency-Key`. Save the exact
+request, key and response privately. The response supplies
+`target_request_sha256` and `onboarding_plan_sha256`. The target digest uses
+canonical JSON of the validated target request, excluding mode, reason,
+confirmation, retention controls, onboarding intent and the two review digests.
+The record-plan digest uses the existing onboarding intent contract. Send both
+back as `reviewed_target_request_sha256` and
+`reviewed_onboarding_plan_sha256` for apply or readback. Apply also requires
+the existing exact confirmation and a reason, and the saved plan under the
+same actor and key. These are native service digests, not the compatibility
+workflow's byte digest of its JSON artifact.
+A changed dry-run requires a fresh key; an existing key preserves its original
+plan even before allocation begins.
+
+On an uncertain outcome, preserve the original request, actor and key. Use
+`mode: readback` to inspect durable progress and `custody_sha256`, then resume
+with unchanged `mode: apply`, or retain with `retain_allocation: true` and
+`expected_allocation_custody_sha256` from that reviewed readback. Recovery uses
+the existing allocation machinery; it never repeats a positively recovered
+create, deletes resources or applies onboarding/policy records. Retained
+allocations keep their original custody and cannot resume creating resources.
+Apply the separately reviewed product-record plan only after allocation succeeds.
+
+The authenticated Director agent can use `POST /v1/product-onboarding/apply`
+with `generic_web` and `mode: dry_run` to review the record plan, then apply it
+with `reviewed_plan_sha256`, the recorded application's `resolved_target_id`
+and the target plan's `allocation_id`. Native apply requires an `Idempotency-Key`.
+The saved allocation belongs to the same actor and must contain the unchanged
+onboarding intent and verified application identity. This also applies to native
+browser apply. A changed intent needs its own reviewed allocation. Apply preserves
+the allocated application identity and generated project/target names. Product
+and context ownership are checked under the atomic record-write lock. Known
+deployment records or other targets in either context are refused.
+Unchanged original-key replay returns the committed receipt. Advanced manifests
+retain their existing service authorization; this path grants no broader action.
+
+The deployed target and record path was qualified in
+[#5263](https://github.com/cbusillo/launchplane/issues/5263#issuecomment-6490944855):
+original-actor/key readback, record identity/replay and lost-client-response
+recovery passed without policy changes. Partial server-checkpoint continuation
+remains rehearsal proof. This qualifies empty target and record onboarding;
+it does not establish working previews or real-repository artifact provenance.
+Verify those independently through [event-driven delivery](event-driven-deploys.md).
+
+#### Compatibility workflow recovery
+
+`Product Onboarding` refuses new-product dry runs and applies before any API
+request. New products use the native operations above. Its remaining dispatch
+surface renders only the original target request and calls the unchanged
+immutable recovery worker. No repository token, product-record plan, caller-grant
+plan or authz reconciliation is requested.
+
+Keep the original target-affecting dispatch inputs, reason and any explicit
+allocation key. Former product metadata inputs remain accepted for compatibility
+but are optional and unused during recovery. For readback, set outer `mode=dry_run` and
+`allocation_control={"mode":"readback"}`. For continuation, use outer
+`mode=apply`, exact confirmation `APPLY GENERIC WEB ONBOARDING`, and
+`allocation_control={"mode":"apply"}`. Include the original `idempotency_key`
+when one was supplied; otherwise the original derived key is preserved.
+Retention additionally requires `retain_allocation: true` and the reviewed
+`expected_allocation_custody_sha256` from readback. Keep the original actor and
+request; never replace the old byte-artifact digest with a native canonical
+one. Recovery skips product and authorization record apply. Do not repin or
+retire the old worker until every old workflow allocation is accounted for;
+completed workflow history alone does not establish that custody is clear.
+If readback finds an old target whose product records were never applied,
+settle its custody through reviewed retention, then start native onboarding
+with fresh testing and preview contexts. Keep the retained resources; do not
+pass the old workflow allocation to native record apply, which requires its
+own same-actor native plan.
+The current-source worker is separate from this immutable recovery revision.
 
 Use `Generic Web Preview Authorization` for reviewed `onboard`, `expand`,
 `contract`, and `retire` operations. `onboard` bootstraps the managed preview
@@ -2890,15 +3032,12 @@ run `contract` at that same SHA. This reviewed overlap removes legacy managed
 rule identities without an authorization gap. Use `retire` when offboarding the
 product entirely.
 
-If provider creation succeeds and a later step fails, rerun the exact same
-workflow inputs, including the reason. Stable idempotency keys replay the provider result and prevent duplicate
-creation. If records succeed but authz fails, leave the records in place and
-rerun; the product remains unauthorized until the existing managed authz
-reconcile succeeds. Use `Product Onboarding Manifest (Advanced)` only when the
-typed generic-web contract does not fit, and use `Dokploy Target Setup` for
-adoption, production, compose, or repair operations.
-
-Conventional onboarding creates new products only.
+Use `Product Onboarding Manifest (Advanced)` only when the typed generic-web
+contract does not fit, and `Dokploy Target Setup` for adoption, production,
+compose or repair operations. Keep the existing generic-web caller-rule
+planner and retirement/readback routes for old products. Its App client ID and
+private-key inputs are shared with `Generic Web Preview Authorization`; this
+onboarding removal does not retire credentials, grants or policy records.
 
 - Promotions and deploys reference explicit artifact identifiers.
 - Missing control-plane config is a hard error, not a silent fallback.
@@ -3666,6 +3805,16 @@ alone is not proof that an existing testing copy has been repaired.
     `invalid` never delivers, and a wire-transfer or demo payment provider
     reaches no service, so neither counts. Odoo generates its web-push keys on
     the lane itself, so `web_push` is checked only right after a restore.
+    Payment readback recognizes Odoo 19's registered `state` and Odoo 20's
+    registered boolean `active`/`is_live` fields and their physical types.
+    Retired SQL columns do not select an obsolete model schema.
+    Enabled and test providers in 19, and active
+    providers in either mode in 20, require the existing payment allowance.
+    Disabled 19 providers and archived 20 providers retain their exemption.
+    Installed active remote providers still need an allowance in 20 even
+    when their credentials are empty. An unsupported
+    payment schema fails the readback even when its table is empty or an
+    allowance exists.
   - Values are compared inside PostgreSQL and never leave the database. The
     schedule log reports `integration_readback_ok`, the number of settings
     checked, and `integration_readback_refused` or `integration_readback_allowed`
@@ -4637,6 +4786,10 @@ Successful empty scans say no previews observed; disabled previews are not
 applicable. Missing or unsuccessful scans cannot establish absence. Do not edit
 records to renew freshness. Service logs and the separate
 `launchplane:preview-inventory-scheduler:v1` slot receipts retain collection outcomes.
+The product overview warns when observed previews have no active lifecycle
+record, using the existing inventory mismatch. A fresh successful scan proves
+inventory freshness, not cleanup convergence. Retained failed preview operations
+remain covered by the existing provider-fence incidents and notifications.
 Rollback is the normal previous-service-image rollback: scans retain the strict v1 payload shape with versioned scope metadata in the
 existing source field, the prior daily job remains supported, and evidence naturally
 expires if collection stops. No grants, workflow settings or credentials are added
@@ -4656,7 +4809,26 @@ anchors from open GitHub pull requests, including drafts, writes lifecycle plans
 results, which Product Ops shows per product. Destructive provider cleanup
 still requires an explicit `apply=true` request to
 `POST /v1/previews/lifecycle-sweep` from a separately authorized caller; the
-manual `Preview Lifecycle` workflow dispatch remains that route.
+native **Engineering Ops → Preview cleanup** page offers **Report** and
+**Apply cleanup** for all preview-enabled products. Cleanup requires the explicit
+delete confirmation; it discovers current desired state again, rather than
+applying a previously displayed report. The page shows per-product failures,
+held reservations and record/trace evidence even when the HTTP request completes.
+A dropped response locks both modes in this browser tab until the original
+request is retried with its retained operation key, including after a reload.
+The page reconstructs the original report or cleanup request by matching that key's
+retained fingerprint; it does not depend on a separately saved form draft.
+Each new cleanup attempt consumes its delete confirmation, including a refused
+attempt. Retrying an uncertain cleanup preserves the originally confirmed
+request and key.
+
+The manual `Preview Lifecycle` workflow and its URL/audience/source settings stay
+supported during #3514's migration. Do not remove them until deployed native
+report/apply behavior, current binding/default and rollback evidence qualify the
+replacement and Chris's fresh settings-deletion table. Source tests alone do
+not establish that deployed proof.
+An authenticated Director agent may run the report-only sweep without cleanup
+mutation authority. Apply requests keep their existing authorization checks.
 Preview-disabled products are excluded from the sweep. PR feedback goes through
 `POST /v1/previews/pr-feedback`; Launchplane renders and upserts the anchored PR
 comment when runtime GitHub credentials are available, then records delivery
@@ -5250,8 +5422,10 @@ optional `inputs.fishbowl_source` reference: `context`, `instance` and
 `version_id`, using the managed `copy_from` reference shape. Obtain the version
 from `product-secret-bindings-read`; select the product's existing **testing**
 Fishbowl password binding, never production's binding or a plaintext value.
-This option is for a disposable PR preview nobody is using. It does not touch
-the testing database, import history, promote or release anything.
+This option is for a disposable PR preview nobody is using. Qualification reads
+the testing database through a read-only session and requires its installed
+importer and shared payload addons. It does not write testing data, run an import,
+promote or release anything.
 
 The service requires an exact testing binding classified `shared_safe`, with
 `read_only_source` sharing evidence, plus testing's existing Fishbowl
@@ -5271,7 +5445,10 @@ overrides preserve persisted parameters; installed producer defaults apply only
 when the parameter is absent. Legacy field environments and copied defaults are
 not a fallback. Uninstalled addons, missing password delivery, conflicting or
 secret-backed non-secret authority, unverified TLS and drift refuse the optional
-source. Ordinary previews without the source remain available. Planning compares the
+source. The existing `source_unqualified` refusal includes the bounded failure
+stage when proved, such as `capacity`, `addon_state` or `source_resolution`.
+An absent stage remains unknown; it does not establish a missing binding.
+Ordinary previews without the source remain available. Planning compares the
 selected managed password with delivered metadata in memory; it does not copy
 the password into its response or evidence digest.
 
@@ -5498,6 +5675,13 @@ Each source child has a ten-second deadline; container execution has a
 budget. Runtime probes share the existing concurrency bound and unknown-result
 cooldown, keyed separately by binding/version and container. Successful results
 are never cached. An unreachable source does not hide other source results.
+Each source includes a nullable, value-free `failure_stage` from the shared
+prerequisite vocabulary. Capacity, installed-addon and qualification failures
+remain refused while retaining their proved stage; unavailable facts stay
+unknown. A global reader failure is projected to each selected source, while
+a source-local failure preserves unrelated observations. A cooldown or
+single-flight refusal reports `capacity`, not a cached earlier failure reason.
+No raw exceptions, connection parameters or credentials appear in these stages.
 Only the documented read privileges above are accepted; role grants, partial
 revokes, incomplete/unrecognized syntax and drift remain unknown.
 
@@ -5562,18 +5746,11 @@ health-alert policies and historical delivery evidence intact.
 
 Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
 `RETIRED_TABLES` in that revision. Normal service startup targets the
-non-runtime profile archive `a4c8e0f2b6d3` (see below), which follows
-discussion-topic revision `b81ca763d924` and the separately approved Q533
-preview-enablement drop, `e8d2f6a0b4c7`. That preview branch starts at
-`e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
-and a green PR do not authorize applying the drop to the shared database.
-The candidate runtime accepts the common predecessor, either branch revision,
-their original empty merge revision, `e9e3a7b1c5d8`, the additive topics revision,
-its existing held-path join `da72490fce13`, and the prepared hostname revisions
-and compatibility joins described below. It retains expiry/key-retirement,
+[canonical hostname activation](#canonical-hostname-activation), including the
+non-runtime profile archive, managed preview settings and idle retirement. The
+release default preserves all held delivery history. The candidate runtime
+requires that activation before it serves traffic. It retains expiry/key-retirement,
 activation/history/policy maintenance, custody evidence and native train fences.
-These are recognized revision paths; the HTTP service also requires the topics
-table and starts only after the release migration has added it.
 While this hold is active, schema initialization refuses a migration graph whose
 head has advanced beyond the reviewed compatibility join. A later schema change must
 reconcile the hold, runtime compatibility and supported migration targets in the
@@ -5582,11 +5759,13 @@ step; advancing an unrelated additive migration does not authorize it. Lifting
 the hold requires the shared-data/release approval below.
 
 The release default never traverses the held branch. If a database has already
-applied the held drop or the original join, startup applies the missing preview
-and topic migrations and joins the paths at `da72490fce13`.
-After explicit approval, requesting the held revision on a database already at
-the preview or topics revision applies the held drop, adds topics if missing,
-and joins at `da72490fce13`. These routes leave
+applied the held drop or one of its joins, startup joins the missing approved
+branches through `schema_migration_target`. After explicit approval, requesting
+the held revision from an activated hostname-only schema reaches its compatibility
+join; an integration-attestations schema reaches the later attestations join.
+Use the planner's target for the observed current revision. Earlier schemas
+keep their explicit historical application routes, followed by normal startup.
+These routes leave
 one recorded Alembic revision; startup never mistakes incomparable branches for
 ordered versions. Do not substitute Alembic `head` for the release migration
 target: `head` includes the held drop and is reserved for disposable rehearsals
@@ -5620,13 +5799,14 @@ window. The source rehearsal seeds every retiring table and checks restored
 rows/columns plus every surviving table's contents. A dump file without a proven
 restore is insufficient.
 
-Only after that proof and the recorded approval, the approved host/image runs:
+After Q777/Q966's approval and the actual restored-backup proof, use the
+[bounded maintenance keeper](#bounded-launchplane-database-maintenance) below.
+It runs the prepared migration on the same connection and transaction as the
+backup locks. Do not run the separate-process migration command against that
+keeper: it would wait for the keeper's own schema and table locks.
 
-```bash
-uv run python -m control_plane.storage.schema_migration --target-revision e7c1d5e9a3b6
-```
-
-The existing serialized migration helper holds the deployment advisory lock.
+The existing serialized migration helper holds the schema-migration advisory lock;
+that lock alone does not stop database writers or deployments.
 The revision takes non-waiting exclusive locks on all existing retiring tables
 before dropping any, uses restrictive drops, and never cascades into an unexpected
 dependent object. A busy table or retained database dependency aborts the
@@ -5643,6 +5823,317 @@ rows. Recovery requires a separately approved restore of the verified full
 pre-migration backup with its matching image and writer quiescence. Images
 before this preparation accept only the old revision and cannot simply restart
 against the contracted database. Keep the Protection App/access decision separate.
+
+### Bounded Launchplane database maintenance
+
+This path holds Launchplane's own writers and deployments through a full private
+backup, actual isolated restore, exact retirement rehearsal and verification.
+It adds no normal request or transaction barrier. Source must be reviewed,
+landed through the train and present in the exact running image before use.
+Q777 and Q966 on #2437 retain full hold/full-backup recovery; online backup or
+selective table recovery does not meet that decision. Client databases,
+credentials, grants and product resources are excluded.
+
+On the documented Launchplane host, copy only the reviewed image's
+`control_plane/database_maintenance_host.py` into a private directory. The
+standalone driver needs Python 3.11+, root's existing Docker/systemd access and
+Linux pidfd signal support and a single exact Docker cgroup membership per
+original process. Qualification adds no packages or capability grants.
+The existing PostgreSQL container must expose its Unix socket directory; the
+verification helper consumes that socket in place through a read-only mount:
+
+```bash
+python3 database_maintenance_host.py plan --api-container API_CONTAINER \
+  --postgres-container POSTGRES_CONTAINER --duration-seconds 1800
+python3 database_maintenance_host.py hold --api-container API_CONTAINER \
+  --postgres-container POSTGRES_CONTAINER --duration-seconds 1800
+```
+
+`plan` reads exact project/container/image/database identities, current DB-backed
+own target, provider queue/history and self-deploy workflows. It creates only
+private evidence, a temporary keeper helper and an isolated loopback health
+probe. The planning/keeper helper uses the existing `.env` in place and the actual API image ID, with no ports, logs,
+restart policy, runtime volumes, Odoo copy or prepared-public mounts. Its root
+is read-only, temporary storage is RAM-backed, and its only host mount is private
+maintenance state. The credential-free browser may remain running. Every own
+writer must match the image. The complete Docker inventory, including dormant
+and foreign-source containers, must have exclusive credential custody: a raw or
+percent-decoded copy of the API database password in any other environment or
+configured command refuses qualification. A same-image container without explicit
+independent database credentials also refuses qualification.
+The exact PostgreSQL server is trusted bootstrap custody, bound separately to
+the API's database system identifier; it stays running for the backup. It is
+never treated as an application writer to stop or an arbitrary extra client.
+The API needs explicit PostgreSQL username/password wiring; credential indirection
+is unqualified. Values stay in process memory and are never emitted. Unknown
+identities refuse.
+The plan binds the original PostgreSQL container and database system identifier.
+Each probe resolves a host-namespace mount or merged-directory source and compares
+its socket device/inode with the actual container socket. A process restart in
+that same container can rebind after the cluster check; a different container
+or cluster refuses recovery. A proc-root path is not used as a bind source.
+No database directory or credential file is mounted into the verification helper.
+`plan` qualifies its actual read-only startup and HTTP health before any pause.
+That qualification authorizes no backup or retirement; committed-state verification
+repeats under the complete writer hold.
+
+Before stopping services, `hold` installs and reads back a persistent systemd calendar
+timer/service, records every original restart policy, and suppresses automatic
+restart on those exact IDs. Private fsync'd state and watchdog files survive
+reboot. The watchdog runs release at the recorded deadline, including after a
+missed deadline during reboot. That oneshot service is the single recovery process:
+EOF cleanup, the deadline and explicit release requests join the same systemd job.
+The keeper ends at COMMIT; only that process verifies committed state.
+Each automatic recovery entry consumes a fsync'd budget in the existing private
+state before external commands, including an unavailable ownership read. Reloading systemd or restarting the interpreter cannot reset that count. Unit rate limits are
+secondary protection, and each service attempt has a timeout. Genuine unsafe or
+blocked results and exhausted automatic budgets have distinct non-restarting
+statuses. Explicit manual release replenishes only the main automatic budget
+through the supported driver, waits for state custody, then starts or joins the
+same service and its applicable verification gates. It never restores data or
+replays an uncertain provider request. The main service is enabled for the next
+boot without starting at installation; the existing calendar timer still starts
+it at the deadline. Boot, EOF and deadline requests share the same executor and
+persisted budget. Observe actual release;
+installation alone is not a release receipt.
+
+The keeper takes the existing own-deploy dispatch lock and installs an expiring
+provider marker before shutdown. Own DB/image/repository binding, auto-deploy off,
+complete queue/history and absence of self-deploy workflows are required.
+Normal and emergency self-deploy guards enforce that marker. The host credential
+file must remain unchanged. No workflow, credential or access grant is changed.
+
+The keeper takes the existing schema, own-deploy dispatch and release-admission
+locks before checking executor observations. Existing exact executor-exit receipts
+and execution-lock observations preserve historical running/UNKNOWN fences;
+lease expiry is never absence proof. Additional running reservations and admitted
+worker work refuse shutdown. The train must be idle or in its qualified
+pre-effect selection phase. This observation is repeated after shutdown.
+
+The host persists each exact original's termination intent before sending SIGTERM
+through a kernel pidfd bound to that process and its container membership. There
+is no queued Docker stop and no SIGKILL escalation. All originals receive TERM
+before the shared shutdown deadline. Read-only own-role clients waiting directly
+on the keeper's advisory locks are canceled so their shutdown can finish; this
+never cancels a transaction with an XID or an unrelated address/blocker.
+Every original must have its qualified exit status, no OOM and automatic restart
+suppressed. The API permits the POSIX SIGTERM exit after Uvicorn graceful cleanup;
+ordinary workers must return success. Qualify those signal paths on the exact image.
+All six own writers stop, including the API and workers. No cgroup freezer,
+namespace firewall, API thaw, or second health timer is required.
+
+Shutdown timeout, changed identity or an unclean exit refuses backup admission.
+After database safety is proved, recovery restores and reads back every original
+automatic restart policy before waiting on any API or worker. New plans require
+original policies that restart a late clean exit, with no policy mapping.
+A delayed graceful exit can then restart through Docker even after the bounded
+automatic attempts are exhausted. Exit waits remain transient; a still-running
+process with TERM pending is never reported as recovered. A native signal can be repeated
+only against that original process. A newly needed forced termination or Client
+recovery action requires its exact Director question, never an automatic kill.
+The actual released readback qualifies the bounded window; a deadline alone does
+not prove release.
+
+The keeper then takes all-public-table EXCLUSIVE NOWAIT locks before its first
+repeatable-read snapshot. No application backend is disconnected to manufacture
+admission: zero other client backends and zero prepared transactions are required.
+Stopped originals, suppressed restart, credential custody, table locks and the
+repeated client census prove exclusion of further Launchplane commits. Zero
+selected drains do not. Foreign/materialized relations, other application
+schemas, large objects and table-set changes still refuse qualification.
+
+The private `held` receipt binds hold ID, keeper identity, exported snapshot,
+transaction, cluster and aggregate schema/full-row/sequence checksums. Trigger
+metadata includes enabled state and function bodies. No SQL definition, payload,
+column default, ciphertext or individual credential-column hash is emitted.
+Schema fingerprints normalize PostgreSQL's equivalent placement of unbounded
+varchar-to-text casts only within literal arrays that are the complete operand
+of ANY or ALL. Values, comparison operations, other casts and other metadata remain distinct;
+an unsupported difference still refuses the rehearsal. Deparsing uses fixed
+string and search-path settings in a savepoint, restores the caller's settings
+and releases the savepoint before exporting the keeper snapshot. A SQL error
+rolls back that savepoint without discarding the caller's earlier work or locks.
+After changing fingerprint behavior, deploy the source first and take a new hold
+and full backup. An older diagnostic receipt cannot authorize a later window.
+Stream the complete custom dump through the existing private transport:
+
+```bash
+python3 database_maintenance_host.py dump --state STATE_JSON
+```
+
+Stdout is binary; create its approved mode-0600 encrypted private artifact
+exclusively, never overwriting a verified file. The dump carries a private
+hold-scoped application name; the keeper admits only its Unix-socket/current-role/no-XID
+backend and binds its first PID/start identity. Generic pg_dump names refuse.
+Only one dump attempt is supported per hold; after a failed read, release with
+readback and create a new hold rather than blindly retrying or replacing evidence. Stderr and host state record the stream SHA-256; independently hash the
+private file and require agreement. Prove actual artifact custody with one
+read-only private file descriptor feeding both stream hashing and pg_restore;
+check file identity/size/mtime and the full checksum before and after, require
+agreement with the native dump stream, and retain that same artifact. The
+rehearsal checksum argument is accepted only with this independently recorded
+operational proof; it is not proof by itself. Qualify capacity, encryption, custodian,
+minimum retention and Director-reviewed disposal before capture. Leave the
+existing bootstrap/keyring in place; copy or export no credential/key file.
+
+Restore with PostgreSQL `pg_restore --no-owner --exit-on-error` into an empty
+qualified isolated cluster. It has no outbound network, published ports, logs,
+persistent mounts, application processes or production keys. Data and temporary
+storage are RAM-backed without VM swap, or independently qualified encrypted
+storage. Both PostgreSQL and migrator containers require `--ulimit core=0:0`
+with process-limit readback, so a crash cannot write a core onto an unencrypted
+VM disk. Capture restore/migrator stderr privately or in RAM and emit only fixed
+status summaries on failure. Use only the exact reviewed migrator image and private held receipt,
+never production configuration. The rehearsal requires a different system
+identifier, loopback DSN and no platform credentials. Run the migrator with
+`--cap-drop ALL --security-opt no-new-privileges:true`; it requires every
+capability set empty and NoNewPrivs enabled. Namespace-local socket flags,
+IPv4 addresses, IPv4/IPv6 routes and IPv6 addresses must prove that only
+loopback is active/configured/routed. Kernel-created DOWN unconfigured tunnel
+templates are permitted without a name allowlist; missing or unknown views
+refuse. The database container remains network-none, without NET_ADMIN or
+SYS_ADMIN, and its PostgreSQL OS user must have no effective capabilities. Join
+only that exact namespace with `--network container:<isolated-postgres-container>`.
+Read back matching namespace identities and both processes' zero core limits as
+helper evidence; the network guard does not inspect its PostgreSQL peer or
+replace those process-limit observations:
+
+```bash
+python -m control_plane.database_maintenance_cli rehearse \
+  --before-file HELD_RECEIPT --backup-sha256 VERIFIED_DUMP_SHA256 \
+  --hold-id HOLD_ID --expires-at DEADLINE
+python3 database_maintenance_host.py submit --state STATE_JSON --receipt-file REHEARSAL_RECEIPT
+```
+
+Rehearsal compares the actual restore with every source aggregate, applies only
+the prepared revision, and proves the exact retired table/function set,
+retained data, compatibility and full schema invariants. Non-serving readonly
+startup, retained-history, train and expiry callbacks must also pass on the
+restored clone without changing credentials; no application service runs there.
+The receipt binds the same hold/snapshot/transaction and actual dump hash. The private FIFO submits it;
+terminal input is monitored only for EOF. The live transaction repeats the
+checks, including full invariants on its held Connection before COMMIT.
+
+Before committing DDL, the keeper readbacks a non-expiring, exact own recovery
+marker and fsyncs `commit-pending.json` while serialized against host release.
+EOF, deadline or mismatch before commit rolls back. A pending/uncertain committed
+outcome cannot reopen writers merely because the original deadline elapsed.
+Normal, explicit, deadline and post-boot release all use the same read-only
+before/after verifier: first terminate and confirm the exact keeper backend
+is gone, then independently compare committed state with either verified full
+state, check revision/cluster and full invariants. Any unsafe or UNKNOWN result
+keeps originals stopped with restart disabled and the recovery marker
+held. The failure event states which evidence failed:
+
+- `database_unsafe`: the committed data or schema disagrees with the verified
+  states. Preserve the backup and bring the Director an exact full-restore
+  question; later writes could otherwise be lost.
+- `deployment_recovery_required`: an original marker effect remains unknown.
+  Re-observe that same operation through manual release. This is no evidence of
+  database damage and never calls for restoring a healthy database.
+- `verification_blocked`: identity or runtime/health verification cannot pass.
+  Bring the Director the concrete missing action if it exceeds Q777.
+- `release_incomplete`: a transient read or transport failed; retry is supported.
+- `automatic_recovery_exhausted`: automatic attempts stopped. Supported manual
+  release replenishes their allowance without changing any safety proof.
+
+None authorizes an automatic restore or drop retry. Events report whether resume
+started and whether all original writers were resumed; a failed read does not
+claim physical quiescence.
+
+Before reopening writers, the matching image runs its actual non-serving
+privileged-worker startup/schema probe, retained-history and train readers,
+and existing expiry callback against the committed live database. A generated
+in-memory URL adds enforced transaction read-only options to both actual store
+engines; no credential is printed or copied. Expiry must return success and
+zero changes. If a credential would expire, readonly enforcement refuses its
+write and verification fails. An earlier empty count is not expiry proof.
+
+The exact image then runs the normal service application factory and real
+lifespan, including DB-backed authorization/OAuth construction, native route
+validation and the unchanged startup confirmation callback. Only its five
+background schedulers are omitted. Both store pools remain enforced read-only;
+a would-write startup, expiry or policy seed is fatal. The default startup schema
+action must already be compatible. A fresh loopback HTTP GET of `/v1/health` must
+return the service's success payload. Server shutdown and pool disposal finish
+before verification succeeds.
+
+This temporary API runs against the actual own database, never against the
+restored copy. Its root is read-only, scratch is RAM-backed, capabilities are
+dropped, and its network namespace has only loopback. It reaches PostgreSQL via
+the qualified read-only Unix-socket mount, which may use the server's existing
+local-trust authentication. Only reviewed image code consumes that access; no
+role, authentication rule or grant is created. Existing bootstrap and keyring inputs
+are consumed in place, with no credential export, new grant, published port or
+provider connection. Runtime/schema/history/expiry/train probes remain mandatory.
+After the helper exits, zero remaining DB clients are required before a durable
+health receipt binds hold, cluster, revision and image.
+
+Automatic recovery consumes the existing durable budget. Transient reads and
+health failures can be retried through the same explicit `release` or `verify`
+path; unsafe or UNKNOWN state keeps writers stopped and deployments held. Budget
+exhaustion never authorizes a restore or resets a safety proof. No probe failure
+is called database damage merely because health is unavailable.
+
+Release starts the exact original API first and requires its container health
+before explicitly starting other workers in parallel. The original policies
+have already been restored after the bound database/health proof. Healthy readback
+requires a live, non-restarting PID with unchanged process start across two seconds
+for every original, including an automatically restarted one. This is bounded
+startup evidence; normal live monitoring owns later failures. A partial resume records progress; subsequent cleanup retries
+reuse the safe proof because legitimate resumed writes may have changed rows.
+They never stop healthy services again or demand the old full hashes again. A crash after
+starting a stopped original, before progress is recorded, may leave its same
+container ID/image/project running with a newer PID. Only the already bound safe
+proof and persisted resume-start intent allow that exact-original retry. Original
+policy readback precedes resumption. On a no-commit release, durable resume intent
+and absence of `commit-pending.json` allow the same exact-original retry; the
+host's releasing flag and state lock prevent a later commit. Unverified changed
+identities still refuse.
+
+After release, observe the normal [catch-up sweep](event-driven-deploys.md#catch-up-sweep)
+and train polling against current source-control state. These existing workers
+recover missed webhook state; do not invent acceptance or blindly replay a
+Client/provider mutation. Their ordinary admission, provenance and release gates
+remain in force. Record any observed catch-up failure on its owning work item.
+
+Only the host removes the deployment marker, after all original recovery
+readbacks pass and the keeper can no longer act. Install, recovery fencing and
+removal share one private fsync'd transition journal bound to hold, target and
+expected/desired marker. The existing provider mutation observer records dispatch
+immediately before the POST, response confirmation after return and exact result
+observation after readback. It records no env body, token or credential. A failed
+GET or validation before dispatch may retry; a dispatched request is never sent
+again. One-off intent and container identity are persisted; a timed-out one-off
+is removed and its DB session must be gone before another observation.
+
+An uncertain original request permits a bounded read-only observation of its
+exact desired effect. Only that value, including absence for an original removal,
+settles it. An old marker, an expired old deadline or absence before an uncertain
+install does not prove the request cannot execute late. Unavailable or mismatched
+effect observation emits a distinct terminal recovery requirement, so the watchdog
+does not restart forever. The same manual release can re-read that original
+operation later. A newly needed repair action requires an exact Director question;
+there is no blind whole-env rewrite or cleanup override. Provider failure can
+prevent release beyond the planned bound, so successful actual marker absence
+and service release readback, rather than timer installation, qualify the window.
+
+```bash
+python3 database_maintenance_host.py release --state STATE_JSON
+```
+
+The final receipt includes actual verified revision and original service
+readback. Successful cleanup disables/removes the watchdog and verifies its
+inactive state. A crash after marking release complete still uses the same
+supported command to settle only the exact owned units and fsync cleanup progress;
+it repeats no database, provider or resume operation. It stops those
+units outside state custody before final metadata cleanup. Success requires the
+cleanup readback as well as the sticky release proof.
+Private state defaults to `/var/lib/launchplane-maintenance`;
+a reboot or failed attempt continues through that same supported release,
+never a different target or recovery restore. Monitoring is paused during the
+window, which counts against verification cadence and is not healthy evidence.
+
 
 ### Hostname schema compatibility prelude
 
@@ -5717,6 +6208,51 @@ during automatic deployment. Complete the deployed-image qualification before
 that release reaches main. Image rollback then returns to this qualified
 compatibility image without downgrading the hostname schema.
 
+### Canonical hostname activation
+
+Startup activates the already-prepared hostname revision through
+`b2c4e6a8f0d3`, which also includes the profile archive, preview settings and
+idle retirement. A database that already applied the held delivery drop joins
+at `f87c72d690ab`; an explicit approved held-drop request from a hostname-only
+schema also reaches that join. Startup never applies that drop on its own.
+The runtime refuses earlier schemas until the supported migration completes.
+The four compatibility-prelude migration files remain unchanged.
+
+Ownership comparisons and PostgreSQL hostname fences share ASCII case folding,
+surrounding whitespace removal, trailing-dot removal and retained URL-host
+extraction. Existing payloads stay unchanged, and new public-host validation
+keeps its existing rules. Provider IDs, receipt ownership and exact original
+recipient checks remain exact.
+
+Every supported active private-endpoint write, including recipient publication
+and its scoped inverse, takes the existing hostname transaction fence before
+rechecking foreign target domains, public hosts and pending effects. Target writes,
+including compare-and-write domain repair, also refuse a foreign active endpoint
+claim under the same short authority transaction. A competing
+provider operation returns `public_hosts_authority_busy` (HTTP 409). A settled
+foreign target claim returns `private_health_endpoint_host_owned` (HTTP 409);
+review ownership before retrying. Failed endpoint applies save no success
+receipt. Disabled endpoint cleanup remains available. Endpoints may still share
+an internal monitoring host with each other. These are service/store writer
+fences, not a grant for direct database writes.
+
+Activation can hold a self-deploy or train worker startup when the transition
+mutex or target-table lock is busy. The migration remains transactional; retry
+through the supported self-deploy after writers or maintenance settle. Canonical
+aliases can now block an operation that previously passed an ownership check.
+Provider I/O retains only scoped name/target fences, so unrelated endpoint and
+product writers continue. A foreign claim acquired between recipient publication
+and its inverse refuses the inverse without overwriting that claim. Resolve the
+foreign ownership through its supported control-plane path, then retry the scoped inverse.
+
+Before checked Ready, qualify the immutable currently deployed image against
+both activated joins as the previous-image rollback target. It must include the
+non-runtime archive and every later applied migration; the old #4229 image is
+not compatible. Verify the supported self-deploy will capture that qualified
+image and that older HTTP replicas and workers have been replaced. Rollback
+starts that image on the compatible-ahead schema without downgrading it. The
+independent held-drop approval still applies to real data.
+
 ### Non-runtime profile archive
 
 Release revision `a4c8e0f2b6d3` follows the topics revision. It copies every
@@ -5738,3 +6274,81 @@ Hostname activation must target a join that includes this revision.
 Downgrade refuses. Images from before this revision reject it, so an image
 rollback across it needs this image or a later one; the hostname compatibility
 image above is no longer a rollback target once the archive has run.
+
+
+### Preview idle reservation retirement
+
+Release revision `b0a2c4e6f8d1` follows the managed preview-settings migration. It
+removes only the retired preview-idle scope's stop/start reservations and
+original-intent records. A matching database constraint refuses an overlapping
+old scheduler's late reservation writes before effects. Other operations, target
+fences and preview data are unchanged. The gateway's persisted receipt and
+current lane observation recover sleep and wake under the existing executor lock; see
+[preview idle behavior](clean-testing-snapshots.md).
+
+Through [stored-record preflight](stored-record-preflight.md#activation-order-and-recovery),
+startup migration selects `b1b3d5f7a9e2` for an already-applied delivery-drop
+branch, `b2c4e6a8f0d3` for an already-applied hostname-only branch, and
+`f87c72d690ab` for their already-applied compatibility joins. These empty joins
+retain each branch's existing approval boundary. They never activate the
+prepared delivery drop or hostname transition on an unapproved database.
+An explicit approved delivery-drop request from `b0a2c4e6f8d1` joins at
+`b1b3d5f7a9e2`; hostname-only histories continue to refuse that request.
+Downgrade cannot reconstruct deleted idle intents. An image rollback to code
+that still requires them cannot recover a sleeping preview from its gateway
+receipt alone; use this image or a later one.
+
+### Managed preview settings migration
+
+For the producer-first rollout and activation order, see
+[stored-record preflight activation](stored-record-preflight.md#activation-order-and-recovery).
+The managed-preview migration moves profile preview overrides into each
+product's existing runtime-environment records at instance `preview`, and removes
+the old profile values atomically. Existing testing and production records stay
+unchanged. See [shared preview settings](preview-settings.md) for
+configuration and conflict handling.
+
+An explicit `b8f2c4d6e0a7` migration target retains its historical joins:
+`b9a3d5e7f1b8` for retirement, `c0b4e6f8a2c9` for hostnames, and
+`c1c5f7a9b3d0` for their compatibility join. Its route from the archive never
+applies either unrelated branch. An approved delivery-drop request from this
+revision joins at `b9a3d5e7f1b8`; hostname-only histories still refuse it.
+The startup target includes idle retirement as described above.
+
+Downgrade retains the migrated values. An older image that does not recognize
+these revisions or still renders profile overrides is not a rollback target for
+this change; retain a compatible image or the pre-migration backup and matching
+image. Schema initialization's head fence continues rejecting unreviewed
+successors after the idle-retirement transition above.
+
+This data migration uses the shared preview validator. A restored database from
+before this revision must pass the validator in the selected image; later
+validation changes may therefore refuse older values transactionally at startup.
+Preflight that backup's preview settings against the selected image before
+release rather than weakening validation to admit them.
+
+### Additive integration-attestation storage
+
+The attestation release targets `c8d2e4f6a9b1`, following the current
+hostname/idle-retirement release target. It adds only
+`launchplane_integration_attestations` and its PR lookup index. The default path
+still never applies the held delivery drop. An already-applied delivery branch
+joins at `d1a5b7c9d2e4`; that join is empty. Runtime recognizes the preceding
+release and compatibility revisions and these additions; the HTTP service still
+checks its required tables. Explicit approved delivery-drop requests from the
+additive revision use the same join, preserving the existing separate approval.
+Legacy adoption recognizes the future table as belonging to Launchplane and
+refuses to stamp an unversioned database containing it as an older schema.
+
+Before activating this target, deploy the compatibility slice containing these
+same two migration files and recognized revision paths while startup still uses
+the preceding target. That slice creates no attestation table and does not
+require it. Retain its qualified deployed image as activation's previous-image
+rollback target. Source delivery alone does not qualify it. Older images cannot
+recognize the additive revision and are below the new rollback floor. Image
+rollback retains the additive table and its immutable evidence.
+Compatibility also reads populated restoration and attestation evidence on
+carried Client decisions. Both additive fields are omitted when empty, so its
+ordinary carries remain readable by the preceding image. Activation uses the
+same read contract unchanged. Do not roll activation back past this compatible
+image after any populated carry has been saved.

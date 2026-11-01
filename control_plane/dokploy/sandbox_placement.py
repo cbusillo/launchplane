@@ -23,6 +23,7 @@ def create_isolated_placement(
     before_create: Callable[[str], None],
     record_identity: Callable[[str, str], None],
     recorded_placement: tuple[str, str, str] = ("", "", ""),
+    record_store: object | None = None,
 ) -> None:
     """Create an unrouted placement, without adopting a product's serving lane.
 
@@ -86,9 +87,14 @@ def create_isolated_placement(
             continue
         checkpoint()
         before_create(field)
-        response = api.as_json_object(
-            api.dokploy_request(host=host, token=token, path=path, method="POST", payload=payload())
-        )
+        from control_plane.production_recipient_retirement_names import provider_name_guard
+
+        with provider_name_guard(record_store, namespace if field == "compose_id" else ""):
+            response = api.as_json_object(
+                api.dokploy_request(
+                    host=host, token=token, path=path, method="POST", payload=payload()
+                )
+            )
         identifier = (response or {}).get(response_key)
         nested = (response or {}).get(response_key.removesuffix("Id"))
         if isinstance(nested, dict):

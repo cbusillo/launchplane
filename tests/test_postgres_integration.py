@@ -33,6 +33,10 @@ from tests import test_testing_rebuild as testing_rebuild_tests
 from tests import test_testing_retry as testing_retry_tests
 from tests import test_browser_route_repair as browser_repair_tests
 from tests import test_release_review_http as release_review_http_tests
+from tests import test_production_recipient_release_settings as recipient_settings_tests
+from tests import test_production_recipient_retirement as recipient_retirement_tests
+from tests import test_accepted_recipient_delivery_recovery as recipient_delivery_tests
+from tests import test_generic_web_compose_refusal as compose_refusal_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
@@ -44,7 +48,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import create_engine, delete, event, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from psycopg.errors import LockNotAvailable
 
@@ -74,7 +78,7 @@ from tests.test_odoo_import_override_reconciliation import (
     runtime_record as _import_runtime_record,
 )
 from tests import test_preview_reservation_recovery as preview_reservation_tests
-from tests import test_discord_incident_summary as discord_summary_tests
+from tests import test_discord_incident_alerts as discord_alert_tests
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
@@ -559,6 +563,14 @@ def _store_for_fresh_head_database() -> Iterator[PostgresRecordStore]:
             yield store
         finally:
             store.close()
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresComposeRefusalTests(compose_refusal_tests.ComposeRefusalTests):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
 
 
 class RealPostgresRunnerAuditIdentityTests(unittest.TestCase):
@@ -1268,8 +1280,9 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
 
         with _isolated_postgres_database() as database_url:
             url = database_url.replace("postgresql+psycopg://", "postgresql://")
-            spec = {
+            spec: dict[str, Any] = {
                 "mode": "quiescence",
+                "identity": {"environment_kind": "stable"},
                 "binding": "fixture-binding",
                 "copy_binding": "fixture-copy",
                 "task_id": "1" * 32,
@@ -1438,96 +1451,9 @@ class RealPostgresTestingHoldRehearsalTests(testing_hold_rehearsal.DirectorHoldR
 @unittest.skipUnless(
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
 )
-class RealPostgresDiscordSummaryTests(discord_summary_tests.DiscordIncidentSummaryTests):
+class RealPostgresDiscordAlertTests(discord_alert_tests.DiscordIncidentAlertTests):
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
-
-    def test_racing_late_probe_is_in_current_or_next_summary(self) -> None:
-        from control_plane.workflows.public_ingress_monitor import _store_monitor_observation
-
-        self.observe("first-lane")
-        late = self.store.list_public_ingress_observation_records()[0].model_copy(
-            update={
-                "record_id": "late-probe",
-                "instance": "late-lane",
-                "observed_at": "2026-10-25T12:01:00Z",
-                "incident_id": "",
-                "incident_event_id": "",
-            }
-        )
-        staged = threading.Event()
-        resume = threading.Event()
-        delivered = threading.Event()
-        source_threads: list[int] = []
-        original_dedupe = self.store._lock_outbox_dedupe_keys
-
-        def dedupe(session: Any, *, dedupe_keys: tuple[str, ...]) -> None:
-            original_dedupe(session, dedupe_keys=dedupe_keys)
-            if threading.get_ident() in source_threads:
-                staged.set()
-                if not resume.wait(10):
-                    raise AssertionError("Late probe was never released")
-
-        def record_late() -> None:
-            source_threads.append(threading.get_ident())
-            _store_monitor_observation(
-                record_store=self.store,
-                record=late,
-                incident_eligible=True,
-                expected_profile_sha256="",
-                recovery_observation_threshold=1,
-                notify=True,
-                notification_drivers=self.drivers,
-            )
-
-        def clock(_session: Any) -> str:
-            return (
-                "2026-10-25T12:04:59Z"
-                if threading.get_ident() in source_threads
-                else "2026-10-25T12:05:00Z"
-            )
-
-        def send(_url: str, payload: dict[str, object]) -> None:
-            self.sent.append(payload)
-            delivered.set()
-
-        self.drivers.discord_sender = send
-        with (
-            patch.object(self.store, "_lock_outbox_dedupe_keys", side_effect=dedupe),
-            patch.object(self.store, "_database_mutation_timestamp", side_effect=clock),
-            ThreadPoolExecutor(max_workers=2) as executor,
-        ):
-            transition = executor.submit(record_late)
-            worker = None
-            try:
-                self.assertTrue(staged.wait(10))
-                worker = executor.submit(self.drain, "12:05:00")
-                deadline = time.monotonic() + 10
-                while not delivered.is_set():
-                    with self.store._session_factory() as witness:
-                        waiting = witness.scalar(
-                            text(
-                                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock')"
-                            )
-                        )
-                    if waiting:
-                        break
-                    if time.monotonic() >= deadline:
-                        self.fail("Race reached neither delivery nor database contention")
-                    delivered.wait(0.01)
-            finally:
-                resume.set()
-            transition.result(timeout=10)
-            if worker is not None:
-                worker.result(timeout=10)
-        self.drain("12:10:00")
-        self.assertTrue(any("late-lane" in str(payload) for payload in self.sent))
-        self.assertTrue(
-            all(
-                value.status == "open"
-                for value in self.store.list_public_ingress_incident_records()
-            )
-        )
 
 
 @unittest.skipUnless(
@@ -2175,6 +2101,81 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_postgres_preview_transport_holds_product_lease_through_provider_execution(
+        self,
+    ) -> None:
+        from control_plane.drivers.postgres_preview_transport import (
+            PostgresPreviewDestroyEnvelope,
+            apply_postgres_preview_destroy_result,
+        )
+        from control_plane.workflows.postgres_preview import (
+            PostgresPreviewDestroyRequest,
+            PostgresPreviewDestroyResult,
+        )
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        with _store_for_fresh_head_database() as store:
+            profile = _driver_profile()
+            store.write_product_profile_record(profile)
+            renamed = profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"app_name_suffix": "-new"})}
+            )
+
+            def execute(**_: object) -> PostgresPreviewDestroyResult:
+                with self.assertRaises(ValueError):
+                    store.write_product_profile_record(renamed)
+                return PostgresPreviewDestroyResult(
+                    destroy_status="pass",
+                    destroy_started_at="2026-10-29T00:00:00Z",
+                    destroy_finished_at="2026-10-29T00:00:00Z",
+                    application_name="",
+                    application_id="",
+                    preview_url="",
+                )
+
+            with patch(
+                "control_plane.drivers.postgres_preview_transport.execute_postgres_preview_destroy",
+                side_effect=execute,
+            ):
+                apply_postgres_preview_destroy_result(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    execution_profile=profile,
+                    request=PostgresPreviewDestroyEnvelope(
+                        product=profile.product,
+                        destroy=PostgresPreviewDestroyRequest(
+                            context=profile.preview.context,
+                            anchor_repo=profile.repository.partition("/")[2],
+                            anchor_pr_number=1,
+                            preview_slug="pr-1",
+                            destroy_reason="closed",
+                        ),
+                    ),
+                )
+            store.write_product_profile_record(renamed)
+            self.assertEqual(store.read_product_profile_record(profile.product), renamed)
+
+    def test_preview_operation_excludes_resource_renaming_until_it_finishes(self) -> None:
+        from control_plane.preview_namespaces import preview_product_operation_key
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        with _store_for_fresh_head_database() as store:
+            profile = _driver_profile()
+            store.write_product_profile_record(profile)
+            renamed = profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"app_name_suffix": "-new"})}
+            )
+            with store.serialize_preview_refresh(
+                preview_id=preview_product_operation_key(profile.product),
+                dedicated=True,
+                shared=True,
+            ):
+                with self.assertRaises(ValueError):
+                    store.write_product_profile_record(renamed)
+                self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            store.write_product_profile_record(renamed)
+            self.assertEqual(store.read_product_profile_record(profile.product), renamed)
+
     def test_schema_column_catalog_reads_do_not_grow_per_required_table(self) -> None:
         from control_plane.storage.postgres import Base
 
@@ -3179,6 +3180,16 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             self.assertEqual(store.list_authz_policy_records(), ())
 
     def test_scrubbed_snapshot_restores_in_postgres_and_rejects_stricter_policy(self) -> None:
+        import base64
+        from control_plane.contracts.odoo_post_deploy_payload import (
+            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        )
+        from control_plane.odoo_instance_overrides import addon_setting_secret_env_key
+        from control_plane.preview_settings import validate_preview_scope
+        from control_plane.storage.migrations.versions import (
+            a4c8e0f2b6d3_archive_nonruntime_product_profiles as profile_archive,
+            b8f2c4d6e0a7_managed_preview_settings as preview_settings,
+        )
         from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
         from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
         from control_plane.stored_record_preflight import check_restored_records, restore_snapshot
@@ -3187,7 +3198,10 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         from tests.test_postgres_store import _merge_train_run_record
         from pydantic import ValidationError
 
-        with _store_for_fresh_head_database() as source:
+        with _isolated_postgres_database() as source_url:
+            migrate_schema(database_url=source_url, target_revision=profile_archive.revision)
+            source = PostgresRecordStore(database_url=source_url)
+            self.addCleanup(source.close)
             policy = LaunchplaneAuthzPolicy(
                 schema_version=2,
                 github_actions=(
@@ -3210,7 +3224,35 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             profile = product_profile_payload()
             preview = profile["preview"]
             assert isinstance(preview, dict)
-            preview["override_env"] = {"TOKEN": "plaintext-sentinel"}
+            addon = "private_connector"
+            setting = "api_token"
+            encoded_payload = {
+                "context": f" {str(preview['context']).upper()} ",
+                "instance": "preview",
+                "addon_settings": [
+                    {
+                        "addon": addon,
+                        "setting": "private_option",
+                        "value": {"source": "literal", "value": "plaintext-sentinel"},
+                    },
+                    {
+                        "addon": addon,
+                        "setting": setting,
+                        "value": {
+                            "source": "secret_binding",
+                            "secret_binding_id": "private-binding",
+                            "environment_variable": addon_setting_secret_env_key(
+                                addon_name=addon, setting_name=setting
+                            ),
+                        },
+                    },
+                ],
+            }
+            preview["override_env"] = {
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                    json.dumps(encoded_payload).encode()
+                ).decode()
+            }
             source.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(profile)
             )
@@ -3257,9 +3299,25 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     engine = create_engine(target_url)
                     self.addCleanup(engine.dispose)
                     revision = restore_snapshot(engine, exported)
+                    migrate_schema(
+                        database_url=target_url, target_revision=preview_settings.revision
+                    )
                     target = PostgresRecordStore(database_url=target_url)
                     self.addCleanup(target.close)
-                    self.assertEqual(revision, target.schema_revision())
+                    self.assertEqual(revision, SCHEMA_MIGRATION_TARGET_REVISION)
+                    restored_profile = target.list_product_profile_records()[0]
+                    self.assertFalse(restored_profile.preview.override_env)
+                    restored_settings = target.list_runtime_environment_records()[0]
+                    decoded = validate_preview_scope(
+                        restored_settings.env, context=restored_profile.preview.context
+                    )
+                    self.assertIsNotNone(decoded)
+                    assert decoded is not None
+                    self.assertEqual(
+                        len(decoded.addon_settings), len(encoded_payload["addon_settings"])
+                    )
+                    for sentinel in ("plaintext-sentinel", "private-binding", addon):
+                        self.assertNotIn(sentinel, decoded.model_dump_json())
                     self.assertEqual(
                         len(target.list_authz_policy_records()),
                         len(source.list_authz_policy_records()),
@@ -4300,16 +4358,33 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         with _isolated_postgres_database() as url:
             assert_preview_enablement_drop(self, url)
 
+    def test_idle_reservation_retirement_rejects_late_old_writers(self) -> None:
+        from control_plane.storage.migrations.versions import (
+            b0a2c4e6f8d1_retire_preview_idle_reservations as migration,
+        )
+        from tests.test_preview_idle_migration import assert_idle_retirement
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), migration.down_revision)
+            assert_idle_retirement(self, url, migration.revision)
+
     def test_preview_drop_startup_joins_an_already_applied_delivery_drop(self) -> None:
         from control_plane.storage.migrations.versions import (
             e7c1d5e9a3b6_drop_retired_delivery_tables as held,
-            a5d9f1b3c7e4_join_archive_topics_retirement as archive_join,
         )
 
         with _isolated_postgres_database() as url:
             alembic_command.upgrade(_alembic_config(url), held.revision)
-            self.assertEqual(migrate_schema(database_url=url), archive_join.revision)
-            self.assertEqual(migrate_schema(database_url=url), archive_join.revision)
+            from control_plane.storage.schema_migration import (
+                SCHEMA_MIGRATION_TARGET_REVISION,
+                schema_migration_target,
+            )
+
+            expected = schema_migration_target(
+                current_revision=held.revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
+            )
+            self.assertEqual(migrate_schema(database_url=url), expected)
+            self.assertEqual(migrate_schema(database_url=url), expected)
 
     def test_preview_drop_refuses_busy_table_and_retained_dependency(self) -> None:
         from control_plane.storage.migrations.versions import (
@@ -4364,6 +4439,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     )
                     self.assertEqual(_current_alembic_version(engine), migration.down_revision)
                 alembic_command.upgrade(config, migration.revision)
+                migrate_schema(database_url=url)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
@@ -4394,6 +4470,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 with engine.begin() as connection:
                     connection.execute(text("DROP VIEW retained_delivery_reader"))
                 alembic_command.upgrade(config, migration.revision)
+                migrate_schema(database_url=url)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
@@ -6908,7 +6985,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         from tests.test_release_review import decision, profile, seed
         from tests.test_release_review_record import FakeReleaseIssues
 
-        for phase in ("read", "acknowledgement"):
+        for phase in ("lookup", "create"):
             with self.subTest(phase=phase), _head_postgres_database() as url:
                 engine = create_engine(url, pool_size=3, max_overflow=0, pool_timeout=0.2)
                 with patch("control_plane.storage.postgres._build_engine", return_value=engine):
@@ -6922,15 +6999,11 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     holder_ready, resume_holder = threading.Event(), threading.Event()
                     original_read = store.read_release_review_decision_record
 
-                    def read(**kwargs: Any) -> ReleaseReviewDecisionRecord:
-                        if phase == "read" and not holder_ready.is_set():
-                            holder_ready.set()
-                            if not resume_holder.wait(10):
-                                raise AssertionError("Lock holder was not resumed")
-                        return original_read(**kwargs)
-
                     def request(**kwargs: Any) -> object:
-                        if kwargs.get("method", "GET") == "GET" and phase == "acknowledgement":
+                        if (
+                            kwargs.get("method", "GET") == ("GET" if phase == "lookup" else "POST")
+                            and not holder_ready.is_set()
+                        ):
                             holder_ready.set()
                             if not resume_holder.wait(10):
                                 raise AssertionError("Lock holder was not resumed")
@@ -6945,9 +7018,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         )
 
                     with (
-                        patch.object(
-                            store, "read_release_review_decision_record", side_effect=read
-                        ),
                         patch(
                             "control_plane.release_review_record.github_api_request",
                             side_effect=request,
@@ -6955,6 +7025,10 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         patch(
                             "control_plane.release_review_record.resolve_launchplane_github_token",
                             return_value="test-token",
+                        ),
+                        patch(
+                            "control_plane.release_review_record.resolve_delivery_github_app_id",
+                            return_value=github.app_id,
                         ),
                         ThreadPoolExecutor(max_workers=3) as workers,
                     ):
@@ -7033,6 +7107,10 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                                 patch(
                                     "control_plane.release_review_record.resolve_launchplane_github_token",
                                     return_value="test-token",
+                                ),
+                                patch(
+                                    "control_plane.release_review_record.resolve_delivery_github_app_id",
+                                    return_value=github.app_id,
                                 ),
                             ):
                                 with self.assertRaises(ValueError):
@@ -9808,6 +9886,68 @@ def _run_integration_provider_operation(
 
 
 class RealPostgresProviderOperationTests(unittest.TestCase):
+    def test_accepted_backup_continuation_preserves_history_and_refuses_late_reservation(
+        self,
+    ) -> None:
+        from tests import test_generic_web_client_release as fixtures
+
+        for scenario in (
+            "test_expired_capture_continuation_preserves_the_complete_drill",
+            "test_continuation_transaction_rechecks_a_new_promotion_reservation",
+        ):
+            with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
+                with patch.object(fixtures, "PostgresRecordStore", return_value=store):
+                    case = fixtures.GenericWebClientReleaseTests(scenario)
+                    try:
+                        case.debug()
+                    finally:
+                        case.doCleanups()
+
+    def test_backup_continuation_serializes_capture_and_promotion_source_until_pending_commit(
+        self,
+    ) -> None:
+        from tests import test_generic_web_client_release as fixtures
+        from control_plane.client_release_backup_continuation import BackupContinuationRefused
+        from control_plane.workflows.production_promotion_backup import _source_key
+
+        with _store_for_fresh_head_database() as store:
+            case = fixtures.GenericWebClientReleaseTests()
+            with patch.object(fixtures, "PostgresRecordStore", return_value=store):
+                case.setUp()
+            try:
+                decision = case.accept()
+                (operation_id,) = case.advance()
+                case.capture()
+                original = store.read_verireel_prod_backup_gate_operation_record(operation_id)
+                backup = store.read_backup_gate_record(original.backup_record_id)
+                with fixtures.expired_backup_clock(store, operation_id):
+                    plan = case.continue_backup(decision)
+                    with store.production_backup_source_lock(_source_key(original)) as held:
+                        self.assertIsNotNone(held)
+                        with self.assertRaises(BackupContinuationRefused):
+                            case.continue_backup(decision, digest=plan.review_digest, apply=True)
+                        self.assertEqual(store.read_backup_gate_record(backup.record_id), backup)
+                        self.assertEqual(
+                            store.read_verireel_prod_backup_gate_operation_record(operation_id),
+                            original,
+                        )
+                    case.continue_backup(decision, digest=plan.review_digest, apply=True)
+                with store.production_backup_source_lock(_source_key(original)) as released:
+                    self.assertIsNotNone(released)
+                    pending = store.read_backup_gate_record(backup.record_id)
+                    self.assertEqual(pending.status, "pending")
+                    self.assertFalse(pending.evidence)
+                case.capture()
+                self.assertTrue(case.advance())
+                self.assertEqual(
+                    store.read_verireel_prod_backup_gate_operation_record(
+                        operation_id
+                    ).previous_attempt,
+                    original,
+                )
+            finally:
+                case.doCleanups()
+
     def test_executor_exit_drain_proof_and_live_reconciliation_on_postgres(self) -> None:
         from tests.test_event_deploy_redeploy import EventDeployRedeployTests
 
@@ -12471,6 +12611,9 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = _application_testing_fixture(self)
 
+    def test_publication_refuses_stale_route_readiness_without_changing_custody(self) -> None:
+        self.fixture.test_publication_refuses_stale_route_readiness_without_changing_custody()
+
     def test_external_admission_persists_once_across_original_restart(self) -> None:
         self.fixture.test_external_admission_persists_once_across_original_restart()
 
@@ -12693,6 +12836,24 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
     def test_supported_application_route_original_intent_and_key_replay(self) -> None:
         self.fixture.assert_supported_http_activation(native_apply=True)
 
+    def test_unanswered_mount_refusal_original_request_and_receipt(self) -> None:
+        self.fixture.assert_http_unanswered_refusal()
+
+    def test_late_mount_after_durable_refusal_remains_recovery_only(self) -> None:
+        self.fixture.test_late_mount_after_durable_refusal_cannot_resume_forward_apply()
+
+    def test_unanswered_refusal_cannot_replace_live_original_execution(self) -> None:
+        self.fixture.test_unanswered_refusal_cannot_replace_a_live_original_lease()
+
+    def test_unanswered_refusal_fences_forward_storage_progress(self) -> None:
+        self.fixture.test_unanswered_refusal_rejects_stale_forward_progress_in_storage()
+
+    def test_plain_apply_cannot_select_unanswered_mount_abandonment(self) -> None:
+        self.fixture.test_plain_authority_changed_apply_cannot_abandon_an_unanswered_mount()
+
+    def test_lost_refusal_completion_adopts_only_the_negative_result(self) -> None:
+        self.fixture.test_lost_negative_completion_adopts_the_refusal_without_forward_work()
+
     def test_interrupted_http_apply_reuses_immutable_original_intent(self) -> None:
         self.fixture.assert_supported_http_activation(native_apply=True, interrupted=True)
 
@@ -12813,6 +12974,59 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
 
     def test_committed_receipt_survives_later_provider_drift(self) -> None:
         self.fixture.test_committed_receipt_survives_later_provider_drift()
+
+
+@unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
+class RealPostgresRecipientRetirementTests(recipient_retirement_tests.RecipientRetirementTests):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
+
+    def test_waiting_creation_rechecks_committed_retirement_reservation(self) -> None:
+        from control_plane.production_recipient_retirement_names import provider_name_guard
+
+        record, manifest, _, _ = self.adapter.current()
+
+        def create() -> None:
+            with provider_name_guard(self.store, manifest["project"]):
+                self.fail("Creation reused the retired project")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with provider_name_guard(self.store, manifest["project"]):
+                waiting = pool.submit(create)
+                blocked = False
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with self.store._engine.connect() as connection:
+                        blocked = bool(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+                                )
+                            )
+                        )
+                    if blocked:
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(blocked, "Creation did not wait for retirement admission")
+                retiring = record.model_copy(
+                    update={
+                        "phase": "retiring_old",
+                        "execution": {
+                            **record.execution,
+                            "retirement_started_at": datetime.now(timezone.utc).isoformat(),
+                            "retirement_manifest": manifest,
+                        },
+                    }
+                )
+                self.store.write_production_recipient(
+                    expected=record.model_dump(mode="json"),
+                    replacement=retiring.model_dump(mode="json"),
+                )
+            with self.assertRaises(ValueError):
+                waiting.result(timeout=5)
+        with provider_name_guard(self.store, "an-independent-new-project"):
+            pass
 
 
 class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
@@ -13363,6 +13577,94 @@ class RealPostgresRecipientCutoverTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 admission.result(timeout=10)
         self.assertEqual(f.actions, [])
+
+
+class RealPostgresRecipientReleaseAdmissionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.test_production_recipient_release_recovery import RecipientReleaseRecoveryTests
+
+        self.fixture = RecipientReleaseRecoveryTests()
+        self.fixture.database_url = self.enterContext(_head_postgres_database())
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_same_key_continuation_stays_on_recipient_path(self) -> None:
+        self.fixture.test_unarmed_recipient_never_uses_the_ordinary_production_adapter()
+
+    def test_native_status_matches_worker_refusal(self) -> None:
+        self.fixture.test_native_release_reports_the_same_unarmed_custody_refusal_as_worker()
+
+    def test_mismatched_continuation_is_held(self) -> None:
+        self.fixture.test_unarmed_different_candidate_remains_on_recipient_path()
+
+    def test_custody_is_rechecked_at_atomic_first_effect(self) -> None:
+        self.fixture.test_ordinary_promotion_rechecks_new_custody_at_its_atomic_first_effect()
+
+    def test_stale_preflight_original_does_not_fence_replacement(self) -> None:
+        self.fixture.test_superseded_preflight_retry_releases_without_touching_replacement()
+
+    def test_admitted_ordinary_work_keeps_its_authority(self) -> None:
+        self.fixture.test_admitted_ordinary_promotion_finishes_after_custody_creation()
+
+    def test_automatic_rollback_keeps_its_authority(self) -> None:
+        self.fixture.test_ordinary_automatic_rollback_survives_custody_creation()
+
+    def test_native_worker_supersession_is_an_informational_hold(self) -> None:
+        self.fixture.test_superseded_worker_selection_waits_without_delivery_incident()
+
+    def test_atomic_target_change_stays_terminal(self) -> None:
+        self.fixture.test_atomic_target_change_stops_the_release_without_retry_or_rollback()
+
+    def test_http_temporary_hold_does_not_alert(self) -> None:
+        self.fixture.test_http_temporary_custody_hold_does_not_open_delivery_incident()
+
+    def test_missing_custody_is_unknown(self) -> None:
+        self.fixture.test_missing_custody_remains_unknown_without_provider_effects()
+
+
+class RealPostgresRecipientReleaseSettingsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = recipient_settings_tests.RecipientReleaseSettingsTests()
+        self.fixture.database_url = self.enterContext(_head_postgres_database())
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_native_drill_and_ordinary_settings_handoff(self) -> None:
+        self.fixture.test_native_drill_keeps_authority_through_publication_and_inverse()
+
+    def test_continuation_after_native_release_hands_off_to_ordinary(self) -> None:
+        self.fixture.test_later_ordinary_release_can_continue_after_completed_native_publication()
+
+    def test_native_second_backup_continuation_preserves_inverse(self) -> None:
+        self.fixture.test_native_second_backup_can_continue_after_completed_inverse()
+
+    def test_native_busy_source_has_no_delivery_failure(self) -> None:
+        self.fixture.test_busy_native_source_leaves_the_release_waiting_without_delivery_failure()
+
+    def test_first_preflight_expiry_preserves_original_release(self) -> None:
+        self.fixture.test_expired_native_preflight_continues_original_first_promotion()
+
+    def test_final_preflight_expiry_preserves_original_drill(self) -> None:
+        self.fixture.test_expired_native_preflight_continues_original_final_promotion()
+
+    def test_pre_snapshot_refusal_preserves_original_drill(self) -> None:
+        self.fixture.test_expired_native_preflight_before_snapshot_continues_original_final_promotion()
+
+    def test_native_backup_continuation_rechecks_custody_and_promotion(self) -> None:
+        self.fixture.test_native_preflight_continuation_rechecks_reviewed_custody_and_promotion()
+
+    def test_native_backup_continuation_rechecks_current_and_dispatched_attempt(self) -> None:
+        self.fixture.test_native_preflight_continuation_refuses_current_or_dispatched_attempt()
+
+
+class RealPostgresRecipientDeliveryRecoveryTests(unittest.TestCase):
+    def test_released_final_preflight_recovers_through_native_publication(self) -> None:
+        fixture = recipient_delivery_tests.ReleasedFinalPreflightDeliveryRecoveryTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.old_database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_abandoned_preflight_recovers_without_recreating_its_reservation()
 
 
 class RealPostgresRecipientWriterTests(unittest.TestCase):
@@ -14288,6 +14590,134 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
 
 
 class RealPostgresSecretReferenceTests(unittest.TestCase):
+    def test_new_testing_reference_and_receipt_commit_or_roll_back_together(self) -> None:
+        from tests.test_private_testing_integration import seed_integration
+        from control_plane.odoo_secret_references import plan_secret_reference_reconciliation
+        from control_plane.storage.postgres import DbOnlyMutationRequest
+
+        with (
+            _head_postgres_database() as url,
+            closing(PostgresRecordStore(database_url=url)) as store,
+        ):
+            profile, _ = seed_integration(store, "printnode.api_key", write_override=False)
+            plan, bundle = plan_secret_reference_reconciliation(
+                store=store,
+                profile=profile,
+                record=None,
+                environment="testing",
+                keys=("printnode.api_key",),
+                create_missing=True,
+            )
+            mutation = DbOnlyMutationRequest(
+                scope="fixture-admin",
+                route_path="fixture-reference",
+                idempotency_key="original",
+                request_fingerprint=plan.review_digest,
+                lease_owner="fixture",
+                response_status_code=200,
+                response_trace_id="completed-reference",
+                response_payload={"result": plan.model_dump(mode="json")},
+            )
+            with patch.object(
+                store,
+                "_after_product_authority_bundle_step",
+                side_effect=RuntimeError("injected failure"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    store.compare_and_write_product_authority_bundle(bundle, mutation=mutation)
+            self.assertIsNone(
+                store.read_idempotency_record(
+                    scope=mutation.scope,
+                    route_path=mutation.route_path,
+                    idempotency_key=mutation.idempotency_key,
+                )
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_odoo_instance_override_record(context_name="cm", instance_name="testing")
+            status, receipt = store.compare_and_write_product_authority_bundle(
+                bundle, mutation=mutation
+            )
+            self.assertEqual(status, "written")
+            status, replay = store.compare_and_write_product_authority_bundle(
+                bundle, mutation=mutation
+            )
+            self.assertEqual(status, "replayed")
+            self.assertEqual(replay.response_trace_id, receipt.response_trace_id)
+            after = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            )
+            self.assertEqual(after.config_parameters[0].value.source, "secret_binding")
+
+    def test_parameter_readback_compares_empty_values_inside_postgres(self) -> None:
+        import base64
+        import contextlib
+        import io
+        import sys
+        from types import SimpleNamespace
+        from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
+
+        with (
+            _head_postgres_database() as url,
+            closing(PostgresRecordStore(database_url=url)) as store,
+        ):
+            with store._engine.begin() as connection:
+                connection.execute(
+                    text("CREATE TABLE ir_config_parameter (key text PRIMARY KEY, value text)")
+                )
+                connection.execute(
+                    text("INSERT INTO ir_config_parameter VALUES (:key, :value)"),
+                    [
+                        {"key": "acme.present", "value": "private-readback-sentinel"},
+                        {"key": "acme.empty", "value": "\t \r\n"},
+                    ],
+                )
+            keys = ["acme.present", "acme.empty", "acme.missing"]
+            payload = {
+                "config_parameters": [
+                    {"key": key, "value": {"source": "secret_binding"}} for key in keys
+                ]
+            }
+            spec = {
+                "families": [],
+                "allowed_integrations": [],
+                "connection_isolation_required": False,
+                "protected_shopify_store_handles": [],
+                "verify_parameter_presence": True,
+            }
+            output = io.StringIO()
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "psycopg2": SimpleNamespace(
+                            connect=lambda **kwargs: store._engine.raw_connection()
+                        )
+                    },
+                ),
+                patch.dict(
+                    os.environ,
+                    {
+                        "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": base64.b64encode(
+                            json.dumps(payload).encode()
+                        ).decode()
+                    },
+                ),
+                patch.object(
+                    sys,
+                    "argv",
+                    ["readback", "testing", base64.b64encode(json.dumps(spec).encode()).decode()],
+                ),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaises(SystemExit):
+                    exec(INTEGRATION_READBACK_PROGRAM, {})
+            self.assertIn("odoo_config_parameter_present=acme.present", output.getvalue())
+            self.assertIn(
+                "odoo_config_parameter_missing=acme.empty,acme.missing", output.getvalue()
+            )
+            self.assertNotIn("private-readback-sentinel", output.getvalue())
+
     def test_selection_cas_rollback_and_late_completion_preservation(self) -> None:
         from tests.test_odoo_secret_references import seed, KEY
         from control_plane.odoo_secret_references import plan_secret_reference_reconciliation
@@ -14390,6 +14820,7 @@ class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):
             RuntimeRemovalTests.test_last_value_preserves_retirement_intent,
             RuntimeRemovalTests.test_transaction_failure_keeps_values_and_no_success_receipt,
             RuntimeRemovalTests.test_drift_type_changes_and_key_or_reason_changes_refuse,
+            RuntimeRemovalTests.test_preview_removal_rechecks_eligibility_and_write_authority_on_replay,
         ):
             with self.subTest(scenario=scenario.__name__), _head_postgres_database() as url:
                 fixture = RuntimeRemovalTests(scenario.__name__)
@@ -16096,6 +16527,10 @@ class RealPostgresReleaseReviewHttpTests(release_review_http_tests._ReleaseRevie
                 return_value="test-token",
             ),
             patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=github.app_id,
+            ),
+            patch(
                 "control_plane.http_app.publish_release_decision",
                 wraps=publish_release_decision,
             ),
@@ -16290,7 +16725,7 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
         await self.closed_preview(completed_at=(now - timedelta(seconds=3)).isoformat())
         self.reads.clear()
         fake = FakePreviewProvider()
-        operation = self.prepared_operation(fake, "actual-custom-executor", now)
+        operation = self.prepared_operation(fake, "actual-custom-executor", now, creating=True)
         entered = threading.Event()
         release = threading.Event()
         execute = fake.execute_apply
@@ -16484,3 +16919,900 @@ class RealPostgresCalendarProfileFenceTests(unittest.TestCase):
                             self.assertEqual(receipt.response_payload["result"]["winner"], name)
                 finally:
                     second.close()
+
+
+class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
+    def test_real_readonly_service_startup_http_and_shutdown_preserve_database(self) -> None:
+        from control_plane.database_maintenance import database_snapshot
+        from control_plane.database_maintenance_cli import verify_application_reads
+        from control_plane.http_app import resolve_launchplane_authz_policy
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from control_plane.storage.schema_migration import migrate_schema
+        from control_plane import service_bootstrap
+
+        with _isolated_postgres_database() as url:
+            migrate_schema(database_url=url)
+            store = PostgresRecordStore(database_url=url)
+            try:
+                resolve_launchplane_authz_policy(
+                    record_store=store,
+                    bootstrap_policy=LaunchplaneAuthzPolicy(),
+                    policy_source="synthetic",
+                    now_timestamp="2026-01-01T00:00:00Z",
+                )
+            finally:
+                store.close()
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            from control_plane.http_app import create_launchplane_fastapi_app as factory
+
+            def create_app(**arguments: Any) -> Any:
+                schedulers = {
+                    name: value for name, value in arguments.items() if name.endswith("_scheduler")
+                }
+                self.assertTrue(schedulers)
+                for value in schedulers.values():
+                    self.assertIsNone(value)
+                return factory(**arguments)
+
+            with (
+                engine.connect() as connection,
+                patch.object(
+                    service_bootstrap, "create_launchplane_fastapi_app", side_effect=create_app
+                ),
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_POLICY_TOML": f"schema_version = {LaunchplaneAuthzPolicy().schema_version}"
+                    },
+                    clear=True,
+                ),
+            ):
+                before = database_snapshot(connection)
+                connection.commit()
+                verify_application_reads(connection, service_health=True)
+                self.assertEqual(database_snapshot(connection), before)
+                connection.commit()
+                from control_plane.storage.schema_migration import migrate_schema_on_connection
+                from control_plane.storage.migrations.versions import (
+                    e7c1d5e9a3b6_drop_retired_delivery_tables as retirement,
+                )
+
+                with connection.begin():
+                    migrate_schema_on_connection(connection, target_revision=retirement.revision)
+                retired = database_snapshot(connection)
+                connection.commit()
+                verify_application_reads(connection, service_health=True)
+                self.assertEqual(database_snapshot(connection), retired)
+
+    def test_readonly_service_startup_refuses_a_policy_seed(self) -> None:
+        from control_plane.database_maintenance_cli import verify_application_reads
+        from control_plane.database_maintenance_host import (
+            RecoveryRequired,
+            VERIFICATION_BLOCKED_EVENT,
+        )
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from control_plane.storage.schema_migration import migrate_schema
+
+        with _isolated_postgres_database() as url:
+            migrate_schema(database_url=url)
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            with (
+                engine.connect() as connection,
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_POLICY_TOML": f"schema_version = {LaunchplaneAuthzPolicy().schema_version}"
+                    },
+                    clear=True,
+                ),
+            ):
+                with self.assertRaises(RecoveryRequired) as failure:
+                    verify_application_reads(connection, service_health=True)
+                self.assertEqual(failure.exception.event, VERIFICATION_BLOCKED_EVENT)
+
+    def test_shutdown_cancels_only_readonly_waiters_blocked_by_its_admission(self) -> None:
+        from control_plane.database_maintenance import MAINTENANCE_LOCKS, maintenance_admission
+        from control_plane.database_maintenance_cli import cancel_waiting_admissions
+        from sqlalchemy.pool import NullPool
+        from queue import Queue
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            identities: Queue[int] = Queue()
+            results: list[str] = []
+
+            def wait() -> None:
+                with engine.connect() as waiter:
+                    identities.put(int(waiter.scalar(text("SELECT pg_backend_pid()"))))
+                    try:
+                        waiter.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
+                            {"key": MAINTENANCE_LOCKS[-1]},
+                        )
+                    except DBAPIError as error:
+                        results.append(str(getattr(error.orig, "sqlstate", None)))
+
+            with engine.connect() as keeper, maintenance_admission(keeper):
+                thread = threading.Thread(target=wait)
+                thread.start()
+                waiter_pid = identities.get(timeout=5)
+                deadline = time.monotonic() + 5
+                while not keeper.scalar(
+                    text("SELECT pg_backend_pid()=ANY(pg_blocking_pids(:pid))"), {"pid": waiter_pid}
+                ):
+                    if time.monotonic() >= deadline:
+                        self.fail("The synthetic admission waiter did not block.")
+                    time.sleep(0.01)
+                cancel_waiting_admissions(keeper, ["192.0.2.1"])
+                self.assertTrue(thread.is_alive())
+                address = str(
+                    keeper.scalar(
+                        text("SELECT host(client_addr) FROM pg_stat_activity WHERE pid=:pid"),
+                        {"pid": waiter_pid},
+                    )
+                )
+                cancel_waiting_admissions(keeper, [address])
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(results, ["57014"])
+
+    def test_keeper_release_closes_only_after_its_admission_scope_finishes(self) -> None:
+        import argparse
+        from contextlib import nullcontext, redirect_stdout
+        from io import StringIO
+        from control_plane import database_maintenance_cli
+        from control_plane.storage.schema_migration import migrate_schema
+        from sqlalchemy.pool import NullPool
+        from tempfile import TemporaryDirectory
+
+        with _isolated_postgres_database() as url, TemporaryDirectory() as directory:
+            migrate_schema(database_url=url)
+            root = Path(directory)
+            root.joinpath("state.json").write_text(
+                json.dumps(
+                    {
+                        "hold_id": "own",
+                        "originals": {"synthetic-writer": {"addresses": ["192.0.2.1"]}},
+                    }
+                )
+            )
+            expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+            arguments = argparse.Namespace(
+                hold_id="own", job_directory=root, expires_at=expires.isoformat()
+            )
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            output = StringIO()
+            deployment = Mock(target_id="synthetic", fence=Mock(return_value=nullcontext()))
+            with (
+                engine.connect() as connection,
+                patch.object(
+                    database_maintenance_cli,
+                    "await_command",
+                    side_effect=({"action": "stopped"}, {"action": "release"}),
+                ),
+                redirect_stdout(output),
+            ):
+                database_maintenance_cli.keep_database(
+                    connection, deployment=deployment, arguments=arguments, expires=expires
+                )
+                self.assertTrue(connection.closed)
+            self.assertEqual(
+                json.loads(output.getvalue().splitlines()[-1])["event"], "database_released"
+            )
+
+    def test_stable_lane_claims_obey_maintenance_and_durable_deploy_admission(self) -> None:
+        from control_plane import service_deploy_drain as drain
+        from control_plane.database_maintenance import maintenance_admission
+        from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.pool import NullPool
+        from tests.test_odoo_prod_retained_volume_backup_import_storage import (
+            _stable_lane_operations,
+            _write_stable_lane_operation,
+            _claim_stable_lane_operation,
+        )
+
+        for kind, operation in _stable_lane_operations().items():
+            with self.subTest(kind=kind), _head_postgres_database() as url:
+                limited = (
+                    make_url(url)
+                    .update_query_dict({"options": "-c lock_timeout=100"})
+                    .render_as_string(hide_password=False)
+                )
+                store = PostgresRecordStore(database_url=limited)
+                engine = create_engine(url, poolclass=NullPool)
+                try:
+                    _write_stable_lane_operation(store, operation)
+                    with engine.connect() as keeper, maintenance_admission(keeper):
+                        with self.assertRaises(DBAPIError):
+                            _claim_stable_lane_operation(store, kind)
+                    record = drain.ServiceDeployDrainRecord(
+                        request_fingerprint="maintenance-fixture",
+                        target_type="compose",
+                        target_id="own-target",
+                        image_reference="synthetic-image",
+                        deployment_marker="paused",
+                        state="requested",
+                        updated_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    with store._session_factory() as session:
+                        drain._write(session, record)
+                        session.commit()
+                    self.assertIsNone(_claim_stable_lane_operation(store, kind))
+                    with store._session_factory() as session:
+                        row = session.get(LaunchplaneServiceDeployDrainRow, "service")
+                        session.delete(row)
+                        session.commit()
+                    claimed = _claim_stable_lane_operation(store, kind)
+                    self.assertIsNotNone(claimed)
+                    with store._session_factory() as session:
+                        observations = drain._operation_observations(
+                            store, session, datetime.now(timezone.utc).isoformat()
+                        )
+                        active = next(
+                            item
+                            for item in observations
+                            if item["operation_id"] == operation.operation_id
+                        )
+                        self.assertTrue(active["blocks_drain"])
+                finally:
+                    store.close()
+                    engine.dispose()
+
+    def test_snapshot_settings_restore_on_sql_failure_without_rolling_back_outer_work(self) -> None:
+        from control_plane.database_maintenance import _schema_deparse_settings
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text("CREATE TABLE setting_scope_sample(id integer PRIMARY KEY)")
+                )
+                connection.execute(text("INSERT INTO setting_scope_sample VALUES(1)"))
+                connection.execute(text("SET LOCAL standard_conforming_strings=off"))
+                original = connection.execute(
+                    text(
+                        "SELECT current_setting('search_path'),current_setting('standard_conforming_strings')"
+                    )
+                ).one()
+                with self.assertRaises(DBAPIError):
+                    with _schema_deparse_settings(connection):
+                        connection.execute(text("SELECT 1/0"))
+                self.assertEqual(
+                    connection.execute(
+                        text(
+                            "SELECT current_setting('search_path'),current_setting('standard_conforming_strings')"
+                        )
+                    ).one(),
+                    original,
+                )
+                self.assertEqual(
+                    connection.scalar(text("SELECT count(*) FROM setting_scope_sample")), 1
+                )
+
+    def test_reparsed_constraint_and_partial_index_keep_schema_but_changes_do_not(self) -> None:
+        from control_plane.database_maintenance import database_snapshot
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE scalar_array_sample(id integer PRIMARY KEY, state varchar, value text, CONSTRAINT scalar_array_state_ck CHECK(state IN ('queued','done')))"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "CREATE UNIQUE INDEX scalar_array_value_idx ON scalar_array_sample(value) WHERE state IN ('queued','done')"
+                    )
+                )
+                connection.execute(
+                    text("INSERT INTO scalar_array_sample VALUES(1,'queued','original')")
+                )
+                before = database_snapshot(connection)
+                constraint = connection.scalar(
+                    text(
+                        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='scalar_array_sample'::regclass AND conname='scalar_array_state_ck'"
+                    )
+                )
+                index = connection.scalar(
+                    text("SELECT pg_get_indexdef('scalar_array_value_idx'::regclass)")
+                )
+                assert isinstance(constraint, str) and isinstance(index, str)
+                connection.execute(
+                    text("ALTER TABLE scalar_array_sample DROP CONSTRAINT scalar_array_state_ck")
+                )
+                connection.exec_driver_sql(
+                    "ALTER TABLE scalar_array_sample ADD CONSTRAINT scalar_array_state_ck "
+                    + constraint
+                )
+                connection.execute(text("DROP INDEX scalar_array_value_idx"))
+                connection.exec_driver_sql(index)
+                self.assertEqual(database_snapshot(connection), before)
+                connection.execute(
+                    text("ALTER TABLE scalar_array_sample DROP CONSTRAINT scalar_array_state_ck")
+                )
+                connection.execute(
+                    text(
+                        "ALTER TABLE scalar_array_sample ADD CONSTRAINT scalar_array_state_ck CHECK(state IN ('queued'))"
+                    )
+                )
+                self.assertNotEqual(database_snapshot(connection), before)
+                connection.execute(
+                    text("ALTER TABLE scalar_array_sample DROP CONSTRAINT scalar_array_state_ck")
+                )
+                connection.exec_driver_sql(
+                    "ALTER TABLE scalar_array_sample ADD CONSTRAINT scalar_array_state_ck "
+                    + constraint
+                )
+                self.assertEqual(database_snapshot(connection), before)
+                connection.execute(text("DROP INDEX scalar_array_value_idx"))
+                connection.execute(
+                    text(
+                        "CREATE UNIQUE INDEX scalar_array_value_idx ON scalar_array_sample(value) WHERE state='queued'"
+                    )
+                )
+                self.assertNotEqual(database_snapshot(connection), before)
+
+    def test_hold_blocks_writes_but_allows_its_exported_backup_snapshot(self) -> None:
+        from control_plane.database_maintenance import locked_database, database_snapshot
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(id integer PRIMARY KEY, value text)"))
+                connection.execute(text("INSERT INTO sample VALUES(1,'before')"))
+            with engine.connect() as keeper:
+                with locked_database(
+                    keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=20)
+                ):
+                    database_snapshot(keeper)
+                    snapshot = keeper.scalar(text("SELECT pg_export_snapshot()"))
+                    with engine.connect() as reader:
+                        reader.execute(text("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                        reader.execute(text(f"SET TRANSACTION SNAPSHOT '{snapshot}'"))
+                        self.assertEqual(reader.scalar(text("SELECT value FROM sample")), "before")
+                    with engine.connect() as writer:
+                        writer.execute(text("SET LOCAL lock_timeout='100ms'"))
+                        with self.assertRaises(OperationalError):
+                            writer.execute(text("UPDATE sample SET value='after'"))
+                with engine.begin() as writer:
+                    writer.execute(text("UPDATE sample SET value='released'"))
+
+    def test_external_migration_is_rolled_back_with_its_keeper_transaction(self) -> None:
+        from control_plane.storage.schema_migration import migrate_schema_on_connection
+        from control_plane.storage.migrations.versions import (
+            e7c1d5e9a3b6_drop_retired_delivery_tables as retired,
+        )
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), retired.down_revision)
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.connect() as keeper:
+                transaction = keeper.begin()
+                migrate_schema_on_connection(keeper, target_revision=retired.revision)
+                self.assertTrue(
+                    set(retired.RETIRED_TABLES).isdisjoint(inspect(keeper).get_table_names())
+                )
+                transaction.rollback()
+            with engine.connect() as observer:
+                self.assertTrue(
+                    set(retired.RETIRED_TABLES) <= set(inspect(observer).get_table_names())
+                )
+                self.assertEqual(
+                    observer.scalar(text("SELECT version_num FROM alembic_version")),
+                    retired.down_revision,
+                )
+
+    def test_unexpected_client_refuses_hold_and_all_locks_are_released(self) -> None:
+        from control_plane.database_maintenance import locked_database, MAINTENANCE_LOCKS
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(id integer)"))
+            with engine.connect() as keeper, engine.connect() as unexpected:
+                unexpected.execute(text("SELECT 1"))
+                with self.assertRaises(RuntimeError):
+                    with locked_database(
+                        keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=20)
+                    ):
+                        self.fail("Unexpected client must prevent the maintenance window.")
+            with engine.begin() as observer:
+                self.assertTrue(
+                    observer.scalar(
+                        text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))"),
+                        {"key": MAINTENANCE_LOCKS[0]},
+                    )
+                )
+                observer.execute(text("INSERT INTO sample VALUES(1)"))
+
+    def test_snapshot_is_established_after_the_table_locks(self) -> None:
+        from control_plane.database_maintenance import locked_database
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(value text)"))
+                connection.execute(text("INSERT INTO sample VALUES('old')"))
+            with engine.connect() as keeper:
+
+                def commit_before_lock(
+                    _connection: Any,
+                    _cursor: Any,
+                    statement: str,
+                    _parameters: Any,
+                    _context: Any,
+                    _executemany: bool,
+                ) -> None:
+                    if statement.startswith("LOCK TABLE"):
+                        with engine.begin() as writer:
+                            writer.execute(text("UPDATE sample SET value='committed-before-lock'"))
+
+                event.listen(keeper, "before_cursor_execute", commit_before_lock)
+                with locked_database(
+                    keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=20)
+                ):
+                    self.assertEqual(
+                        keeper.scalar(text("SELECT value FROM sample")), "committed-before-lock"
+                    )
+
+    def test_full_column_digest_detects_nonpayload_and_sequence_changes(self) -> None:
+        from control_plane.database_maintenance import database_snapshot
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE sample(id bigserial PRIMARY KEY, label text, payload jsonb, content bytea, observed timestamptz)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO sample(label,payload,content,observed) VALUES('révision',CAST(:payload AS jsonb),decode('00ff','hex'),'2026-01-01T03:00:00+03:00')"
+                    ),
+                    {"payload": json.dumps({"a": None})},
+                )
+                before = database_snapshot(connection)
+                connection.execute(text("SET LOCAL TIME ZONE 'America/New_York'"))
+                self.assertEqual(database_snapshot(connection), before)
+                connection.execute(text("UPDATE sample SET label='changed'"))
+                self.assertNotEqual(database_snapshot(connection), before)
+                connection.execute(text("UPDATE sample SET label='révision'"))
+                connection.execute(text("SELECT nextval('sample_id_seq')"))
+                self.assertNotEqual(database_snapshot(connection), before)
+                connection.execute(
+                    text(
+                        "CREATE FUNCTION sample_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "CREATE TRIGGER sample_guard BEFORE INSERT ON sample FOR EACH ROW EXECUTE FUNCTION sample_guard()"
+                    )
+                )
+                guarded = database_snapshot(connection)
+                connection.execute(
+                    text(
+                        "CREATE OR REPLACE FUNCTION sample_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NULL; END'"
+                    )
+                )
+                self.assertNotEqual(database_snapshot(connection), guarded)
+
+    def test_server_deadline_releases_an_idle_keeper(self) -> None:
+        from control_plane.database_maintenance import locked_database
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(id integer)"))
+            with engine.connect() as keeper:
+                with self.assertRaises(SQLAlchemyError):
+                    with locked_database(
+                        keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=0.15)
+                    ):
+                        time.sleep(0.3)
+                        keeper.execute(text("SELECT 1"))
+            with engine.begin() as writer:
+                writer.execute(text("SET LOCAL lock_timeout='1s'"))
+                writer.execute(text("INSERT INTO sample VALUES(1)"))
+
+    def test_submillisecond_budget_cannot_disable_the_server_deadline(self) -> None:
+        from control_plane.database_maintenance import locked_database
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(id integer)"))
+            with engine.connect() as keeper:
+                expires = datetime.now(timezone.utc) + timedelta(seconds=10)
+                scalar = keeper.scalar
+
+                def near_deadline(statement: Any, *args: Any, **kwargs: Any) -> Any:
+                    if str(statement) == "SELECT clock_timestamp()":
+                        return expires - timedelta(microseconds=100)
+                    return scalar(statement, *args, **kwargs)
+
+                with patch.object(keeper, "scalar", side_effect=near_deadline):
+                    with self.assertRaises(SQLAlchemyError):
+                        with locked_database(keeper, expires_at=expires):
+                            time.sleep(0.05)
+                            keeper.execute(text("SELECT 1"))
+
+    def test_keeper_releases_only_its_own_advisory_lock_acquisitions(self) -> None:
+        from control_plane.database_maintenance import locked_database
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            key = 273645
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(id integer)"))
+            with engine.connect() as keeper:
+                keeper.execute(text("SELECT pg_advisory_lock(:key)"), {"key": key})
+                keeper.commit()
+                with locked_database(
+                    keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=10)
+                ):
+                    pass
+                with engine.connect() as observer:
+                    self.assertFalse(
+                        observer.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key})
+                    )
+
+    def test_rehearsal_refuses_the_live_cluster_before_migration(self) -> None:
+        from control_plane.database_maintenance import database_system_identifier
+        from control_plane.database_maintenance_cli import rehearsal_receipt
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.connect() as connection:
+                live_identifier = database_system_identifier(connection)
+                with (
+                    patch("control_plane.database_maintenance_cli.require_isolated_runtime"),
+                    patch(
+                        "control_plane.storage.schema_migration.migrate_schema_on_connection"
+                    ) as migrate,
+                ):
+                    with self.assertRaises(RuntimeError):
+                        rehearsal_receipt(
+                            connection,
+                            held={"system_identifier": live_identifier},
+                            backup_sha256="a" * 64,
+                            expires=datetime.now(timezone.utc) + timedelta(seconds=20),
+                        )
+                migrate.assert_not_called()
+
+    def test_live_apply_refuses_a_rehearsal_from_its_own_cluster(self) -> None:
+        from control_plane.database_maintenance import apply_retirement, database_system_identifier
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.connect() as connection:
+                live_identifier = database_system_identifier(connection)
+                with patch(
+                    "control_plane.database_maintenance.migrate_schema_on_connection"
+                ) as migrate:
+                    with self.assertRaises(RuntimeError):
+                        apply_retirement(
+                            connection, before={}, rehearsal={"system_identifier": live_identifier}
+                        )
+                migrate.assert_not_called()
+
+    def test_held_migration_joins_current_attestations_without_losing_retained_rows(self) -> None:
+        from control_plane.database_maintenance_host import RecoveryRequired
+        from control_plane.database_maintenance import (
+            apply_retirement,
+            database_snapshot,
+            database_system_identifier,
+            verify_committed_database,
+            locked_database,
+            require_retired_functions_absent,
+            retained_snapshot,
+        )
+        from control_plane.storage.schema_migration import (
+            migrate_schema_on_connection,
+            schema_migration_target,
+        )
+        from control_plane.storage.migrations.versions import (
+            c8d2e4f6a9b1_add_integration_attestations as current,
+        )
+        from control_plane.storage.migrations.versions import (
+            e7c1d5e9a3b6_drop_retired_delivery_tables as retired,
+        )
+        from tests.test_retired_delivery_migration import seed_retired_history
+        from sqlalchemy.pool import NullPool
+        from sqlalchemy import Table, MetaData
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), current.revision)
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            seed_retired_history(engine)
+            with engine.begin() as seed:
+                table = Table(current.TABLE_NAME, MetaData(), autoload_with=seed)
+                seed.execute(
+                    table.insert().values(
+                        record_id="retained-attestation",
+                        repository="example/control",
+                        pull_request_number=17,
+                        payload={"retained": "full columns", "nullable": None},
+                    )
+                )
+            with engine.connect() as connection:
+                with locked_database(
+                    connection, expires_at=datetime.now(timezone.utc) + timedelta(seconds=30)
+                ):
+                    before = database_snapshot(connection)
+                    preview = connection.begin_nested()
+                    final = migrate_schema_on_connection(
+                        connection, target_revision=retired.revision
+                    )
+                    self.assertEqual(
+                        final,
+                        schema_migration_target(
+                            current_revision=current.revision, target_revision=retired.revision
+                        ),
+                    )
+                    after = database_snapshot(connection)
+                    require_retired_functions_absent(connection)
+                    verify_postgres_schema_invariants(connection)
+                    self.assertEqual(set(before) - set(after), set(retired.RETIRED_TABLES))
+                    self.assertEqual(retained_snapshot(after), retained_snapshot(before))
+                    self.assertEqual(
+                        after[current.TABLE_NAME],
+                        before[current.TABLE_NAME],
+                    )
+                    preview.rollback()
+                    rehearsal = {
+                        "system_identifier": database_system_identifier(connection) + "-isolated",
+                        "backup_sha256": "a" * 64,
+                        "restored": before,
+                        "retained": retained_snapshot(after),
+                        "revision": final,
+                    }
+                    incompatible = connection.begin_nested()
+                    try:
+                        with patch(
+                            "control_plane.database_maintenance.schema_migration_action",
+                            return_value="upgrade",
+                        ):
+                            with self.assertRaises(RuntimeError):
+                                apply_retirement(connection, before=before, rehearsal=rehearsal)
+                    finally:
+                        incompatible.rollback()
+                    rejected = connection.begin_nested()
+                    try:
+                        with patch(
+                            "control_plane.database_maintenance.verify_postgres_schema_invariants",
+                            side_effect=RuntimeError("invariant failure"),
+                        ):
+                            with self.assertRaises(RuntimeError):
+                                apply_retirement(connection, before=before, rehearsal=rehearsal)
+                    finally:
+                        rejected.rollback()
+                    self.assertTrue(
+                        set(retired.RETIRED_TABLES) <= set(inspect(connection).get_table_names())
+                    )
+                    self.assertEqual(
+                        apply_retirement(connection, before=before, rehearsal=rehearsal), final
+                    )
+                    proof = {
+                        "system_identifier": database_system_identifier(connection),
+                        "before": before,
+                        "after": database_snapshot(connection),
+                    }
+            with engine.connect() as observer:
+                self.assertEqual(verify_committed_database(observer, proof), final)
+                table = Table(current.TABLE_NAME, MetaData(), autoload_with=observer)
+                observer.execute(table.update().values(pull_request_number=99))
+                with self.assertRaises(RecoveryRequired):
+                    verify_committed_database(observer, proof)
+                self.assertEqual(
+                    observer.execute(text("SELECT version_num FROM alembic_version"))
+                    .scalars()
+                    .all(),
+                    [final],
+                )
+
+    def test_trigger_readback_refuses_a_remaining_retired_function(self) -> None:
+        from control_plane.database_maintenance import require_retired_functions_absent
+        from control_plane.storage.migrations.versions import (
+            e7c1d5e9a3b6_drop_retired_delivery_tables as retired,
+        )
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                require_retired_functions_absent(connection)
+                name = connection.dialect.identifier_preparer.quote(
+                    retired.RETIRED_TRIGGER_FUNCTIONS[0]
+                )
+                connection.execute(
+                    text(
+                        f"CREATE FUNCTION public.{name}() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'"
+                    )
+                )
+                with self.assertRaises(RuntimeError):
+                    require_retired_functions_absent(connection)
+
+    def test_stopped_writer_admission_never_disconnects_an_existing_client(self) -> None:
+        from control_plane.database_maintenance import locked_database
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as seed:
+                seed.execute(text("CREATE TABLE sample(id integer PRIMARY KEY)"))
+            with engine.connect() as keeper, engine.connect() as client:
+                for statement in (
+                    "SELECT * FROM sample",
+                    "SELECT pg_advisory_xact_lock(9876543)",
+                    "INSERT INTO sample VALUES(1)",
+                ):
+                    client.execute(text(statement))
+                    keeper.rollback()
+                    with self.assertRaises((RuntimeError, SQLAlchemyError)):
+                        with locked_database(
+                            keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=20)
+                        ):
+                            self.fail("An existing client was admitted.")
+                    self.assertEqual(client.scalar(text("SELECT 1")), 1)
+                    client.rollback()
+
+    def test_existing_executor_census_rejects_admitted_worker_without_using_lease_expiry(
+        self,
+    ) -> None:
+        from control_plane.database_maintenance_cli import require_no_active_executors
+        from sqlalchemy import Table, MetaData
+        from control_plane.storage.migrations.versions import (
+            c8d2e4f6a9b1_add_integration_attestations as current,
+        )
+        from control_plane.storage.postgres import LaunchplanePrivilegedOperationRow
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), current.revision)
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                require_no_active_executors(connection)
+                table = Table(
+                    LaunchplanePrivilegedOperationRow.__tablename__,
+                    MetaData(),
+                    autoload_with=connection,
+                )
+                connection.execute(
+                    table.insert().values(
+                        operation_id="synthetic",
+                        descriptor_id="managed-secret-reencryption",
+                        status="executing",
+                        requester_github_id=1,
+                        created_at="2000-01-01T00:00:00+00:00",
+                        updated_at="2000-01-01T00:00:00+00:00",
+                        expires_at="2000-01-01T00:00:00+00:00",
+                        payload={},
+                    )
+                )
+                with self.assertRaises(RuntimeError):
+                    require_no_active_executors(connection)
+                connection.execute(table.update().values(status="execution_failed"))
+                require_no_active_executors(connection)
+                self.assertEqual(connection.scalar(select(table.c.status)), "execution_failed")
+
+    def test_unknown_running_reservation_refuses_unless_its_exact_executor_is_excluded(
+        self,
+    ) -> None:
+        from control_plane.database_maintenance_cli import require_no_active_executors
+        from control_plane.storage.migrations.versions import (
+            c8d2e4f6a9b1_add_integration_attestations as current,
+        )
+        from control_plane.storage import postgres
+        from control_plane import service_deploy_drain
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), current.revision)
+            store = postgres.PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            reservation = store.reserve_mutation(
+                scope="synthetic-api-scheduler",
+                route_path="service:synthetic-scheduler",
+                idempotency_key="current",
+                request_fingerprint="synthetic",
+                lease_owner="synthetic",
+            )
+            with store._engine.connect() as connection:
+                with self.assertRaises(RuntimeError):
+                    require_no_active_executors(connection)
+                with patch.object(
+                    service_deploy_drain,
+                    "_operation_observations",
+                    return_value=(
+                        {
+                            "operation_id": reservation.record.record_id,
+                            "blocks_drain": False,
+                            "execution_excluded": True,
+                        },
+                    ),
+                ):
+                    require_no_active_executors(connection)
+                self.assertEqual(
+                    connection.scalar(select(postgres.LaunchplaneIdempotencyRow.state)),
+                    "running",
+                )
+
+    def test_nonserving_runtime_probes_enforce_readonly_and_preserve_every_row(self) -> None:
+        from control_plane.database_maintenance_cli import verify_application_reads
+        from control_plane.database_maintenance import database_snapshot
+        from control_plane.database_maintenance_host import RecoveryRequired
+        from control_plane.storage.migrations.versions import (
+            c8d2e4f6a9b1_add_integration_attestations as current,
+        )
+        from control_plane.storage.postgres import PostgresRecordStore
+        from sqlalchemy.pool import NullPool
+        from sqlalchemy.exc import OperationalError
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), current.revision)
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.connect() as connection:
+                before = database_snapshot(connection)
+                verify_application_reads(connection)
+                self.assertEqual(database_snapshot(connection), before)
+                transient = OperationalError("expiry read", {}, ConnectionResetError())
+                with patch.object(
+                    PostgresRecordStore,
+                    "expire_ordinary_agent_deliveries",
+                    side_effect=transient,
+                ):
+                    with self.assertRaises(OperationalError):
+                        verify_application_reads(connection)
+                for attribute in ("_engine", "_preview_lock_engine"):
+
+                    def attempt_write(store: PostgresRecordStore, *, limit: int) -> int:
+                        with getattr(store, attribute).begin() as writer:
+                            writer.execute(
+                                text("UPDATE alembic_version SET version_num=version_num")
+                            )
+                        return 0
+
+                    with (
+                        self.subTest(engine=attribute),
+                        patch.object(
+                            PostgresRecordStore,
+                            "expire_ordinary_agent_deliveries",
+                            attempt_write,
+                        ),
+                    ):
+                        with self.assertRaises(RecoveryRequired):
+                            verify_application_reads(connection)
+                    self.assertEqual(database_snapshot(connection), before)

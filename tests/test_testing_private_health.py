@@ -188,10 +188,12 @@ class TestingPrivateHealthTests(PrivateIngressFixture):
         )
         read = self.client.get_proxy_host
 
-        def get_host(host_id: int, *, public_only: bool = False) -> Any:
+        def get_host(
+            host_id: int, *, public_only: bool = False, private_bearer_auth: bool = False
+        ) -> Any:
             if host_id == missing_host_id:
                 raise click.ClickException("Historical host was deleted")
-            return read(host_id, public_only=public_only)
+            return read(host_id, public_only=public_only, private_bearer_auth=private_bearer_auth)
 
         with patch.object(self.client, "get_proxy_host", side_effect=get_host):
             self.assertEqual(self.fetch().status_code, 200)

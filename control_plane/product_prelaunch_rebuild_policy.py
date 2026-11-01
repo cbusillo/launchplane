@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     OdooDataAuthority,
@@ -15,7 +14,6 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductOdooPrelaunchRebuildPolicy,
 )
-
 
 ProductPrelaunchRebuildPolicyMode = Literal["dry-run", "apply"]
 ProductPrelaunchRebuildPolicyOperation = Literal["update", "unchanged"]
@@ -150,6 +148,10 @@ def build_product_prelaunch_rebuild_policy_plan(
     _validate_requested_policy(lane=lane, policy=requested_policy)
     current_policy = lane.odoo_prelaunch_rebuild
     changed = current_policy.model_dump(mode="json") != requested_policy.model_dump(mode="json")
+    if changed:
+        updated_product_prelaunch_rebuild_policy_profile(
+            profile=profile, request=request, updated_at=profile.updated_at
+        )
     operation: ProductPrelaunchRebuildPolicyOperation = "update" if changed else "unchanged"
     profile_sha256 = _canonical_sha256(profile.model_dump(mode="json"))
     plan_evidence = {
@@ -266,6 +268,4 @@ def _validate_requested_policy(
 
 
 def _canonical_sha256(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)

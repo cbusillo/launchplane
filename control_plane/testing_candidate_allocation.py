@@ -199,6 +199,7 @@ def prepare_candidate_storage(
     if not record.compose_id:
         create_isolated_placement(
             root,
+            record_store=store,
             namespace=record.namespace,
             server_id=record.server_id,
             description="Independent testing candidate",

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 
-import hashlib
 import json
 import re
 import time
@@ -77,6 +76,7 @@ from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import compose as dokploy_compose
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.dokploy.api import JsonObject, JsonValue
+from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 
 
 OdooPreviewDokployDryRunStatus = OdooPreviewRuntimePlanStatus
@@ -235,6 +235,11 @@ class OdooPreviewApplyInputsResult(BaseModel):
     # Template-lane integration credentials the preview receives blank because no
     # key-safety rule allows them on previews. Key names only, never values.
     omitted_integration_credential_keys: tuple[str, ...] = ()
+    preview_website_bootstrap_sha256: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     source: str
     fishbowl_source_sha256: str = Field(
         default="",
@@ -279,8 +284,7 @@ class OdooPreviewApplyInputsResult(BaseModel):
 
 def odoo_preview_apply_plan_sha256(result: OdooPreviewApplyInputsResult) -> str:
     payload = result.model_dump(mode="json", exclude={"plan_provenance"})
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return nonvalidating_compact_sorted_json_sha256(payload)
 
 
 def build_odoo_preview_apply_inputs(
@@ -1309,6 +1313,7 @@ def execute_odoo_preview_dokploy_apply(
             provider_lease_check=provider_lease_check,
         )
     return _execute_refresh(
+        record_store=record_store,
         database_url=database_url,
         host=host,
         token=token,
@@ -1773,6 +1778,7 @@ def _preview_refresh_environment_values(
 
 def _execute_refresh(
     *,
+    record_store: object | None = None,
     host: str,
     token: str,
     request: OdooPreviewDokployApplyRequest,
@@ -1827,6 +1833,7 @@ def _execute_refresh(
         )
         source_server_id = str(target_payload.get("serverId") or "").strip()
         compose_id, created_compose = _resolve_or_create_compose(
+            record_store=record_store,
             database_url=database_url,
             host=host,
             token=token,
@@ -2269,6 +2276,7 @@ def _execute_destroy(
 
 def _resolve_or_create_compose(
     *,
+    record_store: object | None = None,
     host: str,
     token: str,
     plan: OdooPreviewDokployDryRunPlan,
@@ -2301,20 +2309,23 @@ def _resolve_or_create_compose(
         host=host, token=token, server_id=server_id, database_url=database_url
     )
     provider_effect_checkpoint("compose_create")
-    created = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/compose.create",
-        method="POST",
-        payload={
-            "name": plan.compose_name,
-            "appName": plan.compose_name,
-            "description": f"Launchplane Odoo preview {plan.preview_slug}",
-            "environmentId": plan.environment_id,
-            "serverId": server_id,
-            "composeType": "docker-compose",
-        },
-    )
+    from control_plane.production_recipient_retirement_names import provider_name_guard
+
+    with provider_name_guard(record_store, plan.compose_name):
+        created = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/compose.create",
+            method="POST",
+            payload={
+                "name": plan.compose_name,
+                "appName": plan.compose_name,
+                "description": f"Launchplane Odoo preview {plan.preview_slug}",
+                "environmentId": plan.environment_id,
+                "serverId": server_id,
+                "composeType": "docker-compose",
+            },
+        )
     created_compose = dokploy_api.as_json_object(created)
     compose_id = str((created_compose or {}).get("composeId") or "").strip()
     if not compose_id:

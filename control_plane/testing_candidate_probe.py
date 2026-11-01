@@ -213,6 +213,8 @@ def probe(spec):
             raise CopyReadbackRefused(ReadbackPredicate.COPY_WITNESS)
     inspection_predicate = ReadbackPredicate.INTEGRATIONS
     readback = docker('exec','-i',runner,'python3','-',spec['database_name'],spec['readback_spec'],'dry-run',stdin=base64.b64decode(spec['readback_program'])).decode()
+    if any(line.startswith('odoo_config_parameter_missing=') for line in readback.splitlines()):
+        raise CopyReadbackRefused(ReadbackPredicate.SETTINGS)
     if 'integration_readback_ok=false' in readback.splitlines():
         raise CopyReadbackRefused(ReadbackPredicate.INTEGRATIONS)
     if 'integration_readback_ok=true' not in readback.splitlines():

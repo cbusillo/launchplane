@@ -2,9 +2,13 @@ import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import { requestReleaseReview, readReleaseReview, writeReleaseReviewDecision } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
-import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse, ReleaseReviewItem, OdooWebsiteSettings } from "./generated/openapi.ts";
+import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse, ReleaseReviewItem, OdooWebsiteSettings, ReleaseVersion } from "./generated/openapi.ts";
 import { groupReleaseItems, untestedReason } from "./release-review-model";
 import { safeExternalUrl } from "./url";
+
+function runtimeSettingsIdentity(settings: ReleaseVersion["runtime_settings"]): string {
+  return JSON.stringify(settings ? [Object.entries(settings.values).sort(([left], [right]) => left.localeCompare(right)), [...settings.absent_keys].sort()] : null);
+}
 
 const RELEASE_STEP_LABELS: Record<ClientReleaseRunView["steps"][number]["kind"], string> = {
   backup: "Verified backup",
@@ -230,11 +234,16 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   // bind it; other viewers review the already-live fix's saved checklist.
   const reviewingHotfix = activeHotfix && !response?.can_start_temporary_hotfix;
   const incomplete = !checklist || response?.review.checklist_complete !== true;
-  const hasChanges = !!checklist && (
+  const hasChanges = !!checklist && !noNewRelease && (
     checklist.production.artifact_id !== checklist.candidate.artifact_id
     || checklist.production.source_commit !== checklist.candidate.source_commit
     || (checklist.production.shared_addons_digest ?? "") !== (checklist.candidate.shared_addons_digest ?? "")
+    || runtimeSettingsIdentity(checklist.production.runtime_settings) !== runtimeSettingsIdentity(checklist.candidate.runtime_settings)
   );
+  const changedSettings = Object.entries(checklist?.candidate.runtime_settings?.values ?? {})
+    .filter(([key, value]) => checklist?.production.runtime_settings?.values[key] !== value);
+  const removedSettings = (checklist?.candidate.runtime_settings?.absent_keys ?? [])
+    .filter(key => !checklist?.production.runtime_settings?.absent_keys.includes(key));
   const client = response?.owner_github_login ?? "";
   // A viewer who is not the Client learns first who the Client is and that their
   // own decision cannot start the release.
@@ -287,9 +296,9 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
           <p>Testing and previews keep production analytics and search indexing disabled.</p>
         </section> : null}
         <h3>What to test</h3>
-        <ReleaseItems items={checklist.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={(checklist.shared_sources ?? []).length ? "No website-repository changes. Review the shared components below." : undefined} />
-        {(checklist.shared_sources ?? []).map(source => <section key={source.repository} aria-label={`Shared website components from ${source.repository}`}>
-          <h4>Shared website components</h4>
+        <ReleaseItems items={checklist.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={(checklist.shared_sources ?? []).length ? "No product-repository changes. Review the shared components below." : undefined} />
+        {(checklist.shared_sources ?? []).map(source => <section key={`${source.repository}/${source.production_commit}/${source.candidate_commit}`} aria-label={`Shared release inputs from ${source.repository}`}>
+          <h4>Shared release inputs</h4>
           <p className="owner-review-state">{source.repository}</p>
           <ReleaseItems items={source.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={source.untracked_commits.length ? "Shared changes have no merged pull request coverage. See the blockers below." : undefined} />
         </section>)}
@@ -343,12 +352,24 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {checklist && !noNewRelease && (response.viewer_is_owner || response.can_override) ? <p className="owner-review-state">Each new decision is saved and published as a separate release record. {releaseStarts ? "Only the Client's acceptance starts the release; an admin override does not, and an admin can hold releases." : "Recording a decision does not deploy anything."} Production deployment still requires the release and backup checks.</p> : null}
       {recorded ? <p role="status" className="owner-review-success">{latestDecision?.decision === "temporary_hotfix" ? "Temporary hotfix recorded. Launchplane is putting it live; this page shows its progress." : latestDecision?.release_start === "rollback" ? "Changes requested. Launchplane is rolling the site back to your last accepted release." : latestDecision?.release_start ? "Release accepted. This page shows when Launchplane can start and its progress." : "Decision recorded. Nothing has been deployed."}</p> : null}
+      {(changedSettings.length > 0 || removedSettings.length > 0) && !noNewRelease ? <details className="release-review-technical" data-production-settings>
+        <summary>Production settings</summary>
+        <p>Accepting this release applies these saved settings to the live site. Rollback restores the previous settings with the previous version.</p>
+        <dl>
+          {changedSettings.map(([key, value]) => <div key={key}>
+            <dt>{key}</dt><dd><code>{value}</code></dd>
+          </div>)}
+          {removedSettings.map(key => <div key={key}>
+            <dt>{key}</dt><dd>Removed</dd>
+          </div>)}
+        </dl>
+      </details> : null}
       {checklist ? <details className="release-review-technical">
         <summary>Technical details</summary>
         <dl>
           <div><dt>{reviewingHotfix ? "Version the urgent fix replaced:" : "Current production version:"}</dt><dd><code>{checklist.production.source_commit}</code></dd></div>
           <div><dt>{noNewRelease ? "Testing version (already in production):" : reviewingHotfix ? "Live urgent fix:" : "Proposed production version:"}</dt><dd><code>{checklist.candidate.source_commit}</code>{reviewingHotfix ? null : <span>Currently in testing</span>}</dd></div>
-          {(checklist.shared_sources ?? []).map(source => <div key={source.repository}>
+          {(checklist.shared_sources ?? []).map(source => <div key={`${source.repository}/${source.production_commit}/${source.candidate_commit}`}>
             <dt>Shared components from {source.repository}</dt>
             <dd><span>Production</span><code>{source.production_commit}</code><span>Currently in testing</span><code>{source.candidate_commit}</code></dd>
           </div>)}

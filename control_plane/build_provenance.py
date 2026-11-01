@@ -36,6 +36,7 @@ BuildProvenanceReasonCode = Literal[
     "artifact_record_conflict",
     "build_purpose_mismatch",
     "build_run_missing",
+    "build_run_failed",
     "download_too_large",
     "github_read_failed",
     "github_response_invalid",
@@ -454,22 +455,36 @@ def _select_build_run(
         and run.get("event") == event
         and _repository_id(run.get("repository")) == repository_id
         and _repository_id(run.get("head_repository")) == repository_id
-        and run.get("status") == "completed"
-        and run.get("conclusion") == "success"
         and (purpose != "release" or run.get("head_branch") == default_branch)
     ]
-    if not runs:
+    successful = [
+        run
+        for run in runs
+        if run.get("status") == "completed" and run.get("conclusion") == "success"
+    ]
+    if not successful:
+        failed = [
+            run
+            for run in runs
+            if run.get("status") == "completed"
+            and run.get("conclusion") in {"failure", "timed_out", "startup_failure"}
+        ]
+        if purpose == "preview" and failed:
+            latest = max(failed, key=_build_run_order)
+            raise BuildProvenanceError(
+                "The preview build did not complete successfully.",
+                code="build_run_failed",
+                run_id=_int(latest.get("id"), "run id"),
+            )
         raise BuildProvenanceError(
             f"No successful {event} run of {BUILD_WORKFLOW_PATH} built {commit} in this repository.",
             code="build_run_missing",
         )
-    return max(
-        runs,
-        key=lambda run: (
-            _int(run.get("id"), "run id"),
-            _int(run.get("run_attempt") or 1, "run attempt"),
-        ),
-    )
+    return max(successful, key=_build_run_order)
+
+
+def _build_run_order(run: dict[str, object]) -> tuple[int, int]:
+    return _int(run.get("id"), "run id"), _int(run.get("run_attempt") or 1, "run attempt")
 
 
 def _require_first_parent(

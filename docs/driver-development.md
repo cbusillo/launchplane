@@ -113,38 +113,101 @@ replay a previous failed attempt. Command text names an executable in the
 product artifact; runtime settings and managed bindings supply its secrets.
 
 Preview profiles using driver data transport can explicitly select the
-`verireel-postgres` transport extension through `transport_extension` while their
+`postgres` transport extension through `transport_extension` while their
 driver is `generic-web`, declaring its isolated database namespace through
 `transport_database_prefix`. The template lane, application prefix, database
-namespace and runtime product identity come from the profile. This uses the existing isolated PostgreSQL preparation
-and cleanup rather than the plain preview path. The VeriReel testing transition
-has qualified this declared shared path; the parallel deploy, promotion and rollback driver is removed. Historical deployment
+namespace and runtime product identity come from the profile, as do its port,
+health path, URL environment keys and generated secrets. The testing template
+must expose a PostgreSQL `DATABASE_URL` and its image must provide Node and `pg`
+for database administration. Application database URLs retain the template's
+scheme and connection options, replacing only credentials and the database name;
+see [PostgreSQL connection URIs](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING-URIS).
+Query parameters that override connection identity or contain credentials are
+refused before effects. Put connection identity in the URI authority/path and
+credentials in the managed testing template instead.
+The shared preview health contract requires the observed runtime identity to
+match and rejects an explicit `ok: false`. Choose application and database prefixes unique
+to the product; storage checks the prospective profile set and provisioning and
+cleanup refuse overlapping rendered namespaces, including default prefixes and
+slug prefixes. Clean up retained previews before changing their resource names,
+source, template or transport. Disabling previews leaves cleanup available.
+Environment rendering uses the plain-preview model: only `copied_env_keys` are
+inherited from testing, declared required keys must exist, and managed preview
+runtime settings, secrets and retired keys apply before generated credentials.
+Use managed preview records for nongenerated settings; unlisted template values
+are absent. Copied credentials use the shared runtime key-safety gate;
+PostgreSQL also checks for credentials inside copied URL query values. Existing
+plain-preview classification is unchanged. Declare the copy list explicitly when transitioning
+a historical PostgreSQL profile. `preview.generated_secret_env` maps application
+environment keys to `urlsafe` or `base64`; values are generated for each preview
+and retained on refresh, never copied from testing. `preview_url_env_keys` and
+`preview_domain_env_keys` replace the
+product-specific URL rewriting. Maintenance and schedules remain profile-owned.
+Domain keys receive the full preview hostname, as with plain previews; a product
+needing a static base domain declares that value in managed preview settings.
+`DATABASE_URL` belongs to this transport, and `generated_secret_env` assigns its
+keys to the generator. Those declarations take precedence over managed values,
+secrets and retired-key entries. Remove an application key's generator declaration
+to retire it or supply it through managed configuration. Database credentials
+remain required while this transport is enabled; clean up previews before
+switching transport to use a separately managed database connection.
+This uses the existing isolated PostgreSQL preparation and cleanup rather than
+the plain preview path. Stored `verireel-postgres` declarations remain unchanged
+when read, including profiles embedded in retirement records and their hash
+fences. Historical declarations support database-aware cleanup using their
+stored resource names and testing template, including when the product is
+retiring or previews are disabled. Use `/v1/drivers/generic-web/preview-destroy`
+through the existing authorized agent route. Retired products remain refused;
+cleanup does not rewrite the profile or its retirement hash fence.
+Before preview refresh or other profile edits, apply a reviewed generic-web transition from the product's
+Shared web driver panel. Declare `postgres`, `copied_env_keys`, `generated_secret_env`,
+`preview_url_env_keys` and `preview_domain_env_keys` explicitly from the product's
+runtime contract. Empty collections mean the product requires none; Launchplane
+does not infer product keys. Keep existing resource prefixes and slug/template
+settings when retained previews still need cleanup. The review shows the new
+preview endpoint and HTTPS policy; a legacy effective endpoint is reported as
+unknown. Production endpoint settings are not rewritten. New inputs reject the
+retired name.
+New products declare their own keys
+and prefixes through the product profile or reviewed generic-web transition.
+Historical deployment
 and backup records and retired instance-scoped policy grants remain readable;
 no retired release endpoint is enabled by those grants. Production still changes only through an
 accepted release.
 
-A generic-web testing lane selects `verification_extension="verireel-testing"`
-in `generic_web_extensions` to reuse VeriReel's creator/admin
-qualification. The preset accepts only a recorded testing lane and exact
-reserved application target; other lanes and an absent executor are refused
-before deployment. The preset is selected only by the declaration; a product
-name or historical driver identifier does not enable testing qualification. The shared lifecycle runs the profile's migration commands first. The extension verifies a
-disposable creator's QR/public flow, creator denial of admin pages, and the admin
-pages after the existing smoke-maintenance intent elevates that fixture. Cleanup
-uses the existing test-account deletion intent. The deployment's
-`post_deploy_update.evidence` binds creator, admin and cleanup statuses
-to the deployment ID, immutable artifact and source revision; all must pass.
-The service image includes matching Playwright Chromium. The Compose browser
-service uses Playwright's built-in remote server in an unprivileged, read-only
-container with no credentials, runtime volume, host socket or published port.
-`LAUNCHPLANE_BROWSER_WS_ENDPOINT` is Launchplane self-bootstrap wiring to that
-private component. Both the HTTP service and the event-reconcile worker receive
-that endpoint and private network; control-plane startup does not wait on browser
-health. Verification checks browser availability before migration and Linux
-verification refuses an absent endpoint. Local
-non-Linux rehearsals use a sandboxed browser with a scrubbed environment.
-Fixture passwords are ephemeral and never enter qualification evidence.
-See [event-driven deploys](event-driven-deploys.md) for requalification and replay.
+Historical lifecycle translation remains in
+[`product_application_lifecycle_migration.py`](../control_plane/contracts/product_application_lifecycle_migration.py).
+[Issue 3856](https://github.com/cbusillo/launchplane/issues/3856) tracks its removal
+after persisted profile declarations and retirement/snapshot compatibility are
+qualified; this refactor does not rewrite live records to remove that reader.
+
+Application-only product retirement cannot clean PostgreSQL databases or roles.
+Destroy retained PostgreSQL previews through their normal preview cleanup route
+before integrated or no-target product retirement.
+
+Product browser checks belong to the product's Build. VeriReel qualifies every
+candidate image using disposable app, database and browser containers before
+publishing its deployable artifact manifest. Launchplane consumes that completed
+Build and immutable artifact; it does not create product fixtures or execute
+product assertions after deploying. Shared health and exact runtime identity
+checks still qualify the deployment.
+
+The retired `verification_extension="verireel-testing"` declaration remains
+readable for stored profiles. Reconcile holds it before provider effects, and
+explicit deploys refuse its missing executor. After the product's checked Build
+is available, use the existing reviewed generic-web transition to remove the
+retired testing declaration. Preserve its maintenance and schedules and every
+production declaration. This is an explicit testing-profile migration, never a
+silent fallback or an automatic production change.
+
+`control_plane.testing_browser` owns Launchplane's shared browser harness for
+Odoo walkthroughs and cutover probes. Its private Compose browser has no
+credentials, runtime volume, host socket or published port.
+`LAUNCHPLANE_BROWSER_WS_ENDPOINT` is Launchplane self-bootstrap wiring. Linux
+refuses an absent endpoint; non-Linux rehearsals launch a sandboxed browser
+with a scrubbed environment. The product's build browser is separate and never
+joins this private service network.
+
 Do not move a product apply route onto generic deploy until its remaining
 release, backup, promotion, migration, and post-deploy invariants are either
 represented in generic contracts or still explicitly wrapped by the product
@@ -173,11 +236,30 @@ the card starts with the current declarations. Maintenance and schedule commands
 run in the product artifact and use existing managed runtime settings.
 
 Review returns the normalized declarations and a plan bound to the whole current
-profile. Apply requires that exact review, a signed-in administrator's existing
-`product_profile.write` authority, CSRF and an operation key. A concurrent profile
+profile. A signed-in administrator applies with existing `product_profile.write`
+authority and CSRF. The Director's authenticated `local_operator` or `terminal_agent`
+identity can apply preview-only declarations on an existing `generic-web` product
+through the same service API, under `product_profile.preview_transition.apply`.
+It cannot change the driver or any stable-lane declaration, including testing and
+production. Other agent identities cannot apply this operation, even with a
+profile-write rule. No access policy or credential is created or changed.
+
+For an agent call, read `GET /v1/product-profiles/{product}` first. Submit each
+lane's current `generic_web_extensions` unchanged as its `extensions`, and the
+reviewed preview declarations from the product's runtime contract. Use
+`mode: dry-run`, inspect the normalized result, then submit the same declarations
+and reason with `mode: apply`, `reviewed_plan_sha256` and an `Idempotency-Key`.
+Read the profile back independently. Credential copying still passes the existing
+preview runtime-key safety gate at deployment; this declaration writes no secret
+and supplies no live-site key. Keep preview resource prefixes and custody intact.
+
+Every apply requires that exact review and an operation key. A concurrent profile
 edit refuses the apply. The write and original response commit atomically;
 a lost response keeps the card locked to its original key until replay or the
 profile mutation receipt settles it.
+API callers retain their original body and key on a lost response; the profile's
+`mutation-receipts/generic-web-transition?operation_key=...` read settles completion
+without repeating a mutation. Same-key replay returns the original response.
 
 This changes driver and extension declarations only. Lane placement, Client,
 release policy, health settings, runtime settings, secrets, artifacts and deployment
@@ -464,10 +546,7 @@ deployment receipt.
 
 For declared preview transport, `preview.app_name_suffix` is part of the resource
 name used by creation, inventory and destruction. Existing VeriReel applications
-use `-app`; record that suffix explicitly when switching its profile. The named
-`verireel-postgres` transport retains VeriReel's Prisma, seed and environment
-interfaces while its template lane, product identity and resource prefixes come
-from the profile. It does not imply compatibility with other applications.
+use `-app`; record that suffix explicitly when switching its profile.
 
 A reservation keeps its original lifecycle declaration. Changing a declaration
 requires a new operation after exact recovery of the previous attempt; refusal
@@ -485,8 +564,8 @@ declaration alone does not add lifecycle work to a pre-extension rollback.
 If provider deployment evidence is absent but the exact attempt's receipt proves
 that a pre-image refusal restored all schedules, recovery may retry the original
 operation. A different attempt or an unqualified/failed-restoration receipt does
-not supply that proof. Testing rollback selects the same declared qualification
-executor as a forward testing deploy.
+not supply that proof. After removing the retired declaration, testing rollback retains shared runtime qualification. Product browser behavior
+is checked by the Build that produced the artifact.
 
 ### VeriReel extension repair and history
 
@@ -496,9 +575,8 @@ it does not expose a parallel native preview API. Legacy deployment, promotion
 and backup schemas and migrations remain readers for stored history.
 
 The VeriReel app-maintenance endpoint and source-control smoke-client action are
-retired. Fixture setup remains internal to the testing qualification extension
-until the product checks move into the product repository. No product workflow
-calls a Launchplane maintenance route.
+retired. VeriReel owns fixture setup and cleanup in its candidate-image browser
+checks. No product workflow calls a Launchplane maintenance route.
 
 ### Profile maintenance and explicit testing reset
 

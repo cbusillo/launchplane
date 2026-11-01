@@ -130,6 +130,55 @@ class _ReleaseReviewHttpFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
+    async def test_standing_settings_request_succeeds_without_an_invitation(self) -> None:
+        from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
+        from control_plane.release_review import checklist_digest
+
+        review = build_release_review(store=self.store, profile=profile(), read=github_read)
+        assert review.checklist is not None
+        checklist = review.checklist.model_copy(
+            update={
+                "candidate": review.checklist.candidate.model_copy(
+                    update={
+                        "runtime_settings": GenericWebReleaseSettings(values={"APP_CHANNEL": "new"})
+                    }
+                )
+            }
+        )
+        review = review.model_copy(
+            update={"checklist": checklist, "checklist_digest": checklist_digest(checklist)}
+        )
+        self.store.write_product_profile_record(
+            profile().model_copy(
+                update={"driver_id": "generic-web", "release_on_acceptance": "director_standing"}
+            )
+        )
+        with (
+            patch("control_plane.http_app.current_release_review", return_value=review),
+            patch("control_plane.release_request.publish_release_invitation") as invitation,
+        ):
+            payload: dict[str, object] = {
+                "product": profile().product,
+                "checklist_digest": review.checklist_digest,
+                "source": "director_request",
+                "reason": "Activate the saved settings",
+                "decision_reference": "https://git.example.test/decisions/965",
+            }
+            headers = {"Authorization": "Bearer local-operator-token"}
+            first = await _asgi_request(
+                self.app, "POST", "/v1/release-review/requests", headers=headers, payload=payload
+            )
+            self.assertEqual(first.status_code, 200, first.text)
+            saved = self.store.read_product_profile_record(profile().product).release_request
+            assert saved is not None
+            self.assertEqual(first.json()["release_request"], saved.model_dump(mode="json"))
+            retry = await _asgi_request(
+                self.app, "POST", "/v1/release-review/requests", headers=headers, payload=payload
+            )
+            self.assertEqual(retry.status_code, 200, retry.text)
+            self.assertEqual(retry.json()["release_request"], first.json()["release_request"])
+            invitation.assert_not_called()
+
     async def test_review_access_uses_existing_scope_without_building_a_checklist(self) -> None:
         with patch(
             "control_plane.http_app.current_release_review",
@@ -343,7 +392,7 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
                 self.assertEqual(refused.status_code, 409, refused.text)
                 self.assertIn("release_checklist_incomplete", refused.text)
 
-    async def test_accept_publishes_saved_decision_through_storage_lock(self) -> None:
+    async def test_accept_publishes_the_saved_decision_issue(self) -> None:
         from tests.test_release_review_record import FakeReleaseIssues
 
         github = FakeReleaseIssues()
@@ -358,16 +407,14 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
             patch(
                 "control_plane.release_review_record.github_api_request", side_effect=github.request
             ),
-            patch.object(
-                self.store,
-                "release_review_publication_lock",
-                wraps=self.store.release_review_publication_lock,
-            ) as publication_lock,
+            patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=77,
+            ),
         ):
             response = await self.post()
         self.assertEqual(response.status_code, 200, response.text)
         saved = self.store.list_release_review_decision_records(product="example-site")[0]
-        publication_lock.assert_called_once_with(record_id=saved.record_id)
         self.assertEqual(len(github.issues), 1)
         self.assertEqual(
             response.json()["review"]["latest_decision"]["release_issue_url"],
@@ -402,6 +449,10 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
             patch(
                 "control_plane.release_review_record.github_api_request", side_effect=github.request
             ),
+            patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=77,
+            ),
         ):
             for mode, outcome, start in cases:
                 with self.subTest(mode=mode, outcome=outcome):
@@ -425,7 +476,8 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
                         f"https://github.com/example/site/issues/{issue['number']}",
                     )
                     # Read the body submitted to publication, not a separate rendering.
-                    body = str(issue["body"])
+                    body = github.comments[-1]["body"] if github.comments else issue["body"]
+                    assert isinstance(body, str)
                     effect = _decision_effect(saved)
                     self.assertIn(effect, body)
                     # A universal description must not erase distinct recorded actions.

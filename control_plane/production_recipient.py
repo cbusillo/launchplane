@@ -17,6 +17,7 @@ from control_plane.contracts.production_recipient import (
     ProductionRecipientRecord,
     ProductionRecipientRequest,
 )
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.dokploy import api, compose, source
 from control_plane.dokploy.network_capacity import (
     BridgeNetworkCapacityRefused,
@@ -273,7 +274,9 @@ def runtime_values(
     *,
     published: bool = False,
 ) -> dict[str, str]:
-    if published and (record.phase != "published" or not record.publication):
+    if published and (
+        record.phase not in {"published", "retiring_old", "old_retired"} or not record.publication
+    ):
         raise ValueError("Published rendering requires a current recorded publication.")
     environment = runtime_environments.resolve_site_runtime_environment(
         control_plane_root=root,
@@ -297,7 +300,7 @@ def runtime_values(
         ):
             raise ValueError("Candidate ports must differ from production ports.")
         values[key] = str(value)
-    values["DOCKER_IMAGE_REFERENCE"] = record.image_reference
+    values.update(dict.fromkeys(COMPOSE_IMAGE_REFERENCE_ENV_KEYS, record.image_reference))
     if any(
         looks_like_credential(key, value) and key not in environment.secret_keys
         for key, value in values.items()
@@ -621,6 +624,10 @@ class ProductionRecipientAdapter:
             authority_snapshot(self.store, self.product, record.context), record.authority_snapshot
         ):
             raise RecipientAuthorityChanged("Production authority changed after review.")
+        if record.phase in {"retiring_old", "old_retired"} and record.execution.get(
+            "retirement_started_at"
+        ):
+            return
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         old = api.fetch_dokploy_target_payload(
             host=host,
@@ -684,7 +691,13 @@ class ProductionRecipientAdapter:
                 "The provider source differs from the reviewed immutable source."
             )
         values = runtime_values(self.store, self.root, record, published=published)
-        allowed_environments = [values]
+        actual_environment = api.parse_dokploy_env_text(str(payload.get("env") or ""))
+        unstarted_values = {
+            key: value
+            for key, value in values.items()
+            if key not in COMPOSE_IMAGE_REFERENCE_ENV_KEYS or key in actual_environment
+        }
+        allowed_environments = [unstarted_values]
         if record.execution.get("runtime_identity"):
             from control_plane.contracts.runtime_identity import (
                 RuntimeIdentity,
@@ -698,9 +711,9 @@ class ProductionRecipientAdapter:
                 ),
             }
             allowed_environments = (
-                [values] if not record.execution.get("trigger_requested_at") else []
+                [unstarted_values] if not record.execution.get("trigger_requested_at") else []
             ) + [deployed_values]
-        if api.parse_dokploy_env_text(str(payload.get("env") or "")) not in allowed_environments:
+        if actual_environment not in allowed_environments:
             raise RecipientAuthorityChanged(
                 "The provider environment differs from managed production inputs."
             )
@@ -1002,6 +1015,11 @@ class ProductionRecipientAdapter:
                 if field == "environmentId":
                     body = {"name": record.namespace, "projectId": record.project_id}
                 if field == "composeId":
+                    from control_plane.production_recipient_retirement_names import (
+                        require_unretired_provider_name,
+                    )
+
+                    require_unretired_provider_name(self.store, record.namespace)
                     body = {
                         "name": record.namespace,
                         "appName": record.namespace,
@@ -1011,13 +1029,18 @@ class ProductionRecipientAdapter:
                     }
                 record = self.save(record, phase=phase)
                 checkpoint(phase)
-                result = api.dokploy_request(
-                    host=host,
-                    token=token,
-                    path=path,
-                    method="POST",
-                    payload=cast(api.JsonObject, body),
-                )
+                from control_plane.production_recipient_retirement_names import provider_name_guard
+
+                with provider_name_guard(
+                    self.store, record.namespace if field == "composeId" else ""
+                ):
+                    result = api.dokploy_request(
+                        host=host,
+                        token=token,
+                        path=path,
+                        method="POST",
+                        payload=cast(api.JsonObject, body),
+                    )
                 if (
                     field == "projectId"
                     and isinstance(result, dict)

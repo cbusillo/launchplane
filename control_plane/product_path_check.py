@@ -51,9 +51,11 @@ from control_plane.workflows.odoo_prod_rollback import (
 )
 from control_plane.contracts.odoo_prod_promotion_operation import ODOO_PROD_PROMOTION_RUN_ACTION
 from control_plane.operation_status_read import safe_operation_error_code
+from control_plane.lane_movement import LANE_MOVEMENT_REFUSALS
 from control_plane.product_reconcile_read import (
     ProductReconcileRequestReader,
     product_reconcile_request_view,
+    testing_reconcile_failure_code,
 )
 from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
@@ -218,6 +220,14 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             "Launchplane has not planned a testing deploy for this product yet.",
             "wait",
         )
+    if plan.get("reconcile_state") not in {"done", "failed"}:
+        return _step(
+            step_id,
+            "unknown",
+            "reconcile_not_done",
+            "The current testing reconcile has no terminal outcome; its saved plan may be older.",
+            "wait",
+        )
     deployed = str(plan.get("deployed_operation_id") or "")
     queued = str(plan.get("queued_operation_id") or "")
     failed = str(plan.get("last_failed_operation_id") or "")
@@ -248,6 +258,15 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             summary or "The last testing deploy failed.",
             _testing_failure_fix(code),
             (failed,),
+        )
+    if plan.get("reconcile_state") == "failed":
+        code = safe_operation_error_code(testing_reconcile_failure_code(plan))
+        return _step(
+            step_id,
+            "blocked",
+            code,
+            "The last testing reconciliation failed.",
+            _testing_failure_fix(code),
         )
     if _completed_testing_noop(plan):
         return _step(
@@ -434,7 +453,9 @@ def _previous_promotion_step(latest: PromotionRecord | None | Unread) -> PathChe
     if latest.failure is not None:
         # The description comes from the code, never from the stored text.
         code = latest.failure.code
-        description = PROMOTION_FAILURE_DESCRIPTIONS.get(code)
+        description = PROMOTION_FAILURE_DESCRIPTIONS.get(code) or LANE_MOVEMENT_REFUSALS.get(
+            code.removeprefix("lane_movement.")
+        )
         return _step(
             step_id,
             "clear",

@@ -1,6 +1,5 @@
 """Activate only new testing resources; retain the old recipient and unknown effects."""
 
-import base64
 from collections.abc import Callable
 from dataclasses import dataclass
 import hmac
@@ -16,6 +15,7 @@ from control_plane.build_provenance import GitHubBuildProvenanceTransport
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.testing_activation import (
     TestingActivationPlan,
     TestingActivationRefusal,
@@ -334,6 +334,14 @@ def preparation_resources(
     return resources, row.record_id
 
 
+def shared_read_only_binding(binding: SecretBinding) -> bool:
+    return bool(
+        binding.declared_secret_class == "shared_safe"
+        and binding.sharing_reason
+        and binding.sharing_reason.kind == "read_only_source"
+    )
+
+
 def runtime_values(
     store: PostgresRecordStore,
     root: Path,
@@ -391,11 +399,7 @@ def runtime_values(
             "testing",
         ):
             raise TestingActivationRefusal("Testing credentials must have lane-specific bindings.")
-        if (
-            binding.declared_secret_class == "shared_safe"
-            and binding.sharing_reason
-            and binding.sharing_reason.kind == "read_only_source"
-        ):
+        if shared_read_only_binding(binding):
             shared.add(key)
         elif binding.declared_secret_class not in {"testing", "non_prod"}:
             raise TestingActivationRefusal("A carried key can reach a live writable system.")
@@ -474,6 +478,10 @@ def target_without_hold(target: Any) -> dict[str, Any]:
     payload = target.model_dump(mode="json", exclude={"updated_at", "source_label"})
     payload["policies"].pop("staff_testing_hold", None)
     return cast(dict[str, Any], payload)
+
+
+def recipient_target_identity(target: DokployTargetRecord) -> dict[str, Any]:
+    return target.model_dump(mode="json", exclude={"updated_at", "source_label", "policies"})
 
 
 def same_reservation_intent(current: object, original: object) -> bool:
@@ -801,14 +809,10 @@ def inspect_new_resources(
         compose_name=resources.context,
         target_payload=payload,
     )
-    encoded = base64.b64encode(json.dumps(sorted(ports)).encode()).decode()
-    program = (
-        resources.script("readback")
-        + "\npython3 - "
-        + encoded
-        + " <<'LP_PORTS'\n"
-        + PORT_INSPECTION_PROGRAM
-        + "\nLP_PORTS\n"
+    from control_plane.host_package import host_schedule
+
+    program = host_schedule(
+        "activation", {"resources": resources.host_spec("readback"), "ports": sorted(ports)}
     )
     evidence = post_deploy.run_manual_data_schedule(
         host=host,
@@ -915,13 +919,24 @@ class TestingActivationAdapter:
                 "Testing configuration or key policy changed.",
                 code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
             )
+        target = self.require_recipient_custody(record)
+        if record.published and target_without_hold(target) != target_without_hold(
+            record.published_target
+        ):
+            raise TestingActivationRefusal(
+                "Activated testing authority changed.",
+                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+            )
+
+    def require_recipient_custody(self, record: TestingActivationRecord) -> DokployTargetRecord:
         _, target, target_id, provider = self.bindings()
         if record.published:
             if (
                 target_id.target_id != record.target_id
                 or provider.target_id != record.target_id
                 or record.published_target is None
-                or target_without_hold(target) != target_without_hold(record.published_target)
+                or recipient_target_identity(target)
+                != recipient_target_identity(record.published_target)
             ):
                 raise TestingActivationRefusal(
                     "Activated testing recipient changed.",
@@ -947,6 +962,7 @@ class TestingActivationAdapter:
                     "The retained original reservation changed.",
                     code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
                 )
+        return cast(DokployTargetRecord, target)
 
     def save(self, record: TestingActivationRecord, **updates: Any) -> TestingActivationRecord:
         replacement = record.model_copy(update=updates)
@@ -956,8 +972,14 @@ class TestingActivationAdapter:
         return replacement
 
     def verify_provider(self, record: TestingActivationRecord) -> None:
+        self.verify_compose_provider(record)
+
+    def verify_compose_provider(
+        self, record: TestingActivationRecord, *, values: dict[str, str] | None = None
+    ) -> None:
         resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
-        values = runtime_values(self.store, self.root, record, resources)
+        if values is None:
+            values = runtime_values(self.store, self.root, record, resources)
         expected = json.loads(record.compose_source)
         for volume in expected["volumes"].values():
             volume["external"] = True
@@ -1551,13 +1573,20 @@ class TestingActivationAdapter:
                             body["serverId"] = str(old["serverId"])
                     checkpoint(phase)
                     record = self.save(record, phase=phase)
-                    response = api.dokploy_request(
-                        host=host,
-                        token=token,
-                        path=path,
-                        method="POST",
-                        payload=cast(api.JsonObject, body),
+                    from control_plane.production_recipient_retirement_names import (
+                        provider_name_guard,
                     )
+
+                    with provider_name_guard(
+                        self.store, record.namespace if phase == "create_compose" else ""
+                    ):
+                        response = api.dokploy_request(
+                            host=host,
+                            token=token,
+                            path=path,
+                            method="POST",
+                            payload=cast(api.JsonObject, body),
+                        )
                     # Current Dokploy returns {project, environment}; older
                     # supported servers returned the project directly.
                     if (

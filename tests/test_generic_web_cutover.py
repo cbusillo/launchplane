@@ -36,6 +36,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.generic_web_cutover import WebDeploymentCutoverStore
+from control_plane.generic_web_source_qualification import GenericWebSourceSnapshot
 from control_plane.release_compatibility import classify_release_database_compatibility
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -43,6 +44,7 @@ from control_plane.workflows.generic_web_cutover import execute_web_cutover, rol
 from control_plane.workflows.generic_web_deploy import (
     execute_generic_web_deploy,
     GenericWebDeployRequest,
+    GenericWebDeployResult,
 )
 from control_plane.workflows.generic_web_deploy_provider import DokployGenericWebDeployProvider
 from control_plane.workflows.inventory import build_environment_inventory
@@ -549,10 +551,9 @@ class WebCutoverDeploymentTests(unittest.TestCase):
                     return provider
 
                 deploy_provider = DokployGenericWebDeployProvider(cutover_provider_factory=factory)
-                with patch(
-                    "control_plane.workflows.generic_web_deploy.require_forward_lane_build"
-                ) as movement:
-                    result = execute_generic_web_deploy(
+
+                def deploy() -> GenericWebDeployResult:
+                    return execute_generic_web_deploy(
                         control_plane_root=Path(folder),
                         record_store=store,
                         request=GenericWebDeployRequest(
@@ -565,6 +566,25 @@ class WebCutoverDeploymentTests(unittest.TestCase):
                         deploy_provider=deploy_provider,
                         deployment_record_id="release",
                     )
+
+                from control_plane.generic_web_source_qualification import (
+                    GenericWebPromotionAdmissionRefused,
+                )
+                from control_plane.lane_movement import LaneMovementRefused
+
+                before = store.list_deployment_records()
+                with patch(
+                    "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
+                    side_effect=LaneMovementRefused("source_order_unavailable"),
+                ):
+                    with self.assertRaises(GenericWebPromotionAdmissionRefused):
+                        deploy()
+                self.assertEqual(store.list_deployment_records(), before)
+                self.assertEqual(provider.actions, [])
+                with patch(
+                    "control_plane.workflows.generic_web_deploy.require_forward_lane_build"
+                ) as movement:
+                    result = deploy()
                 movement.assert_called_once()
                 self.assertEqual(result.deploy_status, "pass")
                 current = store.read_environment_inventory(
@@ -1113,7 +1133,8 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                     patch.object(provider, "drain", side_effect=drain),
                     patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
                     patch(
-                        "control_plane.workflows.generic_web_promotion.require_release_approval"
+                        "control_plane.workflows.generic_web_promotion.require_release_approval",
+                        return_value=None,
                     ) as approval,
                 ):
                     result = execute_generic_web_prod_promotion(
@@ -1199,7 +1220,10 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
 
                 with (
                     patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
-                    patch("control_plane.workflows.generic_web_promotion.require_release_approval"),
+                    patch(
+                        "control_plane.workflows.generic_web_promotion.require_release_approval",
+                        return_value=None,
+                    ),
                 ):
                     with self.assertRaises(ValueError):
                         execute_generic_web_prod_promotion(
@@ -1253,7 +1277,10 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                 )
                 with (
                     patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
-                    patch("control_plane.workflows.generic_web_promotion.require_release_approval"),
+                    patch(
+                        "control_plane.workflows.generic_web_promotion.require_release_approval",
+                        return_value=None,
+                    ),
                 ):
                     if prior_dispatch:
                         prepare = provider.prepare_candidate
@@ -1286,19 +1313,21 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
 
                     qualified = store.read_deployment_record("qualified-testing")
                     refuse_source = True
+                    read_source = store.read_generic_web_source_snapshot
 
-                    def fail_testing(_evidence: HealthcheckEvidence) -> HealthcheckEvidence:
-                        if not refuse_source:
-                            return _evidence
-                        record = store.read_deployment_record("qualified-testing")
-                        store.write_deployment_record(
-                            record.model_copy(
-                                update={
-                                    "deploy": record.deploy.model_copy(update={"status": "fail"})
-                                }
+                    def changed_after_snapshot(**kwargs: Any) -> GenericWebSourceSnapshot:
+                        snapshot = read_source(**kwargs)
+                        if refuse_source:
+                            store.write_deployment_record(
+                                snapshot.deployment.model_copy(
+                                    update={
+                                        "deploy": snapshot.deployment.deploy.model_copy(
+                                            update={"status": "fail"}
+                                        )
+                                    }
+                                )
                             )
-                        )
-                        return _evidence
+                        return snapshot
 
                     request = GenericWebProdPromotionRequest(
                         product="fixture",
@@ -1308,9 +1337,10 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                         backup_record_id="infrastructure-example",
                         verify_health=False,
                     )
-                    with patch(
-                        "control_plane.workflows.generic_web_promotion._verify_health_evidence",
-                        side_effect=fail_testing,
+                    with patch.object(
+                        store,
+                        "read_generic_web_source_snapshot",
+                        side_effect=changed_after_snapshot,
                     ):
                         if prior_dispatch:
                             result = execute_generic_web_prod_promotion(

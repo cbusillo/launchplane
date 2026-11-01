@@ -115,6 +115,43 @@ class _FakeConnection:
 
 
 class PublicOutboundHttpTests(unittest.TestCase):
+    def test_https_custody_is_checked_before_each_redirect_connection(self) -> None:
+        initial = "https://business.example/health"
+        canonical = "https://www.business.example/health"
+        for redirect, allowed in (
+            (canonical, True),
+            ("https://operator.example/health", False),
+            ("http://business.example/health", False),
+        ):
+            connections: list[PublicHttpDestination] = []
+
+            def connect(destination: PublicHttpDestination, _timeout: float) -> _FakeConnection:
+                connections.append(destination)
+                return _FakeConnection(
+                    _FakeResponse(status=302, headers=(("Location", redirect),))
+                    if len(connections) == 1
+                    else _FakeResponse(status=200)
+                )
+
+            with self.subTest(redirect=redirect):
+
+                def send() -> PublicHttpResponse:
+                    return request_public_http(
+                        initial,
+                        timeout_seconds=5,
+                        resolver=_resolver_for(_PUBLIC_IPV4),
+                        connection_factory=connect,
+                        allowed_https_hosts=("business.example", "www.business.example"),
+                    )
+
+                if allowed:
+                    response = send()
+                    self.assertEqual(response.visited_urls, (initial, canonical))
+                else:
+                    with self.assertRaises(PublicHttpDestinationError):
+                        send()
+                    self.assertEqual([destination.url for destination in connections], [initial])
+
     def test_normal_public_request_uses_validated_destination(self) -> None:
         connection = _FakeConnection(
             _FakeResponse(
