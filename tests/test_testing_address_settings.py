@@ -532,6 +532,91 @@ class CanonicalAddressProgramTests(unittest.TestCase):
         self.assertTrue(frames, output.getvalue())
         return status, frames[-1]
 
+    def test_unavailable_native_steps_keep_distinct_private_source_sites(self) -> None:
+        import ast
+
+        self.native.spec["inspection_only"] = True
+        self.native.spec["canonical_settings"]["mode"] = "inspect"
+        original = self.command
+        parameters = dict(self.parameters)
+        functions = {
+            node.name: node
+            for node in ast.walk(ast.parse(FRESH_TESTING_RESTORE_HOST_PROGRAM))
+            if isinstance(node, ast.FunctionDef)
+        }
+        private = "private-native-command-failure"
+
+        def observe(stage: str, function: str) -> tuple[int, ...]:
+            reached: list[str] = []
+
+            def command(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+                if (
+                    stage == "resource"
+                    and arguments[:3] == ["docker", "volume", "inspect"]
+                    or stage == "database"
+                    and CANONICAL_ADDRESS_DATABASE_READ in arguments
+                ):
+                    reached.append(stage)
+                    if stage == "resource":
+                        raise subprocess.TimeoutExpired(private, 1)
+                    return subprocess.CompletedProcess(
+                        arguments, 1, stdout=b"", stderr=private.encode()
+                    )
+                return original(arguments, **kwargs)
+
+            with patch.object(self, "command", side_effect=command):
+                status, frame = self.run_program()
+            self.assertTrue(reached)
+            self.assertNotEqual(status, 0)
+            failure = transport.NativeProgramFailed(
+                "fixture failure",
+                predicate=frame["predicate"],
+                kind=frame["kind"],
+                program=FRESH_TESTING_RESTORE_HOST_PROGRAM,
+                program_sites=frame.get("sites"),
+            )
+            self.assertTrue(failure.unavailable)
+            self.assertTrue(failure.program_sites)
+            node = functions[function]
+            end = node.end_lineno
+            assert end is not None
+            self.assertTrue(any(node.lineno <= line <= end for line in failure.program_sites))
+            if stage == "resource":
+                command_node = functions["command"]
+                command_end = command_node.end_lineno
+                assert command_end is not None
+                self.assertLessEqual(command_node.lineno, failure.program_sites[-1])
+                self.assertLessEqual(failure.program_sites[-1], command_end)
+            self.assertNotIn(private, json.dumps(frame))
+            self.assertFalse(self.gate.exists())
+            self.assertEqual(self.parameters, parameters)
+            return failure.program_sites
+
+        self.assertNotEqual(
+            observe("resource", "inspect_copy_runtime"),
+            observe("database", "canonical_address_settings"),
+        )
+
+    def test_native_source_sites_preserve_a_typed_refusal(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.native.spec["inspection_only"] = True
+        self.native.spec["canonical_settings"]["mode"] = "inspect"
+        self.foreign_network_member = True
+        status, frame = self.run_program()
+        self.assertNotEqual(status, 0)
+        failure = transport.NativeProgramFailed(
+            "fixture refusal",
+            predicate=frame["predicate"],
+            kind=frame["kind"],
+            program=FRESH_TESTING_RESTORE_HOST_PROGRAM,
+            program_sites=frame.get("sites"),
+        )
+        self.assertFalse(failure.unavailable)
+        self.assertEqual(failure.predicate, ReadbackPredicate.NETWORK_MEMBERS)
+        self.assertTrue(failure.program_sites)
+        self.assertFalse(self.gate.exists())
+
     def test_gate_release_does_not_claim_unapplied_database_values(self) -> None:
         original = dict(self.parameters)
         status, frame = self.run_program()
