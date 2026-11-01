@@ -2560,7 +2560,15 @@ unknown historical effects; it never returns a safe-release assertion.
 The same client's `inspect` mode attributes each reserved hostname in that context
 to its retained generation or allocation, original target ID, operation and custody
 digest. It uses the reservation guard's own enumeration. It requires the original
-product, context, operation and reason, but no key or review file. It makes no provider call or
+product, context, operation and reason, but no key or review file. Without a
+retirement receipt, it checks exclusive ownership of the active Odoo testing
+context and returns its reservations with `plan=null`; the supplied operation
+and reason do not identify or verify an operation in this context-only result.
+Only the reservation entries attribute hostnames to recorded operations. Initial allocation facts
+show whether an initial request was recorded, its apply/reconcile/release times,
+and whether the retained target is still bound to a lane. Missing allocation
+details remain absent; they do not prove an unreserved hostname or safe transfer.
+The inspection makes no provider call or
 record change and leaves the original receipt and hostname reservations intact.
 These coordinates let the supported exact-target inspector read the preserved
 recipients. Missing preparation custody leaves its product and target ID null,

@@ -1,7 +1,7 @@
 """Legacy retirement preserves unknown history and leaves actual replacement gated."""
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 import unittest
 from unittest.mock import patch
@@ -187,6 +187,100 @@ class TestingGenerationRetirementTests(unittest.TestCase):
     def apply(self) -> Any:
         return self.store.retire_testing_generation(
             product=self.product, request=self.apply_body, mutation=self.mutation
+        )
+
+    def test_inspection_without_retirement_reads_custody_without_writing(self) -> None:
+        import asyncio
+        from tests.support.http import request
+        from tests.support.auth import scoped_agent_transport
+
+        from control_plane.storage.postgres import LaunchplaneDisposableTestingResourceAllocationRow
+
+        started = datetime.now(timezone.utc)
+        with self.store._session_factory() as session:
+            row = session.get(
+                LaunchplaneDisposableTestingResourceAllocationRow, self.gen.operation_id
+            )
+            assert row is not None
+            row.payload = {
+                **row.payload,
+                "initial_request_sha256": canonical_json_sha256({"fixture": "initial"}),
+                "initial_apply_started_at": started.isoformat(),
+                "initial_reconcile_requested_at": (started + timedelta(seconds=1)).isoformat(),
+                "retained_target_record": self.store._payload_dict(
+                    retirement_snapshot(self.store, self.product, self.body).target
+                ),
+            }
+            session.commit()
+        allocation = self.store.read_disposable_resource_preparation(self.gen.operation_id)
+        assert allocation is not None
+        reservations = self.store.read_retained_testing_hostname_reservations(self.context)
+        self.assertTrue(reservations)
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(
+            self.operation.operation_id
+        )
+
+        def inspect(product: str, **changes: object) -> Any:
+            return asyncio.run(
+                request(
+                    self.fixture.fixture.app,
+                    "POST",
+                    ROUTE.format(product=product),
+                    headers={"Authorization": "Bearer local-operator-token"},
+                    payload={**self.body.model_dump(mode="json"), "mode": "inspect", **changes},
+                )
+            )
+
+        with patch("control_plane.dokploy.api._dokploy_request") as provider:
+            response = inspect(self.product, operation_id="unknown-operation")
+            self.assertEqual(response.status_code, 202, response.text)
+            result = response.json()["result"]
+            self.assertIsNone(result["plan"])
+            self.assertEqual(result["product"], self.product)
+            self.assertEqual(result["context"], self.context)
+            self.assertEqual(
+                result["reservations"], [item.model_dump(mode="json") for item in reservations]
+            )
+            self.assertNotIn("operation_id", result)
+            facts = result["initial_allocations"][self.gen.operation_id]
+            self.assertTrue(facts["initial_request_recorded"])
+            self.assertFalse(facts["retained_target_bound"])
+            identities = self.store.list_dokploy_target_id_records()
+            bound = identities[0].model_copy(update={"target_id": allocation.retained_target_id})
+            with patch.object(
+                self.store, "list_dokploy_target_id_records", return_value=(*identities, bound)
+            ):
+                observed = inspect(self.product).json()["result"]
+                self.assertTrue(
+                    observed["initial_allocations"][self.gen.operation_id]["retained_target_bound"]
+                )
+            for name in (
+                "initial_apply_started_at",
+                "initial_reconcile_requested_at",
+                "initial_released_at",
+            ):
+                self.assertEqual(facts[name], getattr(allocation, name))
+            self.assertEqual(inspect(self.product, mode="readback").status_code, 409)
+            self.assertEqual(inspect("foreign-product").status_code, 409)
+            self.assertEqual(inspect(self.product, context="foreign-context").status_code, 409)
+            with scoped_agent_transport():
+                self.assertEqual(inspect(self.product).status_code, 403)
+            profiles = self.store.list_product_profile_records()
+            competing = self.store.read_product_profile_record(self.product).model_copy(
+                update={"product": "competing-product"}
+            )
+            with patch.object(
+                self.store, "list_product_profile_records", return_value=(*profiles, competing)
+            ):
+                self.assertEqual(inspect(self.product).status_code, 409)
+            provider.assert_not_called()
+        self.assertIsNone(self.store.read_retained_testing_generation(self.operation.operation_id))
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
+            operation,
+        )
+        self.assertEqual(
+            self.store.read_retained_testing_hostname_reservations(self.context), reservations
         )
 
     def test_custody_inspection_reads_original_targets_without_releasing_hosts(self) -> None:
