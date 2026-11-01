@@ -28,6 +28,7 @@ from control_plane.contracts.product_profile_record import (
     product_lane_monitoring_probe_effective,
 )
 from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.production_recipient import ProductionRecipientRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.generic_web_source_qualification import (
@@ -913,7 +914,7 @@ def _recover_delivery_failures(
     now: str,
     index: DeliveryEvidenceIndex,
 ) -> None:
-    recipient_evidence_failed = False
+    release_evidence_failed = False
     for incident in store.list_public_ingress_incident_records(
         product=profile.product,
         context_name=lane.context,
@@ -971,15 +972,15 @@ def _recover_delivery_failures(
             recovery_summary = f"The failed production rollback recovered through {recovery}."
         else:
             try:
-                recovery = _later_completed_recipient_release(
+                recovery = _later_completed_release(
                     store, profile, lane, key, failures, failed_at, now
                 )
             except (ValueError, KeyError, TypeError, AttributeError, FileNotFoundError):
-                recipient_evidence_failed = True
-                _LOGGER.exception("Could not verify recipient delivery for %s", profile.product)
+                release_evidence_failed = True
+                _LOGGER.exception("Could not verify accepted delivery for %s", profile.product)
             else:
                 if recovery:
-                    recovery_summary = f"The retained failed recipient recovered through accepted release {recovery}."
+                    recovery_summary = f"The failed production delivery recovered through accepted release {recovery}."
         if recovery_summary:
             try:
                 _observe(
@@ -1020,11 +1021,11 @@ def _recover_delivery_failures(
                 if previous.targets and urlsplit(previous.targets[0].url).query
                 else None,
             )
-    if recipient_evidence_failed:
-        raise ValueError("Current recipient delivery evidence is unavailable.")
+    if release_evidence_failed:
+        raise ValueError("Current accepted delivery evidence is unavailable.")
 
 
-def _later_completed_recipient_release(
+def _later_completed_release(
     store: Store,
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
@@ -1058,7 +1059,6 @@ def _later_completed_recipient_release(
         is None
     ):
         return ""
-    record = custody(store, profile.product, lane.context)
     if (
         decision.decision != "accepted"
         or decision.release_start not in {"promote", "promote_with_rollback_drill"}
@@ -1066,11 +1066,6 @@ def _later_completed_recipient_release(
         or decision.checklist.repository != profile.repository
         or decision.checklist.owner_github_id != profile.owner.github_id
         or decision.actor_github_id != profile.owner.github_id
-        or record is None
-        or record.phase not in {"published", "retiring_old", "old_retired"}
-        or record.image_reference != decision.checklist.candidate.artifact_id
-        or record.request.source_commit != decision.checklist.candidate.source_commit
-        or record.execution.get("release_trace") != "client-release-" + decision.record_id
     ):
         return ""
     run = read_client_release_run(store=store, profile=profile, decision=decision)
@@ -1082,24 +1077,58 @@ def _later_completed_recipient_release(
         or final.state != "completed"
         or final.scope != CLIENT_RELEASE_IDEMPOTENCY_SCOPE
         or final.response_payload.get("result", {}).get("promotion_status") != "pass"
-        or final.response_payload.get("result", {}).get("recipient_plan_sha256")
-        != record.plan_sha256
         or not final.updated_at
         or not _time(failed_at) < _time(final.updated_at) <= _time(now)
     ):
         return ""
+    record = custody(store, profile.product, lane.context)
+    if final.response_payload.get("result", {}).get("recipient_plan_sha256"):
+        if (
+            record is None
+            or record.phase not in {"published", "retiring_old", "old_retired"}
+            or record.image_reference != decision.checklist.candidate.artifact_id
+            or record.request.source_commit != decision.checklist.candidate.source_commit
+            or record.execution.get("release_trace") != "client-release-" + decision.record_id
+            or final.response_payload["result"]["recipient_plan_sha256"] != record.plan_sha256
+        ):
+            return ""
+        require_owned_publication_rows(store, record, inventory_timestamp_required=False)
+    else:
+        record = None
+        deployment = store.read_deployment_record(
+            final.response_payload["result"]["deployment_record_id"]
+        )
+        inventory = store.read_environment_inventory(
+            context_name=lane.context, instance_name="prod"
+        )
+        target = store.read_provider_target_record(context_name=lane.context, instance_name="prod")
+        if (
+            deployment.deployed_target != target.to_deployed_target_reference()
+            or not deployment_record_passed(deployment)
+            or deployment.failure is not None
+            or deployment.artifact_identity is None
+            or deployment.artifact_identity.artifact_id != decision.checklist.candidate.artifact_id
+            or deployment.source_git_ref != decision.checklist.candidate.source_commit
+            or (deployment.context, deployment.instance) != (lane.context, "prod")
+            or inventory.deployment_record_id != deployment.record_id
+            or inventory.runtime_identity != deployment.runtime_identity
+        ):
+            return ""
     settled_traces = (
-        _settled_recipient_release_traces(store, profile, record, decision, final.updated_at)
+        _settled_release_traces(store, profile, record, decision, final.updated_at)
         if key
-        in {_candidate_key(record.image_reference), _candidate_key(record.request.source_commit)}
+        in {
+            _candidate_key(decision.checklist.candidate.artifact_id),
+            _candidate_key(decision.checklist.candidate.source_commit),
+        }
         else set()
     )
-    for prior in record.prior_attempts:
+    for prior in record.prior_attempts if record is not None else ():
         try:
             previous = ProductionRecipientRecord.model_validate(prior)
             if (
                 previous.phase not in {"rolled_back", "preflight_refused"}
-                or (previous.product, previous.context) != (record.product, record.context)
+                or (previous.product, previous.context) != (profile.product, lane.context)
                 or key
                 not in {
                     _candidate_key(previous.image_reference),
@@ -1114,18 +1143,30 @@ def _later_completed_recipient_release(
                 product=profile.product, record_id=trace.removeprefix("client-release-")
             )
             settled_traces.update(
-                _settled_recipient_release_traces(
+                _settled_release_traces(
                     store, profile, previous, previous_decision, final.updated_at
                 )
             )
         except (ValueError, KeyError, TypeError, AttributeError, FileNotFoundError):
             continue
+    for previous_decision in (
+        store.list_release_review_decision_records(product=profile.product)
+        if record is None
+        else ()
+    ):
+        if key not in {
+            _candidate_key(previous_decision.checklist.candidate.artifact_id),
+            _candidate_key(previous_decision.checklist.candidate.source_commit),
+        }:
+            continue
+        settled_traces.update(
+            _settled_release_traces(store, profile, None, previous_decision, final.updated_at)
+        )
     if any(
         _delivery_failure_reference(failure).trace_id not in settled_traces for failure in failures
     ):
         return ""
     try:
-        require_owned_publication_rows(store, record, inventory_timestamp_required=False)
         verification = read_lane_runtime_verification(
             record_store=store,
             profile=profile,
@@ -1150,10 +1191,10 @@ def _later_completed_recipient_release(
     return decision.record_id
 
 
-def _settled_recipient_release_traces(
+def _settled_release_traces(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
-    record: ProductionRecipientRecord,
+    record: ProductionRecipientRecord | None,
     decision: ReleaseReviewDecisionRecord,
     finished_before: str,
 ) -> set[str]:
@@ -1181,9 +1222,12 @@ def _settled_recipient_release_traces(
         )
         is None
         or decision.checklist.repository != profile.repository
-        or decision.checklist.candidate.artifact_id != record.image_reference
-        or decision.checklist.candidate.source_commit != record.request.source_commit
-        or record.execution.get("release_trace") != trace
+        or record is not None
+        and (
+            decision.checklist.candidate.artifact_id != record.image_reference
+            or decision.checklist.candidate.source_commit != record.request.source_commit
+            or record.execution.get("release_trace") != trace
+        )
     ):
         return set()
     traces: set[str] = set()
@@ -1193,8 +1237,10 @@ def _settled_recipient_release_traces(
     steps = client_release_steps(decision.release_start)
     for index, (step, view) in enumerate(zip(steps, views, strict=True)):
         if view.status == "not_started":
-            if view.kind != "promote" or not record.execution.get(
-                "reservation:" + view.operation_id
+            if (
+                record is None
+                or view.kind != "promote"
+                or not record.execution.get("reservation:" + view.operation_id)
             ):
                 continue
             if record.phase != "preflight_refused" or any(
@@ -1229,7 +1275,11 @@ def _settled_recipient_release_traces(
             if (
                 operation.binding is None
                 or (operation.product, operation.context, operation.instance)
-                != (record.product, record.context, "prod")
+                != (
+                    profile.product,
+                    next(lane.context for lane in profile.lanes if lane.instance == "prod"),
+                    "prod",
+                )
                 or _time(operation.finished_at) > _time(finished_before)
             ):
                 return set()
@@ -1247,12 +1297,21 @@ def _settled_recipient_release_traces(
         ):
             return set()
         outcome = receipt.response_payload.get("result", {})
-        if outcome.get("recipient_plan_sha256") != record.plan_sha256:
+        if record is None:
+            if outcome.get("recipient_plan_sha256"):
+                return set()
+            step_traces = _settled_in_place_step_traces(
+                store, profile, decision, receipt, view.kind, view.status
+            )
+            if not step_traces:
+                return set()
+            traces.update(step_traces)
+        elif outcome.get("recipient_plan_sha256") != record.plan_sha256:
             return set()
         if view.kind == "rollback":
             if view.status != "pass" or outcome.get("rollback_status") != "pass":
                 return set()
-        else:
+        elif record is not None:
             if receipt.reconciliation_key != cutover_reconciliation_key(record.plan_sha256):
                 return set()
             if view.status == "fail" and (
@@ -1276,6 +1335,58 @@ def _settled_recipient_release_traces(
             traces.update((view.failure.record_id, view.failure.trace_id))
     traces.discard("")
     return traces | {trace} if traces else set()
+
+
+def _settled_in_place_step_traces(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    receipt: LaunchplaneIdempotencyRecord,
+    kind: str,
+    status: str,
+) -> set[str]:
+    outcome = receipt.response_payload.get("result", {})
+    if kind != "promote":
+        return (
+            {receipt.record_id}
+            if status == "pass" and outcome.get("rollback_status") == "pass"
+            else set()
+        )
+    promotion = store.read_promotion_record(outcome["promotion_record_id"])
+    deployed = store.read_deployment_record(outcome["deployment_record_id"])
+    context = next(lane.context for lane in profile.lanes if lane.instance == "prod")
+    if (
+        promotion.context != context
+        or promotion.to_instance != "prod"
+        or promotion.artifact_identity.artifact_id != decision.checklist.candidate.artifact_id
+        or promotion.deployment_record_id != deployed.record_id
+        or (deployed.context, deployed.instance) != (context, "prod")
+        or deployed.deployed_target is None
+        or deployed.artifact_identity != promotion.artifact_identity
+        or deployed.source_git_ref != decision.checklist.candidate.source_commit
+    ):
+        return set()
+    if status == "fail":
+        if outcome.get("rollback_status") != "pass" or promotion.rollback.status != "pass":
+            return set()
+        rollback = store.read_deployment_record(promotion.rollback.deployment_record_id)
+        if (
+            not deployment_record_passed(rollback)
+            or rollback.failure is not None
+            or (rollback.context, rollback.instance) != (context, "prod")
+            or rollback.deployed_target != deployed.deployed_target
+            or rollback.artifact_identity is None
+            or rollback.artifact_identity.artifact_id != decision.checklist.production.artifact_id
+            or rollback.source_git_ref != decision.checklist.production.source_commit
+        ):
+            return set()
+    elif (
+        not deployment_record_passed(deployed)
+        or deployed.failure is not None
+        or promotion.failure is not None
+    ):
+        return set()
+    return {promotion.record_id, deployed.record_id}
 
 
 def _is_rollback_deployment(record: DeploymentRecord) -> bool:
