@@ -28,7 +28,6 @@ from control_plane.contracts.product_profile_record import (
     product_lane_monitoring_probe_effective,
 )
 from control_plane.contracts.promotion_record import PromotionRecord
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.production_recipient import ProductionRecipientRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.generic_web_source_qualification import (
@@ -1159,9 +1158,12 @@ def _later_completed_release(
             _candidate_key(previous_decision.checklist.candidate.source_commit),
         }:
             continue
-        settled_traces.update(
-            _settled_release_traces(store, profile, None, previous_decision, final.updated_at)
-        )
+        try:
+            settled_traces.update(
+                _settled_release_traces(store, profile, None, previous_decision, final.updated_at)
+            )
+        except (ValueError, KeyError, TypeError, AttributeError, FileNotFoundError):
+            continue
     if any(
         _delivery_failure_reference(failure).trace_id not in settled_traces for failure in failures
     ):
@@ -1298,14 +1300,15 @@ def _settled_release_traces(
             return set()
         outcome = receipt.response_payload.get("result", {})
         if record is None:
-            if outcome.get("recipient_plan_sha256"):
+            if outcome.get("recipient_plan_sha256") or (
+                view.status == "fail"
+                and receipt.provider_effect_started_at
+                and outcome.get("rollback_status") != "pass"
+            ):
                 return set()
-            step_traces = _settled_in_place_step_traces(
-                store, profile, decision, receipt, view.kind, view.status
+            traces.update(
+                outcome.get(field, "") for field in ("promotion_record_id", "deployment_record_id")
             )
-            if not step_traces:
-                return set()
-            traces.update(step_traces)
         elif outcome.get("recipient_plan_sha256") != record.plan_sha256:
             return set()
         if view.kind == "rollback":
@@ -1335,58 +1338,6 @@ def _settled_release_traces(
             traces.update((view.failure.record_id, view.failure.trace_id))
     traces.discard("")
     return traces | {trace} if traces else set()
-
-
-def _settled_in_place_step_traces(
-    store: PostgresRecordStore,
-    profile: LaunchplaneProductProfileRecord,
-    decision: ReleaseReviewDecisionRecord,
-    receipt: LaunchplaneIdempotencyRecord,
-    kind: str,
-    status: str,
-) -> set[str]:
-    outcome = receipt.response_payload.get("result", {})
-    if kind != "promote":
-        return (
-            {receipt.record_id}
-            if status == "pass" and outcome.get("rollback_status") == "pass"
-            else set()
-        )
-    promotion = store.read_promotion_record(outcome["promotion_record_id"])
-    deployed = store.read_deployment_record(outcome["deployment_record_id"])
-    context = next(lane.context for lane in profile.lanes if lane.instance == "prod")
-    if (
-        promotion.context != context
-        or promotion.to_instance != "prod"
-        or promotion.artifact_identity.artifact_id != decision.checklist.candidate.artifact_id
-        or promotion.deployment_record_id != deployed.record_id
-        or (deployed.context, deployed.instance) != (context, "prod")
-        or deployed.deployed_target is None
-        or deployed.artifact_identity != promotion.artifact_identity
-        or deployed.source_git_ref != decision.checklist.candidate.source_commit
-    ):
-        return set()
-    if status == "fail":
-        if outcome.get("rollback_status") != "pass" or promotion.rollback.status != "pass":
-            return set()
-        rollback = store.read_deployment_record(promotion.rollback.deployment_record_id)
-        if (
-            not deployment_record_passed(rollback)
-            or rollback.failure is not None
-            or (rollback.context, rollback.instance) != (context, "prod")
-            or rollback.deployed_target != deployed.deployed_target
-            or rollback.artifact_identity is None
-            or rollback.artifact_identity.artifact_id != decision.checklist.production.artifact_id
-            or rollback.source_git_ref != decision.checklist.production.source_commit
-        ):
-            return set()
-    elif (
-        not deployment_record_passed(deployed)
-        or deployed.failure is not None
-        or promotion.failure is not None
-    ):
-        return set()
-    return {promotion.record_id, deployed.record_id}
 
 
 def _is_rollback_deployment(record: DeploymentRecord) -> bool:

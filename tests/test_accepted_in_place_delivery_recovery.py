@@ -10,6 +10,8 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.production_delivery_monitor import (
     monitor_production_delivery_once,
+    DELIVERY_CHECK_PREFIX,
+    _candidate_key,
     record_production_delivery_failure,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -53,6 +55,14 @@ class AcceptedInPlaceDeliveryRecoveryTests(unittest.TestCase):
         )
         self.case.profile = self.profile
         self.store.write_product_profile_record(self.profile)
+        self.pre_effect = self.case.accept(suffix="-pre-effect")
+        self.case.advance()
+        self.case.capture()
+        with patch(
+            "control_plane.generic_web_promotion_provider_adapter.execute_generic_web_prod_promotion_result",
+            side_effect=ValueError("Candidate prerequisite changed"),
+        ):
+            self.case.advance()
         self.old = self.case.accept(suffix="-old")
         self.case.advance()
         self.case.capture()
@@ -67,7 +77,11 @@ class AcceptedInPlaceDeliveryRecoveryTests(unittest.TestCase):
             incident
             for incident in self.store.list_public_ingress_incident_records(status="open")
             if incident.check_name.startswith("production-delivery-")
-            and "monitor" not in incident.summary
+            and incident.check_name
+            not in {
+                DELIVERY_CHECK_PREFIX + _candidate_key("monitor:source"),
+                DELIVERY_CHECK_PREFIX + _candidate_key("monitor:evidence"),
+            }
         )
         run = read_client_release_run(store=self.store, profile=self.profile, decision=self.old)
         assert run is not None

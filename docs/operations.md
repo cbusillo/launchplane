@@ -2056,10 +2056,11 @@ production must still be the accepted final deployment on its recorded target,
 or the recipient must retain its published authority. Fresh health and matching
 runtime identity must be observed after final completion. Every retained failure
 must identify a settled native operation of the failed candidate's accepted
-release. All steps of a retained decision must have settled effects before its shared trace qualifies. A failed promotion
+release. All steps of a retained decision must have settled effects before its
+shared trace qualifies. A failed promotion
 needs a terminal receipt proving no writer effect or successful protective rollback.
-In-place protective rollback also requires its passing deployment on the same lane,
-restoring that decision's production artifact and source.
+For in-place delivery, that proof is the native worker's completed receipt with
+no provider-effect checkpoint or a passing protective rollback result.
 An abandoned preflight refusal qualifies only through the native exact-attempt
 proof and its failed undeployed promotion; absence of a reservation alone is
 insufficient. Failed backups qualify only through the existing positive
