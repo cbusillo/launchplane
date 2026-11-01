@@ -34,7 +34,7 @@ Preview targets are enumerated, not compared to their running generations.
 Global runtime records and the legacy readers that consume them are excluded;
 this product-scoped read does not qualify their consumers or conflicts.
 
-Use the repository's bounded reader with the installed operator transport:
+Use the repository's bounded reader with the installed admin transport:
 
 ```bash
 uv run python scripts/read-setting-sources.py --product <product> \
