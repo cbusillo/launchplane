@@ -23,7 +23,7 @@ class SettingReference(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str
-    status: Literal["in_lane", "other_lane", "unresolved_or_out_of_scope"]
+    status: Literal["found", "unresolved_or_out_of_scope"]
     binding_key: str = ""
     context: str = ""
     instance: str = ""
@@ -266,6 +266,7 @@ class ProductSettingSourceInventory(BaseModel):
         "value_equality",
         "retained_operation_authority",
         "global_inclusive_legacy_resolvers",
+        "global_runtime_records",
         "managed_secret_resolution",
         "legacy_addon_environment_aliases",
         "exact_preview_override_records",
@@ -275,16 +276,14 @@ class ProductSettingSourceInventory(BaseModel):
 def _override_reference(
     name: str,
     value: OdooOverrideValue,
-    record: OdooInstanceOverrideRecord,
     bindings: dict[str, SecretBinding],
 ) -> SettingReference:
     binding = bindings.get(value.secret_binding_id)
     if binding is None:
         return SettingReference(name=name, status="unresolved_or_out_of_scope")
-    in_lane = binding.context == record.context and binding.instance in {"", record.instance}
     return SettingReference(
         name=name,
-        status="in_lane" if in_lane else "other_lane",
+        status="found",
         binding_key=binding.binding_key,
         context=binding.context,
         instance=binding.instance,
@@ -315,7 +314,7 @@ def _override_sources(
             selected_keys=tuple(sorted(name for name, _value in items)),
             phases=record.apply_on,
             references=tuple(
-                _override_reference(name, value, record, bindings)
+                _override_reference(name, value, bindings)
                 for name, value in items
                 if value.source == "secret_binding"
             ),

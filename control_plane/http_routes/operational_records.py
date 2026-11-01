@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from click import ClickException
 from typing import Annotated, Literal, Protocol, cast
 
 from fastapi import Depends, Path, Query, Response
@@ -945,6 +946,15 @@ def register_managed_secret_read_routes(
                     )
                 ):
                     raise TypeError("Setting source storage unavailable")
+                try:
+                    anchor_repo = generic_web_preview_anchor_repo(profile.repository)
+                except ClickException as error:
+                    raise dependencies.http_error(
+                        status_code=503,
+                        trace_id=trace_id,
+                        code="settings_sources_unavailable",
+                        message="Setting source inventory requires supported repository coordinates.",
+                    ) from error
                 setting_sources = product_setting_source_inventory(
                     profile=profile,
                     records=getattr(record_store, "list_runtime_environment_records")(),
@@ -953,7 +963,7 @@ def register_managed_secret_read_routes(
                     overrides=getattr(record_store, "list_odoo_instance_override_records")(),
                     previews=getattr(record_store, "list_preview_records")(
                         context_name=profile.preview.context,
-                        anchor_repo=generic_web_preview_anchor_repo(profile.repository),
+                        anchor_repo=anchor_repo,
                         limit=SETTING_SOURCE_LIMIT + 1,
                     ),
                 )

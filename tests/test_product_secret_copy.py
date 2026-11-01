@@ -773,6 +773,14 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             plaintext_value=f"synthetic-value-{name}",
         )
 
+    async def _read_setting_sources(self, app: FastAPI | None = None) -> Response:
+        return await _asgi_request(
+            app or self.app,
+            "GET",
+            f"/v1/products/{self.profile.product}/secret-bindings?include_setting_sources=true",
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+
     async def test_setting_sources_are_names_only_and_do_not_read_secret_versions(self) -> None:
         self.store.write_runtime_environment_record(
             RuntimeEnvironmentRecord(
@@ -786,12 +794,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             self.store, "read_secret_version", side_effect=AssertionError("No ciphertext reads")
         ):
-            response = await _asgi_request(
-                self.app,
-                "GET",
-                "/v1/products/example-site/secret-bindings?include_setting_sources=true",
-                headers={"Authorization": "Bearer test-operator-token"},
-            )
+            response = await self._read_setting_sources()
         self.assertEqual(response.status_code, 200, response.text)
         sources = response.json()["setting_sources"]
         prod = next(lane for lane in sources["lanes"] if lane["instance"] == "prod")
@@ -806,10 +809,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.store.write_product_profile_record(
             self.profile.model_copy(update={"preview": preview})
         )
-        url = "/v1/products/example-site/secret-bindings?include_setting_sources=true"
-        response = await _asgi_request(
-            self.app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
-        )
+        response = await self._read_setting_sources()
         self.assertEqual(response.status_code, 200, response.text)
         self.assertTrue(
             any(
@@ -823,21 +823,21 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             "list_product_profile_records",
             return_value=(*self.store.list_product_profile_records(), foreign),
         ):
-            refused = await _asgi_request(
-                self.app, "GET", url, headers={"Authorization": "Bearer test-operator-token"}
-            )
+            refused = await self._read_setting_sources()
         self.assertEqual(refused.status_code, 503, refused.text)
         self.assertNotIn(self.source.name, refused.text)
+
+    async def test_setting_sources_refuse_unsupported_repository_coordinates(self) -> None:
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"repository": "invalid-coordinate"})
+        )
+        response = await self._read_setting_sources()
+        self.assertEqual(response.status_code, 503, response.text)
 
     @scoped_agent_test
     async def test_setting_sources_refuse_missing_scope_without_exposing_source_names(self) -> None:
         app = self._environment_read_app(products=("other-site",))
-        response = await _asgi_request(
-            app,
-            "GET",
-            "/v1/products/example-site/secret-bindings?include_setting_sources=true",
-            headers={"Authorization": "Bearer test-operator-token"},
-        )
+        response = await self._read_setting_sources(app)
         self.assertEqual(response.status_code, 403, response.text)
         self.assertNotIn(self.source.name, response.text)
 
@@ -853,12 +853,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                     instances=("*",),
                     context_actions=context_actions,
                 )
-                response = await _asgi_request(
-                    app,
-                    "GET",
-                    f"/v1/products/{self.profile.product}/secret-bindings?include_setting_sources=true",
-                    headers={"Authorization": "Bearer test-operator-token"},
-                )
+                response = await self._read_setting_sources(app)
                 self.assertEqual(response.status_code, expected_status, response.text)
 
     async def test_selection_reports_global_context_and_instance_sources_without_values(

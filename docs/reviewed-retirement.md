@@ -31,6 +31,8 @@ are read independently, so this is an observation, not an atomic migration plan.
 The read does not score overlaps or implement a second resolver. Comparisons use
 these source names and the existing canonical mapping helpers as task evidence.
 Preview targets are enumerated, not compared to their running generations.
+Global runtime records and the legacy readers that consume them are excluded;
+this product-scoped read does not qualify their consumers or conflicts.
 
 Use the repository's bounded reader with the installed operator transport:
 
