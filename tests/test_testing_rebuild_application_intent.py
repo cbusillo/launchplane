@@ -2,6 +2,7 @@ import unittest
 
 from control_plane import generic_web_testing_rebuild as rebuild
 from control_plane.contracts.product_profile_record import ProductGenericWebTestingState
+from control_plane.contracts.testing_application import TestingApplicationState
 from control_plane.testing_activation import activation_record
 from control_plane.testing_publication_storage import read_snapshot
 from control_plane.testing_rebuild_service import GenericWebTestingRebuildIntent
@@ -61,6 +62,17 @@ class TestingRebuildApplicationIntentTests(unittest.TestCase):
             rebuild.capture_rebuild_application_specification(
                 self.flow.store, self.intent.model_copy(update={"before": rebound})
             )
+
+    def test_current_state_declaration_does_not_reuse_historical_volume_intent(self) -> None:
+        state = TestingApplicationState(kind="none")
+        intent = self.intent.model_copy(update={"state": state})
+        captured = rebuild.capture_rebuild_application_specification(self.flow.store, intent)
+        self.assertEqual(captured.state, state)
+        self.assertEqual(captured.local_credentials, self.specification.local_credentials)
+        self.assertEqual(captured.network_name, self.specification.network_name)
+        self.assertEqual(
+            activation_record(self.flow.store, self.flow.product, self.flow.context), self.record
+        )
 
 
 if __name__ == "__main__":

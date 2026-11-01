@@ -145,15 +145,18 @@ def capture_rebuild_application_specification(
         previous.target_id != intent.before.target_id.target_id
         or not completed_application_activation(store, previous)
         or previous.request.application is None
-        or previous.request.application.state != intent.state
     ):
         raise TestingRebuildRefused(
             "testing_rebuild_application_unverified",
-            "The testing application needs its completed current activation and declared state.",
+            "The testing application needs its completed current activation.",
         )
     return TestingApplicationSpecification.model_validate(
         previous.request.application.model_dump(mode="json")
-        | {"runtime_port": intent.profile.runtime_port, "health_path": intent.profile.health_path}
+        | {
+            "runtime_port": intent.profile.runtime_port,
+            "health_path": intent.profile.health_path,
+            "state": intent.state.model_dump(mode="json"),
+        }
     )
 
 
