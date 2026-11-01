@@ -32,6 +32,8 @@ BUILD_WORKFLOW_PATH = ".github/workflows/build.yml"
 MANIFEST_ARTIFACT_PREFIX = "artifact-manifest-"
 # A PR author controls a preview build's upload; never read more than this.
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+STATE_COPY_ARGUMENT_CHARACTERS = 1024
+STATE_COPY_COMMAND_BYTES = 4096
 FIRST_PARENT_PAGE_LIMIT = 3
 _GITHUB_API = "https://api.github.com"
 
@@ -298,17 +300,18 @@ class GenericWebBuildImage(BaseModel):
 class GenericWebTestingStateCopy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    command: tuple[Annotated[str, Field(min_length=1, max_length=1024)], ...] = Field(
-        min_length=1, max_length=16
-    )
+    command: tuple[
+        Annotated[str, Field(min_length=1, max_length=STATE_COPY_ARGUMENT_CHARACTERS)], ...
+    ] = Field(min_length=1, max_length=16)
 
     @model_validator(mode="after")
     def validate_command(self) -> Self:
         if (
             not PurePosixPath(self.command[0]).is_absolute()
-            or not PurePosixPath(self.command[0]).name
+            or self.command[0].rsplit("/", 1)[-1] in {"", ".", ".."}
             or any("\x00" in argument for argument in self.command)
-            or sum(len(argument.encode("utf-8")) for argument in self.command) > 4096
+            or sum(len(argument.encode("utf-8")) for argument in self.command)
+            > STATE_COPY_COMMAND_BYTES
         ):
             raise ValueError("State copy requires a bounded image-local executable argument list.")
         return self

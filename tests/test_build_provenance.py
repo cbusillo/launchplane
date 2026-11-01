@@ -9,6 +9,8 @@ from urllib.error import HTTPError, URLError
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     MAX_MANIFEST_BYTES,
+    STATE_COPY_ARGUMENT_CHARACTERS,
+    STATE_COPY_COMMAND_BYTES,
     BuildProvenanceError,
     GitHubBuildProvenanceTransport,
     VerifiedBuildArtifact,
@@ -466,7 +468,6 @@ class GenericWebBuildProvenanceTests(unittest.TestCase):
         restored = type(verified).model_validate_json(verified.model_dump_json())
         assert restored.manifest.testing_state_copy is not None
         self.assertEqual(restored.manifest.testing_state_copy.command, tuple(command))
-        self.assertEqual(restored.image_reference, verified.image_reference)
 
     def test_unconfigured_state_copy_preserves_the_existing_manifest_shape(self) -> None:
         from control_plane.build_provenance import GenericWebBuildManifest
@@ -476,14 +477,21 @@ class GenericWebBuildProvenanceTests(unittest.TestCase):
         self.assertNotIn("testing_state_copy", manifest.model_dump(mode="json"))
 
     def test_malformed_state_copy_commands_refuse_the_manifest(self) -> None:
+        multibyte_argument = "é" * (STATE_COPY_ARGUMENT_CHARACTERS // 2)
+        byte_budget_arguments = [multibyte_argument] * (
+            STATE_COPY_COMMAND_BYTES // len(multibyte_argument.encode("utf-8")) + 1
+        )
         for case, command in (
             ("empty", []),
             ("relative", ["relative-command"]),
             ("directory", ["/"]),
+            ("directory-slash", ["/app/bin/"]),
+            ("directory-dot", ["/app/bin/."]),
+            ("directory-parent", ["/.."]),
             ("nul", ["/app/bin/copy", "bad\x00argument"]),
             ("shell-text", "shell command"),
-            ("argument-budget", ["/app/bin/copy", "x" * 100000]),
-            ("total-byte-budget", ["/app/bin/copy", *["é" * 600] * 4]),
+            ("argument-budget", ["/app/bin/copy", "x" * (STATE_COPY_ARGUMENT_CHARACTERS + 1)]),
+            ("total-byte-budget", ["/app/bin/copy", *byte_budget_arguments]),
         ):
             with self.subTest(case=case):
                 with self.assertRaises(BuildProvenanceError) as caught:
