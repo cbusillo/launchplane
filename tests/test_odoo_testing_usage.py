@@ -59,6 +59,7 @@ class SessionInventoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = self.enterContext(TemporaryDirectory())
         self.path = Path(self.directory)
+        self.addons_path = "/opt/launchplane/addons,/odoo/addons"
         self.driver = ModuleType("psycopg2")
         self.namespace: dict[str, Any] = {"__name__": "fixture"}
         self.enterContext(patch.dict("sys.modules", {"psycopg2": self.driver}))
@@ -182,6 +183,7 @@ class SessionInventoryTests(unittest.TestCase):
             "db_name": "testing_db",
             "db_host": "database",
             "data_dir": self.directory,
+            "addons_path": self.addons_path,
             "db_user": "fixture",
             "db_password": "private-fixture",
         }
@@ -190,6 +192,8 @@ class SessionInventoryTests(unittest.TestCase):
             del options["db_user"]
         if failure == "database_identity":
             options["db_name"] = "another_db"
+        if failure == "server_wide_config":
+            options["server_wide_modules"] = "base,web,session_store_module"
         connection = MagicMock()
         connection.cursor.return_value.__enter__.return_value.fetchone.return_value = (recent,)
         if failure == "sql":
@@ -245,7 +249,7 @@ class SessionInventoryTests(unittest.TestCase):
             *([b"gevent"] if gevent else []),
             f"--data-dir={self.directory}".encode(),
             b"--load=base,web,launchplane_runtime_health",
-            b"--addons-path=/opt/launchplane/addons,/odoo/addons",
+            f"--addons-path={self.addons_path}".encode(),
             *argv[2:],
         ]
 
@@ -271,6 +275,8 @@ class SessionInventoryTests(unittest.TestCase):
             [b"--data-dir=/another-store"],
             [b"-c", b"/another-config"],
             [b"--session-dir=/another-store"],
+            [b"--load=base,web,session_store_module"],
+            [b"--addons-path=/another-addons"],
         ):
             with self.subTest(extra=extra):
                 result = self.probe_result(argv=self.wrapped_image_argv() + extra)
@@ -320,6 +326,7 @@ class SessionInventoryTests(unittest.TestCase):
             "database_identity": "web_database_mismatch",
             "process_absent": "serving_process_absent",
             "process_config": "serving_configuration_mismatch",
+            "server_wide_config": "serving_configuration_mismatch",
             "process_inventory": "process_inventory_unavailable",
             "sessions_missing": "session_store_unavailable",
             "sessions_corrupt": "session_file_unreadable",
