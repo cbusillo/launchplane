@@ -28,17 +28,10 @@ the new-product contract rather than duplicating it here.
 
 ## Retained Preview Safety
 
-Odoo preview creation and refresh omit `ODOO_KEY` from the application
-environment. It is an optional workflow service-user provisioning input, not
-a web or runner input. This leaves managed secret records and existing accounts
-unchanged; stable and production workflows keep their own delivery behavior.
-An existing preview adopts the omission through its normal issued refresh on
-the same receiver and artifact, after current ownership, use, original-operation,
-source-history and native resource checks pass. Retained-copy refresh preserves
-the database and file store. A refusal stays a refusal; this does not qualify
-usage, repair missing source history, or relax the execution-credential absence
-check in the copy inspector. Runtime sync without container recreation cannot
-remove a credential from an already-running process.
+Odoo preview creation and refresh omit `ODOO_KEY`, the optional workflow
+service-user provisioning input, from the application environment. An existing
+preview drops it through its normal guarded refresh; runtime sync does not
+remove it.
 
 Generic-web lifecycle cleanup uses the repository-name anchor from the product
 profile for stored-preview lookup and terminal evidence; the product key need
