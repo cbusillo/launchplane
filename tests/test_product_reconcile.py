@@ -8845,85 +8845,63 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
         )
 
     def test_history_http_failure_retains_safe_evidence_before_any_deploy(self) -> None:
-        scenarios: tuple[tuple[int, dict[str, str], str], ...] = (
-            (
-                403,
-                {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1793502000"},
-                "rate_limited",
-            ),
-            (403, {"Retry-After": "60"}, "rate_limited"),
-            (403, {}, "forbidden"),
-            (401, {}, "unauthorized"),
-            (429, {}, "rate_limited"),
-            (503, {}, "transient"),
-        )
         chain = [f"{index:040x}" for index in range(250, 0, -1)]
-        for status, fields, classification in scenarios:
-            with self.subTest(status=status, fields=fields):
-                self.request()
-                self.github.add_run(7, chain[-1])
-                headers = Message()
-                for name, value in fields.items():
-                    headers[name] = value
-                headers["X-GitHub-Request-Id"] = "ABCD:1234:5678:90AB"
-                headers["Authorization"] = "private-token"
-                reads: list[str] = []
-                body = MagicMock()
+        self.request()
+        self.github.add_run(7, chain[-1])
+        headers = Message()
+        headers["X-RateLimit-Remaining"] = "0"
+        headers["X-RateLimit-Reset"] = "1793502000"
+        headers["X-GitHub-Request-Id"] = "ABCD:1234:5678:90AB"
+        headers["Authorization"] = "private-token"
+        reads: list[str] = []
+        body = MagicMock()
 
-                def get_json(path: str) -> object:
-                    if "/commits?" not in path:
-                        return original_get(path)
-                    reads.append(path)
-                    page = int(path.rsplit("page=", 1)[1])
-                    if page < 3:
-                        return [
-                            {"sha": sha, "parents": [{"sha": chain[index + 1]}]}
-                            for index, sha in enumerate(chain)
-                            if (page - 1) * 100 <= index < page * 100
-                        ]
-                    transport = GitHubBuildProvenanceTransport(token="private-token")
-                    failure = HTTPError(
-                        "https://api.github.com/private?token=private-token",
-                        status,
-                        "private-response-message",
-                        headers,
-                        body,
-                    )
-                    self.addCleanup(failure.close)
-                    with patch("control_plane.build_provenance.urlopen", side_effect=failure):
-                        return transport.get_json(path)
+        def get_json(path: str) -> object:
+            if "/commits?" not in path:
+                return original_get(path)
+            reads.append(path)
+            page = int(path.rsplit("page=", 1)[1])
+            if page < 3:
+                return [
+                    {"sha": sha, "parents": [{"sha": chain[index + 1]}]}
+                    for index, sha in enumerate(chain)
+                    if (page - 1) * 100 <= index < page * 100
+                ]
+            transport = GitHubBuildProvenanceTransport(token="private-token")
+            failure = HTTPError(
+                "https://api.github.com/private?token=private-token",
+                403,
+                "private-response-message",
+                headers,
+                body,
+            )
+            self.addCleanup(failure.close)
+            with patch("control_plane.build_provenance.urlopen", side_effect=failure):
+                return transport.get_json(path)
 
-                original_get = self.github.get_json
-                with (
-                    patch.object(self.github, "get_json", side_effect=get_json),
-                    self.assertLogs("control_plane.product_reconcile", "WARNING") as logs,
-                ):
-                    result = self.run_once()
-                self.assertEqual(result.state, "failed")
-                evidence = json.loads(result.last_error.split(": ", 1)[1])
-                self.assertEqual(evidence["status"], status)
-                self.assertEqual(evidence["route"], "commit_history")
-                self.assertEqual(evidence["classification"], classification)
-                self.assertEqual(evidence["request_id"], headers["X-GitHub-Request-Id"])
-                for header, field in (
-                    ("X-RateLimit-Remaining", "rate_limit_remaining"),
-                    ("X-RateLimit-Reset", "rate_limit_reset"),
-                    ("Retry-After", "retry_after_seconds"),
-                ):
-                    self.assertEqual(
-                        evidence.get(field), int(fields[header]) if header in fields else None
-                    )
-                for unsafe in ("private-token", "private-response-message", "https://", REPOSITORY):
-                    self.assertNotIn(unsafe, result.last_error)
-                    self.assertNotIn(unsafe, " ".join(logs.output))
-                body.read.assert_not_called()
-                self.assertEqual(len(reads), 3)
-                self.assertEqual(result.last_plan["last_failed_error_code"], "github_read_failed")
-                self.assertTrue(result.last_plan["failure_trace_id"])
-                self.assertEqual(self.provider.applied, [])
-                self.assertEqual(
-                    self.store.list_odoo_stable_target_replacement_operation_records(), ()
-                )
+        original_get = self.github.get_json
+        with (
+            patch.object(self.github, "get_json", side_effect=get_json),
+            self.assertLogs("control_plane.product_reconcile", "WARNING") as logs,
+        ):
+            result = self.run_once()
+        self.assertEqual(result.state, "failed")
+        evidence = json.loads(result.last_error.split(": ", 1)[1])
+        self.assertEqual(evidence["status"], 403)
+        self.assertEqual(evidence["route"], "commit_history")
+        self.assertEqual(evidence["classification"], "rate_limited")
+        self.assertEqual(evidence["request_id"], headers["X-GitHub-Request-Id"])
+        self.assertEqual(evidence["rate_limit_remaining"], 0)
+        self.assertEqual(evidence["rate_limit_reset"], int(headers["X-RateLimit-Reset"]))
+        for unsafe in ("private-token", "private-response-message", "https://", REPOSITORY):
+            self.assertNotIn(unsafe, result.last_error)
+            self.assertNotIn(unsafe, " ".join(logs.output))
+        body.read.assert_not_called()
+        self.assertEqual(len(reads), 3)
+        self.assertEqual(result.last_plan["last_failed_error_code"], "github_read_failed")
+        self.assertTrue(result.last_plan["failure_trace_id"])
+        self.assertEqual(self.provider.applied, [])
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
 
     def test_missing_build_workflow_is_a_noop_only_with_complete_actions_inventory(self) -> None:
         scenarios: tuple[tuple[dict[str, object] | int, str, str], ...] = (

@@ -116,7 +116,7 @@ def _verify(
 class BuildProvenanceTests(unittest.TestCase):
     def test_http_metadata_is_bounded_and_exception_cause_survives_all_read_paths(self) -> None:
         for stage in ("json", "archive", "redirect"):
-            for unsafe in ("private-secret\nInjected: value", "9" * 200):
+            for unsafe in ("private-secret\nInjected: value", "9" * 200, "60"):
                 with self.subTest(stage=stage, unsafe=unsafe):
                     headers = Message()
                     for name in (
@@ -157,16 +157,21 @@ class BuildProvenanceTests(unittest.TestCase):
                             transport.get_bytes(path)
                     self.assertIs(caught.exception.__cause__, failure)
                     evidence = json.loads(str(caught.exception).split(": ", 1)[1])
+                    self.assertEqual(evidence["status"], 403)
+                    self.assertEqual(evidence["route"], "artifact_download")
+                    self.assertEqual(evidence["stage"], "storage" if stage == "redirect" else "api")
+                    self.assertEqual(evidence["error_type"], "HTTPError")
                     self.assertEqual(
-                        evidence,
-                        {
-                            "status": 403,
-                            "route": "artifact_download",
-                            "classification": "forbidden",
-                        },
+                        evidence["classification"],
+                        "forbidden" if stage == "redirect" else "rate_limited",
                     )
+                    for value in ("private-secret", "Injected", "9" * 200):
+                        self.assertNotIn(value, str(caught.exception))
                     body.read.assert_not_called()
                     if stage == "redirect":
+                        self.assertNotIn("rate_limit_remaining", evidence)
+                        self.assertNotIn("retry_after_seconds", evidence)
+                        self.assertNotIn("request_id", evidence)
                         self.assertNotIn("Authorization", download.call_args.args[0].headers)
 
     def test_missing_http_headers_and_connection_failures_keep_unknown_evidence(self) -> None:
@@ -175,7 +180,11 @@ class BuildProvenanceTests(unittest.TestCase):
         )
         setattr(failure, "headers", None)
         self.addCleanup(failure.close)
-        for error in (failure, URLError("private-secret")):
+        for error in (
+            failure,
+            URLError(TimeoutError("private-secret")),
+            URLError("private-secret"),
+        ):
             with (
                 self.subTest(error=type(error).__name__),
                 patch("control_plane.build_provenance.urlopen", side_effect=error),
@@ -187,9 +196,53 @@ class BuildProvenanceTests(unittest.TestCase):
             self.assertEqual(
                 evidence["classification"], "forbidden" if error is failure else "transport_error"
             )
+            self.assertEqual(evidence["error_type"], type(error).__name__)
+            if isinstance(error, URLError) and not isinstance(error, HTTPError):
+                self.assertEqual(evidence["reason_type"], type(error.reason).__name__)
             self.assertNotIn("request_id", evidence)
             self.assertNotIn("private-secret", str(caught.exception))
             self.assertIs(caught.exception.__cause__, error)
+
+    def test_http_classification_keeps_retry_evidence_without_header_text(self) -> None:
+        for status, fields, classification in (
+            (
+                403,
+                {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1793502000"},
+                "rate_limited",
+            ),
+            (403, {"Retry-After": "60"}, "rate_limited"),
+            (403, {"Retry-After": "Wed, 21 Oct 2030 07:28:00 GMT"}, "rate_limited"),
+            (403, {"X-RateLimit-Remaining": " 0"}, "rate_limited"),
+            (403, {}, "forbidden"),
+            (401, {}, "unauthorized"),
+            (429, {}, "rate_limited"),
+            (503, {}, "transient"),
+        ):
+            with self.subTest(status=status, fields=fields):
+                headers = Message()
+                for name, value in fields.items():
+                    headers[name] = value
+                failure = HTTPError(
+                    "https://api.github.com/private", status, "private", headers, None
+                )
+                self.addCleanup(failure.close)
+                with (
+                    patch("control_plane.build_provenance.urlopen", side_effect=failure),
+                    self.assertRaises(BuildProvenanceError) as caught,
+                ):
+                    GitHubBuildProvenanceTransport(token="private").get_json(
+                        "/repos/test/test/commits"
+                    )
+                evidence = json.loads(str(caught.exception).split(": ", 1)[1])
+                self.assertEqual(evidence["classification"], classification)
+                for header, field in (
+                    ("X-RateLimit-Remaining", "rate_limit_remaining"),
+                    ("X-RateLimit-Reset", "rate_limit_reset"),
+                    ("Retry-After", "retry_after_seconds"),
+                ):
+                    value = fields.get(header, "").strip()
+                    self.assertEqual(evidence.get(field), int(value) if value.isdecimal() else None)
+                self.assertNotIn("Wed,", str(caught.exception))
 
     def test_json_and_manifest_body_connection_drops_are_wrapped(self) -> None:
         from http.client import IncompleteRead

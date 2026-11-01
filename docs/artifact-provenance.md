@@ -142,19 +142,12 @@ page owns its producer contract and conservative missing-evidence behavior.
 
 ## GitHub read failure evidence
 
-The shared build reader retains a bounded JSON diagnostic in its existing
-`github_read_failed` error. Reconciliation keeps it in the existing failure log
-and `last_error`, beside the existing testing failure trace. It includes an HTTP
-status, a fixed route category, a validated provider request id, and valid
-numeric quota remaining/limit/reset and retry-after seconds when supplied.
-URLs, repository/branch values, response bodies, arbitrary headers and upstream
-exception messages are excluded. JSON and archive read failures share this path;
-the original exception cause stays available to existing refusal/retry consumers.
-
-Classification records rate-limit evidence (429, or 403 with zero remaining
-quota or numeric retry-after), 401 unauthorized, 403 forbidden, server errors,
-or an unclassified HTTP/transport failure. Forbidden alone does not establish
-missing permissions: absent or malformed metadata remains absent, and a secondary
-throttle without those headers cannot be distinguished without further evidence.
-No retry or credential decision changes. The October 31 history-read event's
-cause remains UNKNOWN because its missing headers were not recovered.
+The shared build reader's existing `github_read_failed` diagnostic retains bounded
+HTTP status, route category, API/storage stage and exception types, plus validated
+GitHub request id and numeric quota/retry fields from the API stage. It excludes
+URLs, response bodies, arbitrary header values and upstream exception messages;
+reconciliation retains it in existing logs and `last_error` beside the failure trace.
+Classification reports rate-limit evidence (429, or API 403 with zero remaining
+quota or a Retry-After header), unauthorized, forbidden, server or transport failure.
+Forbidden alone does not establish missing permissions; absent metadata stays
+unknown. Retry and refusal decisions still read the unchanged original exception cause.

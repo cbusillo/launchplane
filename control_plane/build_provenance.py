@@ -111,7 +111,7 @@ class GitHubBuildProvenanceTransport:
             with urlopen(Request(url=location), timeout=self._timeout_seconds) as response:
                 return _bounded_read(response, path)
         except (HTTPError, URLError, OSError, HTTPException) as error:
-            raise _github_read_failure(path, error) from error
+            raise _github_read_failure(path, error, stage="storage") from error
 
     def _api_request(self, path: str) -> Request:
         return Request(
@@ -131,7 +131,9 @@ class GitHubBuildProvenanceTransport:
             raise _github_read_failure(request.full_url, error) from error
 
 
-def _github_read_failure(path: str, error: Exception) -> BuildProvenanceError:
+def _github_read_failure(
+    path: str, error: Exception, *, stage: Literal["api", "storage"] = "api"
+) -> BuildProvenanceError:
     route = "unknown"
     for pattern, category in (
         (r"", "repository"),
@@ -145,10 +147,17 @@ def _github_read_failure(path: str, error: Exception) -> BuildProvenanceError:
         if re.fullmatch(r"/repos/[^/]+/[^/]+" + pattern, urlsplit(path).path):
             route = category
             break
-    evidence: dict[str, object] = {"route": route, "classification": "transport_error"}
+    evidence: dict[str, object] = {
+        "route": route,
+        "stage": stage,
+        "classification": "transport_error",
+        "error_type": type(error).__name__[:64],
+    }
+    if isinstance(error, URLError) and not isinstance(error, HTTPError):
+        evidence["reason_type"] = type(error.reason).__name__[:64]
     if isinstance(error, HTTPError):
         evidence["status"] = error.code
-        headers = normalized_github_quota_response_headers(error.headers)
+        headers = normalized_github_quota_response_headers(error.headers) if stage == "api" else {}
         for header, field in (
             ("x-ratelimit-remaining", "rate_limit_remaining"),
             ("x-ratelimit-reset", "rate_limit_reset"),
@@ -159,13 +168,15 @@ def _github_read_failure(path: str, error: Exception) -> BuildProvenanceError:
             if re.fullmatch(r"[0-9]{1,12}", value):
                 evidence[field] = int(value)
         request_id = (
-            error.headers.get("X-GitHub-Request-Id", "") if error.headers is not None else ""
+            error.headers.get("X-GitHub-Request-Id", "")
+            if stage == "api" and error.headers is not None
+            else ""
         )
         if re.fullmatch(r"[0-9A-Fa-f:]{1,128}", request_id):
             evidence["request_id"] = request_id
         if error.code == 429 or (
             error.code == 403
-            and (evidence.get("rate_limit_remaining") == 0 or "retry_after_seconds" in evidence)
+            and (evidence.get("rate_limit_remaining") == 0 or "retry-after" in headers)
         ):
             evidence["classification"] = "rate_limited"
         elif error.code == 401:
