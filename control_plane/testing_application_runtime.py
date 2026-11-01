@@ -6,6 +6,7 @@ from collections.abc import Callable
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from typing import Any, Literal
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.retained_volume_capture import _batched_docker_inspect
 
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
@@ -28,17 +29,12 @@ class VerifiedApplicationRuntimeFailure(ValueError):
 def application_service_inventory(
     docker: Callable[..., str],
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    services = docker("service", "ls", "-q", "--no-trunc").splitlines()
-    rows = json.loads(docker("service", "inspect", *services)) if services else []
-    if (
-        not isinstance(rows, list)
-        or any(not isinstance(row, dict) for row in rows)
-        or len(set(services)) != len(services)
-        or len(rows) != len(services)
-        or {row.get("ID") for row in rows} != set(services)
-    ):
-        raise ValueError("Application service inventory is incomplete.")
-    return services, rows
+    services = docker("service", "ls", "-q").splitlines()
+
+    def load(*arguments: str) -> object:
+        return json.loads(docker(*arguments))
+
+    return services, list(_batched_docker_inspect("service", services, load).values())
 
 
 def require_application_runtime_absent(
@@ -76,7 +72,7 @@ def require_application_runtime_absent(
         ):
             raise ValueError("An original application container remains present.")
     if (
-        docker("service", "ls", "-q", "--no-trunc").splitlines() != services
+        docker("service", "ls", "-q").splitlines() != services
         or docker("ps", "-aq", "--no-trunc").splitlines() != containers
         or single_local_swarm_node(docker) != nodes
     ):
@@ -194,7 +190,9 @@ def wait_for_application_runtime_absence(
 
 
 APPLICATION_STATE_PROGRAM_HEADER = (
-    "import base64,json,subprocess,sys,time\nfrom collections.abc import Callable\nfrom typing import Any\n"
+    "import base64,json,subprocess,sys,time\n"
+    "from collections.abc import Callable,Sequence\nfrom typing import Any\n"
+    + inspect.getsource(_batched_docker_inspect)
     + inspect.getsource(single_local_swarm_node)
     + inspect.getsource(application_service_inventory)
     + inspect.getsource(require_application_runtime_absent)

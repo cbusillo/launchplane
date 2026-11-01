@@ -187,7 +187,7 @@ def inventory(backing,root):
             raise Unknown()
         for mount in mounts:
             mount_reference(mount,backing)
-    services=identifiers('service','ls','-q','--no-trunc')
+    services=identifiers('service','ls','-q')
     service_rows=inspect_many('service',services)
     for service in service_rows.values():
         try:
@@ -229,7 +229,7 @@ def inventory(backing,root):
     if state=='active':
         if swarm.get('ControlAvailable') is not True:
             raise Held()
-        nodes=identifiers('node','ls','-q','--no-trunc')
+        nodes=identifiers('node','ls','-q')
         if len(nodes)!=1:
             raise Held()
     else:

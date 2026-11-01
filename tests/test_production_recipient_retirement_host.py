@@ -50,6 +50,10 @@ class RetirementHostTests(unittest.TestCase):
         return cast(dict[str, Any], json.loads(response.stdout.removeprefix("FRAME:"))["result"])
 
     def test_actual_storage_identity_and_foreign_owner_are_distinct(self) -> None:
+        self.fixture.state.update(
+            services=["a" * 12], service_suffix="b" * 13, task_per_service=True
+        )
+        self.fixture.write_state()
         observed = self.resources()
         self.assertEqual(observed["volumes"][0]["identity"], self.fixture.identity())
         self.assertFalse(observed["volumes"][0]["held"])

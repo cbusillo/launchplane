@@ -25,9 +25,10 @@ def _batched_docker_inspect(
 ) -> dict[str, dict[str, object]]:
     identity_key = "Id" if kind == "container" else "ID" if kind in {"service", "task"} else "Name"
     expected = set(identifiers)
-    if len(expected) != len(identifiers):
+    if len(expected) != len(identifiers) or any(not identifier for identifier in identifiers):
         raise ValueError("duplicate inspect request")
     rows: dict[str, dict[str, object]] = {}
+    observed: set[str] = set()
     offset = 0
     while offset < len(identifiers):
         end = offset
@@ -46,11 +47,23 @@ def _batched_docker_inspect(
                 raise ValueError("inspect unavailable")
             checked_row: dict[str, object] = row
             identifier = checked_row.get(identity_key)
-            if not isinstance(identifier, str) or identifier not in expected or identifier in rows:
+            if not isinstance(identifier, str) or not identifier or identifier in rows:
                 raise ValueError("inspect identity unavailable")
+            matches = [
+                reference
+                for reference in identifiers[offset:end]
+                if (
+                    identifier.startswith(reference)
+                    if kind == "service"
+                    else identifier == reference
+                )
+            ]
+            if len(matches) != 1 or matches[0] in observed:
+                raise ValueError("inspect identity unavailable")
+            observed.add(matches[0])
             rows[identifier] = checked_row
         offset = end
-    if set(rows) != expected:
+    if observed != expected:
         raise ValueError("inspect coverage unavailable")
     return rows
 
