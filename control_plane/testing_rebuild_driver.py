@@ -16,6 +16,10 @@ TESTING_REBUILD_EXECUTION_UNAVAILABLE = (
 TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE = "testing_rebuild_execution_unavailable"
 
 
+def testing_rebuild_interlock_reason(operation_id: str) -> str:
+    return "Testing rebuild " + operation_id
+
+
 def testing_rebuild_build_identity(
     verified: VerifiedBuildArtifact | VerifiedGenericWebBuild,
 ) -> tuple[str, str]:
@@ -47,7 +51,12 @@ class TestingRebuildDriver:
 
     @property
     def execution_available(self) -> bool:
-        return self.profile.driver_id == "odoo"
+        return self.profile.driver_id == "odoo" or (
+            self.profile.driver_id == "generic-web"
+            and self.state is not None
+            and self.state.kind == "none"
+            and bool(self.lane.base_url)
+        )
 
     def require_execution(self) -> None:
         if not self.execution_available:

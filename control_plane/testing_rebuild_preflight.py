@@ -64,6 +64,11 @@ class TestingRebuildPreflight(BaseModel):
     # This is admission evidence. The worker still proves the actual independent
     # candidate's isolation, credentials, restore, health and cutover before use.
     candidate_verification: Literal["pending"] = "pending"
+    restore_applicable: bool | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 def inspect_testing_rebuild(
@@ -120,6 +125,18 @@ def inspect_testing_rebuild(
     try:
         intent = capture_rebuild_intent(root, store, operation)
         check_testing_rebuild_protection(root, store, operation, intent, actor=actor)
+        generic_execution = (
+            isinstance(intent, GenericWebTestingRebuildIntent)
+            and driver.execution_available
+            and intent.before.target.target_type == "application"
+        )
+        if generic_execution:
+            from control_plane.generic_web_testing_rebuild import (
+                inspect_generic_web_testing_rebuild,
+            )
+
+            assert isinstance(intent, GenericWebTestingRebuildIntent)
+            inspect_generic_web_testing_rebuild(root, store, intent)
     except api.DokployRequestFailed as error:
         if error.status_code in {401, 403}:
             raise NativeSourceAuthorizationDenied(
@@ -143,8 +160,8 @@ def inspect_testing_rebuild(
         ) from error
     if isinstance(intent, GenericWebTestingRebuildIntent):
         return TestingRebuildPreflight(
-            status="pending",
-            message=TESTING_REBUILD_EXECUTION_UNAVAILABLE,
+            status="pass" if generic_execution else "pending",
+            message="" if generic_execution else TESTING_REBUILD_EXECUTION_UNAVAILABLE,
             product=apply.product,
             context=lane.context,
             base_url=lane.base_url,
@@ -152,6 +169,7 @@ def inspect_testing_rebuild(
             source_git_ref=apply.source_git_ref,
             data_source_mode="empty",
             observed_at=now,
+            restore_applicable=intent.state.kind != "none",
         )
     if apply.data_source_mode != "empty":
         try:

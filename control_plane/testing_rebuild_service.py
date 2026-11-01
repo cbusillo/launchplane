@@ -112,6 +112,7 @@ from control_plane.testing_address_storage import effective_testing_route
 from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.odoo_testing_usage import read_odoo_testing_usage
 from control_plane.provider_operations import (
+    DurableProviderMutationAdapter,
     ProviderEvidenceLease,
     DurableProviderOperationResult,
     ProviderMutationOutcome,
@@ -158,6 +159,7 @@ from control_plane.testing_rebuild_storage import RecordTestingRebuildStore
 from control_plane.testing_rebuild_driver import (
     TestingRebuildRefused as TestingRebuildRefused,
     resolve_testing_rebuild_driver,
+    testing_rebuild_interlock_reason,
 )
 from control_plane.contracts.testing_application import TestingApplicationState
 from control_plane.testing_replacement_resources import IncompleteTestingResources
@@ -323,6 +325,11 @@ def capture_rebuild_intent(
     before = read_snapshot(store, product=operation.product, context=operation.context)
     if driver.state is not None:
         if operation.request.data_source_mode != "empty":
+            if driver.state.kind == "none":
+                raise TestingRebuildRefused(
+                    "testing_restore_not_applicable",
+                    "This application has no persistent data to restore.",
+                )
             raise TestingRebuildRefused(
                 "testing_restore_source_unconfigured",
                 "Generic-web restore requires a supported sanitized state source.",
@@ -601,7 +608,11 @@ def testing_rebuild_hold_allows(
         bool(actor)
         and operation.request.data_source_mode == "empty"
         and hold.purpose == "isolation_staging"
-        and hold == intent.before.target.policies.staff_testing_hold
+        and (
+            hold == intent.before.target.policies.staff_testing_hold
+            or isinstance(intent, GenericWebTestingRebuildIntent)
+            and hold.reason == testing_rebuild_interlock_reason(operation.operation_id)
+        )
         and hold.recorded_by == actor
     )
 
@@ -2683,17 +2694,29 @@ def _execute_native_testing_rebuild(
     if found.status == "missing":
         intent = capture_rebuild_intent(root, store, operation)
     elif found.record is not None and found.status == "found":
-        intent = NativeTestingRebuildIntent.model_validate(
-            store.read_original_mutation_intent(found.record)
+        original = store.read_original_mutation_intent(found.record)
+        intent = (
+            GenericWebTestingRebuildIntent.model_validate(original)
+            if "state" in original
+            else NativeTestingRebuildIntent.model_validate(original)
         )
     else:
         raise ValueError("The original testing rebuild reservation is unavailable or conflicts.")
-    if not isinstance(intent, NativeTestingRebuildIntent):
-        resolve_testing_rebuild_driver(store, operation.product).require_execution()
-        raise ValueError("The selected driver returned an incompatible rebuild intent.")
     if intent.operation_id != operation.operation_id or intent.profile.product != operation.product:
         raise ValueError("The original testing rebuild intent belongs to another operation.")
-    adapter = NativeTestingRebuildAdapter(root, store, operation, intent, authorize)
+    adapter: DurableProviderMutationAdapter
+    if isinstance(intent, GenericWebTestingRebuildIntent):
+        from control_plane.generic_web_testing_rebuild import (
+            GenericWebTestingRebuildAdapter,
+            rebuild_application_specification,
+        )
+
+        if found.status == "missing":
+            resolve_testing_rebuild_driver(store, operation.product).require_execution()
+        rebuild_application_specification(intent)
+        adapter = GenericWebTestingRebuildAdapter(root, store, operation, intent, authorize)
+    else:
+        adapter = NativeTestingRebuildAdapter(root, store, operation, intent, authorize)
     result = run_durable_provider_operation(
         store=store,
         scope=REBUILD_SCOPE,
