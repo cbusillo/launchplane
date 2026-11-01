@@ -98,20 +98,19 @@ def retained_application_state(
 def application_mount_matches(
     payload: api.JsonObject, state: RetainedApplicationState | None
 ) -> bool:
-    from control_plane.dokploy.fresh_application import match_application_volume_mount
+    from control_plane.dokploy.fresh_application import application_volume_mount_matches
 
     if state is None or state["mode"] == "stateless":
         return payload.get("mounts") == []
     identifier = payload.get("applicationId")
     if not isinstance(identifier, str):
         return False
-    mount = match_application_volume_mount(
+    return application_volume_mount_matches(
         payload,
         application_id=identifier,
         volume_name=state["volume_name"],
         mount_path=state["mount_path"],
     )
-    return mount is not None and mount.get("serviceType") == "application"
 
 
 def capture_rebuild_application_intent(

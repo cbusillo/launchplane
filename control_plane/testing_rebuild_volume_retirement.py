@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     from control_plane.generic_web_testing_rebuild import GenericWebTestingRebuildExecution
 
 
+VOLUME_RETIREMENT_PERMIT_SECONDS = 300
+
+
 @dataclass
 class TestingRebuildVolumeRetirement:
     execution: GenericWebTestingRebuildExecution

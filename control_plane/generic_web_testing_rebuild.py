@@ -720,17 +720,21 @@ class GenericWebTestingRebuildExecution:
         self.check()
         self.lease.assert_current()
         self.parent.authorize(phase)
-        if self.intent.private_ingress:
+        if self.intent.private_ingress and not (recovery or self.recovering):
             from control_plane.testing_application_private_route import (
+                PrivateIngressAuthorityChanged,
                 require_private_ingress_records,
             )
 
-            require_private_ingress_records(
-                self.store,
-                self.operation.product,
-                self.operation.context,
-                self.intent.private_ingress,
-            )
+            try:
+                require_private_ingress_records(
+                    self.store,
+                    self.operation.product,
+                    self.operation.context,
+                    self.intent.private_ingress,
+                )
+            except PrivateIngressAuthorityChanged as error:
+                raise NativeTestingRebuildAdmissionChanged(str(error)) from error
         if not is_exclusive_product_context(
             context=self.operation.context,
             product=self.operation.product,
@@ -1011,7 +1015,10 @@ class GenericWebTestingRebuildExecution:
             if isinstance(lease, ProviderEvidenceLease)
             else ""
         )
-        removal_started = original_phase in {"retire_predecessor", "remove_retired_service"}
+        removal_started = original_phase in {
+            "retire_predecessor",
+            "remove_retired_service",
+        } or original_phase.startswith("retirement_volume:")
         deploy_setting_unobserved = original_phase == "disable_old_deploys"
 
         def retain_predecessor(cause: ValueError | None = None) -> bool:
@@ -1209,8 +1216,10 @@ class GenericWebTestingRebuildExecution:
         predecessor: TestingActivationRecord,
         lease: ProviderOperationLease,
     ) -> bool:
-        from control_plane.testing_rebuild_volume_retirement import TestingRebuildVolumeRetirement
-        from control_plane.traffic_switch import MAX_READINESS_AGE_SECONDS
+        from control_plane.testing_rebuild_volume_retirement import (
+            TestingRebuildVolumeRetirement,
+            VOLUME_RETIREMENT_PERMIT_SECONDS,
+        )
 
         intent = self.retirement_intent(predecessor)
         if not intent.retained_volumes:
@@ -1225,8 +1234,6 @@ class GenericWebTestingRebuildExecution:
         if row is not None:
             original = self.store.read_original_mutation_intent(row)
         else:
-            readiness = predecessor.application_readiness
-            assert readiness is not None and readiness.route is not None
             assert predecessor.predecessor is not None
             host, token = source.read_dokploy_config(control_plane_root=self.root)
             clock = inspect_application_state(
@@ -1244,9 +1251,9 @@ class GenericWebTestingRebuildExecution:
                 "volume": volume.model_dump(mode="json"),
                 "retirement": {
                     "binding": adapter.reconciliation_key(),
-                    "fresh_until": clock.received_at + MAX_READINESS_AGE_SECONDS,
+                    "fresh_until": clock.received_at + VOLUME_RETIREMENT_PERMIT_SECONDS,
                     "boot_id": clock.boot_id,
-                    "monotonic_deadline": clock.monotonic + MAX_READINESS_AGE_SECONDS,
+                    "monotonic_deadline": clock.monotonic + VOLUME_RETIREMENT_PERMIT_SECONDS,
                 },
             }
         result = self.run_child(

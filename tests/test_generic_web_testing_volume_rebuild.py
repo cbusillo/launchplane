@@ -8,6 +8,7 @@ from unittest.mock import patch
 from urllib.parse import urlsplit, urlunsplit
 
 from control_plane import retained_volume_capture
+from control_plane import generic_web_testing_rebuild as native_rebuild
 from control_plane.dokploy import api, native_copy_stream
 from control_plane.dokploy_inventory import TARGET_COLLECTIONS
 from control_plane.retained_volume_capture import retained_volume_engine_identity
@@ -20,6 +21,8 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.testing_activation import activation_record
 from control_plane.testing_rebuild_service import NativeTestingRebuildPending
+from control_plane.traffic_switch import MAX_READINESS_AGE_SECONDS
+from control_plane.testing_lane_hold import apply_testing_hold_plan
 from tests import test_generic_web_testing_rebuild as rebuild
 from tests import test_retained_volume_sweep_program as sweep_program
 
@@ -34,6 +37,7 @@ class GenericWebTestingVolumeRebuildFixture(rebuild.GenericWebTestingRebuildFlow
         self.flow.storage.root = self.sweep.docker_root / "volumes"
         self.captured: dict[str, dict[str, Any]] = {}
         self.lose_volume_reply = False
+        self.cleanup_elapsed = 0.0
         read_text = Path.read_text
 
         def read(path: Path, *args: Any, **kwargs: Any) -> str:
@@ -107,7 +111,7 @@ class GenericWebTestingVolumeRebuildFixture(rebuild.GenericWebTestingRebuildFlow
                 containers=list(self.flow.containers),
                 services=[row["ID"] for row in self.flow.services.values()],
                 task_per_service=True,
-                clock=time.monotonic(),
+                clock=time.monotonic() + self.cleanup_elapsed,
                 removed=name not in self.flow.storage.volumes,
                 extra_volumes=[volume for volume in self.flow.storage.volumes if volume != name],
                 container_ref=any(
@@ -178,6 +182,7 @@ class GenericWebTestingVolumeRebuildFixture(rebuild.GenericWebTestingRebuildFlow
 
 class GenericWebTestingVolumeRebuildTests(GenericWebTestingVolumeRebuildFixture):
     def test_rebuild_uses_fresh_state_and_retires_the_original_volume_after_health(self) -> None:
+        self.cleanup_elapsed = MAX_READINESS_AGE_SECONDS + 1
         previous = self.original
         volume = self.original_volume
         for attempt in (1, 2):
@@ -206,6 +211,53 @@ class GenericWebTestingVolumeRebuildTests(GenericWebTestingVolumeRebuildFixture)
 
 
 class PrivateWebTestingVolumeRebuildTests(GenericWebTestingVolumeRebuildTests):
+    def test_private_record_change_after_own_hold_finishes_refused_without_candidate_effects(
+        self,
+    ) -> None:
+        apply = apply_testing_hold_plan
+
+        def changed(**kwargs: Any) -> Any:
+            result = apply(**kwargs)
+            if kwargs["request"].hold:
+                endpoint = self.store.list_private_health_endpoint_records()[0]
+                self.store.write_private_health_endpoint_record(
+                    endpoint.model_copy(update={"updated_at": datetime.now(UTC).isoformat()})
+                )
+            return result
+
+        before = set(self.flow.payloads)
+        with patch.object(native_rebuild, "apply_testing_hold_plan", side_effect=changed):
+            result = self.execute(1)
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+        self.assertEqual(set(self.flow.payloads), before)
+        self.assertIn(self.original_volume, self.flow.storage.volumes)
+        self.assertIsNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.flow.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+
+    def test_private_record_refresh_after_cutover_keeps_original_recovery_and_current_health(
+        self,
+    ) -> None:
+        def refresh() -> None:
+            endpoint = self.store.list_private_health_endpoint_records()[0]
+            self.store.write_private_health_endpoint_record(
+                endpoint.model_copy(update={"updated_at": datetime.now(UTC).isoformat()})
+            )
+
+        self.after_retirement = refresh
+        result = self.execute(1)
+        self.assertEqual(result.health_status, "pass", result.error_message)
+        self.assertEqual(result.post_deploy_status, "pass", result.error_message)
+        self.assertNotIn(self.original_volume, self.flow.storage.volumes)
+        self.assertIsNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.flow.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+
     def configure_route(self) -> Any:
         route, _, _ = self.flow.private_addressed()
         profile = self.flow.store.read_product_profile_record(self.flow.product)
@@ -236,6 +288,20 @@ class TestingVolumeRebuildRecoveryTests(GenericWebTestingVolumeRebuildFixture):
         with self.assertRaises(NativeTestingRebuildPending):
             self.execute(1)
         self.assertNotIn(self.original_volume, self.flow.storage.volumes)
+        with (
+            patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+            ),
+            patch.object(
+                native_rebuild,
+                "inspect_application_state",
+                side_effect=ValueError("Transient incomplete original service inventory"),
+            ),
+            self.assertRaises(NativeTestingRebuildPending),
+        ):
+            self.execute(1)
         with patch.object(
             self.store,
             "_database_mutation_timestamp",

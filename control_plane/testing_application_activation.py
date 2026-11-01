@@ -31,7 +31,7 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.dokploy import api, source
 from control_plane.dokploy.application_endpoint import application_endpoint_spec
 from control_plane.dokploy.fresh_application import (
-    match_application_volume_mount,
+    application_volume_mount_matches,
     require_fresh_application_runtime,
 )
 from control_plane.dokploy_inventory import MAX_PROJECTS, read_dokploy_inventory
@@ -1191,13 +1191,12 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
     ) -> bool:
         specification = record.request.application
         assert specification is not None
-        mount = match_application_volume_mount(
+        return application_volume_mount_matches(
             live,
             application_id=record.target_id,
             volume_name=resources.volumes["state"],
             mount_path=specification.state.container_path,
         )
-        return mount is not None and mount.get("serviceType") == "application"
 
     def configure_application(
         self,

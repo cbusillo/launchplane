@@ -779,7 +779,8 @@ volume. A separate durable child removes the original volume only after current
 candidate health and complete Launchplane, provider and local Docker inventories
 prove independent cleanup custody. The existing retained-volume host program
 checks the captured engine and backing identity, references, path aliases and
-same-boot monotonic permit before removal. Completed retirement requires final
+same-boot monotonic permit before removal. That permit has its own bounded
+cleanup budget, independent of route-readiness freshness. Completed retirement requires final
 health and independent service, container and volume absence checks. A lost
 reply resumes the original receipts; a later staff hold or deployment is retained.
 The host program waits for Docker's asynchronous container teardown within a
@@ -817,7 +818,12 @@ not synchronized with this operation.
 A lost volume-removal reply reads back only the original host receipt and key;
 it never renews an expired removal permit. Known protected-volume refusals retain
 the exact predecessor for a later rebuild while allowing ordinary testing work.
-Unknown removal effects keep the original operation pending.
+Unknown removal effects keep the original operation pending, including when a
+later service-absence observation is temporarily incomplete. A private-ingress
+record contradiction before candidate dispatch finishes as a known admission
+refusal and clears only this operation's hold. Recovery retains original route
+custody and uses actual candidate health instead of requiring an unchanged
+private-record timestamp.
 Non-application lanes remain pending. Existing Odoo preflight and execution
 continue through the same control.
 
