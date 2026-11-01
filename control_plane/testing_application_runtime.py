@@ -82,16 +82,25 @@ def require_application_runtime_absent(
 def application_service_mounts_match(mounts: object, volume_name: str, mount_path: str) -> bool:
     if not volume_name:
         return mounts in (None, [])
+    if not isinstance(mounts, list) or len(mounts) != 1 or not isinstance(mounts[0], dict):
+        return False
+    mount = mounts[0]
+    options = mount.get("VolumeOptions") or {}
+    if not isinstance(options, dict):
+        return False
+    driver = options.get("DriverConfig")
     return (
-        isinstance(mounts, list)
-        and len(mounts) == 1
-        and isinstance(mounts[0], dict)
-        and mounts[0].get("Type") == "volume"
-        and mounts[0].get("Source") == volume_name
-        and mounts[0].get("Target") == mount_path
-        and mounts[0].get("ReadOnly") in (None, False)
-        and isinstance(mounts[0].get("VolumeOptions") or {}, dict)
-        and (mounts[0].get("VolumeOptions") or {}).get("Subpath") in (None, "")
+        mount.get("Type") == "volume"
+        and mount.get("Source") == volume_name
+        and mount.get("Target") == mount_path
+        and mount.get("ReadOnly") in (None, False)
+        and options.get("Subpath") in (None, "")
+        and (
+            driver is None
+            or isinstance(driver, dict)
+            and driver.get("Name") in (None, "", "local")
+            and driver.get("Options") in (None, {})
+        )
     )
 
 
@@ -116,24 +125,6 @@ def require_application_runtime_state(
         for row in services
         if row.get("ID") == service_id or row.get("Spec", {}).get("Name") == application
     ]
-    if not selected and service_id:
-        require_application_runtime_absent(docker, application, service_id)
-        return
-    if len(selected) != 1:
-        raise ValueError("The original stateless service is unavailable.")
-    service = selected[0]
-    if (
-        service.get("Spec", {}).get("Name") != application
-        or service_id
-        and service.get("ID") != service_id
-    ):
-        raise ValueError("The original stateless service identity changed.")
-    if not application_service_mounts_match(
-        service.get("Spec", {}).get("TaskTemplate", {}).get("ContainerSpec", {}).get("Mounts"),
-        volume_name,
-        mount_path,
-    ):
-        raise ValueError("The original service state differs from its captured declaration.")
     volume = None
     if volume_name:
         volumes = json.loads(docker("volume", "inspect", volume_name))
@@ -151,6 +142,30 @@ def require_application_runtime_state(
             or not volume["Mountpoint"]
         ):
             raise ValueError("The original state volume provenance changed.")
+
+    def volume_unchanged() -> bool:
+        return volume is None or json.loads(docker("volume", "inspect", volume_name)) == [volume]
+
+    if not selected and service_id:
+        require_application_runtime_absent(docker, application, service_id)
+        if not volume_unchanged():
+            raise ValueError("The original state volume changed during observation.")
+        return
+    if len(selected) != 1:
+        raise ValueError("The original stateless service is unavailable.")
+    service = selected[0]
+    if (
+        service.get("Spec", {}).get("Name") != application
+        or service_id
+        and service.get("ID") != service_id
+    ):
+        raise ValueError("The original stateless service identity changed.")
+    if not application_service_mounts_match(
+        service.get("Spec", {}).get("TaskTemplate", {}).get("ContainerSpec", {}).get("Mounts"),
+        volume_name,
+        mount_path,
+    ):
+        raise ValueError("The original service state differs from its captured declaration.")
     tasks = docker("service", "ps", "--no-trunc", "-q", application).splitlines()
     if len(set(tasks)) != len(tasks):
         raise ValueError("The original task inventory is ambiguous.")
@@ -207,8 +222,7 @@ def require_application_runtime_state(
         or docker("service", "ps", "--no-trunc", "-q", application).splitlines() != tasks
         or docker("ps", "-aq", "--no-trunc").splitlines() != containers
         or single_local_swarm_node(docker) != nodes
-        or volume is not None
-        and json.loads(docker("volume", "inspect", volume_name)) != [volume]
+        or not volume_unchanged()
     ):
         raise ValueError("The original stateless runtime changed during observation.")
 

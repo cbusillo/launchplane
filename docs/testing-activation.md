@@ -801,6 +801,13 @@ not synchronized with this operation.
 Volume, private-address and non-application lanes remain pending in this slice.
 Existing Odoo preflight and execution continue through the same control.
 
+Rebuild admission retains the completed current activation's application recipe,
+including its network and local and external credential intent. Current profile
+port, health path and declared state remain authoritative. A recipe from another
+recipient or an incomplete activation cannot supply that intent. External
+credential comparisons use fresh profiles internally under the original rebuild
+authority; they do not expose other products' settings to the caller.
+
 Stateless lanes have no saved data to restore. Generic-web production/upstream
 restore for volume lanes is not admitted by this slice. Its
 continuation must bind a supported sanitized source before any candidate runs.
