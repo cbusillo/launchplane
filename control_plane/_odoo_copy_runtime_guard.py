@@ -3,6 +3,7 @@
 import inspect
 
 from control_plane.copy_readback_diagnostics import (
+    NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
     CopyReadbackRefused,
     copy_failure_diagnostics_library,
     readback_predicate_library,
@@ -40,13 +41,23 @@ VOLUME_BACKING_INSPECTION_LIBRARY = (
     + readback_predicate_library()
     + copy_failure_diagnostics_library()
     + inspect.getsource(CopyReadbackRefused)
+    + f"\nNATIVE_PROGRAM_SOURCE_SITE_LIMIT={NATIVE_PROGRAM_SOURCE_SITE_LIMIT!r}\n"
     + r"""
 import subprocess
 
 
-def copy_readback_failure_frame(error: Exception, predicate: str = ReadbackPredicate.NATIVE_READ) -> dict[str, str]:
-    return {'type': 'failed', 'predicate': error.predicate if isinstance(error, CopyReadbackRefused) else predicate,
+def copy_readback_failure_frame(error: Exception, predicate: str = ReadbackPredicate.NATIVE_READ) -> dict[str, object]:
+    frame = {'type': 'failed', 'predicate': error.predicate if isinstance(error, CopyReadbackRefused) else predicate,
         'kind': 'refused' if isinstance(error, CopyReadbackRefused) else 'unavailable'}
+    sites = []
+    trace = error.__traceback__
+    while trace is not None:
+        if trace.tb_frame.f_code.co_filename == copy_readback_failure_frame.__code__.co_filename:
+            sites.append(trace.tb_lineno)
+        trace = trace.tb_next
+    if sites:
+        frame['sites'] = sites[-NATIVE_PROGRAM_SOURCE_SITE_LIMIT:]
+    return frame
 
 
 def foreign_volume_inventory(containers, own):
