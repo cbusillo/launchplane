@@ -4884,6 +4884,11 @@ or original operation. A harmless sweep or pending feedback does not renew a
 historical failure. Existing decision timestamps date inherited errors across
 queue pickup; missing stable evidence retains the refusal. The normal reconciler
 also stops carrying or reposting a failure superseded by verified retirement.
+Each genuine failure records its own `last_failed_at` alongside the retained
+failure fields. Harmless sweeps carry that original time unchanged, including
+when comment delivery deduplicates the same body. A carried legacy failure with
+no reliable date remains unqualified. Unavailable retirement lookups preserve
+failure attention and cannot interrupt reconcile completion.
 Exact completed
 replays return their original response even after newer evidence arrives; they
 perform no new mutation. The operation cannot manufacture retirement, clear a

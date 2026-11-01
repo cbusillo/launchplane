@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from typing import Literal
 from fastapi import FastAPI
+from sqlalchemy.exc import SQLAlchemyError
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -17,6 +18,7 @@ from control_plane.odoo_preview_apply_http import (
 from control_plane.product_reconcile_read import preview_refresh_failure
 from control_plane.product_reconcile_feedback import _preview_feedback, post_reconcile_feedback
 from control_plane.product_reconcile import ReconcileOutcome, run_product_reconcile_once
+from control_plane.contracts.record_failures import record_failure_summary
 from control_plane.contracts.product_environment_read_model import _preview_refresh_warnings
 from control_plane.preview_retirement import verified_preview_retirement_digest
 from control_plane.preview_pr_feedback_remediation import PreviewPrFeedbackCredentials
@@ -62,6 +64,7 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
             {
                 "action": "apply",
                 "last_failed_error_summary": "Preview source history unknown",
+                "last_failed_at": old_at,
                 "timing": {"planning_finished_at": old_at},
             },
             "Preview source history unknown",
@@ -277,7 +280,20 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
             self.enterContext(patch(f"{module}.github_api_request", side_effect=github_api))
         return comments
 
-    def assert_pending_writer_survives_retirement(self, *, delivered: bool) -> None:
+    def assert_pending_writer_survives_retirement(
+        self, *, delivered: bool, repeated_failure: bool = False
+    ) -> None:
+        error = record_failure_summary("preview_provenance_refused")
+        self.failed = self.failed.model_copy(
+            update={
+                "last_error": error,
+                "last_plan": {
+                    **self.failed.last_plan,
+                    "last_failed_error_code": "preview_provenance_refused",
+                    "last_failed_error_summary": error,
+                },
+            }
+        )
         comments = self.feedback_comments()
         comments.fail_writes = not delivered
         previous = post_reconcile_feedback(
@@ -304,6 +320,28 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.retire()
         comments.fail_writes = False
+        if repeated_failure:
+            before = self.store.list_preview_pr_feedback_records()
+            self.store.request_product_reconcile(
+                self.target, datetime.now(timezone.utc).isoformat()
+            )
+            with patch(
+                "control_plane.product_reconcile.reconcile_product_request",
+                return_value=ReconcileOutcome(
+                    {"action": "apply", "last_failed_error_code": "preview_provenance_refused"},
+                    error=error,
+                ),
+            ):
+                failed = run_product_reconcile_once(
+                    record_store=self.store,
+                    lease_owner="worker",
+                    feedback_token=lambda *_: "feedback-token",
+                    public_origin=lambda: "",
+                    control_plane_root=self.root,
+                )
+            assert failed is not None
+            self.assertEqual(failed.last_error, error)
+            self.assertEqual(self.store.list_preview_pr_feedback_records(), before)
         for reason in ("no_verified_build", "client_test_notes_required"):
             self.store.request_product_reconcile(
                 self.target, datetime.now(timezone.utc).isoformat()
@@ -327,12 +365,98 @@ class PreviewRetirementTests(unittest.IsolatedAsyncioTestCase):
                     control_plane_root=self.root,
                 )
             assert completed is not None
-            self.assertFalse(preview_refresh_failure(completed, store=self.store))
-            self.assertFalse(_preview_refresh_warnings(self.store, self.profile))
-            self.assertTrue(self.retirement_digest())
+            self.assertEqual(
+                bool(preview_refresh_failure(completed, store=self.store)), repeated_failure
+            )
+            self.assertEqual(
+                bool(_preview_refresh_warnings(self.store, self.profile)), repeated_failure
+            )
+            self.assertEqual(bool(self.retirement_digest()), not repeated_failure)
             feedback = self.store.list_preview_pr_feedback_records()[0]
-            self.assertEqual(feedback.status, "pending")
+            self.assertEqual(feedback.status, "failed" if repeated_failure else "pending")
             self.assertEqual(feedback.delivery_status, "delivered")
+
+    async def test_same_body_later_failure_survives_harmless_sweeps_and_refuses_terminal_write(
+        self,
+    ) -> None:
+        self.assert_pending_writer_survives_retirement(delivered=True, repeated_failure=True)
+        app = create_launchplane_fastapi_app(
+            verifier=StubVerifier(identity()),
+            authz_policy=LaunchplaneAuthzPolicy(schema_version=3),
+            bearer_identity_config=_local_operator_bearer_config(),
+            control_plane_root_path=self.root,
+            record_store_factory=lambda: self.store,
+        )
+        with (
+            patch(
+                "control_plane.http_app.resolve_remediation_token",
+                return_value=nullcontext(
+                    PreviewPrFeedbackCredentials(
+                        token="fixture", actor_id=101, actor_login="delivery[bot]"
+                    )
+                ),
+            ),
+            patch(
+                "control_plane.http_app.observe_managed_preview_pr_feedback",
+                return_value=PreviewPrFeedbackObservation(
+                    state="absent",
+                    digest_sha256="a" * 64,
+                    token_actor_id=101,
+                    token_actor_login="delivery[bot]",
+                ),
+            ),
+        ):
+            dry = await self.remediate(app, "dry-run")
+            self.assertEqual(dry.status_code, 202, dry.text)
+            applied = await self.remediate(app, "apply")
+            self.assertEqual(applied.status_code, 403, applied.text)
+        current = self.store.read_product_reconcile_request(self.failed.target_key)
+        failed_at = current.last_plan["last_failed_at"]
+        assert isinstance(failed_at, str)
+        self.apply_native(
+            operation="destroy",
+            plan_id="retirement-after-failure",
+            issued_at=datetime.fromisoformat(failed_at) + timedelta(seconds=1),
+        )
+        self.assertTrue(self.retirement_digest())
+        self.assertFalse(_preview_refresh_warnings(self.store, self.profile))
+
+    def test_unavailable_retirement_evidence_preserves_failure_and_completes_the_worker(
+        self,
+    ) -> None:
+        self.retire()
+        for error in (
+            OSError("unavailable"),
+            ValueError("unavailable"),
+            SQLAlchemyError("unavailable"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(self.store, "read_product_profile_record", side_effect=error):
+                    self.assertTrue(preview_refresh_failure(self.failed, store=self.store))
+                with patch.object(self.store, "list_odoo_preview_originals", side_effect=error):
+                    self.assertFalse(self.retirement_digest())
+        self.store.request_product_reconcile(self.target, datetime.now(timezone.utc).isoformat())
+        with (
+            patch.object(
+                self.store, "read_product_profile_record", side_effect=OSError("unavailable")
+            ),
+            patch(
+                "control_plane.product_reconcile.reconcile_product_request",
+                return_value=ReconcileOutcome(
+                    {"action": "wait", "held": False, "reason": "no_verified_build"}
+                ),
+            ),
+        ):
+            completed = run_product_reconcile_once(
+                record_store=self.store,
+                lease_owner="worker",
+                feedback_token=lambda *_: "fixture",
+                public_origin=lambda: "",
+                control_plane_root=self.root,
+            )
+        assert completed is not None
+        self.assertEqual(completed.state, "done")
+        self.assertTrue(completed.last_plan["last_failed_error_summary"])
 
     def test_pending_writer_does_not_revive_delivered_failure(self) -> None:
         self.assert_pending_writer_survives_retirement(delivered=True)

@@ -12,6 +12,8 @@ validated key names, and a plan blocker can name dozens of keys.
 """
 
 import re
+import logging
+from sqlalchemy.exc import SQLAlchemyError
 from collections.abc import Mapping
 from typing import Protocol, cast
 
@@ -102,14 +104,20 @@ def _request_retired(store: object, request: ProductReconcileRequestRecord) -> b
 
     if not isinstance(store, PostgresRecordStore) or request.pull_request_number is None:
         return False
-    return (
-        verified_preview_retirement_digest(
-            store,
-            profile=store.read_product_profile_record(request.product),
-            number=request.pull_request_number,
+    try:
+        return (
+            verified_preview_retirement_digest(
+                store,
+                profile=store.read_product_profile_record(request.product),
+                number=request.pull_request_number,
+            )
+            != ""
         )
-        != ""
-    )
+    except (SQLAlchemyError, OSError, ValueError) as error:
+        logging.getLogger(__name__).warning(
+            "Preview retirement lookup is unavailable (%s).", type(error).__name__
+        )
+        return False
 
 
 def preview_refresh_failure(request: ProductReconcileRequestRecord, *, store: object = None) -> str:

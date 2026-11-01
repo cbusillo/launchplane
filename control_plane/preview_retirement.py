@@ -1,4 +1,6 @@
 from datetime import datetime
+import logging
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.idempotency_record import (
     format_launchplane_mutation_timestamp,
@@ -6,11 +8,26 @@ from control_plane.contracts.idempotency_record import (
 )
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.product_reconcile import product_reconcile_target_key
+from control_plane.contracts.product_reconcile import (
+    product_reconcile_target_key,
+    preview_failure_observed_at,
+)
 from control_plane.contracts.preview_execution import odoo_preview_destroy_reason
 
 
 def verified_preview_retirement_digest(
+    store: object, *, profile: LaunchplaneProductProfileRecord, number: int
+) -> str:
+    try:
+        return _verified_preview_retirement_digest(store, profile=profile, number=number)
+    except (SQLAlchemyError, OSError, ValueError) as error:
+        logging.getLogger(__name__).warning(
+            "Preview retirement proof is unavailable (%s).", type(error).__name__
+        )
+        return ""
+
+
+def _verified_preview_retirement_digest(
     store: object, *, profile: LaunchplaneProductProfileRecord, number: int
 ) -> str:
     from control_plane.preview_reservation_recovery import original_preview_intent
@@ -97,6 +114,10 @@ def verified_preview_retirement_digest(
             if not isinstance(decided_at, str) or not decided_at.strip():
                 decided_at = request.updated_at if request.state in {"done", "failed"} else ""
             if not decided_at or _timestamp(decided_at) >= _timestamp(preview.destroyed_at):
+                return ""
+        if request is not None and request.last_plan.get("last_failed_error_summary"):
+            failed_at = preview_failure_observed_at(request)
+            if not failed_at or _timestamp(failed_at) >= _timestamp(preview.destroyed_at):
                 return ""
         if any(
             feedback.product == profile.product
