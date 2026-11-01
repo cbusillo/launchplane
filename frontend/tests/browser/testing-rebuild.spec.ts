@@ -1,6 +1,6 @@
 import { expect, test, waitForState } from "./state";
 
-for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "session-unauthenticated", "watch-denied", "denied", "stale-build", "preflight-unavailable", "generic-pending", "held-resume", "held-resume-denied", "held-resume-lost-reply", "settlement-excluded", "settlement-lost-reply", "settlement-denied", "settlement-observed", "replay-conflict-settlement", "settlement-mismatch", "denied-reload", "storage-initial", "storage-dispatch", "storage-after-dispatch", "storage-clear", "storage-read"] as const) {
+for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "session-unauthenticated", "watch-denied", "denied", "stale-build", "preflight-unavailable", "generic-pending", "generic-success", "held-resume", "held-resume-denied", "held-resume-lost-reply", "settlement-excluded", "settlement-lost-reply", "settlement-denied", "settlement-observed", "replay-conflict-settlement", "settlement-mismatch", "denied-reload", "storage-initial", "storage-dispatch", "storage-after-dispatch", "storage-clear", "storage-read"] as const) {
   test(`testing rebuild keeps its address and original request after ${outcome} @responsive`, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -20,7 +20,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       prelaunch_rebuild_approval_issue_url: "", prelaunch_rebuild_data_source_mode: "empty",
       requires_runtime_identity: true, rollback_artifact_id: "", rollback_deployment_record_id: "", upstream_source: "configured",
     };
-    if (outcome === "generic-pending") {
+    if (outcome === "generic-pending" || outcome === "generic-success") {
       environment.driver_id = "generic-web";
       environment.driver_extensions.odoo = undefined;
     }
@@ -54,7 +54,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       status: outcome === "generic-pending" ? "pending" : "pass", message: outcome === "generic-pending" ? pendingMessage : "", product: environment.product, context: environment.context, instance: "testing", base_url: environment.base_url,
       artifact_id: "current-verified-build", source_git_ref: selectedCommit, data_source_mode: new URL(route.request().url()).searchParams.get("data_source_mode"),
       observed_at: new Date().toISOString(), candidate_verification: "pending",
-      original_scope: originalScope,
+      original_scope: originalScope, restore_applicable: outcome === "generic-success" ? false : undefined,
     } }));
     const receipt = (status: string) => ({ trace_id: "rebuild-trace", operation: { product: environment.product, instance: "testing", operation_id: "native-original", status, phase: status === "pass" ? "completed" : "running", updated_at: status === "reconciliation_required" ? heldUpdatedAt : new Date().toISOString(), attempt: heldAttempt } });
     await page.route("**/v1/products/atlas-commerce/testing-rebuild", async route => {
@@ -154,7 +154,11 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-unavailable.png") });
       return;
     }
-    const selectedSource = outcome === "success" ? "empty" : outcome === "stale-build" ? "production_restore" : "upstream_restore";
+    const selectedSource = outcome === "success" || outcome === "generic-success" ? "empty" : outcome === "stale-build" ? "production_restore" : "upstream_restore";
+    if (outcome === "generic-success") {
+      await expect(panel.getByLabel("Start with").locator("option")).toHaveCount(1);
+      await expect(panel.getByLabel("Start with")).toHaveValue(selectedSource);
+    }
     if (selectedSource !== "empty") await panel.getByLabel("Start with").selectOption(selectedSource);
     await expect(panel).toContainText(selectedCommit.slice(0, 12));
     if (["lost-reply", "recovery-denied", "lookup-not-observed"].includes(outcome) || settling) {

@@ -467,12 +467,21 @@ class TestingRouteTests(unittest.TestCase):
         document = route_document(plan, self.new)
         for router in document["http"]["routers"].values():
             if router["entryPoints"] == ["web"]:
-                self.assertEqual(router["middlewares"], [redirect])
+                self.assertEqual(len(router["middlewares"]), 1)
+                reference = router["middlewares"][0]
+                self.assertNotEqual(reference, redirect)
+                self.assertEqual(
+                    document["http"]["middlewares"][reference.removesuffix("@file")],
+                    {"redirectScheme": self.raw["middlewares"][redirect]["redirectScheme"]},
+                )
             else:
                 self.assertEqual(router["tls"], tls)
         applied = self.apply(plan, self.new, retire_old=True)
+        applied["middlewares"].pop(redirect)
         self.assertEqual(observe_testing_route(plan, applied, document), self.new)
-        middleware = next(iter(document["http"]["middlewares"]))
+        middleware = next(
+            name for name, value in document["http"]["middlewares"].items() if "headers" in value
+        )
         self.assertEqual(
             applied["middlewares"][middleware + "@file"]["headers"],
             {"contentSecurityPolicy": TESTING_CONNECTION_CSP},

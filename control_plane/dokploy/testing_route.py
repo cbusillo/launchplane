@@ -435,6 +435,23 @@ def redirects_to_https(
     return False
 
 
+def testing_route_middlewares_owned(template: dict[str, Any]) -> bool:
+    return not testing_route_external_middlewares(template) and all(
+        not router.get("tls", {}).get("options") for router in template["http"]["routers"].values()
+    )
+
+
+def testing_route_https_redirect(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"redirectScheme"}
+        and isinstance(value["redirectScheme"], dict)
+        and set(value["redirectScheme"]) <= {"scheme", "permanent"}
+        and value["redirectScheme"].get("scheme") == "https"
+        and type(value["redirectScheme"].get("permanent", False)) is bool
+    )
+
+
 def application_load_balancer_configuration(value: Any) -> Any:
     """Compare source and runtime with ordinary Traefik defaults materialized."""
     if not isinstance(value, dict):
@@ -465,6 +482,7 @@ def compile_testing_route(
     application_file_name: str = "",
     application_file_sha256: str = "",
     recorded_application_route: TestingLaneRoute | None = None,
+    require_owned_middlewares: bool = False,
 ) -> TestingLaneRoute:
     route = _compile_testing_route(
         product=product,
@@ -482,6 +500,7 @@ def compile_testing_route(
         application_file_name=application_file_name,
         application_file_sha256=application_file_sha256,
         recorded_application_route=recorded_application_route,
+        require_owned_middlewares=require_owned_middlewares,
     )
     assert route is not None
     return route
@@ -509,6 +528,7 @@ def _compile_testing_route(
     application_file_name: str = "",
     application_file_sha256: str = "",
     recorded_application_route: TestingLaneRoute | None = None,
+    require_owned_middlewares: bool = False,
 ) -> TestingLaneRoute | None:
     """Bind actual predecessor authority; the caller proves backend physical custody.
 
@@ -567,6 +587,20 @@ def _compile_testing_route(
             legacy[name] = router_configuration(router)
     elif application_file_name or application_file_sha256:
         raise ValueError("The retained application file is unavailable.")
+    if recorded_application_route is not None and owned_document is not None:
+        previous = recorded_application_route
+        if (previous.product, previous.context, previous.host, previous.template) != (
+            product,
+            context,
+            host,
+            recorded_template,
+        ) or observe_testing_route(previous, raw, owned_document) != old_backend:
+            raise ValueError("The completed application route authority changed.")
+        legacy = {
+            name: configuration
+            for name, configuration in previous.legacy_routers.items()
+            if name in matches
+        }
     legacy_backends = {
         applied_service_backend(
             raw, str(matches[name].get("service") or ""), name.rsplit("@", 1)[-1]
@@ -577,20 +611,26 @@ def _compile_testing_route(
     if recorded_application_route is not None:
         previous = recorded_application_route
         if (
-            previous.product,
-            previous.context,
-            previous.host,
-            previous.template,
-            previous.application_file_name,
-            previous.application_file_sha256,
-        ) != (
-            product,
-            context,
-            host,
-            recorded_template,
-            application_file_name,
-            application_file_sha256,
-        ) or legacy != previous.legacy_routers:
+            owned_document is None
+            and (
+                previous.product,
+                previous.context,
+                previous.host,
+                previous.template,
+                previous.application_file_name,
+                previous.application_file_sha256,
+            )
+            != (
+                product,
+                context,
+                host,
+                recorded_template,
+                application_file_name,
+                application_file_sha256,
+            )
+            or owned_document is None
+            and legacy != previous.legacy_routers
+        ):
             raise ValueError("The original application's retained route custody changed.")
         admitted_backends.add(previous.legacy_backend)
     if len(legacy_backends) > 1 or any(
@@ -599,6 +639,10 @@ def _compile_testing_route(
         raise ValueError("Docker predecessor differs from its physically verified copy.")
     legacy_backend = next(iter(legacy_backends), "")
     if owned_document is not None:
+        if require_owned_middlewares and (
+            recorded_template is None or not testing_route_middlewares_owned(recorded_template)
+        ):
+            raise ValueError("The testing route still depends on predecessor-owned configuration.")
         if new_backend is None:
             if (
                 recorded_application_route is None
@@ -671,6 +715,28 @@ def _compile_testing_route(
                 raise ValueError("Testing predecessor middleware is malformed.")
             reference = reference if "@" in reference else reference + "@" + provider
             if reference.endswith("@file"):
+                current = raw.get("middlewares", {}).get(reference)
+                redirect_configuration = (
+                    {"redirectScheme": current["redirectScheme"]}
+                    if isinstance(current, dict) and "redirectScheme" in current
+                    else None
+                )
+                if (
+                    testing_route_https_redirect(redirect_configuration)
+                    and current.get("status") == "enabled"
+                    and not set(current)
+                    - {"redirectScheme", "status", "usedBy", "name", "provider", "type"}
+                ):
+                    redirect = identifier + "-https"
+                    assert redirect_configuration is not None
+                    if (
+                        redirect in owned_middlewares
+                        and owned_middlewares[redirect] != redirect_configuration
+                    ):
+                        raise ValueError("The testing HTTPS redirects disagree.")
+                    owned_middlewares[redirect] = redirect_configuration
+                    middlewares.append(redirect + "@file")
+                    continue
                 middlewares.append(reference)
                 continue
             current = raw.get("middlewares", {}).get(reference)
@@ -734,6 +800,10 @@ def _compile_testing_route(
         desired["priority"] = priority + 1
         routers[identifier + "-" + str(index)] = desired
         services = document["http"]["services"]
+    if require_owned_middlewares and not testing_route_middlewares_owned(
+        {"http": {"routers": routers, "middlewares": owned_middlewares}}
+    ):
+        raise ValueError("The testing route still depends on predecessor-owned configuration.")
     if new_backend is None:
         return None
     plan = TestingLaneRoute(
@@ -1142,7 +1212,7 @@ def observe_testing_route(
         if (
             not isinstance(applied, dict)
             or applied.get("status") != "enabled"
-            or applied.get("headers") != expected["headers"]
+            or any(applied.get(key) != value for key, value in expected.items())
         ):
             raise TestingRoutePending("Testing connection middleware has not been applied.")
     backend = applied_service_backend(raw, plan.route_id, "file")

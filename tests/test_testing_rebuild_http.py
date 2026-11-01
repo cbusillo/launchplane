@@ -412,6 +412,31 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
 
+    async def test_director_agent_cannot_queue_odoo_through_product_native_route(self) -> None:
+        from tests.http_app_test_support import _local_operator_bearer_config
+
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=self.policy,
+            bearer_identity_config=_local_operator_bearer_config(),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.root,
+        )
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        refused = await request(
+            app,
+            "POST",
+            self.url,
+            headers={
+                "Authorization": "Bearer local-operator-token",
+                "Idempotency-Key": "native-odoo-agent",
+            },
+            payload=self.payload,
+        )
+        self.assertEqual(refused.status_code, 403, refused.text)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
     async def test_director_reads_preserve_original_binding_and_mutation_guards(self) -> None:
         from control_plane.service_auth import (
             BearerIdentityConfig,
@@ -1359,7 +1384,7 @@ class GenericWebTestingRebuildHttpTests(
             provider.model_copy(update={"target_category": "application"})
         )
         response = await self.call("GET", path=self.url + "/inputs")
-        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.status_code, 409, response.text)
         for state, supported in (
             ({"kind": "none"}, True),
             (None, False),

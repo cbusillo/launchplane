@@ -163,8 +163,9 @@ export function TestingRebuildPanel({ detail, fixtureMode, onRefresh }: {
     {recovery.error ? <><p role="alert">{recovery.error}</p><button type="button" className="secondary-button" disabled={busy || fixtureMode} onClick={retryRecovery}>Retry recovery</button></> : null}
     {storageError ? <p role="alert">{storageError}</p> : null}
     <label className="promotion-field"><span>Start with</span><select value={attempt?.payload.data_source_mode ?? source} disabled={locked} onChange={event => { setSource(event.target.value as TestingRebuildSubmit["data_source_mode"]); setPreflight(null); setResult(null); setMessage(""); }}>
-      <option value="empty">Fresh empty copy</option><option value="production_restore">Sanitized production copy</option><option value="upstream_restore">Configured upstream copy</option>
+      <option value="empty">Fresh empty copy</option>{preflight?.restore_applicable !== false ? <><option value="production_restore">Sanitized production copy</option><option value="upstream_restore">Configured upstream copy</option></> : null}
     </select></label>
+    {preflight?.restore_applicable === false ? <p>This app has no saved data to restore.</p> : null}
     {(attempt?.payload.data_source_mode ?? source) !== "empty" ? <p>Copied data has live keys and outbound connections removed before it runs.</p> : null}
     {!attempt && !fixtureMode && !recovery.error ? <p>{inspectionError || (preflight?.status === "pending" ? preflight.message : preflight ? `Selected build ${preflight.source_git_ref.slice(0, 12)}.` : "Checking the current build and testing lane…")}</p> : null}
     {!attempt ? <button type="button" className="primary-button" disabled={locked || !preflight || preflight.status !== "pass" || !reason.trim()} onClick={() => void rebuild()}>Rebuild testing</button> : null}

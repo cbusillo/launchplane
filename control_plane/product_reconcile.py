@@ -1703,20 +1703,23 @@ def _plan_testing_target(
     )
     current_commit = ""
     current_run_id = 0
-    if current_artifact_id:
+    current_manifest = None
+    if current_artifact_id and profile.driver_id == "odoo":
         try:
             current_manifest = record_store.read_artifact_manifest(current_artifact_id)
             current_commit = current_manifest.source_commit
             if current_manifest.source_build is not None:
                 current_run_id = current_manifest.source_build.run_id
         except FileNotFoundError:
-            try:
-                inventory = record_store.read_environment_inventory(
-                    context_name=lane.context, instance_name="testing"
-                )
-                current_commit = inventory.source_git_ref
-            except FileNotFoundError:
-                pass
+            pass
+    if current_artifact_id and current_manifest is None:
+        try:
+            inventory = record_store.read_environment_inventory(
+                context_name=lane.context, instance_name="testing"
+            )
+            current_commit = inventory.source_git_ref
+        except FileNotFoundError:
+            pass
     selection: dict[str, object] = {}
     desired, rejected, absent_reason = _desired_release(
         transport=transport,

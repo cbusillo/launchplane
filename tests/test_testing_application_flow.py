@@ -4366,7 +4366,7 @@ class ApplicationFlowTests(unittest.TestCase):
         def correction(record: Any, *args: Any, **values: str) -> Any:
             nonlocal changed
             result = original(record, *args, **values)
-            marker = "registry_sha256" if boundary == "staged" else "mount_verified"
+            marker = "application_registry_sha256" if boundary == "staged" else "mount_verified"
             if not changed and (boundary in {"placement", "configured"} or marker in values):
                 changed = True
                 self.correct_runtime()

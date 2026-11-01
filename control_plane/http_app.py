@@ -12782,7 +12782,7 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message=(
                     "Director agents may conditionally change only scan activation, preview "
-                    "snapshot policy, testing storage requirements or health fallback corrections. "
+                    "snapshot policy, testing state or storage requirements, or health fallback corrections. "
                     "Use product-config for preview settings."
                 ),
             )
