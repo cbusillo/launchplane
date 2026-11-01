@@ -185,7 +185,16 @@ class NativeTestingWorkerTests(unittest.TestCase):
             )
         )
 
-        self.capture_function = service.capture_rebuild_intent
+        self.capture_driver_function = service.capture_rebuild_intent
+
+        def capture_odoo_intent(
+            root: Any, store: Any, operation: OdooStableTargetReplacementOperationRecord
+        ) -> service.NativeTestingRebuildIntent:
+            intent = self.capture_driver_function(root, store, operation)
+            assert isinstance(intent, service.NativeTestingRebuildIntent)
+            return intent
+
+        self.capture_function = capture_odoo_intent
         self.capture = self.enterContext(
             patch.object(service, "capture_rebuild_intent", return_value=self.intent)
         )

@@ -719,3 +719,32 @@ restores the original route without calling the original application healthy.
 
 Completed negative preparation receipts preserve the same optional source and
 location evidence, including stable replay; historical receipts remain unchanged.
+
+## One-action rebuild admission
+
+The testing rebuild control reads an explicit
+`lanes[].generic_web_testing_state` from the managed product profile.
+`kind: none` declares no persistent data. `kind: volume` also requires the
+application's safe `container_path`, using the activation state contract above.
+A missing declaration refuses admission. `postgresql` records the
+still-deferred independent PostgreSQL prerequisite and refuses before provider work.
+These declarations apply only to generic-web testing lanes.
+
+The first delivery slice exposes the same signed-in inspection and its control
+for declared none/volume lanes. Inspection checks exclusive product/context
+ownership, the selected verified build, stored target agreement and recorded
+holds, use and custody protections. It reads verified source-control build
+information without deployment-provider calls or writes. Generic-web builds keep
+their verified immutable image reference; no Odoo manifest is invented or stored.
+It returns `status: pending`, a reason and pending candidate verification.
+This is state admission, not proof of current usage, resource
+isolation, candidate readiness or a completed rebuild. Submission and the native
+worker both refuse generic-web execution until the shared activation continuation
+is connected. The button remains disabled. Existing Odoo preflight and execution
+continue through the same control.
+
+Generic-web production/upstream restore is not admitted by this slice. Its
+continuation must bind a supported sanitized source before any candidate runs.
+The generic-web one-action rebuild, restore and predecessor retirement finish
+line remains open on [#4023](https://github.com/cbusillo/launchplane/issues/4023),
+under the recorded Q1158 decision on [#5453](https://github.com/cbusillo/launchplane/issues/5453).

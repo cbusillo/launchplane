@@ -3688,9 +3688,19 @@ class _TestingRebuildBuildReads:
 def latest_verified_testing_build(
     record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
 ) -> VerifiedBuildArtifact:
-    """Reuse testing's verified-build selection for an explicit native rebuild."""
     if profile.driver_id != "odoo" or lane.instance != "testing":
         raise ValueError("Native rebuild build selection requires an Odoo testing lane.")
+    verified = latest_verified_testing_release(record_store, profile, lane)
+    if not isinstance(verified, VerifiedBuildArtifact):
+        raise ValueError("Odoo testing requires its verified artifact manifest.")
+    return verified
+
+
+def latest_verified_testing_release(
+    record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+) -> VerifiedBuildArtifact | VerifiedGenericWebBuild:
+    if profile.driver_id not in {"odoo", "generic-web"} or lane.instance != "testing":
+        raise ValueError("Rebuild build selection requires a supported testing lane.")
     identity = product_repository_identity(record_store, profile)
     plan, verified = _plan_testing_target(
         record_store=cast(ProductReconcileStore, record_store),
@@ -3700,7 +3710,7 @@ def latest_verified_testing_build(
         profile=profile,
         repository_id=identity.repository_id,
     )
-    if not isinstance(verified, VerifiedBuildArtifact):
+    if verified is None:
         raise ProductReconcileError(
             "No current verified testing build.",
             code=str(plan.get("reason") or "no_verified_build"),

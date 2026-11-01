@@ -136,6 +136,22 @@ class GenericWebTestingExclusionTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertNotIn(private, result.text)
 
+    def test_state_declaration_preserves_plain_compose_exclusion(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+
+        before = self.inspect()
+        payload = self.store.read_product_profile_record(self.product).model_dump(mode="json")
+        for lane in payload["lanes"]:
+            if lane["instance"] == "testing":
+                lane["generic_web_testing_state"] = {"kind": "none"}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        after = self.inspect()
+        self.assertEqual(
+            (after.status, after.execution.state), (before.status, before.execution.state)
+        )
+
     def test_target_read_failures_preserve_independent_execution_and_inventory_evidence(
         self,
     ) -> None:
