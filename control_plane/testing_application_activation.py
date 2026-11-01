@@ -1666,6 +1666,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         prospective: bool = False,
         expected: RuntimeIdentity | None = None,
     ) -> Any:
+        from urllib.parse import urlsplit
+
         from control_plane.contracts.promotion_record import HealthcheckEvidence
         from control_plane.contracts.runtime_identity import health_payload_runtime_identity_status
         from control_plane.testing_rebuild_service import read_public_testing_health
@@ -1685,6 +1687,13 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             record.retained_private_ingress["endpoint_key"]
         )
         try:
+            current, frozen = urlsplit(endpoint.url), urlsplit(address)
+            if (current.scheme, current.hostname, current.port or 443) != (
+                frozen.scheme,
+                frozen.hostname,
+                frozen.port or 443,
+            ):
+                raise ValueError("Private health no longer observes the original testing address.")
             response = fetch_testing_private_health(
                 root=self.root,
                 store=self.store,

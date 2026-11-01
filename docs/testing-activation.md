@@ -823,7 +823,11 @@ later service-absence observation is temporarily incomplete. A private-ingress
 record contradiction before candidate dispatch finishes as a known admission
 refusal and clears only this operation's hold. Recovery retains original route
 custody and uses actual candidate health instead of requiring an unchanged
-private-record timestamp.
+private-record timestamp. A missing endpoint, ingress receipt or edge record
+before dispatch is also a known refusal; unresolved ingress effects wait on the
+original key. Private recovery refuses health from a different origin, even if
+that origin serves the same candidate. Expired cleanup permits retain the volume
+without renewing the original permit.
 Non-application lanes remain pending. Existing Odoo preflight and execution
 continue through the same control.
 

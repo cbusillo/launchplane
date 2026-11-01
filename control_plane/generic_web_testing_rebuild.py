@@ -733,8 +733,10 @@ class GenericWebTestingRebuildExecution:
                     self.operation.context,
                     self.intent.private_ingress,
                 )
-            except PrivateIngressAuthorityChanged as error:
+            except (PrivateIngressAuthorityChanged, FileNotFoundError) as error:
                 raise NativeTestingRebuildAdmissionChanged(str(error)) from error
+            except ValueError as error:
+                raise NativeTestingRebuildPending(str(error)) from error
         if not is_exclusive_product_context(
             context=self.operation.context,
             product=self.operation.product,

@@ -1,10 +1,11 @@
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import shutil
 import time
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import urlsplit, urlunsplit
 
 from control_plane import retained_volume_capture
@@ -21,7 +22,13 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.testing_activation import activation_record
 from control_plane.testing_rebuild_service import NativeTestingRebuildPending
-from control_plane.traffic_switch import MAX_READINESS_AGE_SECONDS
+from control_plane.testing_rebuild_volume_retirement import (
+    TestingRebuildVolumeRetirement,
+    VOLUME_RETIREMENT_PERMIT_SECONDS,
+)
+from control_plane import testing_private_health
+from control_plane.outbound_http import PublicHttpResponse
+from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.testing_lane_hold import apply_testing_hold_plan
 from tests import test_generic_web_testing_rebuild as rebuild
 from tests import test_retained_volume_sweep_program as sweep_program
@@ -182,7 +189,7 @@ class GenericWebTestingVolumeRebuildFixture(rebuild.GenericWebTestingRebuildFlow
 
 class GenericWebTestingVolumeRebuildTests(GenericWebTestingVolumeRebuildFixture):
     def test_rebuild_uses_fresh_state_and_retires_the_original_volume_after_health(self) -> None:
-        self.cleanup_elapsed = MAX_READINESS_AGE_SECONDS + 1
+        self.cleanup_elapsed = VOLUME_RETIREMENT_PERMIT_SECONDS / 2
         previous = self.original
         volume = self.original_volume
         for attempt in (1, 2):
@@ -211,32 +218,94 @@ class GenericWebTestingVolumeRebuildTests(GenericWebTestingVolumeRebuildFixture)
 
 
 class PrivateWebTestingVolumeRebuildTests(GenericWebTestingVolumeRebuildTests):
-    def test_private_record_change_after_own_hold_finishes_refused_without_candidate_effects(
-        self,
-    ) -> None:
-        apply = apply_testing_hold_plan
+    def test_private_record_changes_and_absence_after_own_hold_finish_refused(self) -> None:
+        for attempt, change in enumerate(
+            (
+                "timestamp",
+                "read_private_health_endpoint_record",
+                "read_ingress_route_audit_record",
+                "read_edge_endpoint_record",
+            ),
+            start=1,
+        ):
+            apply = apply_testing_hold_plan
+            state = {"missing": False}
 
-        def changed(**kwargs: Any) -> Any:
-            result = apply(**kwargs)
-            if kwargs["request"].hold:
-                endpoint = self.store.list_private_health_endpoint_records()[0]
-                self.store.write_private_health_endpoint_record(
-                    endpoint.model_copy(update={"updated_at": datetime.now(UTC).isoformat()})
+            def changed(**kwargs: Any) -> Any:
+                result = apply(**kwargs)
+                if kwargs["request"].hold:
+                    if change == "timestamp":
+                        endpoint = self.store.list_private_health_endpoint_records()[0]
+                        self.store.write_private_health_endpoint_record(
+                            endpoint.model_copy(
+                                update={"updated_at": datetime.now(UTC).isoformat()}
+                            )
+                        )
+                    else:
+                        state["missing"] = True
+                return result
+
+            before = set(self.flow.payloads)
+            with self.subTest(change=change), ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(native_rebuild, "apply_testing_hold_plan", side_effect=changed)
                 )
-            return result
+                if change != "timestamp":
+                    reader = getattr(self.store, change)
 
-        before = set(self.flow.payloads)
-        with patch.object(native_rebuild, "apply_testing_hold_plan", side_effect=changed):
-            result = self.execute(1)
-        self.assertEqual(result.deploy_status, "fail")
-        self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
-        self.assertEqual(set(self.flow.payloads), before)
-        self.assertIn(self.original_volume, self.flow.storage.volumes)
-        self.assertIsNone(
-            self.store.read_dokploy_target_record(
-                context_name=self.flow.context, instance_name="testing"
-            ).policies.staff_testing_hold
+                    def missing(*args: Any, **kwargs: Any) -> Any:
+                        if state["missing"]:
+                            raise FileNotFoundError("Private record was removed")
+                        return reader(*args, **kwargs)
+
+                    stack.enter_context(patch.object(self.store, change, side_effect=missing))
+                result = self.execute(attempt)
+                self.assertEqual(result.deploy_status, "fail")
+                self.assertEqual(result.error_code, "testing_rebuild_admission_changed")
+                self.assertEqual(set(self.flow.payloads), before)
+                self.assertIn(self.original_volume, self.flow.storage.volumes)
+                self.assertIsNone(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.flow.context, instance_name="testing"
+                    ).policies.staff_testing_hold
+                )
+
+    def test_changed_private_origin_cannot_supply_the_frozen_address_health(self) -> None:
+        endpoint = self.store.list_private_health_endpoint_records()[0]
+        address = urlsplit(endpoint.url)
+        moved = endpoint.model_copy(
+            update={
+                "url": urlunsplit((address.scheme, "moved." + address.netloc, address.path, "", ""))
+            }
         )
+        response: Mock | None = None
+
+        def move() -> None:
+            nonlocal response
+            self.store.write_private_health_endpoint_record(moved)
+            current = activation_record(self.store, self.flow.product, self.flow.context)
+            assert current is not None and current.application_readiness is not None
+            body = json.dumps(
+                {
+                    "runtime_identity": current.application_readiness.runtime_identity.model_dump(
+                        mode="json"
+                    )
+                }
+            ).encode()
+            response = self.enterContext(
+                patch.object(
+                    testing_private_health,
+                    "fetch_testing_private_health",
+                    return_value=PublicHttpResponse(200, moved.url, 0, (), body),
+                )
+            )
+
+        self.after_retirement = move
+        with self.assertRaises(NativeTestingRebuildPending):
+            self.execute(1)
+        assert response is not None
+        response.assert_not_called()
+        self.assertIn(self.original_volume, self.flow.storage.volumes)
 
     def test_private_record_refresh_after_cutover_keeps_original_recovery_and_current_health(
         self,
@@ -312,6 +381,61 @@ class TestingVolumeRebuildRecoveryTests(GenericWebTestingVolumeRebuildFixture):
         state = json.loads(self.sweep.state_path.read_text())
         self.assertEqual(state["calls"].count(["volume", "rm", self.original_volume]), 1)
         self.assertEqual(self.flow.normal("after-volume-readback").status, "completed")
+
+    def assert_expired_permit_is_not_renewed(self, *, host_clock: bool) -> None:
+        run = run_durable_provider_operation
+        dispatch = TestingRebuildVolumeRetirement.validate_dispatch
+        captured: dict[str, Any] = {}
+        pause = True
+
+        def operation(**kwargs: Any) -> Any:
+            child = getattr(kwargs["adapter"], "child", None)
+            if isinstance(child, TestingRebuildVolumeRetirement):
+                captured.update(kwargs)
+            return run(**kwargs)
+
+        def validate(adapter: TestingRebuildVolumeRetirement, permit: dict[str, Any]) -> None:
+            if pause:
+                raise NativeTestingRebuildPending("Wait before removal")
+            if host_clock:
+                dispatch(adapter, permit)
+            else:
+                with patch("time.time", return_value=permit["fresh_until"] + 1):
+                    dispatch(adapter, permit)
+
+        with (
+            patch.object(native_rebuild, "run_durable_provider_operation", side_effect=operation),
+            patch.object(TestingRebuildVolumeRetirement, "validate_dispatch", new=validate),
+        ):
+            with self.assertRaises(NativeTestingRebuildPending):
+                self.execute(1)
+            original = captured["original_intent"]
+            pause = False
+            if host_clock:
+                self.cleanup_elapsed = VOLUME_RETIREMENT_PERMIT_SECONDS + 1
+            with patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+            ):
+                result = self.execute(1)
+            self.assertEqual(result.health_status, "pass", result.error_message)
+            self.assertEqual(result.post_deploy_status, "fail")
+            row = self.store.read_idempotency_record(
+                scope=captured["scope"],
+                route_path=captured["route_path"],
+                idempotency_key=captured["idempotency_key"],
+            )
+            assert row is not None
+            self.assertEqual(self.store.read_original_mutation_intent(row), original)
+        self.assertIn(self.original_volume, self.flow.storage.volumes)
+        self.assertNotIn("rm_args", json.loads(self.sweep.state_path.read_text()))
+
+    def test_expired_wall_clock_permit_retains_volume_without_renewal(self) -> None:
+        self.assert_expired_permit_is_not_renewed(host_clock=False)
+
+    def test_expired_host_clock_permit_retains_volume_without_renewal(self) -> None:
+        self.assert_expired_permit_is_not_renewed(host_clock=True)
 
     def test_alias_retains_old_volume_until_next_rebuild_can_prove_cleanup(self) -> None:
         self.sweep.state["alias"] = True
