@@ -580,7 +580,7 @@ resolves flat default/required forms from Dokploy's standard generated Compose
 environment when every referenced service input is present, nonempty, unique and
 qualified for literal delivery. A default never replaces missing input evidence.
 Custom commands, stack/randomized deployments and unknown inputs stay held for
-these forms. The production recipient's reviewed volume-key path keeps its
+every interpolated name, including sole-variable expressions. The production recipient's reviewed volume-key path keeps its
 existing sole-variable restriction. These reads do not alter removal custody.
 
 Dokploy can add an unused `dokploy-network: {external: true}` root declaration

@@ -118,8 +118,7 @@ def compose_volume_names(
                 not keys
                 or allowed_keys is not None
                 and (match is None or not keys <= allowed_keys)
-                or match is None
-                and (
+                or (
                     payload.get("composeType") != "docker-compose"
                     or payload.get("createEnvFile") is not True
                     or "command" not in payload
@@ -224,12 +223,12 @@ def _inventory_clear(
                     ):
                         return False
                     if target_type == "compose":
-                        document = read_provider_compose(
-                            compose.fetch_dokploy_converted_compose_file(
-                                host=host, token=token, compose_id=target_id
-                            )
-                        )
                         try:
+                            document = read_provider_compose(
+                                compose.fetch_dokploy_converted_compose_file(
+                                    host=host, token=token, compose_id=target_id
+                                )
+                            )
                             names = compose_volume_names(
                                 document, payload if exact else {**payload, "env": ""}
                             )

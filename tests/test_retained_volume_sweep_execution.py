@@ -460,11 +460,15 @@ class RetainedVolumeSweepTests(unittest.TestCase):
         }
         document = {
             "services": {"web": {"volumes": ["data:/data"]}},
-            "volumes": {"data": {"external": True, "name": "${STATE_VOLUME:-unused-state}"}},
+            "volumes": {"data": {"external": True, "name": "${STATE_VOLUME:-unused}-data"}},
         }
         for changes, exact, clear in (
             ({}, True, True),
-            ({"env": "STATE_VOLUME=" + self.binding.volume_name}, True, False),
+            (
+                {"env": "STATE_VOLUME=" + self.binding.volume_name.removesuffix("-data")},
+                True,
+                False,
+            ),
             ({"env": ""}, True, False),
             ({"env": "STATE_VOLUME="}, True, False),
             ({"env": "STATE_VOLUME=one\nSTATE_VOLUME=two"}, True, False),
@@ -491,6 +495,21 @@ class RetainedVolumeSweepTests(unittest.TestCase):
                     ),
                 ):
                     self.assertEqual(_inventory_clear(self.root, self.binding, exact=exact), clear)
+        with (
+            patch(
+                "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_projects",
+                return_value=(project,),
+            ),
+            patch(
+                "control_plane.retained_volume_sweep_execution.api.fetch_dokploy_target_payload",
+                return_value=payload,
+            ),
+            patch(
+                "control_plane.retained_volume_sweep_execution.compose.fetch_dokploy_converted_compose_file",
+                return_value="null",
+            ),
+        ):
+            self.assertFalse(_inventory_clear(self.root, self.binding, exact=True))
 
     def test_exact_inventory_reads_environment_variables_from_complete_identity_bound_detail(
         self,
