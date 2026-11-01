@@ -39,9 +39,7 @@ from control_plane.odoo_target_replacement_apply_http import (
     enqueue_odoo_target_replacement_apply_operation,
     find_odoo_target_replacement_apply_operation_by_idempotency_key,
 )
-from control_plane.odoo_target_replacement_plan_http import (
-    resolve_odoo_target_replacement_plan_lane,
-)
+from control_plane.testing_rebuild_driver import resolve_testing_rebuild_driver
 from control_plane.product_reconcile import ProductReconcileError, latest_verified_testing_build
 from control_plane.service_auth import (
     GitHubHumanIdentity,
@@ -273,9 +271,7 @@ def register_testing_rebuild_routes(
         store = require_admin(identity, record_store, trace_id, read_only=True)
         try:
             profile = store.read_product_profile_record(product)
-            lane = resolve_odoo_target_replacement_plan_lane(
-                record_store=store, product=product, instance="testing"
-            )
+            lane = resolve_testing_rebuild_driver(store, product).lane
             verified = latest_verified_testing_build(store, profile, lane)
             request = replacement(
                 product,
@@ -344,9 +340,13 @@ def register_testing_rebuild_routes(
                 )
             return response(existing, trace_id)
         try:
-            lane = resolve_odoo_target_replacement_plan_lane(
-                record_store=store, product=product, instance="testing"
-            )
+            driver = resolve_testing_rebuild_driver(store, product)
+            lane = driver.lane
+            if not driver.execution_available:
+                raise TestingRebuildRefused(
+                    "testing_rebuild_execution_unavailable",
+                    "Rebuilding this testing lane is not available yet. No changes have been made.",
+                )
             now = utc_now_timestamp()
             authorization = capture_durable_operation_authorization(
                 identity=identity,

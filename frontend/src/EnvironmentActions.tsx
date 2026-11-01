@@ -57,7 +57,7 @@ export function EnvironmentActionsView({
   promotionResource: ResourceState<ProductPromotionStatus>;
   refreshToken: number;
 }) {
-  const testingRebuild = detail.environment === "testing" && !!detail.driver_extensions.odoo;
+  const testingRebuild = detail.environment === "testing" && (detail.testing_rebuild_supported || !!detail.driver_extensions.odoo);
   const actions = detail.available_actions
     .filter(action => !testingRebuild || !["target_replacement_plan", "target_replacement_apply"].includes(action.action_id))
     .map((action) => browserActionPresentation(detail.driver_id, action))

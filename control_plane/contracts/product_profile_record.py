@@ -376,6 +376,8 @@ class ProductLaneProfile(BaseModel):
 
     @model_validator(mode="after")
     def _validate_lane(self) -> "ProductLaneProfile":
+        if self.generic_web_extensions.testing_state is not None and self.instance != "testing":
+            raise ValueError("Testing state declarations require the testing instance.")
         if (
             self.odoo_testing_drill_enabled or self.odoo_testing_drill_storage
         ) and self.instance != "testing":
@@ -847,6 +849,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "LaunchplaneProductProfileRecord":
+        if self.driver_id != "generic-web" and any(
+            lane.generic_web_extensions.testing_state is not None for lane in self.lanes
+        ):
+            raise ValueError("Generic-web testing state requires the generic-web driver.")
         if not self.driver_id.strip():
             raise ValueError("product profile requires driver_id")
         if "image" not in self.model_fields_set:

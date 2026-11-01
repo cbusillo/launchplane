@@ -5,9 +5,12 @@ from typing import Literal
 from uuid import uuid4
 
 import click
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
-from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.artifact_identity import (
+    ArtifactIdentityManifest,
+    artifact_manifest_matches_image_repository,
+)
 from control_plane.clean_testing_snapshot import snapshot_storage_budget
 from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -20,9 +23,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.odoo_target_replacement_apply_http import (
     _validate_target_replacement_apply_artifact_authority,
 )
-from control_plane.odoo_target_replacement_plan_http import (
-    resolve_odoo_target_replacement_plan_lane,
-)
+from control_plane.testing_rebuild_driver import resolve_testing_rebuild_driver
 from control_plane.odoo_testing_native_source import native_testing_source_authority
 from control_plane.testing_candidate_runtime import candidate_credential_authority
 from control_plane.runtime_environments import resolve_site_runtime_environment
@@ -37,6 +38,7 @@ from control_plane.testing_rebuild_service import (
     capture_rebuild_intent,
     check_testing_rebuild_protection,
     TestingRebuildRefused,
+    GenericWebTestingRebuildIntent,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -44,7 +46,12 @@ from control_plane.workflows.ship import utc_now_timestamp
 class TestingRebuildPreflight(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["pass"] = "pass"
+    status: Literal["pass", "pending"] = "pass"
+    execution_available: bool = Field(
+        default=True,
+        exclude_if=lambda value: value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     product: str
     context: str
     instance: Literal["testing"] = "testing"
@@ -69,15 +76,28 @@ def inspect_testing_rebuild(
     if request.strategy != "replace-and-cutover":
         raise ValueError("Native preflight requires the testing copy lifecycle.")
     apply = OdooStableTargetReplacementApplyRequest.model_validate(request.model_dump())
-    lane = resolve_odoo_target_replacement_plan_lane(
-        record_store=store, product=apply.product, instance=apply.instance
-    )
-    _validate_target_replacement_apply_artifact_authority(
-        operation_store=store,
-        replacement_request=apply,
-        context=lane.context,
-        verified_manifest=verified_manifest,
-    )
+    driver = resolve_testing_rebuild_driver(store, apply.product)
+    lane = driver.lane
+    if apply.instance != "testing":
+        raise ValueError("Testing rebuild preflight cannot inspect production.")
+    if driver.execution_available:
+        _validate_target_replacement_apply_artifact_authority(
+            operation_store=store,
+            replacement_request=apply,
+            context=lane.context,
+            verified_manifest=verified_manifest,
+        )
+    else:
+        manifest = verified_manifest or store.read_artifact_manifest(apply.artifact_id)
+        if (manifest.artifact_id, manifest.source_commit) != (
+            apply.artifact_id,
+            apply.source_git_ref,
+        ) or not artifact_manifest_matches_image_repository(
+            manifest, expected_repository=driver.profile.image.repository
+        ):
+            raise TestingRebuildRefused(
+                "testing_rebuild_inputs_unverified", "The selected build differs from its product."
+            )
     now = utc_now_timestamp()
     # A local read identity, never persisted or passed to a provider executor.
     operation = OdooStableTargetReplacementOperationRecord(
@@ -115,6 +135,18 @@ def inspect_testing_rebuild(
             "testing_rebuild_inputs_unverified",
             "The retained testing inputs could not be verified.",
         ) from error
+    if isinstance(intent, GenericWebTestingRebuildIntent):
+        return TestingRebuildPreflight(
+            status="pending",
+            execution_available=False,
+            product=apply.product,
+            context=lane.context,
+            base_url=lane.base_url,
+            artifact_id=apply.artifact_id,
+            source_git_ref=apply.source_git_ref,
+            data_source_mode="empty",
+            observed_at=now,
+        )
     if apply.data_source_mode != "empty":
         try:
             snapshot_storage_budget(intent.profile, lane.context)

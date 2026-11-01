@@ -578,6 +578,12 @@ class ProductSiteOverview(BaseModel):
 class ProductEnvironmentDetail(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    testing_rebuild_supported: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
     lane_status: ProductLaneStatus | None = None
 
     @model_validator(mode="after")
@@ -891,9 +897,9 @@ def build_product_environment_detail(
     action_allowed: ActionAllowed,
 ) -> ProductEnvironmentDetail:
     profile = record_store.read_product_profile_record(product)
-    lane = _find_lane(profile=profile, environment=environment)
+    declared_lane = _find_lane(profile=profile, environment=environment)
     lane = split_ingress_monitoring_lane(
-        profile, lane, read_split_ingress_binding(record_store, profile, lane)
+        profile, declared_lane, read_split_ingress_binding(record_store, profile, declared_lane)
     )
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
     lane_summary = _read_product_lane_summary(
@@ -931,12 +937,20 @@ def build_product_environment_detail(
         if warning
     )
     from control_plane.odoo_testing_drill import testing_drill_evidence
+    from control_plane.testing_rebuild_driver import testing_rebuild_driver, TestingRebuildRefused
+
+    try:
+        testing_rebuild_driver(profile, declared_lane)
+        rebuild_supported = True
+    except TestingRebuildRefused:
+        rebuild_supported = False
 
     return ProductEnvironmentDetail(
         product=profile.product,
         display_name=profile.display_name,
         repository=profile.repository,
         driver_id=profile.driver_id,
+        testing_rebuild_supported=rebuild_supported,
         base_driver_id=descriptor.base_driver_id if descriptor is not None else "",
         environment=lane.instance,
         testing_rebuild_drill=testing_drill_evidence(

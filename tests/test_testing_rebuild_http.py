@@ -1211,3 +1211,134 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(operation["status"], saved.status)
         self.assertNotIn("provider_detail", operation)
         self.assertEqual(self.fixture.effects, [])
+
+
+class GenericWebTestingRebuildHttpTests(
+    TestingRebuildHttpFixture, unittest.IsolatedAsyncioTestCase
+):
+    def setUp(self) -> None:
+        super().setUp()
+        self.profile = self.fixture.intent.profile.model_copy(update={"driver_id": "generic-web"})
+        self.declare_state({"kind": "none"})
+        self.enterContext(
+            patch.object(
+                preflight,
+                "capture_rebuild_intent",
+                side_effect=self.fixture.capture_driver_function,
+            )
+        )
+        self.provider_config = self.enterContext(
+            patch.object(routes, "record_verified_build_artifact")
+        )
+
+    def declare_state(self, state: dict[str, str] | None) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+
+        payload = self.profile.model_dump(mode="json")
+        for lane in payload["lanes"]:
+            if lane["instance"] == "testing":
+                lane["generic_web_extensions"] = {"testing_state": state}
+        self.profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        self.store.write_product_profile_record(self.profile)
+
+    async def test_none_and_volume_admission_remain_read_only_until_execution_exists(self) -> None:
+        from control_plane.dokploy import source
+
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        for state in ({"kind": "none"}, {"kind": "volume", "container_path": "/app/data"}):
+            with self.subTest(state=state), patch.object(source, "read_dokploy_config") as provider:
+                self.declare_state(state)
+                response = await self.call("GET", path=self.url + "/inputs")
+                self.assertEqual(response.status_code, 200, response.text)
+                inspected = response.json()
+                self.assertFalse(inspected["execution_available"])
+                self.assertNotEqual(inspected["status"], "pass")
+                self.assertEqual(inspected["artifact_id"], self.manifest.artifact_id)
+                self.assertEqual(inspected["context"], self.fixture.operation.context)
+                submitted = await self.call("POST", self.payload)
+                self.assertEqual(submitted.status_code, 409, submitted.text)
+                provider.assert_not_called()
+        self.provider_config.assert_not_called()
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_unknown_postgresql_and_restore_refuse_before_provider_reads(self) -> None:
+        from control_plane.dokploy import source
+
+        for state, source_mode in (
+            (None, "empty"),
+            ({"kind": "unknown"}, "empty"),
+            ({"kind": "postgresql"}, "empty"),
+            ({"kind": "none"}, "production_restore"),
+            ({"kind": "volume", "container_path": "/app/data"}, "upstream_restore"),
+        ):
+            with (
+                self.subTest(state=state, source=source_mode),
+                patch.object(source, "read_dokploy_config") as provider,
+            ):
+                self.declare_state(state)
+                response = await self.call(
+                    "GET", path=self.url + "/inputs?data_source_mode=" + source_mode
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                provider.assert_not_called()
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_recorded_protection_blocks_generic_web_inspection(self) -> None:
+        from types import SimpleNamespace
+
+        for facts in (
+            {"usage": "in_use", "data": "unknown", "production_resources": "unknown"},
+            {"usage": "unknown", "data": "only_copy", "production_resources": "unknown"},
+            {"usage": "unknown", "data": "unknown", "production_resources": "shared"},
+        ):
+            with (
+                self.subTest(facts=facts),
+                patch.object(
+                    self.store, "read_disposable_lane_safety", return_value=SimpleNamespace(**facts)
+                ),
+            ):
+                response = await self.call("GET", path=self.url + "/inputs")
+                self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_application_lane_reports_support_from_declared_state(self) -> None:
+        from control_plane.contracts.product_environment_read_model import (
+            build_product_environment_detail,
+        )
+
+        context = self.fixture.operation.context
+        target = self.store.read_dokploy_target_record(
+            context_name=context, instance_name="testing"
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"target_type": "application"})
+        )
+        self.store.write_provider_target_record(
+            provider.model_copy(update={"target_category": "application"})
+        )
+        response = await self.call("GET", path=self.url + "/inputs")
+        self.assertEqual(response.status_code, 200, response.text)
+        for state, supported in (
+            ({"kind": "none"}, True),
+            (None, False),
+            ({"kind": "postgresql"}, False),
+        ):
+            with self.subTest(state=state):
+                self.declare_state(state)
+                with patch(
+                    "control_plane.contracts.product_environment_read_model.split_ingress_monitoring_lane",
+                    side_effect=lambda _profile, lane, _binding: lane.model_copy(
+                        update={"health_url": "https://private.invalid/ready"}
+                    ),
+                ):
+                    detail = build_product_environment_detail(
+                        record_store=self.store,
+                        product=self.product,
+                        environment="testing",
+                        action_allowed=lambda *_: True,
+                    )
+                self.assertEqual(detail.testing_rebuild_supported, supported)

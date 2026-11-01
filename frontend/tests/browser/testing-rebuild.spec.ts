@@ -1,6 +1,6 @@
 import { expect, test, waitForState } from "./state";
 
-for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "session-unauthenticated", "watch-denied", "denied", "stale-build", "preflight-unavailable", "held-resume", "held-resume-denied", "held-resume-lost-reply", "settlement-excluded", "settlement-lost-reply", "settlement-denied", "settlement-observed", "replay-conflict-settlement", "settlement-mismatch", "denied-reload", "storage-initial", "storage-dispatch", "storage-after-dispatch", "storage-clear", "storage-read"] as const) {
+for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-observed", "session-unavailable", "session-unauthenticated", "watch-denied", "denied", "stale-build", "preflight-unavailable", "generic-pending", "held-resume", "held-resume-denied", "held-resume-lost-reply", "settlement-excluded", "settlement-lost-reply", "settlement-denied", "settlement-observed", "replay-conflict-settlement", "settlement-mismatch", "denied-reload", "storage-initial", "storage-dispatch", "storage-after-dispatch", "storage-clear", "storage-read"] as const) {
   test(`testing rebuild keeps its address and original request after ${outcome} @responsive`, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -19,6 +19,11 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       prelaunch_rebuild_approval_issue_url: "", prelaunch_rebuild_data_source_mode: "empty",
       requires_runtime_identity: true, rollback_artifact_id: "", rollback_deployment_record_id: "", upstream_source: "configured",
     };
+    if (outcome === "generic-pending") {
+      environment.driver_id = "generic-web";
+      environment.driver_extensions.odoo = undefined;
+      environment.testing_rebuild_supported = true;
+    }
     const writes: { key: string; body: Record<string, unknown> }[] = [];
     const selectedCommit = "c".repeat(40);
     const csrfToken = "fixture-csrf";
@@ -45,7 +50,7 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
     await page.route("**/v1/products/atlas-commerce/testing-rebuild/inputs?*", route => outcome === "preflight-unavailable"
       ? route.fulfill({ status: 503, json: { trace_id: "preflight-unavailable", error: { code: "testing_preflight_unavailable", message: "Testing inspection is unavailable." } } })
       : route.fulfill({ json: {
-      status: "pass", product: environment.product, context: environment.context, instance: "testing", base_url: environment.base_url,
+      status: outcome === "generic-pending" ? "pending" : "pass", execution_available: outcome !== "generic-pending", product: environment.product, context: environment.context, instance: "testing", base_url: environment.base_url,
       artifact_id: "current-verified-build", source_git_ref: selectedCommit, data_source_mode: new URL(route.request().url()).searchParams.get("data_source_mode"),
       observed_at: new Date().toISOString(), candidate_verification: "pending",
       original_scope: originalScope,
@@ -133,6 +138,13 @@ for (const outcome of ["success", "lost-reply", "recovery-denied", "lookup-not-o
       expect(writes.length).toBe(0);
       await page.evaluate(() => Reflect.set(window, "rebuildStorageFailure", false));
       await panel.getByRole("button", { name: "Retry recovery" }).click();
+    }
+    if (outcome === "generic-pending") {
+      await expect(panel.getByRole("button", { name: "Rebuild testing", exact: true })).toBeDisabled();
+      await expect(panel).toContainText("No changes have been made.");
+      expect(writes.length).toBe(0);
+      await panel.screenshot({ path: testInfo.outputPath("testing-rebuild-pending.png") });
+      return;
     }
     if (outcome === "preflight-unavailable") {
       await expect(panel.getByRole("button", { name: "Refresh inspection" })).toBeEnabled();
