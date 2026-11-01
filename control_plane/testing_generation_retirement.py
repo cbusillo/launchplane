@@ -98,7 +98,6 @@ class TestingGenerationCustodyInspection(BaseModel):
     plan: TestingGenerationRetirementPlan | None = None
     product: str = Field(default="", exclude_if=lambda value: not value)
     context: str = Field(default="", exclude_if=lambda value: not value)
-    operation_id: str = Field(default="", exclude_if=lambda value: not value)
     reservations: tuple[RetainedTestingHostnameReservation, ...] = Field(max_length=1000)
     initial_allocations: dict[str, TestingInitialAllocationInspection] = Field(
         default_factory=dict, exclude_if=lambda value: not value
@@ -147,7 +146,6 @@ def inspect_testing_hostname_custody(
     return TestingGenerationCustodyInspection(
         product=product,
         context=request.context,
-        operation_id=request.operation_id,
         reservations=reservations,
         initial_allocations=allocations,
     )

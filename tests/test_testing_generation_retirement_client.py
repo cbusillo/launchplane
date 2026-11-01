@@ -142,7 +142,6 @@ class TestingGenerationRetirementClientTests(unittest.TestCase):
                     "plan": None,
                     "product": plan.product,
                     "context": plan.context,
-                    "operation_id": plan.operation_id,
                 }
             )
             request.return_value = {**receipt(True), "result": inspection.model_dump(mode="json")}

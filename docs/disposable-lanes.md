@@ -2562,7 +2562,9 @@ to its retained generation or allocation, original target ID, operation and cust
 digest. It uses the reservation guard's own enumeration. It requires the original
 product, context, operation and reason, but no key or review file. Without a
 retirement receipt, it checks exclusive ownership of the active Odoo testing
-context and returns its reservations with `plan=null`. Initial allocation facts
+context and returns its reservations with `plan=null`; the supplied operation
+and reason do not identify or verify an operation in this context-only result.
+Only the reservation entries attribute hostnames to recorded operations. Initial allocation facts
 show whether an initial request was recorded, its apply/reconcile/release times,
 and whether the retained target is still bound to a lane. Missing allocation
 details remain absent; they do not prove an unreserved hostname or safe transfer.

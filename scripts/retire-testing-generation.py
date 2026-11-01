@@ -89,10 +89,9 @@ def main() -> int:
                 response["result"], extra="ignore"
             )
             if inspection.plan is None:
-                if (inspection.product, inspection.context, inspection.operation_id) != (
+                if (inspection.product, inspection.context) != (
                     args.product,
                     draft.context,
-                    draft.operation_id,
                 ):
                     raise ValueError("Hostname inspection belongs to another request.")
             elif (

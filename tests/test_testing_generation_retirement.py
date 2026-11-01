@@ -1,7 +1,7 @@
 """Legacy retirement preserves unknown history and leaves actual replacement gated."""
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 import unittest
 from unittest.mock import patch
@@ -196,6 +196,7 @@ class TestingGenerationRetirementTests(unittest.TestCase):
 
         from control_plane.storage.postgres import LaunchplaneDisposableTestingResourceAllocationRow
 
+        started = datetime.now(timezone.utc)
         with self.store._session_factory() as session:
             row = session.get(
                 LaunchplaneDisposableTestingResourceAllocationRow, self.gen.operation_id
@@ -203,11 +204,16 @@ class TestingGenerationRetirementTests(unittest.TestCase):
             assert row is not None
             row.payload = {
                 **row.payload,
+                "initial_request_sha256": canonical_json_sha256({"fixture": "initial"}),
+                "initial_apply_started_at": started.isoformat(),
+                "initial_reconcile_requested_at": (started + timedelta(seconds=1)).isoformat(),
                 "retained_target_record": self.store._payload_dict(
                     retirement_snapshot(self.store, self.product, self.body).target
                 ),
             }
             session.commit()
+        allocation = self.store.read_disposable_resource_preparation(self.gen.operation_id)
+        assert allocation is not None
         reservations = self.store.read_retained_testing_hostname_reservations(self.context)
         self.assertTrue(reservations)
         operation = self.store.read_odoo_stable_target_replacement_operation_record(
@@ -226,7 +232,7 @@ class TestingGenerationRetirementTests(unittest.TestCase):
             )
 
         with patch("control_plane.dokploy.api._dokploy_request") as provider:
-            response = inspect(self.product)
+            response = inspect(self.product, operation_id="unknown-operation")
             self.assertEqual(response.status_code, 202, response.text)
             result = response.json()["result"]
             self.assertIsNone(result["plan"])
@@ -235,13 +241,38 @@ class TestingGenerationRetirementTests(unittest.TestCase):
             self.assertEqual(
                 result["reservations"], [item.model_dump(mode="json") for item in reservations]
             )
-            self.assertFalse(result["hostname_release_authorized"])
-            self.assertIn(self.gen.operation_id, result["initial_allocations"])
+            self.assertNotIn("operation_id", result)
+            facts = result["initial_allocations"][self.gen.operation_id]
+            self.assertTrue(facts["initial_request_recorded"])
+            self.assertFalse(facts["retained_target_bound"])
+            identities = self.store.list_dokploy_target_id_records()
+            bound = identities[0].model_copy(update={"target_id": allocation.retained_target_id})
+            with patch.object(
+                self.store, "list_dokploy_target_id_records", return_value=(*identities, bound)
+            ):
+                observed = inspect(self.product).json()["result"]
+                self.assertTrue(
+                    observed["initial_allocations"][self.gen.operation_id]["retained_target_bound"]
+                )
+            for name in (
+                "initial_apply_started_at",
+                "initial_reconcile_requested_at",
+                "initial_released_at",
+            ):
+                self.assertEqual(facts[name], getattr(allocation, name))
             self.assertEqual(inspect(self.product, mode="readback").status_code, 409)
             self.assertEqual(inspect("foreign-product").status_code, 409)
             self.assertEqual(inspect(self.product, context="foreign-context").status_code, 409)
             with scoped_agent_transport():
                 self.assertEqual(inspect(self.product).status_code, 403)
+            profiles = self.store.list_product_profile_records()
+            competing = self.store.read_product_profile_record(self.product).model_copy(
+                update={"product": "competing-product"}
+            )
+            with patch.object(
+                self.store, "list_product_profile_records", return_value=(*profiles, competing)
+            ):
+                self.assertEqual(inspect(self.product).status_code, 409)
             provider.assert_not_called()
         self.assertIsNone(self.store.read_retained_testing_generation(self.operation.operation_id))
         self.assertEqual(
