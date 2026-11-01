@@ -180,7 +180,7 @@ class InstalledOdooCutoverTests(unittest.TestCase):
             )
         )
         self.sql(
-            "UPDATE website SET domain='http://fixture.invalid'; UPDATE ir_cron SET active=false; INSERT INTO ir_config_parameter(key,value) VALUES ('printnode.api_key','inert-lane-sentinel'),('odoo_devkit.credential_boundary_commit','isolated-initial-committed-boundary') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value"
+            "UPDATE website SET domain='https://fixture.invalid'; UPDATE ir_cron SET active=false; INSERT INTO ir_config_parameter(key,value) VALUES ('printnode.api_key','inert-lane-sentinel'),('odoo_devkit.credential_boundary_commit','isolated-initial-committed-boundary') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value"
         )
         self.command(
             (
