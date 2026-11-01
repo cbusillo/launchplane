@@ -79,10 +79,44 @@ def require_application_runtime_absent(
         raise ValueError("The original application absence inventory changed.")
 
 
-def require_stateless_application_runtime(
-    docker: Callable[..., str], application: str, service_id: str
+def application_service_mounts_match(mounts: object, volume_name: str, mount_path: str) -> bool:
+    if not volume_name:
+        return mounts in (None, [])
+    if not isinstance(mounts, list) or len(mounts) != 1 or not isinstance(mounts[0], dict):
+        return False
+    mount = mounts[0]
+    options = mount.get("VolumeOptions") or {}
+    if not isinstance(options, dict):
+        return False
+    driver = options.get("DriverConfig")
+    return (
+        mount.get("Type") == "volume"
+        and mount.get("Source") == volume_name
+        and mount.get("Target") == mount_path
+        and mount.get("ReadOnly") in (None, False)
+        and options.get("Subpath") in (None, "")
+        and (
+            driver is None
+            or isinstance(driver, dict)
+            and driver.get("Name") in (None, "", "local")
+            and driver.get("Options") in (None, {})
+        )
+    )
+
+
+def require_application_runtime_state(
+    docker: Callable[..., str],
+    application: str,
+    service_id: str,
+    volume_name: str = "",
+    mount_path: str = "",
+    volume_binding: str = "",
 ) -> None:
-    if not application:
+    if (
+        not application
+        or bool(volume_name) != bool(mount_path)
+        or bool(volume_name) != bool(volume_binding)
+    ):
         raise ValueError("The original application identity is required.")
     nodes = single_local_swarm_node(docker)
     _, services = application_service_inventory(docker)
@@ -91,8 +125,31 @@ def require_stateless_application_runtime(
         for row in services
         if row.get("ID") == service_id or row.get("Spec", {}).get("Name") == application
     ]
+    volume = None
+    if volume_name:
+        volumes = json.loads(docker("volume", "inspect", volume_name))
+        if not isinstance(volumes, list) or len(volumes) != 1 or not isinstance(volumes[0], dict):
+            raise ValueError("The original state volume is unobserved.")
+        volume = volumes[0]
+        volume_labels = volume.get("Labels") or {}
+        if (
+            volume.get("Name") != volume_name
+            or volume.get("Driver") != "local"
+            or volume.get("Options") not in (None, {})
+            or not isinstance(volume_labels, dict)
+            or volume_labels.get("io.launchplane.testing-resources") != volume_binding
+            or not isinstance(volume.get("Mountpoint"), str)
+            or not volume["Mountpoint"]
+        ):
+            raise ValueError("The original state volume provenance changed.")
+
+    def volume_unchanged() -> bool:
+        return volume is None or json.loads(docker("volume", "inspect", volume_name)) == [volume]
+
     if not selected and service_id:
         require_application_runtime_absent(docker, application, service_id)
+        if not volume_unchanged():
+            raise ValueError("The original state volume changed during observation.")
         return
     if len(selected) != 1:
         raise ValueError("The original stateless service is unavailable.")
@@ -103,10 +160,12 @@ def require_stateless_application_runtime(
         and service.get("ID") != service_id
     ):
         raise ValueError("The original stateless service identity changed.")
-    if service.get("Spec", {}).get("TaskTemplate", {}).get("ContainerSpec", {}).get(
-        "Mounts"
-    ) not in (None, []):
-        raise ValueError("A stateless service has persistent mounts.")
+    if not application_service_mounts_match(
+        service.get("Spec", {}).get("TaskTemplate", {}).get("ContainerSpec", {}).get("Mounts"),
+        volume_name,
+        mount_path,
+    ):
+        raise ValueError("The original service state differs from its captured declaration.")
     tasks = docker("service", "ps", "--no-trunc", "-q", application).splitlines()
     if len(set(tasks)) != len(tasks):
         raise ValueError("The original task inventory is ambiguous.")
@@ -117,7 +176,11 @@ def require_stateless_application_runtime(
             or len(rows) != 1
             or rows[0].get("ID") != identifier
             or rows[0].get("ServiceID") != service["ID"]
-            or rows[0].get("Spec", {}).get("ContainerSpec", {}).get("Mounts") not in (None, [])
+            or not application_service_mounts_match(
+                rows[0].get("Spec", {}).get("ContainerSpec", {}).get("Mounts"),
+                volume_name,
+                mount_path,
+            )
         ):
             raise ValueError("The original task has mounts or unobserved custody.")
     containers = docker("ps", "-aq", "--no-trunc").splitlines()
@@ -139,13 +202,27 @@ def require_stateless_application_runtime(
             labels.get("com.docker.swarm.service.id") == service["ID"]
             or labels.get("com.docker.swarm.service.name") == application
         ):
-            if row.get("Mounts") != []:
-                raise ValueError("An actual stateless container has persistent mounts.")
+            mounts = row.get("Mounts")
+            if volume is None:
+                if mounts != []:
+                    raise ValueError("An actual stateless container has persistent mounts.")
+            elif (
+                not isinstance(mounts, list)
+                or len(mounts) != 1
+                or not isinstance(mounts[0], dict)
+                or mounts[0].get("Type") != "volume"
+                or mounts[0].get("Name") != volume_name
+                or mounts[0].get("Destination") != mount_path
+                or mounts[0].get("RW") is not True
+                or mounts[0].get("Source") != volume["Mountpoint"]
+            ):
+                raise ValueError("An actual container's captured state changed.")
     if (
         json.loads(docker("service", "inspect", service["ID"])) != selected
         or docker("service", "ps", "--no-trunc", "-q", application).splitlines() != tasks
         or docker("ps", "-aq", "--no-trunc").splitlines() != containers
         or single_local_swarm_node(docker) != nodes
+        or not volume_unchanged()
     ):
         raise ValueError("The original stateless runtime changed during observation.")
 
@@ -156,22 +233,32 @@ def inspect_application_state(
     token: str,
     server_id: str,
     application: str,
-    mode: Literal["absent", "stateless"],
+    mode: Literal["absent", "stateless", "volume"],
     service_id: str = "",
+    volume_name: str = "",
+    mount_path: str = "",
+    volume_binding: str = "",
 ) -> None:
     frames: list[dict[str, object]] = []
+    payload: dict[str, object] = {
+        "application": application,
+        "service_id": service_id,
+        "mode": mode,
+    }
+    if volume_name:
+        payload.update(
+            volume_name=volume_name, mount_path=mount_path, volume_binding=volume_binding
+        )
     _read_remote(
         host=host,
         token=token,
         server_id=server_id,
         program=APPLICATION_STATE_PROGRAM,
-        payload={"application": application, "service_id": service_id, "mode": mode},
+        payload=payload,
         receive=frames.append,
         timeout_seconds=120,
     )
-    if frames != [
-        {"type": "complete", "application": application, "service_id": service_id, "mode": mode}
-    ]:
+    if frames != [{"type": "complete", **payload}]:
         raise ValueError("Physical predecessor state is unobserved.")
 
 
@@ -196,7 +283,8 @@ APPLICATION_STATE_PROGRAM_HEADER = (
     + inspect.getsource(single_local_swarm_node)
     + inspect.getsource(application_service_inventory)
     + inspect.getsource(require_application_runtime_absent)
-    + inspect.getsource(require_stateless_application_runtime)
+    + inspect.getsource(application_service_mounts_match)
+    + inspect.getsource(require_application_runtime_state)
     + inspect.getsource(wait_for_application_runtime_absence)
     + r"""
 def docker(*arguments):
@@ -210,8 +298,9 @@ spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 APPLICATION_STATE_PROGRAM = (
     APPLICATION_STATE_PROGRAM_HEADER
     + r"""
+if (spec['mode']=='volume') != bool(spec.get('volume_name')): raise ValueError('state observation mode differs from its declaration')
 if spec['mode']=='absent': require_application_runtime_absent(docker,spec['application'],spec['service_id'])
-elif spec['mode']=='stateless': require_stateless_application_runtime(docker,spec['application'],spec['service_id'])
+elif spec['mode'] in {'stateless','volume'}: require_application_runtime_state(docker,spec['application'],spec['service_id'],spec.get('volume_name',''),spec.get('mount_path',''),spec.get('volume_binding',''))
 else: raise ValueError('unsupported application state observation')
 print(sys.argv[2]+json.dumps({'type':'complete',**spec}))
 """
@@ -223,7 +312,7 @@ APPLICATION_RETIREMENT_PROGRAM = (
 if spec['mode']!='retire' or not spec['service_id']: raise ValueError('original predecessor identity required')
 _,services=application_service_inventory(docker)
 if any(row.get('ID')==spec['service_id'] or row.get('Spec',{}).get('Name')==spec['application'] for row in services):
-    require_stateless_application_runtime(docker,spec['application'],spec['service_id'])
+    require_application_runtime_state(docker,spec['application'],spec['service_id'],spec.get('volume_name',''),spec.get('mount_path',''),spec.get('volume_binding',''))
     docker('service','rm',spec['service_id'])
 wait_for_application_runtime_absence(docker,spec['application'],spec['service_id'])
 print(sys.argv[2]+json.dumps({'type':'complete',**spec}))
@@ -239,6 +328,9 @@ def retire_application_runtime(
     application: str,
     service_id: str,
     dispatch_guard: Callable[[Callable[[], None]], None],
+    volume_name: str = "",
+    mount_path: str = "",
+    volume_binding: str = "",
 ) -> None:
     frames: list[dict[str, object]] = []
     payload: dict[str, object] = {
@@ -246,6 +338,10 @@ def retire_application_runtime(
         "service_id": service_id,
         "mode": "retire",
     }
+    if volume_name:
+        payload.update(
+            volume_name=volume_name, mount_path=mount_path, volume_binding=volume_binding
+        )
     _read_remote(
         host=host,
         token=token,
