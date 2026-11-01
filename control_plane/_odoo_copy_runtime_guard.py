@@ -57,6 +57,9 @@ def copy_readback_failure_frame(error: Exception, predicate: str = ReadbackPredi
         trace = trace.tb_next
     if sites:
         frame['sites'] = sites[-NATIVE_PROGRAM_SOURCE_SITE_LIMIT:]
+    identity = copy_failure_evidence_id(getattr(error, COPY_FAILURE_EVIDENCE_MARKER, None))
+    if identity:
+        frame[COPY_FAILURE_EVIDENCE_MARKER] = identity
     return frame
 
 

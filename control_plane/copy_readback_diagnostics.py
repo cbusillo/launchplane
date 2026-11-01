@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from enum import StrEnum
+import inspect
 import re
 
 
@@ -23,11 +24,20 @@ COPY_FAILURE_OUTPUT_BYTES = 1024 * 1024
 COPY_FAILURE_STATE_DIRECTORY = ".local/state/launchplane-host/copy-failures"
 
 
+def copy_failure_evidence_id(value: object) -> str:
+    return (
+        value
+        if isinstance(value, str)
+        and (value == "unavailable" or re.fullmatch(r"[a-f0-9]{32}", value) is not None)
+        else ""
+    )
+
+
 def copy_failure_marker_is_safe(key: str, value: str) -> bool:
     if key == COPY_FAILURE_STAGE_MARKER:
         return value in CopyFailureStage
     if key == COPY_FAILURE_EVIDENCE_MARKER:
-        return value == "unavailable" or re.fullmatch(r"[a-f0-9]{32}", value) is not None
+        return bool(copy_failure_evidence_id(value))
     return (
         key == COPY_FAILURE_EXIT_MARKER
         and re.fullmatch(r"-?[0-9]{1,3}", value) is not None
@@ -38,7 +48,9 @@ def copy_failure_marker_is_safe(key: str, value: str) -> bool:
 
 def copy_failure_diagnostics_library() -> str:
     return (
-        "class CopyFailureStage:\n"
+        "import re\n"
+        + inspect.getsource(copy_failure_evidence_id)
+        + "\nclass CopyFailureStage:\n"
         + "\n".join(f"    {stage.name} = {stage.value!r}" for stage in CopyFailureStage)
         + f"\nCOPY_FAILURE_STAGES = {tuple(stage.value for stage in CopyFailureStage)!r}\n"
         + f"COPY_FAILURE_STAGE_MARKER = {COPY_FAILURE_STAGE_MARKER!r}\n"
@@ -102,7 +114,9 @@ def emit_copy_command_failure(result, spec):
             print(key + '=' + value, flush=True)
             break
     print(COPY_FAILURE_EXIT_MARKER + '=' + str(result.returncode), flush=True)
-    print(COPY_FAILURE_EVIDENCE_MARKER + '=' + retain_copy_command_failure(result, stage, spec), flush=True)
+    identity = retain_copy_command_failure(result, stage, spec)
+    print(COPY_FAILURE_EVIDENCE_MARKER + '=' + identity, flush=True)
+    return identity
 """
     )
 

@@ -60,24 +60,24 @@ def canonical_address_settings(spec, containers):
     runner=containers['script-runner'][0]
     if mode in {'inspect','readback'}:
         credentials=docker('exec','-i',containers['web'][0],'python3','-c',
-            base64.b64decode(spec['credential_program']).decode(),stdin=json.dumps(spec).encode()).decode().splitlines()
+            base64.b64decode(spec['credential_program']).decode(),stdin=json.dumps(spec).encode(),diagnose_failure=True).decode().splitlines()
         if credentials!=['candidate_credentials_verified=true']:
             raise CopyReadbackRefused(ReadbackPredicate.CANDIDATE_READINESS)
     workflow_lock=docker('exec',runner,'python3','-c',
-        'from pathlib import Path;import sys;print(Path(sys.argv[1]).exists())',spec['data_workflow_lock_path']).decode().strip()
+        'from pathlib import Path;import sys;print(Path(sys.argv[1]).exists())',spec['data_workflow_lock_path'],diagnose_failure=True).decode().strip()
     if workflow_lock!='False':
         raise CopyReadbackRefused(ReadbackPredicate.EXECUTION_LOCK)
     data=json.loads(docker('exec','-i',runner,'python3','-c',CANONICAL_ADDRESS_DATABASE_READ,
         stdin=json.dumps({**settings,'copy_binding_sha256':spec['copy_binding_sha256'],
-            'copy_witness_parameter':settings['copy_witness_parameter']}).encode()))
+            'copy_witness_parameter':settings['copy_witness_parameter']}).encode(),diagnose_failure=True))
     gate=docker('exec',runner,'python3','-c',COPY_WEB_GATE_READ_PROGRAM,
-        spec['database_name'],spec['web_gate_path']).decode().strip()
+        spec['database_name'],spec['web_gate_path'],diagnose_failure=True).decode().strip()
     if gate not in {'True','False'}:
         raise RuntimeError('Canonical web gate observation is unavailable')
     data['canonical_gate_released']=gate=='True'
     if mode in {'inspect','gate'}:
         readback=docker('exec','-i',runner,'python3','-',spec['database_name'],spec['readback_spec'],'dry-run',
-            stdin=spec['readback_program'].encode()).decode().splitlines()
+            stdin=spec['readback_program'].encode(),diagnose_failure=True).decode().splitlines()
         if 'integration_readback_ok=true' not in readback or 'integration_readback_ok=false' in readback:
             raise CopyReadbackRefused(ReadbackPredicate.INTEGRATIONS)
     if mode=='gate':
@@ -91,7 +91,7 @@ def canonical_address_settings(spec, containers):
             " marker.write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+'\\n'+os.environ['ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64']).encode()).hexdigest())\n"
             " marker.chmod(0o644)\n"
             " os.replace(marker,p)\n",
-            spec['web_gate_path'])
+            spec['web_gate_path'],diagnose_failure=True)
         data['canonical_gate_released']=True
     print(sys.argv[2]+json.dumps({'type':'complete',**data}),flush=True)
 """

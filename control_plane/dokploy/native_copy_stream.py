@@ -24,6 +24,8 @@ import click
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.copy_readback_diagnostics import (
     NATIVE_PROGRAM_SOURCE_SITE_LIMIT as NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
+    COPY_FAILURE_EVIDENCE_MARKER,
+    copy_failure_evidence_id,
     ReadbackPredicate,
     readback_failure_evidence,
 )
@@ -92,8 +94,10 @@ class NativeProgramFailed(NativeSourceUnavailable):
         program: str = "",
         program_sites: object = None,
         container_fields: object = None,
+        failure_evidence_id: object = None,
     ) -> None:
         super().__init__(message)
+        self.copy_failure_evidence_id = copy_failure_evidence_id(failure_evidence_id)
         line_count = len(program.splitlines())
         self.program_sites: tuple[int, ...] = (
             tuple(program_sites)
@@ -103,7 +107,9 @@ class NativeProgramFailed(NativeSourceUnavailable):
             else ()
         )
         self.program_sha256 = (
-            hashlib.sha256(program.encode()).hexdigest() if self.program_sites else ""
+            hashlib.sha256(program.encode()).hexdigest()
+            if self.program_sites or self.copy_failure_evidence_id
+            else ""
         )
         self.container_fields: tuple[tuple[str, str], ...] = (
             tuple((item["field"], item["difference"]) for item in container_fields)
@@ -384,6 +390,7 @@ def _read_program(
                 program=program,
                 program_sites=value.get("sites"),
                 container_fields=value.get("container_fields"),
+                failure_evidence_id=value.get(COPY_FAILURE_EVIDENCE_MARKER),
             )
         if value.get("type") == "source_exceeds_bound":
             raise NativeSourceExceedsBound("The source exceeds the bounded native copy capacity.")

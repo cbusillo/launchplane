@@ -8,6 +8,8 @@ from pydantic import BaseModel, ValidationError
 from pydantic_core import ErrorDetails
 from pydantic_core.core_schema import ErrorType
 
+from control_plane.copy_readback_diagnostics import COPY_FAILURE_EVIDENCE_MARKER
+
 
 _logger = logging.getLogger(__name__)
 _SOURCE_ROOT = Path(__file__).parent
@@ -88,10 +90,16 @@ def log_handled_error_cause(error: BaseException, trace_id: str, *, operation_id
         if isinstance(cause, ProviderResponseValidationError):
             validation.extend(cause.validation[: _MAX_VALIDATION_ERRORS - len(validation)])
             validation_error_count += cause.error_count
-        if isinstance(cause, NativeProgramFailed) and (cause.program_sites or cause.has_diagnostic):
+        if isinstance(cause, NativeProgramFailed) and (
+            cause.program_sites or cause.has_diagnostic or cause.copy_failure_evidence_id
+        ):
             native: dict[str, object] = dict(cause.evidence) if cause.has_diagnostic else {}
+            if cause.copy_failure_evidence_id:
+                native[COPY_FAILURE_EVIDENCE_MARKER] = cause.copy_failure_evidence_id
+            if cause.program_sha256:
+                native["sha"] = cause.program_sha256
             if cause.program_sites:
-                native.update(sha=cause.program_sha256, lines=list(cause.program_sites))
+                native["lines"] = list(cause.program_sites)
             if cause.container_fields:
                 native["container_fields"] = [
                     {"field": field, "difference": difference}
