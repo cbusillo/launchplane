@@ -20,8 +20,7 @@ it.
   - an Odoo product: one devkit artifact manifest (schema v2) with
     `source_commit`, `image.repository`, `image.digest`, and the dependency
     provenance;
-  - a generic-web product: the commit it built and the image it pushed, nothing
-    else:
+  - a generic-web product: the commit it built and the image it pushed:
 
     ```json
     {
@@ -32,8 +31,21 @@ it.
     }
     ```
 
-That is the whole contract. The repository holds no Launchplane secret, grant,
+The repository holds no Launchplane secret, grant,
 workflow reference, or setting.
+
+A generic-web manifest can also declare `testing_state_copy.command`, a bounded
+argument array whose first item is an absolute executable inside that immutable
+image. It identifies the product-owned offline state-copy interface for explicit
+testing restores. The interface supports `plan --source`, `copy --source
+--destination --expected-sha256` and `verify --destination --expected-sha256`.
+Its bounded JSON receipt reports status, product format, sanitized-byte SHA-256
+and byte count. Application data formats and sanitation remain in the product.
+The verified build retains this declaration alongside its image and source;
+image labels and site settings cannot supply it. Omitted declarations keep the
+existing manifest shape. This declaration grants no execution or source access;
+testing restore remains unavailable until native source, custody and execution
+qualification are implemented.
 
 ## What Launchplane records per product
 

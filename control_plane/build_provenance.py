@@ -12,12 +12,13 @@ import json
 import re
 import zipfile
 from collections.abc import Iterator
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol, Self
+from pathlib import PurePosixPath
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
@@ -294,6 +295,24 @@ class GenericWebBuildImage(BaseModel):
     tags: tuple[str, ...] = ()
 
 
+class GenericWebTestingStateCopy(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    command: tuple[Annotated[str, Field(min_length=1, max_length=1024)], ...] = Field(
+        min_length=1, max_length=16
+    )
+
+    @model_validator(mode="after")
+    def validate_command(self) -> Self:
+        if (
+            not PurePosixPath(self.command[0]).is_absolute()
+            or any("\x00" in argument for argument in self.command)
+            or sum(len(argument.encode("utf-8")) for argument in self.command) > 4096
+        ):
+            raise ValueError("State copy requires a bounded image-local executable argument list.")
+        return self
+
+
 class GenericWebBuildManifest(BaseModel):
     """What a generic-web build uploads: the commit it built and the image it pushed."""
 
@@ -303,6 +322,9 @@ class GenericWebBuildManifest(BaseModel):
     kind: Literal["generic-web"]
     source_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     image: GenericWebBuildImage
+    testing_state_copy: GenericWebTestingStateCopy | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class VerifiedGenericWebBuild(BaseModel):

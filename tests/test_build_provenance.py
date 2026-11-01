@@ -449,6 +449,51 @@ def _generic_web_manifest(**changes: object) -> dict[str, object]:
 
 
 class GenericWebBuildProvenanceTests(unittest.TestCase):
+    def test_verified_build_retains_its_product_owned_state_copy_command(self) -> None:
+        command = ["/app/bin/testing-state-copy", "--offline"]
+        github = FakeGitHub(
+            runs=[_run()],
+            manifest=_generic_web_manifest(testing_state_copy={"command": command}),
+        )
+        verified = verify_generic_web_build(
+            transport=github,
+            repository=REPOSITORY,
+            repository_id=REPOSITORY_ID,
+            commit=COMMIT,
+            purpose="release",
+            image_repository=IMAGE_REPOSITORY,
+        )
+        restored = type(verified).model_validate_json(verified.model_dump_json())
+        assert restored.manifest.testing_state_copy is not None
+        self.assertEqual(restored.manifest.testing_state_copy.command, tuple(command))
+        self.assertEqual(restored.image_reference, verified.image_reference)
+
+    def test_unconfigured_state_copy_preserves_the_existing_manifest_shape(self) -> None:
+        from control_plane.build_provenance import GenericWebBuildManifest
+
+        manifest = GenericWebBuildManifest.model_validate(_generic_web_manifest())
+        self.assertIsNone(manifest.testing_state_copy)
+        self.assertNotIn("testing_state_copy", manifest.model_dump(mode="json"))
+
+    def test_malformed_state_copy_commands_refuse_the_manifest(self) -> None:
+        for command in (
+            [],
+            ["relative-command"],
+            ["/app/bin/copy", "bad\x00argument"],
+            "shell command",
+            ["/app/bin/copy", "x" * 100000],
+        ):
+            with (
+                self.subTest(command_type=type(command).__name__),
+                self.assertRaises(BuildProvenanceError),
+            ):
+                self.verify(
+                    FakeGitHub(
+                        runs=[_run()],
+                        manifest=_generic_web_manifest(testing_state_copy={"command": command}),
+                    )
+                )
+
     def test_historical_preview_proof_requires_the_exact_recorded_image(self) -> None:
         image = f"{IMAGE_REPOSITORY}@sha256:{'c' * 64}"
         github = FakeGitHub(
