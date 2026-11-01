@@ -60,7 +60,11 @@ def observe_application_state_program(
         patch.object(subprocess, "run", side_effect=command),
         patch("sys.stdout", output),
     ):
-        exec(program, {})
+        try:
+            exec(program, {})
+        except SystemExit as error:
+            if error.code not in (None, 0):
+                raise
     result = json.loads(output.getvalue().removeprefix("frame:"))
     assert isinstance(result, dict)
     return result
@@ -939,25 +943,7 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
         )
         self.reload_routes()
         self.store = self.flow.store
-        self.flow.payloads[self.flow.old_id]["mounts"] = []
-        for service in self.flow.services.values():
-            service["Spec"]["TaskTemplate"]["ContainerSpec"]["Mounts"] = []
-        for task in self.flow.tasks.values():
-            task["Spec"]["ContainerSpec"]["Mounts"] = []
-        for container in self.flow.containers.values():
-            labels = container.get("Config", {}).get("Labels") or {}
-            if labels.get("com.docker.swarm.service.name") == "old-app":
-                container["Mounts"] = []
-        for binding in self.store.list_secret_bindings(
-            integration="runtime_environment", context_name=self.flow.context
-        ):
-            if binding.instance == "testing":
-                self.store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
-        profile = self.store.read_product_profile_record(self.flow.product)
-        profile.expected_config.managed_secret_bindings = ()
-        lane = next(item for item in profile.lanes if item.instance == "testing")
-        lane.generic_web_testing_state = ProductGenericWebTestingState(kind="none")
-        self.store.write_product_profile_record(profile)
+        self.configure_serving_application()
         target = self.store.read_dokploy_target_record(
             context_name=self.flow.context, instance_name="testing"
         )
@@ -1046,6 +1032,8 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
                         )
                     case ["inspect", "--type", "task", identifier]:
                         value = json.dumps([self.flow.tasks[identifier]])
+                    case ["volume", "inspect", identifier]:
+                        value = json.dumps([self.flow.storage.volumes[identifier]])
                     case ["ps", "-aq", "--no-trunc"]:
                         value = "\n".join(self.flow.containers)
                     case ["inspect", *identifiers]:
@@ -1086,6 +1074,27 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
                 side_effect=storage,
             )
         )
+
+    def configure_serving_application(self) -> None:
+        self.flow.payloads[self.flow.old_id]["mounts"] = []
+        for service in self.flow.services.values():
+            service["Spec"]["TaskTemplate"]["ContainerSpec"]["Mounts"] = []
+        for task in self.flow.tasks.values():
+            task["Spec"]["ContainerSpec"]["Mounts"] = []
+        for container in self.flow.containers.values():
+            labels = container.get("Config", {}).get("Labels") or {}
+            if labels.get("com.docker.swarm.service.name") == "old-app":
+                container["Mounts"] = []
+        for binding in self.store.list_secret_bindings(
+            integration="runtime_environment", context_name=self.flow.context
+        ):
+            if binding.instance == "testing":
+                self.store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
+        profile = self.store.read_product_profile_record(self.flow.product)
+        profile.expected_config.managed_secret_bindings = ()
+        lane = next(item for item in profile.lanes if item.instance == "testing")
+        lane.generic_web_testing_state = ProductGenericWebTestingState(kind="none")
+        self.store.write_product_profile_record(profile)
 
     def reload_routes(self) -> None:
         from copy import deepcopy

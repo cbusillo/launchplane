@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal, TypedDict
 
 from control_plane import retained_volume_capture
 from control_plane.dokploy import api, source
@@ -12,6 +13,68 @@ from control_plane.testing_activation import (
 from control_plane.testing_application_activation import ApplicationActivationAdapter
 from control_plane.testing_rebuild_driver import TestingRebuildRefused
 from control_plane.testing_rebuild_service import GenericWebTestingRebuildIntent
+
+
+class RetainedApplicationState(TypedDict):
+    mode: Literal["stateless", "volume"]
+    volume_name: str
+    mount_path: str
+    volume_binding: str
+
+
+def retained_application_state(
+    store: PostgresRecordStore, intent: GenericWebTestingRebuildIntent
+) -> RetainedApplicationState:
+    previous = intent.retained_application
+    if previous is None and not intent.retained_volumes:
+        return {"mode": "stateless", "volume_name": "", "mount_path": "", "volume_binding": ""}
+    if (
+        previous is None
+        or previous.target_id != intent.before.target_id.target_id
+        or previous.product != intent.profile.product
+        or previous.context != intent.before.target.context
+        or previous.request.application is None
+        or previous.request.application.state.kind != "volume"
+        or len(intent.retained_volumes) != 1
+        or not completed_application_activation(store, previous)
+    ):
+        raise TestingRebuildRefused(
+            "testing_rebuild_state_unverified", "Retain the original completed volume activation."
+        )
+    resources, _ = preparation_resources(store, previous.product, previous.request, previous.scope)
+    if (
+        not isinstance(resources, ApplicationTestingResources)
+        or resources.state_kind != "volume"
+        or resources.volumes["state"] != intent.retained_volumes[0].volume_name
+    ):
+        raise TestingRebuildRefused(
+            "testing_rebuild_state_unverified", "The retained volume allocation is unavailable."
+        )
+    return {
+        "mode": "volume",
+        "volume_name": resources.volumes["state"],
+        "mount_path": previous.request.application.state.container_path,
+        "volume_binding": resources.binding_sha256,
+    }
+
+
+def application_mount_matches(
+    payload: api.JsonObject, state: RetainedApplicationState | None
+) -> bool:
+    from control_plane.dokploy.fresh_application import match_application_volume_mount
+
+    if state is None or state["mode"] == "stateless":
+        return payload.get("mounts") == []
+    identifier = payload.get("applicationId")
+    if not isinstance(identifier, str):
+        return False
+    mount = match_application_volume_mount(
+        payload,
+        application_id=identifier,
+        volume_name=state["volume_name"],
+        mount_path=state["mount_path"],
+    )
+    return mount is not None and mount.get("serviceType") == "application"
 
 
 def capture_rebuild_application_intent(

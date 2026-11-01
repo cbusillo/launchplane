@@ -13,6 +13,7 @@ from control_plane.contracts.product_profile_record import ProductGenericWebTest
 from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.testing_activation import activation_record, preparation_resources
 from control_plane.testing_rebuild_driver import TestingRebuildRefused
+from control_plane.testing_rebuild_application_state import retained_application_state
 from control_plane.testing_rebuild_service import (
     GenericWebTestingRebuildIntent,
     capture_rebuild_intent,
@@ -40,6 +41,7 @@ class TestingRebuildVolumeIntentTests(unittest.TestCase):
         resources, _ = preparation_resources(
             self.flow.store, record.product, record.request, record.scope
         )
+        self.resources = resources
         payload = self.flow.payloads[record.target_id]
         self.volume = RetainedVolumeBinding(
             volume_name=resources.volumes["state"],
@@ -80,7 +82,23 @@ class TestingRebuildVolumeIntentTests(unittest.TestCase):
         assert isinstance(intent, GenericWebTestingRebuildIntent)
         self.assertEqual(intent.retained_application, self.record)
         self.assertEqual(intent.retained_volumes, (self.volume,))
+        state = retained_application_state(self.flow.store, intent)
+        self.assertEqual(state["volume_name"], self.volume.volume_name)
+        self.assertEqual(state["volume_binding"], self.resources.binding_sha256)
         self.assertEqual(tuple(self.flow.writes), writes)
+
+    def test_desired_stateless_candidate_keeps_original_mounted_custody(self) -> None:
+        profile = self.flow.store.read_product_profile_record(self.flow.product)
+        lane = next(item for item in profile.lanes if item.instance == "testing")
+        lane.generic_web_testing_state = ProductGenericWebTestingState(kind="none")
+        self.flow.store.write_product_profile_record(profile)
+        with patch.object(
+            retained_volume_capture, "capture_retained_volumes", return_value=((self.volume,), True)
+        ):
+            intent = capture_rebuild_intent(self.flow.root, self.flow.store, self.operation)
+        assert isinstance(intent, GenericWebTestingRebuildIntent) and intent.application is not None
+        self.assertEqual(intent.application.state.kind, lane.generic_web_testing_state.kind)
+        self.assertEqual(retained_application_state(self.flow.store, intent)["mode"], "volume")
 
     def test_incomplete_or_foreign_volume_custody_cannot_be_admitted(self) -> None:
         for volumes, complete in (
@@ -90,6 +108,7 @@ class TestingRebuildVolumeIntentTests(unittest.TestCase):
             ((self.volume.model_copy(update={"volume_name": "another-volume"}),), True),
             ((self.volume.model_copy(update={"server_id": "another-server"}),), True),
             ((self.volume.model_copy(update={"application_id": "another-application"}),), True),
+            ((self.volume.model_copy(update={"application_name": "another-name"}),), True),
             ((self.volume.model_copy(update={"volume_identity_sha256": ""}),), True),
             ((self.volume.model_copy(update={"engine_identity_sha256": ""}),), True),
         ):
