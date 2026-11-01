@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
-from control_plane.contracts.testing_rebuild import REBUILD_ROUTE
+from control_plane.contracts.testing_rebuild import REBUILD_ROUTE, REBUILD_SCOPE
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
 )
@@ -61,6 +61,12 @@ from control_plane.testing_application_runtime import (
     inspect_application_state,
     retire_application_runtime,
 )
+from control_plane.testing_rebuild_application_state import (
+    RetainedApplicationState,
+    application_mount_matches,
+    retained_application_state,
+    rebuild_address,
+)
 from control_plane.testing_lane_hold import (
     TestingHoldApplyRequest,
     apply_testing_hold_plan,
@@ -85,6 +91,7 @@ from control_plane.testing_separation_resources import (
     SeparationResourcesAdapter,
     SeparationResourcesRequest,
     SeparationResourcesRefused,
+    preparation_binding,
 )
 
 
@@ -175,10 +182,10 @@ def default_rebuild_application_specification(
 def rebuild_application_specification(
     intent: GenericWebTestingRebuildIntent,
 ) -> TestingApplicationSpecification:
-    if intent.state.kind != "none" or intent.before.target.target_type != "application":
+    if intent.before.target.target_type != "application":
         raise TestingRebuildRefused(
             TESTING_REBUILD_EXECUTION_UNAVAILABLE_CODE,
-            "This rebuild currently supports applications without persistent state.",
+            "This rebuild requires an application testing recipient.",
         )
     return intent.application or default_rebuild_application_specification(intent)
 
@@ -198,9 +205,10 @@ def inspect_generic_web_testing_rebuild(
         target_type="application",
         target_id=intent.before.target_id.target_id,
     )
+    state = retained_application_state(store, intent)
     if (
         payload.get("applicationId") != intent.before.target_id.target_id
-        or payload.get("mounts") != []
+        or not application_mount_matches(payload, state)
         or any(
             (row.context, row.instance) != (intent.before.target.context, "testing")
             and row.target_id == intent.before.target_id.target_id
@@ -209,7 +217,7 @@ def inspect_generic_web_testing_rebuild(
     ):
         raise TestingRebuildRefused(
             "testing_rebuild_state_unverified",
-            "The testing application must have no persistent mounts or shared target.",
+            "The testing application must match its captured state and have no shared target.",
         )
     credential_binding_names(
         store, intent.profile.product, intent.before.target.context, specification
@@ -221,7 +229,10 @@ def inspect_generic_web_testing_rebuild(
         payload,
         target_id=intent.before.target_id.target_id,
         application=str(retained["application"]),
-        server_id=str(payload.get("serverId") or ""),
+        server_id=intent.retained_volumes[0].server_id
+        if intent.retained_volumes
+        else str(payload.get("serverId") or ""),
+        state=state,
     )
     require_disabled_predecessor_schedules(host, token, intent.before.target_id.target_id)
     inspect_application_state(
@@ -229,7 +240,7 @@ def inspect_generic_web_testing_rebuild(
         token=token,
         server_id=str(payload.get("serverId") or ""),
         application=str(retained["application"]),
-        mode="stateless",
+        **state,
     )
     serving = activation_record(store, intent.profile.product, intent.before.target.context)
     if serving is not None:
@@ -364,14 +375,19 @@ def rebuild_predecessors(
 
 
 def require_predecessor_metadata(
-    payload: api.JsonObject, *, target_id: str, application: str, server_id: str
+    payload: api.JsonObject,
+    *,
+    target_id: str,
+    application: str,
+    server_id: str,
+    state: RetainedApplicationState | None = None,
 ) -> None:
     if (
         payload.get("applicationId") != target_id
         or payload.get("appName") != application
         or not server_id
         or str(payload.get("serverId") or "") != server_id
-        or payload.get("mounts") != []
+        or not application_mount_matches(payload, state)
         or payload.get("previewDeployments") != []
     ):
         raise TestingRebuildRefused(
@@ -655,6 +671,36 @@ class GenericWebTestingRebuildExecution:
         self.guard("testing_rebuild_external_comparison", recovery=self.recovering)
         return self.store.list_product_profile_records()
 
+    def retirement_intent(self, record: TestingActivationRecord) -> GenericWebTestingRebuildIntent:
+        if record.request.preparation_key == self.resources_key:
+            intent = self.intent
+        else:
+            operation = rebuild_operation(self.store, record)
+            original = (
+                self.store.read_idempotency_record(
+                    scope=REBUILD_SCOPE,
+                    route_path=REBUILD_ROUTE,
+                    idempotency_key=operation.operation_id,
+                )
+                if operation is not None
+                else None
+            )
+            if original is None or original.state != "completed":
+                raise NativeTestingRebuildPending("The retained predecessor intent is unavailable.")
+            intent = GenericWebTestingRebuildIntent.model_validate(
+                self.store.read_original_mutation_intent(original)
+            )
+        if (
+            intent.profile.product != record.product
+            or intent.before.target.context != record.context
+            or intent.before.target_id.target_id != record.retained_target_id.target_id
+        ):
+            raise NativeTestingRebuildPending("The original predecessor state belongs elsewhere.")
+        return intent
+
+    def retirement_state(self, record: TestingActivationRecord) -> RetainedApplicationState:
+        return retained_application_state(self.store, self.retirement_intent(record))
+
     def application_adapter(
         self, request: TestingActivationRequest
     ) -> GenericWebRebuildActivationAdapter:
@@ -675,6 +721,23 @@ class GenericWebTestingRebuildExecution:
         self.check()
         self.lease.assert_current()
         self.parent.authorize(phase)
+        if self.intent.private_ingress and not (recovery or self.recovering):
+            from control_plane.testing_application_private_route import (
+                PrivateIngressAuthorityChanged,
+                require_private_ingress_records,
+            )
+
+            try:
+                require_private_ingress_records(
+                    self.store,
+                    self.operation.product,
+                    self.operation.context,
+                    self.intent.private_ingress,
+                )
+            except (PrivateIngressAuthorityChanged, FileNotFoundError) as error:
+                raise NativeTestingRebuildAdmissionChanged(str(error)) from error
+            except ValueError as error:
+                raise NativeTestingRebuildPending(str(error)) from error
         if not is_exclusive_product_context(
             context=self.operation.context,
             product=self.operation.product,
@@ -788,6 +851,7 @@ class GenericWebTestingRebuildExecution:
         request: dict[str, Any],
         name: str,
         original_intent: dict[str, Any] | None = None,
+        parent_lease: ProviderOperationLease | None = None,
     ) -> dict[str, object]:
         self.guard(name + ":admission")
         if not isinstance(self.lease, ProviderEvidenceLease):
@@ -802,17 +866,28 @@ class GenericWebTestingRebuildExecution:
             ),
             lease_owner=self.lease.evidence_reservation().lease_owner,
             response_trace_id=self.operation.operation_id,
-            adapter=RebuildChildAdapter(child, self.lease, self.guard, name),
+            adapter=RebuildChildAdapter(
+                child, parent_lease if parent_lease is not None else self.lease, self.guard, name
+            ),
             original_intent=original_intent,
         )
         if result.status not in {"completed", "adopted", "replayed"}:
             raise NativeTestingRebuildPending("Continue the original " + name + " operation.")
         return result.response_payload
 
-    def prepare(self) -> None:
+    def prepare(self, *, settle_admission: bool = False) -> None:
         route = RESOURCES_ROUTE.format(product=self.operation.product)
         row = self.store.read_idempotency_record(
             scope=self.scope, route_path=route, idempotency_key=self.resources_key
+        )
+        original = self.store.read_original_mutation_intent(row) if row is not None else None
+        saved_profile = original.get("preparation_profile") if original else None
+        profile = (
+            LaunchplaneProductProfileRecord.model_validate(saved_profile)
+            if saved_profile is not None
+            else self.intent.profile
+            if settle_admission
+            else self.store.read_product_profile_record(self.operation.product)
         )
         request = SeparationResourcesRequest(
             context=self.operation.context,
@@ -826,8 +901,27 @@ class GenericWebTestingRebuildExecution:
             request,
             self.actor,
             self.operation.operation_id,
+            settle_admission=settle_admission,
+            preparation_profile=profile if settle_admission else None,
         )
         binding = row.reconciliation_key if row is not None else adapter.binding()[0]
+        if row is None:
+            if (
+                preparation_binding(
+                    self.store,
+                    self.operation.product,
+                    self.operation.context,
+                    self.actor,
+                    self.root,
+                    self.specification,
+                    profile_snapshot=profile,
+                )[0]
+                != binding
+            ):
+                raise NativeTestingRebuildAdmissionChanged(
+                    "Preparation inputs changed before capture."
+                )
+            original = {"preparation_profile": profile.model_dump(mode="json")}
         adapter.request = request.model_copy(
             update={"mode": "apply", "reviewed_plan_sha256": binding}
         )
@@ -837,13 +931,16 @@ class GenericWebTestingRebuildExecution:
             key=self.resources_key,
             request=adapter.request.model_dump(mode="json"),
             name="resources",
+            original_intent=original,
         )
         from control_plane.testing_separation_resources import (
             parse_preparation_receipt,
             SeparationResourcesRefusal,
         )
 
-        if isinstance(parse_preparation_receipt(result["result"]), SeparationResourcesRefusal):
+        if not settle_admission and isinstance(
+            parse_preparation_receipt(result["result"]), SeparationResourcesRefusal
+        ):
             raise NativeTestingRebuildAdmissionChanged("The original resource preparation refused.")
 
     def activate(self) -> tuple[GenericWebRebuildActivationAdapter, TestingActivationRecord]:
@@ -952,7 +1049,10 @@ class GenericWebTestingRebuildExecution:
             if isinstance(lease, ProviderEvidenceLease)
             else ""
         )
-        removal_started = original_phase in {"retire_predecessor", "remove_retired_service"}
+        removal_started = original_phase in {
+            "retire_predecessor",
+            "remove_retired_service",
+        } or original_phase.startswith("retirement_volume:")
         deploy_setting_unobserved = original_phase == "disable_old_deploys"
 
         def retain_predecessor(cause: ValueError | None = None) -> bool:
@@ -974,6 +1074,7 @@ class GenericWebTestingRebuildExecution:
                 "The earlier predecessor is outside the original unresolved set."
             )
         retained = predecessor or record
+        state = self.retirement_state(retained)
         readiness = retained.application_readiness
         old_id = retained.retained_target_id.target_id
         if (
@@ -1039,6 +1140,7 @@ class GenericWebTestingRebuildExecution:
                     target_id=old_id,
                     application=application,
                     server_id=readiness.route_execution.server_id,
+                    state=state,
                 )
                 require_disabled_predecessor_schedules(host, token, old_id)
             except TestingRebuildRefused as error:
@@ -1059,21 +1161,29 @@ class GenericWebTestingRebuildExecution:
                 )
             try:
                 self.require_retirement_quiescent(
-                    host, token, old_id, application, readiness.route_execution.server_id
+                    host,
+                    token,
+                    old_id,
+                    application,
+                    readiness.route_execution.server_id,
+                    state=state,
                 )
             except NativeTestingRebuildPending as error:
                 if predecessor is not None:
                     return retain_predecessor(error)
                 raise
             deploy_setting_unobserved = False
-            require_unmounted_retirement_application(control_plane_root=self.root, target_id=old_id)
+            if state["mode"] == "stateless":
+                require_unmounted_retirement_application(
+                    control_plane_root=self.root, target_id=old_id
+                )
             inspect_application_state(
                 host=host,
                 token=token,
                 server_id=readiness.route_execution.server_id,
                 application=application,
                 service_id=retained.predecessor.service_id,
-                mode="stateless",
+                **state,
             )
             self.guard("testing_rebuild_retire_predecessor")
             self.require_retirement_custody(retained)
@@ -1099,10 +1209,10 @@ class GenericWebTestingRebuildExecution:
             "remove_retired_service",
         }:
             try:
-                self.require_predecessor_absent(retained)
+                self.require_predecessor_service_absent(retained)
             except ValueError:
                 return retain_predecessor()
-            return True
+            return self.retire_volume(adapter, record, retained, lease)
 
         def dispatch(remove: Callable[[], None]) -> None:
             self.guard("testing_rebuild_remove_retired_service")
@@ -1126,9 +1236,75 @@ class GenericWebTestingRebuildExecution:
             application=application,
             service_id=retained.predecessor.service_id,
             dispatch_guard=dispatch,
+            volume_name=state["volume_name"],
+            mount_path=state["mount_path"],
+            volume_binding=state["volume_binding"],
         )
-        self.require_predecessor_absent(retained)
-        return True
+        self.require_predecessor_service_absent(retained)
+        return self.retire_volume(adapter, record, retained, lease)
+
+    def retire_volume(
+        self,
+        activation: ApplicationActivationAdapter,
+        successor: TestingActivationRecord,
+        predecessor: TestingActivationRecord,
+        lease: ProviderOperationLease,
+    ) -> bool:
+        from control_plane.testing_rebuild_volume_retirement import (
+            TestingRebuildVolumeRetirement,
+            VOLUME_RETIREMENT_PERMIT_SECONDS,
+        )
+
+        intent = self.retirement_intent(predecessor)
+        if not intent.retained_volumes:
+            return True
+        volume = intent.retained_volumes[0]
+        adapter = TestingRebuildVolumeRetirement(self, activation, successor, predecessor, volume)
+        route = REBUILD_ROUTE + ":volume-retirement"
+        key = self.operation.operation_id + ":volume:" + adapter.reconciliation_key()
+        row = self.store.read_idempotency_record(
+            scope=self.scope, route_path=route, idempotency_key=key
+        )
+        if row is not None:
+            original = self.store.read_original_mutation_intent(row)
+        else:
+            assert predecessor.predecessor is not None
+            host, token = source.read_dokploy_config(control_plane_root=self.root)
+            clock = inspect_application_state(
+                host=host,
+                token=token,
+                server_id=volume.server_id,
+                application=volume.application_name,
+                service_id=predecessor.predecessor.service_id,
+                mode="absent",
+                include_clock=True,
+            )
+            if clock is None:
+                raise NativeTestingRebuildPending("Fresh original host custody is unavailable.")
+            original = {
+                "volume": volume.model_dump(mode="json"),
+                "retirement": {
+                    "binding": adapter.reconciliation_key(),
+                    "fresh_until": clock.received_at + VOLUME_RETIREMENT_PERMIT_SECONDS,
+                    "boot_id": clock.boot_id,
+                    "monotonic_deadline": clock.monotonic + VOLUME_RETIREMENT_PERMIT_SECONDS,
+                },
+            }
+        result = self.run_child(
+            adapter,
+            route=route,
+            key=key,
+            request={"retirement": adapter.reconciliation_key()},
+            name="retirement_volume",
+            original_intent=original,
+            parent_lease=lease,
+        )
+        retired = result.get("retired")
+        if not isinstance(retired, bool):
+            raise NativeTestingRebuildPending("Original volume retirement is unobserved.")
+        if retired:
+            self.require_predecessor_absent(predecessor)
+        return retired
 
     def require_retirement_custody(self, record: TestingActivationRecord) -> None:
         target_id = record.retained_target_id.target_id
@@ -1153,6 +1329,21 @@ class GenericWebTestingRebuildExecution:
             raise NativeTestingRebuildPending("An unrelated predecessor writer remains protected.")
 
     def require_predecessor_absent(self, record: TestingActivationRecord) -> None:
+        from control_plane.retained_volume_sweep_execution import _host_result
+
+        self.require_predecessor_service_absent(record)
+        intent = self.retirement_intent(record)
+        for volume in intent.retained_volumes:
+            status, _ = _host_result(
+                self.root,
+                volume,
+                "dry-run",
+                "testing-rebuild-volume-absence:" + record.plan_sha256,
+            )
+            if status != "absent":
+                raise ValueError("Original predecessor volume absence is unobserved.")
+
+    def require_predecessor_service_absent(self, record: TestingActivationRecord) -> None:
         readiness = record.application_readiness
         assert readiness is not None and readiness.route is not None
         assert readiness.route_execution is not None and record.predecessor is not None
@@ -1167,7 +1358,14 @@ class GenericWebTestingRebuildExecution:
         )
 
     def require_retirement_quiescent(
-        self, host: str, token: str, target_id: str, application: str, server_id: str
+        self,
+        host: str,
+        token: str,
+        target_id: str,
+        application: str,
+        server_id: str,
+        *,
+        state: RetainedApplicationState | None = None,
     ) -> None:
         payload = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="application", target_id=target_id
@@ -1178,7 +1376,7 @@ class GenericWebTestingRebuildExecution:
             or str(payload.get("serverId") or "") != server_id
             or payload.get("autoDeploy") is not False
             or payload.get("applicationStatus") not in {"idle", "done", "error"}
-            or payload.get("mounts") != []
+            or not application_mount_matches(payload, state)
             or payload.get("previewDeployments") != []
         ):
             raise NativeTestingRebuildPending(
@@ -1354,6 +1552,13 @@ class GenericWebTestingRebuildExecution:
             if record.failure is None:
                 raise NativeTestingRebuildPending("Original candidate refusal remains unobserved.")
             return self.finalize(adapter, record)
+        resources = self.store.read_idempotency_record(
+            scope=self.scope,
+            route_path=RESOURCES_ROUTE.format(product=self.operation.product),
+            idempotency_key=self.resources_key,
+        )
+        if resources is not None and resources.state != "completed":
+            self.prepare(settle_admission=True)
         for route, key in (
             (RESOURCES_ROUTE.format(product=self.operation.product), self.resources_key),
             (ACTIVATION_ROUTE.format(product=self.operation.product), self.activation_key),
@@ -1434,9 +1639,7 @@ class GenericWebTestingRebuildExecution:
             target_name=record.namespace if ready else record.retained_target.target_name,
             artifact_id=record.image_reference,
             image_reference=record.image_reference,
-            health_url=next(
-                lane.base_url for lane in self.intent.profile.lanes if lane.instance == "testing"
-            ),
+            health_url=rebuild_address(self.intent),
             runtime_source={
                 "testing_rebuild": self.operation.operation_id,
                 "testing_activation": record.plan_sha256,

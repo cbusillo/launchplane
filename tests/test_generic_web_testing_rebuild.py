@@ -60,7 +60,11 @@ def observe_application_state_program(
         patch.object(subprocess, "run", side_effect=command),
         patch("sys.stdout", output),
     ):
-        exec(program, {})
+        try:
+            exec(program, {})
+        except SystemExit as error:
+            if error.code not in (None, 0):
+                raise
     result = json.loads(output.getvalue().removeprefix("frame:"))
     assert isinstance(result, dict)
     return result
@@ -72,6 +76,7 @@ class ApplicationAbsenceTests(unittest.TestCase):
         self.services: dict[str, Any] = {}
         self.containers: dict[str, Any] = {}
         self.tasks: dict[str, Any] = {}
+        self.volumes: dict[str, Any] = {}
         self.removed: list[str] = []
 
     def docker(self, *arguments: str) -> str:
@@ -102,6 +107,8 @@ class ApplicationAbsenceTests(unittest.TestCase):
                 return "\n".join(self.tasks)
             case ("inspect", "--type", "task", identifier):
                 return json.dumps([self.tasks[identifier]])
+            case ("volume", "inspect", identifier):
+                return json.dumps([self.volumes[identifier]])
             case ("ps", "-aq", "--no-trunc"):
                 return "\n".join(self.containers)
             case ("inspect", *identifiers):
@@ -109,8 +116,13 @@ class ApplicationAbsenceTests(unittest.TestCase):
             case _:
                 raise AssertionError(arguments)
 
-    def observe(self, mode: str = "absent") -> None:
-        payload = {"application": "original-app", "service_id": "original-service", "mode": mode}
+    def observe(self, mode: str = "absent", **state: str) -> None:
+        payload = {
+            "application": "original-app",
+            "service_id": "original-service",
+            "mode": mode,
+            **state,
+        }
 
         def command(arguments: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(arguments, 0, self.docker(*arguments[1:]), "")
@@ -123,6 +135,161 @@ class ApplicationAbsenceTests(unittest.TestCase):
             command,
         )
         self.assertEqual(frame, {"type": "complete", **payload})
+
+    def test_host_clock_requires_one_complete_finite_same_observation_frame(self) -> None:
+        def read(**kwargs: Any) -> None:
+            def command(arguments: list[str], **_options: Any) -> subprocess.CompletedProcess[str]:
+                return subprocess.CompletedProcess(arguments, 0, self.docker(*arguments[1:]), "")
+
+            kwargs["receive"](
+                observe_application_state_program(kwargs["program"], kwargs["payload"], command)
+            )
+
+        with (
+            patch.object(application_runtime, "_read_remote", side_effect=read),
+            patch.object(Path, "read_text", return_value="fixture-boot"),
+        ):
+            clock = application_runtime.inspect_application_state(
+                host="https://provider.invalid",
+                token="fixture",
+                server_id="server",
+                application="original-app",
+                service_id="original-service",
+                mode="absent",
+                include_clock=True,
+            )
+        assert clock is not None
+        self.assertEqual(clock.boot_id, "fixture-boot")
+        self.assertGreater(clock.monotonic, 0)
+        for changes in (
+            {"boot_id": ""},
+            {"monotonic": True},
+            {"monotonic": float("nan")},
+            {"monotonic": float("inf")},
+            {"monotonic": -1},
+            {"application": "foreign-app"},
+        ):
+
+            def invalid(**kwargs: Any) -> None:
+                kwargs["receive"](
+                    {
+                        "type": "complete",
+                        **kwargs["payload"],
+                        "boot_id": "fixture-boot",
+                        "monotonic": clock.monotonic,
+                        **changes,
+                    }
+                )
+
+            with (
+                self.subTest(changes=changes),
+                patch.object(application_runtime, "_read_remote", side_effect=invalid),
+                self.assertRaises(ValueError),
+            ):
+                application_runtime.inspect_application_state(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    server_id="server",
+                    application="original-app",
+                    service_id="original-service",
+                    mode="absent",
+                    include_clock=True,
+                )
+
+    def mounted_predecessor(self) -> dict[str, str]:
+        state = {"volume_name": "original-state", "mount_path": "/data", "volume_binding": "owned"}
+        self.tasks = {}
+        self.services = {
+            "original-service": {
+                "ID": "original-service",
+                "Spec": {
+                    "Name": "original-app",
+                    "TaskTemplate": {
+                        "ContainerSpec": {
+                            "Mounts": [
+                                {"Type": "volume", "Source": "original-state", "Target": "/data"}
+                            ]
+                        }
+                    },
+                },
+            }
+        }
+        self.volumes = {
+            "original-state": {
+                "Name": "original-state",
+                "Driver": "local",
+                "Options": None,
+                "Labels": {"io.launchplane.testing-resources": "owned"},
+                "Mountpoint": "/var/lib/docker/volumes/original-state/_data",
+            }
+        }
+        self.containers = {
+            "old-container": {
+                "Id": "old-container",
+                "Config": {"Labels": {"com.docker.swarm.service.id": "original-service"}},
+                "Mounts": [
+                    {
+                        "Type": "volume",
+                        "Name": "original-state",
+                        "Destination": "/data",
+                        "RW": True,
+                        "Source": self.volumes["original-state"]["Mountpoint"],
+                    }
+                ],
+            }
+        }
+        return state
+
+    def test_mounted_predecessor_retires_only_its_service_and_preserves_captured_state(
+        self,
+    ) -> None:
+        state = self.mounted_predecessor()
+        self.observe("volume", **state)
+        self.containers = {}
+        self.observe("retire", **state)
+        self.assertEqual(self.removed, ["original-service"])
+        self.assertIn("original-state", self.volumes)
+
+    def test_mounted_state_refuses_foreign_or_inconsistent_physical_custody(self) -> None:
+        for changed in (
+            "driver",
+            "options",
+            "binding",
+            "container",
+            "task",
+            "mount_driver",
+            "absent",
+        ):
+            with self.subTest(changed=changed):
+                state = self.mounted_predecessor()
+                volume = self.volumes[state["volume_name"]]
+                mount = self.services["original-service"]["Spec"]["TaskTemplate"]["ContainerSpec"][
+                    "Mounts"
+                ][0]
+                if changed == "driver":
+                    volume["Driver"] = "nfs"
+                elif changed == "options":
+                    volume["Options"] = {"device": ":/another-volume"}
+                elif changed == "binding":
+                    volume["Labels"] = {"io.launchplane.testing-resources": "foreign"}
+                elif changed == "container":
+                    self.containers["old-container"]["Mounts"][0]["Source"] = "/another-volume"
+                elif changed == "task":
+                    self.tasks = {
+                        "task": {
+                            "ID": "task",
+                            "ServiceID": "original-service",
+                            "Spec": {"ContainerSpec": {"Mounts": [{**mount, "Source": "foreign"}]}},
+                        }
+                    }
+                elif changed == "mount_driver":
+                    mount["VolumeOptions"] = {"DriverConfig": {"Name": "nfs"}}
+                else:
+                    self.services = self.containers = {}
+                    volume["Driver"] = "nfs"
+                with self.assertRaises(ValueError):
+                    self.observe("volume", **state)
+                self.assertEqual(self.removed, [])
 
     def test_retirement_program_removes_only_the_original_stateless_service(self) -> None:
         self.services = {
@@ -652,7 +819,7 @@ class GenericWebTestingRebuildHttpTests(
         self.enterContext(
             patch.object(capabilities, "fetch_application_runtime", return_value=runtime)
         )
-        self.provider_payload = {
+        self.provider_payload: dict[str, Any] = {
             "applicationId": self.target_id.target_id,
             "appName": self.target.target_name,
             "serverId": "fixture-server",
@@ -748,7 +915,7 @@ class GenericWebTestingRebuildHttpTests(
     async def test_signed_in_administrator_queues_the_real_verified_image(self) -> None:
         await self.assert_verified_queue(self.human_headers)
 
-    async def test_volume_without_activation_history_remains_pending_without_provider_reads(
+    async def test_volume_without_activation_history_admits_only_an_unmounted_predecessor(
         self,
     ) -> None:
         from tests.support.http import request
@@ -760,7 +927,7 @@ class GenericWebTestingRebuildHttpTests(
         )
         self.store.write_product_profile_record(profile)
         operations = self.store.list_odoo_stable_target_replacement_operation_records()
-        with patch.object(source, "read_dokploy_config") as provider:
+        with patch.object(api, "dokploy_request", wraps=api.dokploy_request) as provider:
             response = await request(
                 self.app,
                 "GET",
@@ -768,9 +935,19 @@ class GenericWebTestingRebuildHttpTests(
                 headers=self.human_headers,
             )
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["status"], "pending")
+        self.assertEqual(response.json()["status"], "pass")
         self.assertTrue(response.json()["restore_applicable"])
-        provider.assert_not_called()
+        self.assertTrue(
+            all(call.kwargs.get("method", "GET") == "GET" for call in provider.call_args_list)
+        )
+        self.provider_payload["mounts"] = [{"type": "volume", "volumeName": "unowned-state"}]
+        refused = await request(
+            self.app,
+            "GET",
+            f"/v1/products/{profile.product}/testing-rebuild/inputs",
+            headers=self.human_headers,
+        )
+        self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(
             self.store.list_odoo_stable_target_replacement_operation_records(), operations
         )
@@ -816,7 +993,7 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
         self.flow.no_original = not self.with_unresolved_predecessor
         self.flow.setUp()
         self.addCleanup(self.flow.doCleanups)
-        self.routing = self.flow.addressed()
+        self.routing = self.configure_route()
         document = json.loads((self.routing.root / "old-app.yml").read_text())
         document["http"]["routers"]["old-app-router-fixture"]["middlewares"] = ["redirect-to-https"]
         document["http"].pop("middlewares")
@@ -836,25 +1013,7 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
         )
         self.reload_routes()
         self.store = self.flow.store
-        self.flow.payloads[self.flow.old_id]["mounts"] = []
-        for service in self.flow.services.values():
-            service["Spec"]["TaskTemplate"]["ContainerSpec"]["Mounts"] = []
-        for task in self.flow.tasks.values():
-            task["Spec"]["ContainerSpec"]["Mounts"] = []
-        for container in self.flow.containers.values():
-            labels = container.get("Config", {}).get("Labels") or {}
-            if labels.get("com.docker.swarm.service.name") == "old-app":
-                container["Mounts"] = []
-        for binding in self.store.list_secret_bindings(
-            integration="runtime_environment", context_name=self.flow.context
-        ):
-            if binding.instance == "testing":
-                self.store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
-        profile = self.store.read_product_profile_record(self.flow.product)
-        profile.expected_config.managed_secret_bindings = ()
-        lane = next(item for item in profile.lanes if item.instance == "testing")
-        lane.generic_web_testing_state = ProductGenericWebTestingState(kind="none")
-        self.store.write_product_profile_record(profile)
+        self.configure_serving_application()
         target = self.store.read_dokploy_target_record(
             context_name=self.flow.context, instance_name="testing"
         )
@@ -943,6 +1102,8 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
                         )
                     case ["inspect", "--type", "task", identifier]:
                         value = json.dumps([self.flow.tasks[identifier]])
+                    case ["volume", "inspect", identifier]:
+                        value = json.dumps([self.flow.storage.volumes[identifier]])
                     case ["ps", "-aq", "--no-trunc"]:
                         value = "\n".join(self.flow.containers)
                     case ["inspect", *identifiers]:
@@ -983,6 +1144,30 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
                 side_effect=storage,
             )
         )
+
+    def configure_route(self) -> Any:
+        return self.flow.addressed()
+
+    def configure_serving_application(self) -> None:
+        self.flow.payloads[self.flow.old_id]["mounts"] = []
+        for service in self.flow.services.values():
+            service["Spec"]["TaskTemplate"]["ContainerSpec"]["Mounts"] = []
+        for task in self.flow.tasks.values():
+            task["Spec"]["ContainerSpec"]["Mounts"] = []
+        for container in self.flow.containers.values():
+            labels = container.get("Config", {}).get("Labels") or {}
+            if labels.get("com.docker.swarm.service.name") == "old-app":
+                container["Mounts"] = []
+        for binding in self.store.list_secret_bindings(
+            integration="runtime_environment", context_name=self.flow.context
+        ):
+            if binding.instance == "testing":
+                self.store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
+        profile = self.store.read_product_profile_record(self.flow.product)
+        profile.expected_config.managed_secret_bindings = ()
+        lane = next(item for item in profile.lanes if item.instance == "testing")
+        lane.generic_web_testing_state = ProductGenericWebTestingState(kind="none")
+        self.store.write_product_profile_record(profile)
 
     def reload_routes(self) -> None:
         from copy import deepcopy

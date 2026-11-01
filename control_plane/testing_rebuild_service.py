@@ -22,6 +22,8 @@ from control_plane.durable_operation_authorization import (
     launchplane_identity_from_durable_caller,
 )
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.testing_activation import TestingActivationRecord
+from control_plane.contracts.retained_volume import RetainedVolumeBinding
 from control_plane.service_auth import launchplane_identity_actor
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -316,6 +318,16 @@ class GenericWebTestingRebuildIntent(FrozenRecord):
     application: TestingApplicationSpecification | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    retained_application: TestingActivationRecord | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    retained_volumes: tuple[RetainedVolumeBinding, ...] = Field(
+        default=(), max_length=1, exclude_if=lambda value: not value
+    )
+    testing_address: str = Field(default="", exclude_if=lambda value: not value)
+    private_ingress: dict[str, str] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
 
 
 def capture_rebuild_intent(
@@ -361,13 +373,11 @@ def capture_rebuild_intent(
             operation_id=operation.operation_id, profile=profile, before=before, state=driver.state
         )
         if target_type == "application":
-            from control_plane.generic_web_testing_rebuild import (
-                capture_rebuild_application_specification,
+            from control_plane.testing_rebuild_application_state import (
+                capture_rebuild_application_intent,
             )
 
-            return intent.model_copy(
-                update={"application": capture_rebuild_application_specification(store, intent)}
-            )
+            return capture_rebuild_application_intent(root, store, intent)
         return intent
     if (before.target.context, before.target.instance, before.target.target_type) != (
         operation.context,

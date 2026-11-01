@@ -54,8 +54,15 @@ class TestingRebuildDriver:
         return self.profile.driver_id == "odoo" or (
             self.profile.driver_id == "generic-web"
             and self.state is not None
-            and self.state.kind == "none"
-            and bool(self.lane.base_url)
+            and (
+                bool(self.lane.base_url)
+                or self.profile.public_website == "none"
+                and self.lane.health_monitoring.monitoring_intent == "private"
+                and any(
+                    check.enabled and check.kind == "private_http"
+                    for check in self.lane.health_monitoring.checks
+                )
+            )
         )
 
     def require_execution(self) -> None:

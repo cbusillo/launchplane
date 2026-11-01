@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from dataclasses import replace
@@ -6,13 +7,93 @@ from unittest.mock import patch
 
 from control_plane.contracts.product_profile_record import ProductGenericWebTestingState
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.dokploy import api
+from control_plane.dokploy import api, post_deploy
 from control_plane import testing_application_activation as activation
 from control_plane.testing_rebuild_service import NativeTestingRebuildPending
 from control_plane.testing_rebuild_driver import TestingRebuildRefused
 from control_plane.testing_separation_resources import SeparationResourcesAdapter
+from control_plane import testing_separation_resources as resources_module
+from control_plane.testing_application_capabilities import RETAINED_CAPABILITY_PROGRAM_NAME
 from control_plane.service_auth import BearerIdentityConfig
 from tests import test_generic_web_testing_rebuild as flows
+
+
+def capture_preparation_program(fixture: Any) -> dict[str, str]:
+    markers: dict[str, str] = {}
+    run = fixture.flow.host_schedule
+
+    def program(**kwargs: Any) -> dict[str, str]:
+        result: dict[str, str] = run(**kwargs)
+        identifier = "captured-capability"
+        fixture.flow.schedules[identifier] = {
+            **kwargs["schedule_payload"],
+            "scheduleId": identifier,
+        }
+        fixture.flow.schedule_history[identifier] = [
+            {
+                "scheduleId": identifier,
+                "deploymentId": "captured-execution",
+                "status": "done",
+                "startedAt": fixture.flow.old.now(-1),
+                "finishedAt": fixture.flow.old.now(),
+            }
+        ]
+        markers.update(result, log_available="true")
+        return result
+
+    fixture.enterContext(patch.object(post_deploy, "run_manual_data_schedule", side_effect=program))
+    fixture.enterContext(
+        patch.object(
+            post_deploy,
+            "_read_odoo_post_deploy_log_markers",
+            side_effect=lambda **_kwargs: dict(markers),
+        )
+    )
+
+    return markers
+
+
+def interrupt_original_preparation(fixture: Any, change: Any) -> dict[str, str]:
+    markers = capture_preparation_program(fixture)
+    changed = False
+
+    def at_storage(phase: str) -> None:
+        nonlocal changed
+        if phase == "resources:fresh-storage" and not changed:
+            changed = True
+            change()
+
+    fixture.authorize.side_effect = at_storage
+    with fixture.assertRaises(NativeTestingRebuildPending):
+        fixture.execute(1)
+    fixture.assertTrue(changed)
+    return markers
+
+
+def assert_original_preparation_refusal(fixture: Any, change: Any) -> None:
+    target_id = fixture.store.read_dokploy_target_id_record(
+        context_name=fixture.flow.context, instance_name="testing"
+    ).target_id
+    projects = deepcopy(fixture.flow.projects)
+    interrupt_original_preparation(fixture, change)
+    profile = fixture.store.read_product_profile_record(fixture.flow.product)
+    before = dict(fixture.flow.storage.volumes)
+    with patch.object(
+        fixture.store,
+        "_database_mutation_timestamp",
+        return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+    ):
+        result = fixture.execute(1)
+    fixture.assertEqual(result.deploy_status, "fail")
+    fixture.assertEqual(fixture.store.read_product_profile_record(fixture.flow.product), profile)
+    fixture.assertEqual(result.target_id, target_id)
+    fixture.assertEqual(fixture.flow.storage.volumes, before)
+    fixture.assertEqual(fixture.flow.projects, projects)
+    fixture.assertIsNone(
+        fixture.store.read_dokploy_target_record(
+            context_name=fixture.flow.context, instance_name="testing"
+        ).policies.staff_testing_hold
+    )
 
 
 class GenericWebTestingRebuildRecoveryTests(flows.GenericWebTestingRebuildFlowFixture):
@@ -32,6 +113,84 @@ class GenericWebTestingRebuildRecoveryTests(flows.GenericWebTestingRebuildFlowFi
         else:
             profile.display_name = "An updated product name"
         self.store.write_product_profile_record(profile)
+
+    def test_original_capability_settles_refusal_after_desired_state_changes(self) -> None:
+        path = self.flow.old_backing / "keep"
+        before = path.read_text()
+        assert_original_preparation_refusal(self, lambda: self.change_profile(state=True))
+        self.assertEqual(path.read_text(), before)
+
+    def test_unproven_original_capability_keeps_the_original_key_and_hold(self) -> None:
+        for fault in ("active", "ambiguous", "unreadable"):
+            with self.subTest(fault=fault):
+                case = GenericWebTestingRebuildRecoveryTests()
+                case.setUp()
+                try:
+                    markers = interrupt_original_preparation(
+                        case, lambda: case.change_profile(state=True)
+                    )
+                    program = next(
+                        row
+                        for row in case.flow.schedules.values()
+                        if row["name"] == RETAINED_CAPABILITY_PROGRAM_NAME
+                    )
+                    history = case.flow.schedule_history[program["scheduleId"]][0]
+                    if fault == "active":
+                        history["status"] = "running"
+                    elif fault == "ambiguous":
+                        case.flow.schedules["duplicate"] = {**program, "scheduleId": "duplicate"}
+                    else:
+                        markers["log_available"] = "false"
+                    with patch.object(
+                        case.store,
+                        "_database_mutation_timestamp",
+                        return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+                    ):
+                        with case.assertRaises(NativeTestingRebuildPending):
+                            case.execute(1)
+                        case.assertIsNotNone(case.hold())
+                        case.assertEqual(case.flow.projects, [])
+                        case.assertEqual(case.flow.storage.volumes, {})
+                        history["status"] = "done"
+                        case.flow.schedules.pop("duplicate", None)
+                        markers["log_available"] = "true"
+                        result = case.execute(1)
+                    case.assertEqual(result.deploy_status, "fail")
+                    case.assertIsNone(case.hold())
+                finally:
+                    case.doCleanups()
+
+    def test_original_completed_storage_is_read_back_after_state_changes_without_allocation(
+        self,
+    ) -> None:
+        run = resources_module.run_preparation_schedule
+        calls: list[str] = []
+
+        def storage(**kwargs: Any) -> Any:
+            mode = kwargs.get("mode", "prepare")
+            calls.append(mode)
+            result = run(**kwargs)
+            if mode == "prepare":
+                self.change_profile(state=True)
+                raise OSError("Lost completed preparation response")
+            return result
+
+        with patch.object(resources_module, "run_preparation_schedule", side_effect=storage):
+            with self.assertRaises(NativeTestingRebuildPending):
+                self.execute(1)
+            profile = self.store.read_product_profile_record(self.flow.product)
+            with patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+            ):
+                result = self.execute(1)
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertIsNone(self.hold())
+        self.assertEqual(self.store.read_product_profile_record(self.flow.product), profile)
+        self.assertEqual(calls.count("prepare"), 1)
+        self.assertIn("readback", calls)
+        self.assertEqual(self.flow.projects, [])
 
     def test_changed_preparation_binding_finishes_failed_without_stranding_hold(self) -> None:
         def changed(phase: str) -> None:

@@ -37,6 +37,15 @@ def match_application_volume_mount(
     return mount
 
 
+def application_volume_mount_matches(
+    payload: JsonObject, *, application_id: str, volume_name: str, mount_path: str
+) -> bool:
+    mount = match_application_volume_mount(
+        payload, application_id=application_id, volume_name=volume_name, mount_path=mount_path
+    )
+    return mount is not None and mount.get("serviceType") == "application"
+
+
 def _require_empty_environment(payload: JsonObject) -> None:
     value = payload.get("env")
     if "env" not in payload or (

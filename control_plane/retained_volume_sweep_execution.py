@@ -146,6 +146,28 @@ def _inventory_clear(
         for environment in environments:
             if not isinstance(environment, dict):
                 return False
+            if exact and "env" not in environment:
+                environment_id, project_id = (
+                    environment.get("environmentId"),
+                    project.get("projectId"),
+                )
+                if not isinstance(environment_id, str) or not isinstance(project_id, str):
+                    return False
+                detail = api.as_json_object(
+                    api.dokploy_request(
+                        host=host,
+                        token=token,
+                        path="/api/environment.one",
+                        query={"environmentId": environment_id},
+                    )
+                )
+                if (
+                    detail is None
+                    or detail.get("environmentId") != environment_id
+                    or detail.get("projectId") != project_id
+                ):
+                    return False
+                environment = {**environment, "env": detail.get("env")}
             if exact and (
                 not isinstance(environment.get("env"), str)
                 or _environment_referenced(binding.volume_name, environment)

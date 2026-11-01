@@ -159,12 +159,14 @@ def inspect_testing_rebuild(
             "The retained testing inputs could not be verified.",
         ) from error
     if isinstance(intent, GenericWebTestingRebuildIntent):
+        from control_plane.testing_rebuild_application_state import rebuild_address
+
         return TestingRebuildPreflight(
             status="pass" if generic_execution else "pending",
             message="" if generic_execution else TESTING_REBUILD_EXECUTION_UNAVAILABLE,
             product=apply.product,
             context=lane.context,
-            base_url=lane.base_url,
+            base_url=rebuild_address(intent),
             artifact_id=apply.artifact_id,
             source_git_ref=apply.source_git_ref,
             data_source_mode="empty",
