@@ -1819,6 +1819,14 @@ def _execute_refresh(
         environment_values = _preview_refresh_environment_values(
             request=request, restore_upstream=restore_upstream
         )
+        try:
+            preview_workers = int(
+                environment_values.get("ODOO_WORKERS") or dokploy_compose.ODOO_DEFAULT_WORKERS
+            )
+        except ValueError:
+            raise click.ClickException("Preview Odoo workers must be an integer.") from None
+        if preview_workers < 0:
+            raise click.ClickException("Preview Odoo workers cannot be negative.")
         if restore_upstream or restore_clean_snapshot or preserve_existing_data:
             environment_values["ODOO_MAX_CRON_THREADS"] = "0"
             environment_values["ENV_OVERRIDE_DISABLE_CRON"] = "true"
@@ -1916,6 +1924,7 @@ def _execute_refresh(
             domain_certificate_type=plan.domain_certificate_type,
             preview_filestore=filestore,
             preview_identity=expected_runtime_identity if not restore_upstream else None,
+            preview_workers=preview_workers,
         )
 
         def qualify_resources() -> None:
