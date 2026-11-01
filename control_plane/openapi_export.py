@@ -192,6 +192,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/work-graph/merge-train/policy-targets": "read_merge_train_policy_targets",
     "/v1/work-graph/tenant-admission/evaluation": "read_tenant_admission_evaluation",
     "/v1/governance/projection": "read_governance_projection",
+    "/v1/admin/credential-inventory": "read_credential_inventory",
     "/v1/product-review": "read_product_review",
     "/v1/owner-secret-inputs": "read_owner_secret_inputs",
     "/v1/release-review": "read_release_review",

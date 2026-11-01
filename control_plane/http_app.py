@@ -1337,6 +1337,7 @@ _AUTHZ_NONPERSISTING_SENSITIVE_READ_ROUTES = frozenset(
 )
 _AUTHZ_NO_STORE_ROUTES = frozenset(
     {
+        "/v1/admin/credential-inventory",
         _AUTHZ_POLICY_OPERATION_ACTIVATION_DRY_RUN_ROUTE,
         _AUTHZ_POLICY_OPERATION_ACTIVATION_APPLY_ROUTE,
         _AUTHZ_POLICY_RECOVERY_CANDIDATE_DRY_RUN_ROUTE,
@@ -30272,6 +30273,13 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,
+    )
+    from control_plane.http_routes.credential_inventory import register_credential_inventory_routes
+
+    register_credential_inventory_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_monitoring_mutation_identity,
     )
     register_service_runtime_settings_routes(
         app,

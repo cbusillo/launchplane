@@ -9376,6 +9376,35 @@ class PostgresRecordStore(HumanSessionStore):
                 return None
             return self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
 
+    def read_latest_credential_inventory(
+        self, *, successful: bool = False
+    ) -> LaunchplaneIdempotencyRecord | None:
+        from control_plane.credential_inventory import INVENTORY_ROUTE, INVENTORY_SCOPE
+
+        filters = [
+            LaunchplaneIdempotencyRow.scope == INVENTORY_SCOPE,
+            LaunchplaneIdempotencyRow.route_path == INVENTORY_ROUTE,
+            LaunchplaneIdempotencyRow.state == "completed",
+        ]
+        if successful:
+            filters.append(
+                LaunchplaneIdempotencyRow.payload["response_payload"]["status"].as_string()
+                == "collected"
+            )
+        records = self._list_models(
+            model_type=LaunchplaneIdempotencyRecord,
+            orm_model=LaunchplaneIdempotencyRow,
+            filters=tuple(filters),
+            order_by=(
+                LaunchplaneIdempotencyRow.payload["response_payload"]["attempted_at"]
+                .as_string()
+                .desc(),
+                LaunchplaneIdempotencyRow.record_id.desc(),
+            ),
+            limit=1,
+        )
+        return records[0] if records else None
+
     def list_lane_service_restart_reservations(
         self, *, product: str, limit: int = 50
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:

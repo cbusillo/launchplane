@@ -22,6 +22,7 @@ export type EnvironmentView =
   | "diagnostics";
 
 export type EngineeringView =
+  | "credentials"
   | "hub"
   | "request-attention"
   | "merge-train"
@@ -67,6 +68,7 @@ export function ownerReviewPath(): string {
 }
 
 export function engineeringViewLabel(view: EngineeringView): string {
+  if (view === "credentials") return "Credentials";
   if (view === "request-attention") return "Waiting requests";
   if (view === "runtime-setting-removal") return "Remove stored settings";
   if (view === "preview-lifecycle") return "Preview cleanup";
@@ -121,6 +123,7 @@ export function parseAppRoute(pathname: string): AppRoute {
         "preview-lifecycle",
         "privileged-operations",
         "runtime-setting-removal",
+        "credentials",
       ].includes(view)
     ) {
       return { kind: "engineering", view };

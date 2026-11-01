@@ -59,6 +59,7 @@
     "records": "docs/records.md",
     "hostProgramsPackage": "docs/host-program-package.md",
     "secrets": "docs/secrets.md",
+    "credentialInventory": "docs/credential-inventory.md",
     "testingLocalConsumer": "docs/testing-local-consumer.md",
     "testingLocalCredentials": "docs/testing-local-credentials.md",
     "privateTestingTransport": "docs/private-testing-transport.md",

@@ -144,6 +144,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [clean-testing-snapshots.md](clean-testing-snapshots.md) — independent sanitized testing snapshots, preview copies and transition prerequisites.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
+- [credential-inventory.md](credential-inventory.md) — administrator metadata-only
+  inventory, source coverage, freshness and recurring drift reports.
 - [testing-local-credentials.md](testing-local-credentials.md) — Bounded external-provider
   observations, service-generated testing passwords, creation/rebuild integration
   and names-only overlap audit.

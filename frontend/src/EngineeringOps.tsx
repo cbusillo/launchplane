@@ -1,4 +1,5 @@
 import { EngineeringRuntimeSettingRemovalRoute } from "./EngineeringRuntimeSettingRemovalRoute";
+import { CredentialsRoute } from "./CredentialsRoute";
 import { RequestAttentionRoute } from "./RequestAttentionRoute";
 import {
   ArrowRight,
@@ -23,6 +24,8 @@ import {
 import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
+  { detail: "Read credential names, source coverage, collection freshness and drift.",
+    icon: KeyRound, label: "Director controls", title: "Credentials", view: "credentials" as const },
   { detail: "Read waiting requests and their next actions. Unowned requests go to the Supervisor.",
     icon: Wrench, label: "Read only", title: "Waiting requests", view: "request-attention" as const },
   { detail: "Review exact stored plain-setting removals and approve them as the signed-in administrator.",
@@ -77,15 +80,18 @@ const ENGINEERING_SURFACES = [
 
 export function EngineeringOpsRoute({
   admin,
+  administrator,
   fixtureMode,
   view,
   actorId,
 }: {
   admin: boolean;
+  administrator: boolean;
   fixtureMode: DevFixtureMode;
   view: EngineeringView;
   actorId: number;
 }) {
+  if (view === "credentials") return <CredentialsRoute key={actorId} admin={administrator} />;
   if (view === "request-attention") return <RequestAttentionRoute key={actorId} />;
   if (view === "runtime-setting-removal") return <EngineeringRuntimeSettingRemovalRoute admin={admin} actorId={actorId} />;
   if (view === "preview-lifecycle") {
@@ -106,10 +112,10 @@ export function EngineeringOpsRoute({
   if (view === "privileged-operations") {
     return <EngineeringPrivilegedOperationsRoute admin={admin} fixtureMode={fixtureMode} />;
   }
-  return <EngineeringOpsHub />;
+  return <EngineeringOpsHub administrator={administrator} />;
 }
 
-function EngineeringOpsHub() {
+function EngineeringOpsHub({ administrator }: { administrator: boolean }) {
   return (
     <EngineeringRouteFrame
       description="Platform delivery evidence is separated from product health so admins can investigate queues, automation, and repository control without obscuring live products."
@@ -126,7 +132,7 @@ function EngineeringOpsHub() {
         </p>
       </div>
       <div className="engineering-hub-grid">
-        {ENGINEERING_SURFACES.map(({ detail, icon: Icon, label, title, view }) => (
+        {ENGINEERING_SURFACES.filter(surface => surface.view !== "credentials" || administrator).map(({ detail, icon: Icon, label, title, view }) => (
           <AppLink
             className="engineering-hub-card"
             key={view}
