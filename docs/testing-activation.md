@@ -747,8 +747,8 @@ keeps serving until the candidate passes readiness and health at the unchanged
 address. Candidate failure retains the old copy. Retirement first disables the
 old application's automatic deploys and verifies its placement, empty mounts,
 absence of other lane references or provider previews, terminal deployments and
-quiescent jobs and schedules. An active or unobserved old job keeps the same
-operation pending. Existing unresolved Launchplane reservations remain fenced;
+quiescent jobs and schedules. An active or unobserved old job prevents retirement.
+Existing unresolved Launchplane reservations remain fenced;
 they are not cleared or adopted as successful deployments.
 
 The owned route carries its HTTPS redirect, so deleting the predecessor cannot
@@ -760,8 +760,8 @@ route file. Foreign or changed routers still refuse.
 Provider metadata deletion is followed by physical service/container absence
 verification. If provider cleanup leaves the original stateless service behind,
 the same operation can remove only its captured service ID through the guarded
-host program, after observing metadata absence. It never removes volumes. Final
-health and absence checks precede clearing this operation's staging hold. A lost
+host program, after observing metadata absence. It never removes volumes. Completed
+retirement requires final health and absence checks. A lost
 reply resumes the original receipts; a later staff hold or deployment is retained.
 The host program waits for Docker's asynchronous container teardown within a
 bounded interval. Metadata already deleted outside this operation permits only
@@ -769,9 +769,18 @@ read-only absence verification; it does not authorize removal of a surviving ser
 Interruption after deletion can finish with a failed candidate health result
 instead of stranding the hold. A verified candidate failure before retirement
 retains the predecessor and clears this hold so an ordinary deployment can repair
-testing. Its result identifies the predecessor chain. The next successful rebuild
-checks and retires still-present predecessors from that exact completed activation
-chain, with a separate durable delete checkpoint for each predecessor. The same
+testing. A later static refusal or external deletion without verified absence
+reports the original predecessor as not retired, without granting removal authority.
+The current candidate's health is reported separately. Once its current provider
+and route custody are verified, a known retirement refusal clears only this
+operation's hold so normal testing work can continue. Unknown own provider effects
+stay pending.
+
+The next successful rebuild checks still-retained predecessors from its own exact
+completed rebuild chain, with a separate durable child and delete checkpoint for
+each predecessor. It stops at an earlier finalization that already proved its
+chain absent, and does not adopt ordinary activation history. Static prerequisites
+for still-present ancestors are checked before the new hold. The same
 identity, empty-state, quiescence, health and absence requirements apply.
 Unverified health keeps the original operation pending.
 

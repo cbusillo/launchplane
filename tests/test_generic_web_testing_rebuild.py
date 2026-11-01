@@ -823,6 +823,13 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
             identifier = kwargs["application_id"]
             self.assertIn(identifier, {self.expected_retirement, *self.retained_predecessors})
             payload = self.flow.payloads.pop(identifier)
+            for project in self.flow.projects:
+                for environment in project["environments"]:
+                    environment["applications"] = [
+                        row
+                        for row in environment["applications"]
+                        if row["applicationId"] != identifier
+                    ]
             (self.routing.root / (payload["appName"] + ".yml")).unlink(missing_ok=True)
             self.reload_routes()
             if not self.keep_predecessor_service:
@@ -1009,16 +1016,15 @@ class GenericWebTestingRebuildFlowFixture(unittest.TestCase):
             authorize=self.authorize,
             lease_owner="generic-worker",
         )
+        passed = result.deploy_status == result.health_status == result.post_deploy_status == "pass"
         self.store.write_odoo_stable_target_replacement_operation_record(
             operation.model_copy(
                 update={
-                    "status": "pass"
-                    if result.deploy_status == result.health_status == "pass"
-                    else "fail",
-                    "phase": "completed"
-                    if result.deploy_status == result.health_status == "pass"
-                    else "failed",
+                    "status": "pass" if passed else "fail",
+                    "phase": "completed" if passed else "failed",
                     "result": result,
+                    "error_message": "" if passed else result.error_message,
+                    "error_code": "" if passed else result.error_code,
                     "finished_at": datetime.now(UTC).isoformat(),
                 }
             )
@@ -1130,7 +1136,7 @@ class GenericWebTestingRebuildFlowTests(GenericWebTestingRebuildFlowFixture):
         self.assertNotEqual(result.target_id, self.flow.old_id)
         self.assertIn(self.flow.old_id, self.flow.payloads)
         self.assertEqual(self.deleted, [])
-        self.assertIn(self.flow.old_id, result.error_message)
+        self.assertEqual(result.runtime_source["retained_predecessors"], self.flow.old_id)
         self.assertEqual(self.flow.normal("repair-unhealthy-candidate").status, "completed")
         self.retained_predecessors.add(self.flow.old_id)
         repaired = self.execute(2)

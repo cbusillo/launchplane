@@ -193,16 +193,76 @@ class GenericWebTestingRebuildRecoveryTests(flows.GenericWebTestingRebuildFlowFi
         self.assertIsNone(self.hold())
         self.assertEqual(self.flow.projects, [])
 
-    def test_external_metadata_delete_without_physical_absence_keeps_original_fenced(self) -> None:
+    def test_external_metadata_delete_with_surviving_runtime_reports_unverified_retirement(
+        self,
+    ) -> None:
         def changed(phase: str) -> None:
             if phase == "testing_rebuild_finalization":
                 self.flow.payloads.pop(self.flow.old_id, None)
 
         self.authorize.side_effect = changed
-        with self.assertRaises(NativeTestingRebuildPending):
-            self.execute(1)
-        self.assertIsNotNone(self.hold())
+        result = self.execute(1)
+        self.assertEqual(result.health_status, "pass")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertIn(self.flow.old_id, result.runtime_source["retained_predecessors"])
+        self.assertIsNone(self.hold())
         self.assertIn("old-app", self.flow.services)
+        self.assertEqual(self.deleted, [])
+        self.assertEqual(self.flow.normal("after-external-retirement-leftover").status, "completed")
+
+    def test_static_change_cannot_settle_an_unknown_original_delete_as_a_leftover(self) -> None:
+        with patch.object(
+            api, "delete_dokploy_application", side_effect=OSError("Unanswered delete")
+        ):
+            with self.assertRaises(NativeTestingRebuildPending):
+                self.execute(1)
+        self.flow.payloads[self.flow.old_id]["previewDeployments"] = [{"id": "preview"}]
+        with patch.object(
+            self.store,
+            "_database_mutation_timestamp",
+            return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+        ):
+            with self.assertRaises(NativeTestingRebuildPending):
+                self.execute(1)
+            self.assertIsNotNone(self.hold())
+            self.assertEqual(self.deleted, [])
+            self.flow.payloads[self.flow.old_id]["previewDeployments"] = []
+            self.assertEqual(self.execute(1).post_deploy_status, "pass")
+        self.assertIsNone(self.hold())
+        self.assertEqual(self.deleted, [self.flow.old_id])
+
+    def test_static_change_waits_for_original_deploy_disable_before_reporting_a_leftover(
+        self,
+    ) -> None:
+        request = api.dokploy_request
+
+        def unanswered(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/application.update" and kwargs.get("payload") == {
+                "applicationId": self.flow.old_id,
+                "autoDeploy": False,
+            }:
+                raise OSError("Unanswered automatic deployment edit")
+            return request(**kwargs)
+
+        with patch.object(api, "dokploy_request", side_effect=unanswered):
+            with self.assertRaises(NativeTestingRebuildPending):
+                self.execute(1)
+        self.flow.payloads[self.flow.old_id]["previewDeployments"] = [{"id": "preview"}]
+        with patch.object(
+            self.store,
+            "_database_mutation_timestamp",
+            return_value=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+        ):
+            with self.assertRaises(NativeTestingRebuildPending):
+                self.execute(1)
+            self.assertIsNotNone(self.hold())
+            self.assertTrue(self.flow.payloads[self.flow.old_id]["autoDeploy"])
+            self.flow.payloads[self.flow.old_id]["autoDeploy"] = False
+            result = self.execute(1)
+        self.assertEqual(result.health_status, "pass")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertEqual(result.runtime_source["retained_predecessors"], self.flow.old_id)
+        self.assertIsNone(self.hold())
         self.assertEqual(self.deleted, [])
 
     def test_changed_contract_after_private_creation_uses_existing_candidate_refusal(self) -> None:
