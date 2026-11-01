@@ -25,7 +25,7 @@ from control_plane.testing_activation_compose import (
 
 
 SOURCE_FILE_BYTES = 64 * 1024
-SOURCE_TOTAL_BYTES = 512 * 1024
+SOURCE_TOTAL_BYTES = SOURCE_FILE_BYTES
 SOURCE_FILE_COUNT = 16
 SOURCE_ENV_BYTES = 1024 * 1024
 
@@ -45,8 +45,6 @@ class CachedComposeSource:
 
 
 def standard_compose_environment(payload: dict[str, Any]) -> bool:
-    import posixpath
-
     if (
         payload.get("composeType") != "docker-compose"
         or payload.get("createEnvFile") is not True
@@ -351,6 +349,8 @@ def _empty_project_documents(
 def _default_volume_inputs(document: dict[str, Any], raw_env: str) -> set[str]:
     keys: set[str] = set()
     for definition in document.get("volumes", {}).values():
+        if not isinstance(definition, dict | type(None)):
+            raise ValueError("Cached volume definition is unavailable.")
         name = (definition or {}).get("name")
         if not isinstance(name, str) or "$" not in name:
             continue
@@ -393,7 +393,11 @@ def _included_documents(
     request = {"app_name": payload["appName"], "files": paths}
     arguments = {"host": host, "token": token, "server_id": payload["serverId"]}
     observed = read_cached_compose_source(**arguments, request=request)
-    if observed.project_absent or observed.files[root].document.get("include") != includes:
+    if (
+        observed.project_absent
+        or not observed.files[root].document.keys() <= {"name", "include", "networks"}
+        or observed.files[root].document.get("include") != includes
+    ):
         raise ValueError("The cached source differs from the converted include.")
     from control_plane.production_recipient import readable_provider_compose
 

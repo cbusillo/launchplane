@@ -178,6 +178,9 @@ class CachedComposeInventoryTests(unittest.TestCase):
     def test_incomplete_cached_include_scopes_remain_held(self) -> None:
         child = deepcopy(self.child_document)
         for change in (
+            {"volumes": {"data": True}},
+            {"volumes": {"data": "invalid"}},
+            {"volumes": {"data": ["invalid"]}},
             {"include": ["another.yml"]},
             {"services": {"web": {"extends": {"file": "another.yml", "service": "web"}}}},
             {"services": {"web": {"env_file": "another.env"}}},
@@ -188,6 +191,15 @@ class CachedComposeInventoryTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.documents()
         self.child_document = child
+        self.write_sources()
+        for change in (
+            {"services": {"web": {"volumes": ["retained:/data"]}}},
+            {"volumes": {"retained": {"name": "retained-state"}}},
+            {"include": ["another.yml"]},
+        ):
+            self.root.write_text(json.dumps({**self.wrapper, **change}))
+            with self.subTest(cached_root=change), self.assertRaises(ValueError):
+                self.documents()
         self.write_sources()
         for changes in (
             {"serverId": "other-server"},
