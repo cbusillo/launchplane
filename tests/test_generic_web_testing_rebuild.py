@@ -32,9 +32,11 @@ from control_plane.contracts.product_profile_record import (
     ProductGenericWebTestingState,
 )
 from control_plane.contracts.testing_application import TestingApplicationState
+from control_plane.contracts.testing_activation import TestingActivationRequest
 from control_plane.contracts.testing_publication import TestingServingSnapshot
 from control_plane.durable_operation_authorization import durable_operation_caller_identity
 from control_plane.launchplane_reconcile_authorization import TESTING_TARGET_REPLACEMENT_ACTION
+from control_plane.integration_allowances import target_record_sha256
 from control_plane.provider_operations import ProviderOperationLease
 from control_plane.service_auth import LocalOperatorIdentity
 from control_plane.storage.postgres import PostgresRecordStore
@@ -379,6 +381,27 @@ class GenericWebTestingRebuildFixture(unittest.TestCase):
 
 
 class GenericWebTestingRebuildTests(GenericWebTestingRebuildFixture):
+    def test_external_comparison_rechecks_original_authority_before_reading_profiles(self) -> None:
+        request = TestingActivationRequest(
+            context=self.context,
+            preparation_key=self.execution.resources_key,
+            interlock_record_sha256=target_record_sha256(self.target),
+            source_commit=self.operation.request.source_git_ref,
+            volume_keys={},
+            port_keys=(),
+            reason=self.operation.request.reason,
+            application=self.execution.specification,
+        )
+        adapter = self.execution.application_adapter(request)
+        authorize = adapter.authorize_external
+        assert authorize is not None
+        self.assertEqual(authorize(), self.store.list_product_profile_records())
+        self.authorize.side_effect = PermissionError("Original caller authority was removed")
+        with patch.object(self.store, "list_product_profile_records") as read:
+            with self.assertRaises(PermissionError):
+                authorize()
+            read.assert_not_called()
+
     def test_interlock_is_owned_by_the_original_operation_and_is_idempotent(self) -> None:
         self.execution.interlock(hold=True)
         held = self.current_target()
