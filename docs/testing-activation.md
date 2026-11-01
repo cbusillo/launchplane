@@ -574,14 +574,11 @@ unclassified credentials and unqualified external `*_HOST`/`*_URL` environment
 endpoints refuse it. Application code remains responsible for the behavior of
 its declared read-only source integration.
 
-Shared Compose qualification supports flat braced interpolation; nested and
-variable-bearing defaults remain unqualified. Predecessor volume inventory also
-resolves flat default/required forms from Dokploy's standard generated Compose
-environment when every referenced service input is present, nonempty, unique and
-qualified for literal delivery. A default never replaces missing input evidence.
-Custom commands, stack/randomized deployments and unknown inputs stay held for
-every interpolated name, including sole-variable expressions. The production recipient's reviewed volume-key path keeps its
-existing sole-variable restriction. These reads do not alter removal custody.
+Compose volume inventory resolves flat braced expressions only under the standard
+provider command with present, unique, literal service inputs. That command's
+project argument determines unnamed volumes; unsupported expressions, sources
+and unreadable documents stay held. Production retirement keeps its reviewed
+sole-variable keys and every removal custody check.
 
 Dokploy can add an unused `dokploy-network: {external: true}` root declaration
 to a domainless render. Qualification ignores only that exact provider-added

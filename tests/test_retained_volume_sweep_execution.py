@@ -31,6 +31,7 @@ from control_plane.product_retirement import (
 from control_plane.retained_volume_sweep_execution import (
     build_retained_volume_sweep,
     _inventory_clear,
+    compose_volume_names,
 )
 from control_plane.dokploy_inventory import TARGET_COLLECTIONS
 from control_plane.service_auth import LocalOperatorIdentity, TerminalAgentIdentity
@@ -441,6 +442,38 @@ class RetainedVolumeSweepTests(unittest.TestCase):
             ),
         ):
             self.assertFalse(_inventory_clear(self.root, self.binding))
+
+    def test_implicit_volume_names_follow_the_provider_project_command(self) -> None:
+        selected_project = "selected-project"
+        payload = {
+            "appName": selected_project,
+            "composeType": "docker-compose",
+            "createEnvFile": True,
+            "command": None,
+            "randomize": False,
+        }
+        for project in ("different-project", "${PROJECT_NAME}"):
+            document: dict[str, object] = {"name": project, "volumes": {"data": {}}}
+            with self.subTest(project=project):
+                self.assertEqual(
+                    compose_volume_names(document, payload), (selected_project + "_data",)
+                )
+                for changes in ({"command": "compose -p another up"}, {"command": ""}):
+                    if changes["command"]:
+                        with self.assertRaises(ValueError):
+                            compose_volume_names(document, {**payload, **changes})
+                    else:
+                        self.assertEqual(
+                            compose_volume_names(document, {**payload, **changes}),
+                            (selected_project + "_data",),
+                        )
+        self.assertEqual(
+            compose_volume_names({"volumes": {"data": {"external": True}}}, {}), ("data",)
+        )
+        self.assertEqual(
+            compose_volume_names({"volumes": {"data": {"name": "literal-volume"}}}, {}),
+            ("literal-volume",),
+        )
 
     def test_exact_inventory_resolves_qualified_default_syntax_without_guessing_inputs(
         self,

@@ -94,6 +94,13 @@ def compose_volume_names(
     volumes = document.get("volumes", {})
     if not isinstance(volumes, dict):
         raise ValueError("Compose volume inventory is unavailable.")
+    standard_environment = (
+        payload.get("composeType") == "docker-compose"
+        and payload.get("createEnvFile") is True
+        and "command" in payload
+        and payload["command"] in (None, "")
+        and payload.get("randomize") is False
+    )
     names = []
     for alias, definition in volumes.items():
         if not isinstance(alias, str) or not isinstance(definition, dict | type(None)):
@@ -101,7 +108,7 @@ def compose_volume_names(
         declared = definition or {}
         actual = declared.get("name")
         if actual is None:
-            project = document.get("name") or payload.get("appName")
+            project = payload.get("appName") if standard_environment else None
             actual = (
                 alias
                 if declared.get("external")
@@ -112,19 +119,11 @@ def compose_volume_names(
         if not isinstance(actual, str):
             raise ValueError("Compose volume identity is unavailable.")
         if "$" in actual:
-            match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)}", actual)
-            keys = {match[1]} if match is not None else compose_interpolation_keys(actual)
+            keys = compose_interpolation_keys(actual)
             if (
-                not keys
+                not standard_environment
                 or allowed_keys is not None
-                and (match is None or not keys <= allowed_keys)
-                or (
-                    payload.get("composeType") != "docker-compose"
-                    or payload.get("createEnvFile") is not True
-                    or "command" not in payload
-                    or payload["command"] not in (None, "")
-                    or payload.get("randomize") is not False
-                )
+                and (not keys <= allowed_keys or actual not in {"${" + key + "}" for key in keys})
             ):
                 raise ValueError("Compose volume identity uses an unreviewed input.")
             environment = require_unique_compose_inputs(str(payload.get("env") or ""), keys)
