@@ -22,7 +22,11 @@ import uuid
 import zlib
 import click
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
-from control_plane.copy_readback_diagnostics import ReadbackPredicate, readback_failure_evidence
+from control_plane.copy_readback_diagnostics import (
+    NATIVE_PROGRAM_SOURCE_SITE_LIMIT as NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
+    ReadbackPredicate,
+    readback_failure_evidence,
+)
 from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
@@ -30,7 +34,6 @@ from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTI
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 from websockets.sync.client import connect
 
-NATIVE_PROGRAM_SOURCE_SITE_LIMIT = 8
 CAPABILITY_FAILURE_SITES_MARKER = "testing_resources_failure_sites"
 NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS = 20
 NATIVE_CONTAINER_SPEC_FIELDS = (

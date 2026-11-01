@@ -3,6 +3,9 @@ from enum import StrEnum
 import re
 
 
+NATIVE_PROGRAM_SOURCE_SITE_LIMIT = 8
+
+
 class CopyFailureStage(StrEnum):
     RESTORE = "restore"
     ATTACHMENTS = "attachments"
