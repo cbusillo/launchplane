@@ -211,7 +211,7 @@ class TestingAddressTests(unittest.TestCase):
                 "retirement_sha256": "",
                 "operation_sha256": {
                     allocation.operation_id: canonical_json_sha256(
-                        allocation.model_dump(mode="json", exclude_none=True)
+                        allocation.model_dump(mode="json")
                     )
                 },
                 "reservations": self.store.read_retained_testing_hostname_reservations(
@@ -242,8 +242,13 @@ class TestingAddressTests(unittest.TestCase):
         self.plan = self.plan.model_copy(
             update={"retirement_operation_id": "", "retirement_sha256": ""}
         )
-        with self.assertRaises(ValueError):
-            self.commit()
+        from control_plane.testing_address_storage import verify_testing_address_retained_custody
+
+        with (
+            exclude_address_executors(self.store, tuple(self.plan.operation_sha256)),
+            self.assertRaises(ValueError),
+        ):
+            verify_testing_address_retained_custody(self.store, self.plan)
         self.assertEqual(self.fixture.current(), before)
         self.assertEqual(
             self.store.read_odoo_stable_target_replacement_operation_record(

@@ -1512,7 +1512,8 @@ The reviewed reason is retained in the immutable plan and applied receipt.
 
 The plan requires exact retained hostname custody in the same product/context,
 a superseded original recipient operation or the qualified initial allocation,
-complete credential-visible provider domain membership, and stopped recipients on the existing testing server. The
+complete credential-visible provider domain membership, and stopped recipients on
+the existing testing server. The
 old recipients must have known automatic-deployment flags and no target
 schedules. Enabled flags are bound into the reviewed plan; apply disables only
 those exact unbound retained recipients before route publication. Every recipient

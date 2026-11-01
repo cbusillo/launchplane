@@ -20,6 +20,7 @@ def address_custody(
     context: str,
     retirement_operation_id: str,
     reservations: tuple[RetainedTestingHostnameReservation, ...],
+    for_update: bool = True,
 ) -> tuple[dict[str, str], str]:
     operations: dict[str, str] = {}
     retirement_digest = ""
@@ -27,7 +28,7 @@ def address_custody(
         row = session.get(
             db.LaunchplaneRetainedTestingGenerationRow,
             retirement_operation_id,
-            with_for_update=True,
+            with_for_update=for_update,
         )
         if row is None:
             raise ValueError("The original retirement inspection is unavailable.")
@@ -38,7 +39,7 @@ def address_custody(
     keys = {item.operation_id for item in reservations}
     for key in keys | ({retirement_operation_id} if retirement_operation_id else set()):
         operation = session.get(
-            db.LaunchplaneOdooStableTargetReplacementOperationRow, key, with_for_update=True
+            db.LaunchplaneOdooStableTargetReplacementOperationRow, key, with_for_update=for_update
         )
         if operation is not None:
             record = OdooStableTargetReplacementOperationRecord.model_validate(operation.payload)
@@ -47,10 +48,10 @@ def address_custody(
             operations[key] = retained_address_custody_sha256(record)
             continue
         preparation = session.get(
-            db.LaunchplaneDisposableReplacementPreparationRow, key, with_for_update=True
+            db.LaunchplaneDisposableReplacementPreparationRow, key, with_for_update=for_update
         )
         allocation = session.get(
-            db.LaunchplaneDisposableTestingResourceAllocationRow, key, with_for_update=True
+            db.LaunchplaneDisposableTestingResourceAllocationRow, key, with_for_update=for_update
         )
         if preparation is None or allocation is None or key not in keys:
             raise ValueError("An original retained operation is unavailable.")
@@ -69,5 +70,5 @@ def address_custody(
             or initial.retained_target_record is None
         ):
             raise ValueError("Initial hostname allocation custody is unverified.")
-        operations[key] = canonical_json_sha256(initial.model_dump(mode="json", exclude_none=True))
+        operations[key] = canonical_json_sha256({**preparation.payload, **allocation.payload})
     return operations, retirement_digest

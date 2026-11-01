@@ -346,6 +346,7 @@ def plan_testing_address(
             context=context,
             retirement_operation_id=retirement_operation_id,
             reservations=reservations,
+            for_update=False,
         )
     with exclude_address_executors(store, tuple(operations)):
         require_available_address_recipients(
