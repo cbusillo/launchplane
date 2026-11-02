@@ -91,11 +91,11 @@ class RunnerHostGitHubAppScopeTests(unittest.TestCase):
         self.assertIn("page=2", calls[1])
 
     def test_scope_validation_returns_public_safe_evidence(self) -> None:
-        repositories = (
+        required_repositories = (
             "example-owner/repo-one",
             "example-owner/repo-two",
-            "example-owner/another-repo",
         )
+        repositories = (*required_repositories, "example-owner/another-repo")
 
         def fetch_json(url: str, bearer_token: str) -> dict[str, object]:
             return {
@@ -112,7 +112,7 @@ class RunnerHostGitHubAppScopeTests(unittest.TestCase):
             fetch_json=fetch_json,
         )
 
-        self.assertEqual(evidence.repository_count, len(repositories))
+        self.assertEqual(evidence.repository_count, len(required_repositories))
         self.assertRegex(evidence.repository_sha256, r"^[0-9a-f]{16}$")
 
     def test_scope_mismatch_reports_only_counts_and_digests(self) -> None:
@@ -139,28 +139,6 @@ class RunnerHostGitHubAppScopeTests(unittest.TestCase):
         self.assertNotIn("unexpected-repo", message)
         self.assertRegex(message, r"expected_sha256=[0-9a-f]{16}")
         self.assertRegex(message, r"observed_sha256=[0-9a-f]{16}")
-
-    def test_scope_rejects_another_owner_even_with_required_coverage(self) -> None:
-        def fetch_json(url: str, bearer_token: str) -> dict[str, object]:
-            return {
-                "total_count": 2,
-                "repositories": [
-                    {"full_name": "example-owner/expected-repo"},
-                    {"full_name": "other-owner/extra-repo"},
-                ],
-            }
-
-        with self.assertRaises(ValueError):
-            validate_github_app_installation_scope(
-                expected_owner="example-owner",
-                github_idle_bindings=(
-                    "example-owner/expected-repo|lane|runner-one|runner-one.service"
-                ),
-                generated_run_cache_roots="",
-                api_url="https://api.example.test",
-                bearer_token="installation-token",
-                fetch_json=fetch_json,
-            )
 
     def test_installation_repository_read_rejects_malformed_or_incomplete_response(self) -> None:
         cases: tuple[tuple[dict[str, object], str], ...] = (

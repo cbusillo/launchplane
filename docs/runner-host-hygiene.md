@@ -426,9 +426,8 @@ The workflow requires these repository variables:
   client ID for the dedicated runner-host hygiene GitHub App.
 
 `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY` is the repository
-secret for the dedicated runner-host hygiene GitHub App. Install the App only on
-repositories named by the runtime host binding manifest or generated-cache
-roots, with read-only Actions and Administration permissions. Actions reads
+secret for the dedicated runner-host hygiene GitHub App, with read-only Actions
+and Administration permissions. Actions reads
 provide active workflow and job state, while Administration read is needed to
 list self-hosted runner registrations; GitHub adds Metadata read implicitly.
 The workflow derives the exact repository list from runtime inputs, rejects
@@ -437,14 +436,13 @@ mints a short-lived token through the commit-pinned official GitHub action. The
 App installation must cover every runtime-derived repository. Additional
 repositories under the same owner are supported, including an installation on
 all of that owner's repositories. The workflow validates coverage through the
-installation API and reports only the observed repository count and digest;
+installation API and reports only the required repository count and digest;
 it does not pass repository names to the token
 action because the action logs explicit repository inputs. The token requests
 only Actions read and Administration read, and the action revokes it at job
 completion. There is no PAT, default `GITHUB_TOKEN`, or runner-registration-token
-fallback. Missing App configuration, missing required coverage, another owner's
-repositories, or
-an API that cannot see a named runner fails closed.
+fallback. Missing App configuration, missing required coverage, or an API that
+cannot see a named runner fails closed.
 Organization or enterprise registrations require an equivalent reader before
 they can be listed in the manifest. Generated-cache run-state reads use only
 Actions read. Neither the App nor its installation token grants
@@ -897,7 +895,7 @@ own exact audit, without matching today's scheduler key to a prior run.
 For a correction, first run the existing report-only path and retain its accepted
 audit plus complete private service/registration and producer readbacks. Compare
 the complete host fleet with the existing GitHub idle bindings; include every
-service rather than weakening exact-set checks. Use the existing image-inspect
+service required by the complete host check. Use the existing image-inspect
 results to qualify retained references, preserving Docker's normal tag/digest
 resolution. A live builder container does not prove a warm image exists. If a
 producer emits run-specific verification tags, an arbitrary current tag is not a

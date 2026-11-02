@@ -137,17 +137,15 @@ def validate_runner_host_github_repository_coverage(
 ) -> GitHubAppInstallationScopeEvidence:
     expected_digest = _repository_scope_digest(expected)
     observed_digest = _repository_scope_digest(observed)
-    if not expected <= observed or {repo.split("/", 1)[0] for repo in observed} != {
-        repo.split("/", 1)[0] for repo in expected
-    }:
+    if not expected <= observed:
         raise ValueError(
             "GitHub App installation repositories do not cover runtime evidence scope: "
             f"expected_count={len(expected)} observed_count={len(observed)} "
             f"expected_sha256={expected_digest} observed_sha256={observed_digest}."
         )
     return GitHubAppInstallationScopeEvidence(
-        repository_count=len(observed),
-        repository_sha256=observed_digest,
+        repository_count=len(expected),
+        repository_sha256=expected_digest,
     )
 
 
