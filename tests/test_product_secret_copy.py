@@ -15,6 +15,7 @@ from httpx2 import Response
 from control_plane import secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.secret_record import SecretScope
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_config import (
@@ -445,7 +446,11 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
     def _environment_read_app(
-        self, *, products: tuple[str, ...], instances: tuple[str, ...] = ("prod", "testing")
+        self,
+        *,
+        products: tuple[str, ...],
+        instances: tuple[str, ...] = ("prod", "testing"),
+        context_actions: tuple[str, ...] = (),
     ) -> FastAPI:
         """No secret actions: the standing environment read for ``products`` only."""
         profile_rule = _local_operator_policy(actions=("product_profile.read",)).local_operators[0]
@@ -462,7 +467,21 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=LaunchplaneAuthzPolicy(
-                schema_version=2, local_operators=(profile_rule, config_rule, read_rule)
+                schema_version=2,
+                local_operators=(
+                    profile_rule,
+                    config_rule,
+                    read_rule,
+                    *(
+                        (
+                            _local_operator_policy(
+                                actions=context_actions, products=products
+                            ).local_operators[0],
+                        )
+                        if context_actions
+                        else ()
+                    ),
+                ),
             ),
             record_store_factory=lambda: self.store,
             bearer_identity_config=BearerIdentityConfig(
@@ -753,6 +772,89 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             instance_name=instance,
             plaintext_value=f"synthetic-value-{name}",
         )
+
+    async def _read_setting_sources(self, app: FastAPI | None = None) -> Response:
+        return await _asgi_request(
+            app or self.app,
+            "GET",
+            f"/v1/products/{self.profile.product}/secret-bindings?include_setting_sources=true",
+            headers={"Authorization": "Bearer test-operator-token"},
+        )
+
+    async def test_setting_sources_are_names_only_and_do_not_read_secret_versions(self) -> None:
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="example-site",
+                instance="prod",
+                env={"PLAIN_SETTING": "private-plain-value"},
+                updated_at="fixture-time",
+            )
+        )
+        with patch.object(
+            self.store, "read_secret_version", side_effect=AssertionError("No ciphertext reads")
+        ):
+            response = await self._read_setting_sources()
+        self.assertEqual(response.status_code, 200, response.text)
+        sources = response.json()["setting_sources"]
+        prod = next(lane for lane in sources["lanes"] if lane["instance"] == "prod")
+        self.assertTrue(
+            any("PLAIN_SETTING" in source["selected_keys"] for source in prod["sources"])
+        )
+        self.assertNotIn("private-plain-value", response.text)
+        self.assertNotIn("source-only-test-token", response.text)
+
+    async def test_setting_sources_handle_separate_preview_ownership(self) -> None:
+        preview = self.profile.preview.model_copy(update={"context": "example-preview"})
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"preview": preview})
+        )
+        response = await self._read_setting_sources()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(
+            any(
+                lane["context"] == preview.context
+                for lane in response.json()["setting_sources"]["lanes"]
+            )
+        )
+        foreign = self.profile.model_copy(update={"product": "foreign-site", "preview": preview})
+        with patch.object(
+            self.store,
+            "list_product_profile_records",
+            return_value=(*self.store.list_product_profile_records(), foreign),
+        ):
+            refused = await self._read_setting_sources()
+        self.assertEqual(refused.status_code, 503, refused.text)
+        self.assertNotIn(self.source.name, refused.text)
+
+    async def test_setting_sources_refuse_unsupported_repository_coordinates(self) -> None:
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"repository": "invalid-coordinate"})
+        )
+        response = await self._read_setting_sources()
+        self.assertEqual(response.status_code, 503, response.text)
+
+    @scoped_agent_test
+    async def test_setting_sources_refuse_missing_scope_without_exposing_source_names(self) -> None:
+        app = self._environment_read_app(products=("other-site",))
+        response = await self._read_setting_sources(app)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertNotIn(self.source.name, response.text)
+
+    @scoped_agent_test
+    async def test_setting_sources_require_context_and_instance_environment_reads(self) -> None:
+        for context_actions, expected_status in (
+            (("preview.read",), 403),
+            (("preview.read", "product_environment.read"), 200),
+        ):
+            with self.subTest(context_actions=context_actions):
+                app = self._environment_read_app(
+                    products=(self.profile.product,),
+                    instances=("*",),
+                    context_actions=context_actions,
+                )
+                response = await self._read_setting_sources(app)
+                self.assertEqual(response.status_code, expected_status, response.text)
 
     async def test_selection_reports_global_context_and_instance_sources_without_values(
         self,
