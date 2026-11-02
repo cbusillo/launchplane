@@ -12,7 +12,6 @@ from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
 import click
-from github_plan_status import DEFAULT_STATUS_LABELS
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane import merge_train_github_token as token_module
@@ -30,7 +29,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_pr_feedback
 from tests.support.auth import _StubVerifier
 from tests.support.merge_train import _merge_train_service_identity, _merge_train_service_policy
-from tests.test_merge_train_planning_completion import _BOT, _REPO, _receipt, _wait
+from tests.test_merge_train_planning_completion import _BOT, _LABELS, _REPO, _receipt, _wait
 from tests.test_merge_train_planning_projection import NativeGraphProvider
 from tests.test_merge_train_scheduler import _policy_record
 
@@ -83,7 +82,7 @@ def _graph() -> tuple[NativeGraphProvider, dict[str, str]]:
     graph = NativeGraphProvider(pull_number=9)
     target = graph.add(_TARGET, 8, wait="waiting")
     target.default_branch = "release"
-    names = {key: f"target:{key}" for key in DEFAULT_STATUS_LABELS}
+    names = {key: f"target:{key}" for key in _LABELS}
     target.config = {"planning": {"labels": names}}
     target.issue["labels"] = [{"name": names[key]} for key in ("plan", "blocked")]
     target.comments = [
@@ -222,9 +221,10 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
                 self.assertEqual(mint.call_count, failure not in {"missing", "store"})
                 self.assertFalse(target.writes)
                 self.assertFalse(any(call["repo"] == _TARGET for call in graph.calls))
-                self.assertTrue(independent.writes)
+                self.assertFalse(independent.writes)
                 self.assertEqual(record.retryable, failure in {"network", "503"})
                 rows = {(row["repo"], row["number"]): row for row in _receipt(record)["issues"]}
+                self.assertTrue(rows[_REPO, 10]["verified"])
                 if failure in {"network", "503"}:
                     self.assertEqual(record.delivery_status, "failed")
                     self.assertEqual(
@@ -298,10 +298,6 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
                     self.assertEqual(minted_repositories, [_REPO, _TARGET])
                     self.assertTrue(rows[_TARGET, 8]["verified"])
                     self.assertEqual(rows[_TARGET, 8]["wait"]["state"], "clear")
-                    self.assertEqual(
-                        {item["name"] for item in target.issue["labels"]},
-                        {names["plan"], names["active"]},
-                    )
                     configs = [
                         call
                         for call in graph.calls
@@ -379,7 +375,7 @@ class NativePlanningSchedulerTests(TestCase):
                 self.assertTrue(rows[_REPO, 7]["verified"])
                 if authorized:
                     self.assertTrue(rows[_TARGET, 8]["verified"])
-                    self.assertTrue(target.writes)
+                    self.assertFalse(target.writes)
                     self.assertIn(
                         _TARGET, [call.kwargs["repository"] for call in mint.call_args_list]
                     )
@@ -475,10 +471,6 @@ class NativePlanningSchedulerTests(TestCase):
                 self.assertEqual(recovered.recorded_at, original.recorded_at)
                 self.assertEqual(recovered.delivery_attempts, original.delivery_attempts + 1)
                 self.assertTrue(_receipt(recovered)["ok"])
-                self.assertEqual(
-                    {item["name"] for item in target.issue["labels"]},
-                    {names["plan"], names["active"]},
-                )
                 self.assertTrue(
                     any(
                         call["repo"] == _TARGET and call["token"].endswith(":rotated")

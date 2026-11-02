@@ -86,9 +86,11 @@ class NativeGraphProvider:
         }
 
     def request(self, *, path: str, method: str = "GET", token: str, body: Any = None) -> Any:
+        if path == "/users/example":
+            return {"type": "User"}
         if path == "/graphql":
             variables = body["variables"]
-            repo = f"{variables.get('owner')}/{variables.get('name')}"
+            repo = f"{variables['owner']}/{variables['name']}" if "name" in variables else _REPO
             node = next(node for (target, _), node in self.nodes.items() if target == repo)
         else:
             parts = path.split("/")
@@ -158,7 +160,7 @@ class NativePlanningProjectionTests(TestCase):
         source.references = []
         source.pull_body = "Refs #7"
         source.issue.update(state="open", state_reason=None)
-        parent = self.graph.add(_REPO, 8)
+        self.graph.add(_REPO, 8)
         self.graph.parent = self.graph.ref(_REPO, 8)
         dependent = self.graph.add(_REPO, 10)
         dependent.blockers = [{"number": 7, "state": "open"}]
@@ -179,9 +181,6 @@ class NativePlanningProjectionTests(TestCase):
         self.assertEqual(rows[_REPO, 10]["derived_status"], "blocked")
         self.assertEqual(source.issue["body"], before["body"])
         self.assertEqual(source.issue["state"], before["state"])
-        self.assertEqual(
-            {x["name"] for x in parent.issue["labels"]}, {_LABELS["plan"], _LABELS["active"]}
-        )
 
     def test_completed_reference_in_pr_comment_reconciles_without_closing_keyword(self) -> None:
         source = self.graph.nodes[_REPO, 7]
@@ -197,9 +196,6 @@ class NativePlanningProjectionTests(TestCase):
         row = self.rows(record)[_REPO, 7]
         self.assertFalse(row["closing_reference"])
         self.assertTrue(row["verified"])
-        self.assertEqual(
-            {x["name"] for x in source.issue["labels"]}, {_LABELS["plan"], _LABELS["done"]}
-        )
         self.assertEqual(source.issue["body"], before["body"])
 
     def test_closing_reference_keeps_required_completion_when_also_explicit(self) -> None:
@@ -229,7 +225,8 @@ class NativePlanningProjectionTests(TestCase):
         self.assertTrue(_receipt(record)["ok"])
         self.assertTrue(self.rows(record)[_REPO, 7]["review_required"])
         self.assertEqual(source.issue, before)
-        self.assertTrue(completing.writes)
+        self.assertFalse(completing.writes)
+        self.assertTrue(self.rows(record)[_REPO, 8]["verified"])
 
     def test_pr_comment_discovery_requires_author_trust(self) -> None:
         for identity, login, accepted in (
@@ -248,7 +245,7 @@ class NativePlanningProjectionTests(TestCase):
                 record = self.record()
 
                 self.assertEqual(record.delivery_status, "delivered")
-                self.assertEqual(bool(source.writes), accepted)
+                self.assertFalse(source.writes)
                 self.assertEqual(bool(_receipt(record)["issues"]), accepted)
 
     def test_missing_current_author_trust_keeps_the_neighborhood_read_only(self) -> None:
@@ -519,16 +516,6 @@ class NativePlanningProjectionTests(TestCase):
             rows[_REPO, 9]["blocked_by"], [{"repo": _REPO, "number": 12, "state": "open"}]
         )
         self.assertEqual(rows[_REPO, 10]["wait"]["state"], "waiting")
-        self.assertEqual(
-            {x["name"] for x in parent.issue["labels"]}, {_LABELS["plan"], _LABELS["active"]}
-        )
-        self.assertEqual(
-            {x["name"] for x in remaining.issue["labels"]}, {_LABELS["plan"], _LABELS["blocked"]}
-        )
-        self.assertEqual(
-            {x["name"] for x in held.issue["labels"]},
-            {_LABELS["plan"], _LABELS["blocked"], _LABELS["waiting"]},
-        )
         writes = {key: list(node.writes) for key, node in self.graph.nodes.items()}
         self.record()
         self.assertEqual(writes, {key: node.writes for key, node in self.graph.nodes.items()})
@@ -547,24 +534,20 @@ class NativePlanningProjectionTests(TestCase):
         self.graph.blocking = [self.graph.ref(_REPO, n) for n in (8, 9, 10, 11)]
         record = self.record()
         rows = self.rows(record)
-        self.assertEqual(
-            {x["name"] for x in closed.issue["labels"]},
-            {_LABELS["plan"], _LABELS["done"], _LABELS["waiting"]},
-        )
-        self.assertEqual(rows[_REPO, 8]["projection_status"], "reconciled")
+        self.assertEqual(rows[_REPO, 8]["projection_status"], "unchanged")
         self.assertFalse(rows[_REPO, 8]["verified"])
         for number, node in ((9, unknown), (10, stale), (11, unstatused)):
             self.assertEqual(node.issue, before[number])
             self.assertFalse(node.writes)
         self.assertFalse(rows[_REPO, 9]["verified"])
-        self.assertEqual(rows[_REPO, 10]["derived_status"], "hold")
-        self.assertEqual(rows[_REPO, 11]["derived_status"], "hold")
+        self.assertEqual(rows[_REPO, 10]["derived_status"], "active")
+        self.assertEqual(rows[_REPO, 11]["derived_status"], "active")
         self.assertEqual(closed.issue["body"], before[8]["body"])
 
     def test_source_wait_preserves_full_completion_review_but_refreshes_neighbor(self) -> None:
         source = self.graph.nodes[_REPO, 7]
         source.comments = [{"user": {"id": _BOT}, "body": _wait("waiting")}]
-        neighbor = self.graph.add(_REPO, 8)
+        self.graph.add(_REPO, 8)
         self.graph.blocking = [self.graph.ref(_REPO, 8)]
         before = copy.deepcopy(source.issue)
         record = self.record()
@@ -572,9 +555,6 @@ class NativePlanningProjectionTests(TestCase):
         self.assertEqual(record.delivery_status, "failed")
         self.assertFalse(rows[_REPO, 7]["verified"])
         self.assertTrue(rows[_REPO, 8]["verified"])
-        self.assertEqual(
-            {x["name"] for x in neighbor.issue["labels"]}, {_LABELS["plan"], _LABELS["active"]}
-        )
         self.assertEqual(source.issue["body"], before["body"])
         self.assertEqual(source.issue["state"], before["state"])
         self.assertEqual(source.comments[0]["body"], _wait("waiting"))
@@ -609,9 +589,6 @@ class NativePlanningProjectionTests(TestCase):
                 saved = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
                 self.assertTrue(saved.retryable)
                 self.assertEqual(self.rows(saved)[_REPO, 7]["status"], "review_projection_pending")
-                self.assertIn(
-                    _LABELS["blocked"], {item["name"] for item in neighbor.issue["labels"]}
-                )
 
                 source.issue.update(state="closed", state_reason="completed")
                 neighbor.blockers[0]["state"] = "closed"
@@ -626,11 +603,7 @@ class NativePlanningProjectionTests(TestCase):
                 self.assertFalse(retried.retryable)
                 self.assertTrue(self.rows(retried)[_REPO, 8]["verified"])
                 self.assertEqual(self.rows(retried)[_REPO, 8]["blocked_by"], [])
-                self.assertEqual(
-                    {item["name"] for item in neighbor.issue["labels"]},
-                    {_LABELS["plan"], _LABELS["active"]},
-                )
-                if shape in {"reporter", "unmanaged"}:
+                if shape == "reporter":
                     self.assertEqual(retried.delivery_status, "failed")
                     self.assertFalse(self.rows(retried)[_REPO, 7]["verified"])
                     self.assertEqual(source.issue["body"], source_before["body"])
@@ -643,7 +616,7 @@ class NativePlanningProjectionTests(TestCase):
         independent = "example/independent"
         self.graph.add(denied, 8)
         sibling = self.graph.add(denied, 9)
-        other = self.graph.add(independent, 10)
+        self.graph.add(independent, 10)
         self.graph.blocking = [
             self.graph.ref(denied, 8),
             self.graph.ref(denied, 9),
@@ -670,9 +643,6 @@ class NativePlanningProjectionTests(TestCase):
         self.assertFalse(sibling.writes)
         self.assertTrue(rows[_REPO, 7]["verified"])
         self.assertTrue(rows[independent, 10]["verified"])
-        self.assertEqual(
-            {x["name"] for x in other.issue["labels"]}, {_LABELS["plan"], _LABELS["active"]}
-        )
 
     def test_target_uses_its_nonmain_config_token_and_trust(self) -> None:
         repo = "example/other"
@@ -686,13 +656,9 @@ class NativePlanningProjectionTests(TestCase):
         self.graph.blocking = [self.graph.ref(repo, 8)]
         first = self.record()
         self.assertEqual(self.rows(first)[repo, 8]["wait"]["state"], "waiting")
-        self.assertIn(custom["waiting"], {x["name"] for x in target.issue["labels"]})
         target.comments.append({"user": {"id": 73, "login": "target-bot[bot]"}, "body": _wait()})
         second = self.record()
         self.assertEqual(self.rows(second)[repo, 8]["derived_status"], "active")
-        self.assertEqual(
-            {x["name"] for x in target.issue["labels"]}, {custom["plan"], custom["active"]}
-        )
         configs = [
             call for call in self.graph.calls if call["repo"] == repo and call["path"] == "/graphql"
         ]
@@ -704,23 +670,21 @@ class NativePlanningProjectionTests(TestCase):
             )
         )
 
-    def test_unknown_write_stops_later_targets_and_retains_prior_verified_readback(self) -> None:
-        for n in (8, 9, 10):
-            self.graph.add(_REPO, n)
-        self.graph.blocking = [self.graph.ref(_REPO, n) for n in (8, 9, 10)]
+    def test_unknown_project_write_stops_later_targets(self) -> None:
+        self.graph.nodes[_REPO, 7].config = {"planning": {"projects": {"default_project": 2}}}
+        self.graph.add(_REPO, 8)
+        self.graph.blocking = [self.graph.ref(_REPO, 8)]
 
         def fail(call: dict[str, Any]) -> None:
-            if "/issues/9/labels" in call["path"] and call["method"] == "POST":
+            if "updateProjectV2ItemFieldValue" in (call["body"] or {}).get("query", ""):
                 raise click.ClickException("reply lost") from URLError("offline")
 
         self.graph.fail = fail
         record = self.record()
         rows = self.rows(record)
-        self.assertTrue(rows[_REPO, 7]["verified"])
-        self.assertTrue(rows[_REPO, 8]["verified"])
-        self.assertEqual(rows[_REPO, 9]["failure"]["write_outcome"], "unknown")
-        self.assertEqual(rows[_REPO, 10]["status"], "not_attempted_after_stop")
-        self.assertFalse(self.graph.nodes[_REPO, 10].writes)
+        self.assertEqual(rows[_REPO, 7]["failure"]["write_outcome"], "unknown")
+        self.assertEqual(rows[_REPO, 8]["status"], "not_attempted_after_stop")
+        self.assertFalse(self.graph.nodes[_REPO, 8].writes)
         self.assertFalse(_receipt(record)["ok"])
         self.comment_mock.assert_not_called()
 

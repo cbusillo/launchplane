@@ -13,12 +13,10 @@ from control_plane.workflows.launchplane import github_api_request
 
 
 from github_plan_status import (
-    DEFAULT_STATUS_LABELS,
     classify_outcome,
     derive,
     failure_disposition,
     is_planning_issue,
-    label_changes,
     normalize_author,
     projection_outcome,
     receipt_summary,
@@ -220,13 +218,6 @@ def _source_references(
         issue = _object(_object(event.get("source")).get("issue"))
         if "pull_request" not in issue:
             add_mention(*_reference(issue, repository))
-
-
-def _labels(issue: dict[str, Any]) -> set[str]:
-    labels = issue.get("labels")
-    if not isinstance(labels, list):
-        raise PlanningCompletionReview("Planning completion issue labels were unavailable.")
-    return {str(_object(label)["name"]) for label in labels}
 
 
 def _require_completed(issue: dict[str, Any]) -> None:
@@ -448,7 +439,6 @@ def _discovery_receipt(
 class _Snapshot:
     issue: dict[str, Any]
     config: dict[str, Any]
-    labels: dict[str, str]
     relationships: dict[str, Any]
     wait: dict[str, Any]
     wait_failure: Exception | None = None
@@ -477,16 +467,6 @@ def _configuration(scope: PlanningRepositoryScope) -> dict[str, Any]:
         )
     blob = repo["object"]
     return {} if blob is None else _object(json.loads(_object(blob)["text"]))
-
-
-def _label_names(config: dict[str, Any]) -> dict[str, str]:
-    configured = _object(_object(config.get("planning", {})).get("labels", {}))
-    names = {**DEFAULT_STATUS_LABELS, **configured}
-    if any(not isinstance(value, str) or not value.strip() for value in names.values()) or len(
-        {value.casefold() for value in names.values()}
-    ) != len(names):
-        raise PlanningCompletionReview("Planning target status-label configuration is invalid.")
-    return names
 
 
 def _reference(issue: dict[str, Any], default_repository: str) -> tuple[str, int]:
@@ -541,8 +521,6 @@ def _snapshot(
         if initial_issue is not None
         else _object(github_api_request(path=path, token=scope.token))
     )
-    _labels(issue)
-    names = _label_names(configuration)
     blockers = _pages(scope.token, path + "/dependencies/blocked_by")
     children = _pages(scope.token, path + "/sub_issues") if target.source else []
     relationships: dict[str, Any] = {"blocked_by": [], "sub_issues": []}
@@ -578,18 +556,12 @@ def _snapshot(
             "evidence": "Structured wait history is unread; preserve recorded waits.",
             "waits": [],
         }
-    return _Snapshot(issue, configuration, names, relationships, wait, wait_failure)
+    return _Snapshot(issue, configuration, relationships, wait, wait_failure)
 
 
-def _same_snapshot(first: _Snapshot, second: _Snapshot, *, labels_changed: bool = False) -> bool:
-    issue_matches = first.issue == second.issue
-    if labels_changed:
-        issue_matches = all(
-            first.issue.get(key) == second.issue.get(key)
-            for key in ("body", "state", "state_reason", "user", "title", "node_id")
-        )
+def _same_snapshot(first: _Snapshot, second: _Snapshot) -> bool:
     return (
-        issue_matches
+        first.issue == second.issue
         and first.config == second.config
         and first.relationships == second.relationships
         and same_wait_projection(first.issue, first.wait, second.wait)
@@ -600,8 +572,6 @@ def _source_review(
     snapshot: _Snapshot, *, merged_at: datetime, attempted: datetime, scope: PlanningRepositoryScope
 ) -> str:
     issue = snapshot.issue
-    # Contributor envelopes remain reporter-owned completion, including a valid
-    # managed subsection. Label-only neighbors never edit either subsection.
     envelope = contributor_plan_body(issue)
     if (
         normalize_author(issue).get("id") not in scope.trusted_author_ids
@@ -653,7 +623,7 @@ def _reconcile_target(
                 "then rerun reconcile-landing. References do not prove completion."
             )
     snapshot = _snapshot(target, config=config, initial_issue=initial_issue)
-    if not is_planning_issue(snapshot.issue, snapshot.labels):
+    if not is_planning_issue(snapshot.issue):
         row["status"] = "not_planning_issue"
         return
     if not author_trust_available:
@@ -666,13 +636,10 @@ def _reconcile_target(
         if target.source
         else ""
     )
-    derived = derive(
-        snapshot.issue, snapshot.relationships, snapshot.wait, label_names=snapshot.labels
-    )
+    derived = derive(snapshot.issue, snapshot.relationships, snapshot.wait)
     row.update(
         derived_status=derived["status"], blocked_by=derived["blocked_by"], wait=snapshot.wait
     )
-    changes = label_changes(sorted(_labels(snapshot.issue)), snapshot.labels, derived)
     project = None
     if target.source and not review:
         try:
@@ -689,27 +656,12 @@ def _reconcile_target(
         raise PlanningCompletionReview(
             "Planning issue, native graph, wait or configuration changed before reconciliation."
         )
-    path = f"/repos/{scope.repository}/issues/{target.number}"
     if project is not None:
         row.update(writes_started=True, write_outcome="unknown")
         _sync_project(scope.token, project)
         row["write_outcome"] = "confirmed"
-    if changes["add"]:
-        row.update(writes_started=True, write_outcome="unknown")
-        github_api_request(
-            path=path + "/labels", token=scope.token, method="POST", body={"labels": changes["add"]}
-        )
-        row["write_outcome"] = "confirmed"
-    for label in changes["remove"]:
-        row.update(writes_started=True, write_outcome="unknown")
-        github_api_request(
-            path=path + "/labels/" + quote(label, safe=""), token=scope.token, method="DELETE"
-        )
-        row["write_outcome"] = "confirmed"
     verified = _snapshot(target)
-    if not _same_snapshot(snapshot, verified, labels_changed=True) or {
-        name.casefold() for name in _labels(verified.issue)
-    } != {name.casefold() for name in changes["result"]}:
+    if not _same_snapshot(snapshot, verified):
         raise PlanningCompletionReview("Planning metadata readback did not match.")
     row.update(
         projection_outcome(derived, "reconciled" if row.get("writes_started") else "unchanged")

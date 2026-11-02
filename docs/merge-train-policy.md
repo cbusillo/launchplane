@@ -189,7 +189,7 @@ The supported source is:
   not stored as runtime configuration. No Administration permission is used.
   Read resolutions use the same selected token permissions. Workflows write
   lets branch updates and merges include workflow files.
-  Issues write projects graph-derived planning labels after a landing, within
+  Issues write supports issue and comment operations after a landing, within
   the selected App's already-accepted installation grants. Missing installation
   grants refuse before minting; an issued token missing this capability is revoked.
   The event reconciler also mints narrower tokens from a product repository's
@@ -2598,22 +2598,20 @@ blocking dependents and parents, including neighbors of non-plan or held sources
 Timeline-only issue mentions are recorded for review without expanding their
 neighborhood or changing them. The deduplicated neighborhood is bounded
 to 100 records and is discovered before metadata writes; it is not recursive.
-Each planning target's status and labels derive from its current open native
+Each planning target's status derives from its current open native
 blockers and trusted structured wait through the same pinned pure package used
 by the catalog. The last blocker closing makes an otherwise clear open target
-active; remaining blockers and actual waits remain visible. Open stale/done
-scope holds and unread open waits preserve their labels for owning review.
-Closed lifecycle cleanup preserves actual waits and recorded waiting when the
-wait history is unread. No issue is closed or reopened, and no issue body,
+active; remaining blockers and actual waits remain visible. Unread waits require
+owning review. Labels carry routing, share and type decisions and are never
+changed by completion. No issue is closed or reopened, and no issue body,
 comment, wait record or native relationship is rewritten.
 
 Full source completion retains the stronger existing guards: a managed issue
 created by a numerically trusted automation identity, completed native closure,
 a reviewed clear wait, and closed native blockers and sub-issues. Reporter-owned
 sources and open finish lines require source acceptance review. A closed managed source
-with an actual or unread wait can receive only lifecycle label cleanup; its
-full completion remains unverified. An issue-specific Project membership gap
-also permits label cleanup while keeping full completion in review. Configured
+with an actual or unread wait keeps its full completion unverified. An
+issue-specific Project membership gap also keeps full completion in review. Configured
 Project mutations retain their existing capability and readback requirements.
 Open non-closing sources receive `review_open_finish_line` in the saved receipt;
 their review is informational and does not prevent successful independent metadata
@@ -2624,8 +2622,8 @@ with a named next actor. Landing reconciliation records unresolved judgment in i
 receipt. The existing stranded-work digest independently reports open linked issues;
 neither treats a reference as completion evidence.
 
-Every target uses its actual default branch's `.github/github.json`, or verified
-standard planning labels when that file is absent. Same-account foreign targets
+Every target uses its actual default branch's `.github/github.json`, with no
+Project sync when that file is absent. Same-account foreign targets
 require an existing authorized repository policy and their own exact repository
 token and trusted author IDs. HTTP delivery checks the current identity before
 target token resolution and again for the actual default-branch policy. The
