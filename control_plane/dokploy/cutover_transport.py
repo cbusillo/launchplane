@@ -17,7 +17,7 @@ import base64,json,subprocess,sys,zlib
 prefix=sys.argv[2]
 def emit(value):
     print(prefix+json.dumps(value),flush=True)
-try:
+def command():
     envelope=json.loads(base64.b64decode(sys.argv[1],validate=True))
     decoder=zlib.decompressobj()
     raw=decoder.decompress(base64.b64decode(envelope['command'],validate=True),__OUTPUT_BYTES__+1)
@@ -27,16 +27,42 @@ try:
     argv=spec['argv']
     if not isinstance(argv,list) or not argv or argv[0] not in {'docker','python3','bash'}:
         raise ValueError('unbound host command')
-    result=subprocess.run(argv,input=spec['stdin'],text=True,capture_output=True,timeout=spec['timeout'])
-    if result.returncode or len(result.stdout.encode())>__OUTPUT_BYTES__:
-        raise ValueError('host command did not complete')
+    try:
+        result=subprocess.run(argv,input=spec['stdin'],text=True,capture_output=True,timeout=spec['timeout'])
+    except subprocess.TimeoutExpired:
+        emit({'type':'command_failed','kind':'timeout'})
+        return
+    except OSError:
+        emit({'type':'command_failed','kind':'unavailable'})
+        return
+    if result.returncode:
+        emit({'type':'command_failed','kind':'exit','returncode':result.returncode})
+        return
+    if len(result.stdout.encode())>__OUTPUT_BYTES__:
+        emit({'type':'command_failed','kind':'output_exceeds_bound'})
+        return
     raw=result.stdout.encode()
     for offset in range(0,len(raw),24*1024):
         emit({'type':'stdout','offset':offset,'data':base64.b64encode(raw[offset:offset+24*1024]).decode()})
     emit({'type':'complete','size':len(raw)})
+try: command()
 except BaseException:
     emit({'type':'failed'})
 """.replace("__OUTPUT_BYTES__", str(CUTOVER_COMMAND_BYTES))
+
+
+class CutoverCommandFailed(NativeSourceUnavailable):
+    def __init__(self, frame: dict[str, object]) -> None:
+        kind = frame.get("kind")
+        code = frame.get("returncode")
+        self.kind = (
+            kind
+            if isinstance(kind, str)
+            and kind in {"exit", "timeout", "unavailable", "output_exceeds_bound"}
+            else "unavailable"
+        )
+        self.returncode = code if type(code) is int and -255 <= code <= 255 else None
+        super().__init__(f"Cutover command failed: {self.kind}; returncode={self.returncode}.")
 
 
 class CutoverHostTransport:
@@ -55,22 +81,40 @@ class CutoverHostTransport:
         self.host, self.token = host, token
         self.guard, self.timeout_seconds = guard, timeout_seconds
 
-    def read(self, argv: tuple[str, ...], stdin: str | None) -> str:
-        return self._command(argv, stdin, guarded=False)
+    def read(
+        self, argv: tuple[str, ...], stdin: str | None, *, timeout_seconds: int | None = None
+    ) -> str:
+        return self._command(argv, stdin, guarded=False, timeout_seconds=timeout_seconds)
 
     def __call__(self, argv: tuple[str, ...], stdin: str | None) -> str:
         try:
             return self._command(argv, stdin, guarded=True)
         except NativeSourceUnavailable as error:
+            diagnostic = f" {error}" if isinstance(error, CutoverCommandFailed) else ""
             raise RuntimeError(
                 "Original cutover command requires reconciliation; its effect is uncertain."
+                + diagnostic
             ) from error
 
-    def _command(self, argv: tuple[str, ...], stdin: str | None, *, guarded: bool) -> str:
+    def _command(
+        self,
+        argv: tuple[str, ...],
+        stdin: str | None,
+        *,
+        guarded: bool,
+        timeout_seconds: int | None = None,
+    ) -> str:
+        timeout = (
+            self.timeout_seconds
+            if timeout_seconds is None
+            else min(self.timeout_seconds, timeout_seconds)
+        )
+        if not 1 <= timeout <= 7200:
+            raise ValueError("cutover host requires a bounded execution deadline")
         command: dict[str, object] = {
             "argv": argv,
             "stdin": stdin,
-            "timeout": self.timeout_seconds,
+            "timeout": timeout,
         }
         raw = json.dumps(command, sort_keys=True).encode()
         if len(raw) > CUTOVER_COMMAND_BYTES:
@@ -93,6 +137,8 @@ class CutoverHostTransport:
                     raise NativeSourceUnavailable("Cutover command output exceeds its bound.")
             elif frame == {"type": "complete", "size": len(output)}:
                 completed = True
+            elif frame.get("type") == "command_failed":
+                raise CutoverCommandFailed(frame)
             else:
                 raise NativeSourceUnavailable("Cutover command has no exact completion witness.")
 
@@ -107,7 +153,7 @@ class CutoverHostTransport:
             program=CUTOVER_COMMAND_PROGRAM,
             payload=payload,
             receive=receive,
-            timeout_seconds=self.timeout_seconds + 30,
+            timeout_seconds=timeout + 30,
             dispatch_guard=dispatch if guarded else None,
         )
         if not completed:
