@@ -1006,6 +1006,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsRequest
         from control_plane.odoo_preview_apply_http import (
             issue_odoo_preview_apply_plan,
+            OdooPreviewPlanProvenanceError,
             validate_odoo_preview_issued_plan,
         )
 
@@ -1018,10 +1019,13 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         budget = OdooTestingDrillStorageBudget(
             database_bytes=1024, filestore_bytes=2048, staging_bytes=4096, reserve_bytes=8192
         )
+        expected_budget = budget
         source = {"provider_binding_sha256": "fixture"}
 
         def remote(**kwargs: Any) -> None:
-            self.assertEqual(kwargs["payload"]["storage_budget"], budget.model_dump(mode="json"))
+            self.assertEqual(
+                kwargs["payload"]["storage_budget"], expected_budget.model_dump(mode="json")
+            )
             kwargs["receive"](
                 {
                     "type": "complete",
@@ -1058,9 +1062,6 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                 timeout_seconds=30,
                 check=lambda: None,
             )
-            with self.assertRaisesRegex(ValueError, "reviewed capacity"):
-                run_preview_preservation(**arguments)
-            dispatch.assert_not_called()
             self.issued.plan_request = OdooPreviewApplyInputsRequest.model_validate(
                 {
                     **self.issued.plan_request.model_dump(mode="json"),
@@ -1069,14 +1070,20 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             )
             run_preview_preservation(**arguments)
             dispatch.assert_called_once()
-        self.assertEqual(self.profile.model_dump(mode="json"), before)
+            self.assertEqual(self.profile.model_dump(mode="json"), before)
+            self.profile.preview.clean_testing_snapshot = True
+            self.profile.lanes[0].odoo_testing_drill_storage = expected_budget = budget.model_copy(
+                update={"reserve_bytes": 2 * budget.reserve_bytes}
+            )
+            run_preview_preservation(**arguments)
         self.issued = issue_odoo_preview_apply_plan(result=self.issued, plan_id="reviewed-capacity")
         assert self.issued.plan_request.preservation_storage_budget is not None
         self.issued.plan_request.preservation_storage_budget.database_bytes += 1
-        with self.assertRaisesRegex(ValueError, "provenance fingerprint"):
+        with self.assertRaises(OdooPreviewPlanProvenanceError) as refused:
             validate_odoo_preview_issued_plan(
                 plan_id="reviewed-capacity", issued_plan=self.issued, request=self.destroy
             )
+        self.assertEqual(refused.exception.code, "odoo_preview_plan_mismatch")
 
     def test_preserving_refresh_keeps_data_through_later_ordinary_refreshes(self) -> None:
         from control_plane import odoo_preview_apply_http as preview_http

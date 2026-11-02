@@ -303,10 +303,11 @@ The preview-apply-inputs request accepts `preservation_storage_budget`, using
 the existing reviewed database, file-store, staging and reserve byte limits.
 The issued plan fingerprints that budget and retains it for preflight, capture
 and original-key recovery. It applies only to that plan's preservation; it
-does not enable clean testing snapshots or change product/lane settings. When
-omitted, preservation can reuse an opted-in snapshot lane's reviewed budget.
-Without either budget, preflight refuses before host dispatch. Native capacity
-and captured-size checks still run before any refresh.
+does not enable clean testing snapshots or change product/lane settings. An
+opted-in snapshot lane's stored reviewed budget remains authoritative; the plan
+budget supplies capacity only when no snapshot budget applies. Native capacity
+and captured-size checks still run before any refresh, and already captured
+receipts remain verifiable without a new budget.
 
 Before capture, the service freshly qualifies non-use, resource isolation and
 production credential separation. Under the existing preview execution exclusion,

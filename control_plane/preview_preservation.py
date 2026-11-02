@@ -408,13 +408,11 @@ def run_preview_preservation(
         control_plane_root=control_plane_root, database_url=store.database_url
     )
     budget = (
-        issued_plan.plan_request.preservation_storage_budget
-        or snapshot_storage_budget(profile, profile.preview.context)
+        snapshot_storage_budget(profile, profile.preview.context)
+        or issued_plan.plan_request.preservation_storage_budget
         if mode in {"preserve", "preflight"}
         else None
     )
-    if mode in {"preserve", "preflight"} and budget is None:
-        raise ValueError("Preview preservation requires reviewed capacity.")
     continuation_applied = (
         authority.continuation
         and operation is not None
