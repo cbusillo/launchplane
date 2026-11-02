@@ -394,7 +394,6 @@ The workflow requires these repository variables:
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_HOST`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SERVICE_USER`
-- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RUNNER_WORKDIR_ROOTS`, as comma-separated
   public-key/absolute-path pairs such as `legacy=/srv/runners`. The keys appear
   in evidence; absolute paths remain executor-local runtime input.
@@ -676,7 +675,7 @@ Use this sequence when replacing `chris-testing` or standing up a parallel host:
    by [runner-lane-baseline.md](runner-lane-baseline.md), but keep the
    `chris-testing-ops-gate` label and any production-shared lane label off until
    the host passes readiness and hygiene evidence.
-3. Seed or rebuild the retained warm-builder images on the replacement host.
+3. Seed or rebuild any configured retained images on the replacement host.
    The hygiene executor must be able to observe every value configured in
    `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS` before the host can
    receive the ops-gate label.
@@ -688,7 +687,7 @@ Use this sequence when replacing `chris-testing` or standing up a parallel host:
 5. Run the runner-host hygiene workflow manually with `mutate=false`, no target
    volumes, and a replacement-specific audit key. The run must write an
    accepted planned audit, block only on `mutate_not_requested`, observe the
-   retained warm builders, and include image/volume inventory for the new host.
+   configured retained images, and include image/volume inventory for the new host.
 6. Update the repository variables that define the approved hygiene host,
    execution lane, service user, and retained warm builders only after the new
    host has passing baseline and hygiene dry-run evidence. Keep the old values
@@ -811,6 +810,16 @@ grants no prune permission. Target actions still require their existing exact
 allowlist, target, budget, idle evidence, host lock and durable audit/replay
 path. The configuration projection uses the existing executor request contract;
 the record-backed migration can supply that same input without a new store.
+
+Retained warm-builder references are exact local image references, independent
+of BuildKit cache names. A producer that uses run-specific verification tags
+does not provide a stable image to retain. Remove obsolete image references
+from the existing `RETAINED_WARM_BUILDERS` setting rather than manufacturing
+tags or treating a live builder as proof that a requested image exists. An
+empty list is supported when named cache budgets are configured; their measured
+cache evidence remains required. The record-backed configuration still requires
+the `retained_warm_builders` field, with an explicit empty array in that case.
+Every image reference still configured must exist before and after cleanup.
 
 Reports measure each configured builder using its own container's read-only
 `buildctl du --format '{{json .}}'`. They retain only aggregate counters, never

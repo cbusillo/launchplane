@@ -551,8 +551,10 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
                 )
         if not self.audit_record_key:
             raise ValueError("runner host hygiene executor requires audit_record_key")
-        if not self.retained_warm_builders:
-            raise ValueError("runner host hygiene executor requires retained_warm_builders")
+        if not self.retained_warm_builders and not self.buildkit_cache_budgets.keys() - {"default"}:
+            raise ValueError(
+                "runner host hygiene executor requires retained images or named cache budgets"
+            )
         if not self.prune_until:
             raise ValueError("runner host hygiene executor requires prune_until")
         prune_until_match = re.fullmatch(r"([1-9][0-9]*)h", self.prune_until.lower())

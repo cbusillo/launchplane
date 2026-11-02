@@ -1469,7 +1469,6 @@ def runner_host_hygiene_adapter_boundary_plan(
     "--retained-warm-builder",
     "retained_warm_builders",
     multiple=True,
-    required=True,
     help="Warm builder image/tag that must remain after cleanup. Repeat as needed.",
 )
 @click.option(
