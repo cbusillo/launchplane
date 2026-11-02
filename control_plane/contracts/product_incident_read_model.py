@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 import base64
 import json
 import re
@@ -302,8 +301,6 @@ class ProductEnvironmentIncidentList(BaseModel):
     context: str
     instance: str
     incidents: tuple[ProductIncidentSummary, ...] = ()
-    order: ProductIncidentOrder = "attention"
-    cursor: str | None = None
     next_cursor: str | None = None
     has_more: bool = False
     trust_state: FreshnessStatus = "recorded"
@@ -382,8 +379,6 @@ def build_product_environment_incident_list(
                 raise ValueError
             if not isinstance(data[5], str) or not isinstance(data[6], str) or not data[6]:
                 raise ValueError
-            if datetime.fromisoformat(data[5]).tzinfo is None:
-                raise ValueError
             before = (data[5], data[6])
         except (ValueError, TypeError, UnicodeError) as error:
             raise ProductIncidentQueryError(
@@ -453,8 +448,6 @@ def build_product_environment_incident_list(
         context=incident_scope.context,
         instance=incident_scope.instance,
         incidents=summaries,
-        order=order,
-        cursor=cursor,
         next_cursor=next_cursor,
         has_more=has_more,
         provenance=DataProvenance(

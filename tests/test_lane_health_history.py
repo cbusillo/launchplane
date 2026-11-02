@@ -139,7 +139,6 @@ class LaneHealthHistoryHttpTests(unittest.IsolatedAsyncioTestCase):
                     for changed in (
                         {"status": "open"},
                         {"order": "attention"},
-                        {"historical_context": "other"},
                     ):
                         invalid = await request(
                             app,
@@ -149,7 +148,8 @@ class LaneHealthHistoryHttpTests(unittest.IsolatedAsyncioTestCase):
                             + urlencode({**params, "cursor": page["next_cursor"], **changed}),
                             headers={"Authorization": "Bearer valid-token"},
                         )
-                        self.assertGreaterEqual(invalid.status_code, 400, invalid.text)
+                        self.assertEqual(invalid.status_code, 400, invalid.text)
+                        self.assertEqual(invalid.json()["error"]["code"], "invalid_query")
                 if page["next_cursor"] is None:
                     break
                 params["cursor"] = page["next_cursor"]

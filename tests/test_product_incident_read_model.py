@@ -692,7 +692,10 @@ class ProductIncidentReadModelTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             store = FilesystemRecordStore(Path(temporary))
             store.write_product_profile_record(_profile())
-            records = tuple(_incident(incident_id=name) for name in ("a", "b", "c"))
+            records = tuple(
+                _incident(incident_id=name, opened_at="2026-07-28T12:00:00")
+                for name in ("a", "b", "c")
+            )
             for record in (
                 *records,
                 _incident(incident_id="foreign").model_copy(update={"context": "other"}),
