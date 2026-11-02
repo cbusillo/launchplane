@@ -1,13 +1,17 @@
 """Provider evidence for engineering-only dependency changes."""
 
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import PurePosixPath
 import re
 import tomllib
 from urllib.parse import quote
 
 from control_plane.client_test_notes import NOTHING_TO_TEST
+from control_plane.dependency_reference_update import (
+    dependency_reference_file,
+    dependency_references_only,
+)
 from control_plane.contracts.merge_train_policy import (
     MergeTrainEnqueuePolicy,
     MergeTrainRepositoryPolicy,
@@ -48,6 +52,7 @@ def pure_dependency_update(
     read: Callable[[str], object],
     store: object = None,
     repository_policy: MergeTrainRepositoryPolicy | None = None,
+    declared_updates: Sequence[dict[str, str]] | None = None,
 ) -> bool:
     user = pull_request.get("user")
     if not isinstance(user, dict) or user.get("type") != "Bot":
@@ -111,12 +116,54 @@ def pure_dependency_update(
                 and _workspace_pin_only(read=read, path=path, base_sha=base_sha, head_sha=head_sha)
             ):
                 continue
+            if item.get("status") == "modified" and dependency_reference_file(filename):
+                if declared_updates is not None and any(
+                    update.get("updateType") == "digest"
+                    and re.fullmatch(
+                        r"v?\d+(?:[.]\d+)*(?:-[a-zA-Z0-9.-]+)?", update.get("currentValue", "")
+                    )
+                    is None
+                    for update in declared_updates
+                ):
+                    return False
+                old_content = _immutable_content(read, path, base_sha, filename)
+                new_content = _immutable_content(read, path, head_sha, filename)
+                if (
+                    old_content is None
+                    or new_content is None
+                    or not dependency_references_only(
+                        filename,
+                        old_content,
+                        new_content,
+                        read=lambda endpoint: _safe_read(read, endpoint),
+                    )
+                ):
+                    return False
+                continue
             file = PurePosixPath(filename)
             if file.name not in _DEPENDENCY_FILES and not (
                 file.name.startswith("requirements") and file.suffix == ".txt"
             ):
                 return False
     return True
+
+
+def _immutable_content(
+    read: Callable[[str], object], path: str, revision: str, filename: str
+) -> str | None:
+    payload = _safe_read(read, f"{path}/contents/{quote(filename)}?ref={quote(revision, safe='')}")
+    if not isinstance(payload, dict) or payload.get("encoding") != "base64":
+        return None
+    content = payload.get("content")
+    if not isinstance(content, str):
+        return None
+    try:
+        decoded = base64.b64decode("".join(content.split()), validate=True)
+        if len(decoded) != payload.get("size"):
+            return None
+        return decoded.decode()
+    except (ValueError, UnicodeDecodeError):
+        return None
 
 
 def _safe_read(read: Callable[[str], object], path: str) -> object:
@@ -133,18 +180,12 @@ def _workspace_pin_only(
 ) -> bool:
     documents = []
     for revision in (base_sha, head_sha):
-        payload = _safe_read(read, f"{path}/contents/workspace.toml?ref={quote(revision, safe='')}")
-        if not isinstance(payload, dict) or payload.get("encoding") != "base64":
-            return False
-        content = payload.get("content")
-        if not isinstance(content, str):
+        content = _immutable_content(read, path, revision, "workspace.toml")
+        if content is None:
             return False
         try:
-            decoded = base64.b64decode("".join(content.split()), validate=True)
-            if len(decoded) != payload.get("size"):
-                return False
-            documents.append(tomllib.loads(decoded.decode()))
-        except (ValueError, UnicodeDecodeError):
+            documents.append(tomllib.loads(content))
+        except ValueError:
             return False
     changed = False
     old, new = documents

@@ -150,6 +150,129 @@ class DependabotClientReviewTests(unittest.TestCase):
         self.assertTrue(intent.error)
         self.assertTrue(intent.review_required)
 
+    @staticmethod
+    def _reference_change(
+        filename: str,
+        old: str,
+        new: str,
+        *,
+        upstream_status: str = "ahead",
+        declared_updates: tuple[dict[str, str], ...] | None = None,
+    ) -> bool:
+        from control_plane.dependency_update_review import pure_dependency_update
+
+        pull = _github_pull_request(16)
+        pull["user"] = {"id": 49699333, "login": "configured-update-bot", "type": "Bot"}
+        head_sha = cast(dict[str, str], pull["head"])["sha"]
+
+        def read(path: str) -> object:
+            if path.startswith("/repos/example/action/compare/"):
+                return {
+                    "status": upstream_status,
+                    "base_commit": {"sha": "a" * 40},
+                    "merge_base_commit": {"sha": "a" * 40},
+                    "commits": [{"sha": "b" * 40}],
+                }
+            if "/compare/" in path:
+                return {"files": [{"filename": filename, "status": "modified"}]}
+            content = new if path.endswith("ref=" + head_sha) else old
+            encoded = content.encode()
+            return {
+                "encoding": "base64",
+                "content": base64.b64encode(encoded).decode(),
+                "size": len(encoded),
+            }
+
+        return pure_dependency_update(
+            pull,
+            read=read,
+            repository_policy=dependency_repository_policy(),
+            declared_updates=declared_updates,
+        )
+
+    def test_container_references_require_forward_versions_and_unchanged_instructions(self) -> None:
+        old = "# syntax=docker/dockerfile:1.6\nFROM example/runtime:3.13 AS build\nRUN app\n"
+        new = old.replace(":1.6", ":1.28").replace(":3.13", ":3.14")
+        self.assertTrue(self._reference_change("docker/artifact.Dockerfile", old, new))
+        for changed in (new.replace("RUN app", "RUN other"), old.replace(":1.6", ":1.5")):
+            with self.subTest(changed=changed):
+                self.assertFalse(self._reference_change("Dockerfile", old, changed))
+        compose = "services:\n  db:\n    image: example/db:17.1\n    command: start\n"
+        self.assertTrue(
+            self._reference_change("docker/compose.yml", compose, compose.replace(":17.1", ":17.2"))
+        )
+        self.assertFalse(
+            self._reference_change("docker/compose.yml", compose, compose.replace(":17.1", ":18.0"))
+        )
+
+    def test_workflow_action_digests_require_forward_upstream_ancestry(self) -> None:
+        old = (
+            "on: [push]\njobs:\n  test:\n    steps:\n      - uses: example/action@"
+            + "a" * 40
+            + " # v2.1\n"
+        )
+        new = old.replace("a" * 40, "b" * 40).replace("# v2.1", "# v2.2")
+        self.assertTrue(self._reference_change(".github/workflows/ci.yml", old, new))
+        self.assertFalse(
+            self._reference_change(
+                ".github/workflows/ci.yml",
+                old,
+                new,
+                declared_updates=({"updateType": "digest", "currentValue": "main"},),
+            )
+        )
+        for status in ("behind", "diverged", "identical"):
+            with self.subTest(status=status):
+                self.assertFalse(
+                    self._reference_change(
+                        ".github/workflows/ci.yml", old, new, upstream_status=status
+                    )
+                )
+        self.assertFalse(
+            self._reference_change(
+                ".github/workflows/ci.yml", old, new + "permissions: write-all\n"
+            )
+        )
+        self.assertFalse(
+            self._reference_change(
+                ".github/workflows/ci.yml",
+                old,
+                new.replace("jobs:\n", "jobs: {}\njobs:\n"),
+            )
+        )
+
+    def test_workflow_inputs_and_service_images_cannot_hide_other_changes(self) -> None:
+        old = (
+            "jobs:\n  test:\n    services:\n      db:\n        image: example/db:17.1\n"
+            "    steps:\n      - uses: example/action@v2\n"
+            "        with:\n          python-version: '3.13'\n      - run: app\n"
+        )
+        new = old.replace(":17.1", ":17.2").replace("'3.13'", "'3.14'")
+        self.assertTrue(self._reference_change(".github/workflows/ci.yml", old, new))
+        for changed in (
+            new.replace("run: app", "run: other"),
+            new.replace("example/db", "other/db"),
+        ):
+            with self.subTest(changed=changed):
+                self.assertFalse(self._reference_change(".github/workflows/ci.yml", old, changed))
+
+    def test_unknown_digests_branch_pins_and_unrelated_yaml_stay_for_review(self) -> None:
+        image = "services:\n  db:\n    image: example/db:17@sha256:" + "a" * 64 + "\n"
+        self.assertFalse(
+            self._reference_change("compose.yml", image, image.replace("a" * 64, "b" * 64))
+        )
+        action = "jobs:\n  test:\n    steps:\n      - uses: example/action@main\n"
+        self.assertFalse(
+            self._reference_change(
+                ".github/workflows/ci.yml", action, action.replace("@main", "@next")
+            )
+        )
+        self.assertFalse(
+            self._reference_change(
+                "settings.yml", "image: example/db:17.1", "image: example/db:17.2"
+            )
+        )
+
     def test_shared_dependency_repository_uses_consuming_client_profile(self) -> None:
         pull = _github_pull_request(16)
         pull["labels"] = []
