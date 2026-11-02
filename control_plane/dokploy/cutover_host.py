@@ -199,20 +199,23 @@ else: print(json.dumps({'state':'absent'}))
 
 
 def readiness_container_state(transport: CutoverHostTransport, container: str) -> dict[str, object]:
-    template = "{{json .State.Status}} {{json .State.Running}} {{json .State.OOMKilled}} {{json .State.ExitCode}}"
+    template = "{{json .State.Status}} {{json .State.Running}} {{json .State.OOMKilled}} {{json .State.ExitCode}} {{json .State.StartedAt}}"
     try:
         output = transport.read(
             ("docker", "inspect", "--format", template, container),
             None,
             timeout_seconds=20,
         )
-        status, running, oom_killed, exit_code = json.loads("[" + ",".join(output.split()) + "]")
+        status, running, oom_killed, exit_code, started_at = json.loads(
+            "[" + ",".join(output.split()) + "]"
+        )
         if (
             status
             not in {"created", "running", "paused", "restarting", "removing", "exited", "dead"}
             or type(running) is not bool
             or type(oom_killed) is not bool
             or type(exit_code) is not int
+            or datetime.fromisoformat(started_at).tzinfo is None
         ):
             return {"status": "unavailable"}
         return {
@@ -220,6 +223,7 @@ def readiness_container_state(transport: CutoverHostTransport, container: str) -
             "running": running,
             "oom_killed": oom_killed,
             "exit_code": exit_code,
+            "started_at": started_at,
         }
     except (ValueError, OSError, TypeError):
         return {"status": "unavailable"}

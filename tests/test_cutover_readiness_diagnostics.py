@@ -1,5 +1,6 @@
 import base64
 from contextlib import redirect_stdout
+from datetime import UTC, datetime
 import io
 from http.client import IncompleteRead
 import json
@@ -124,6 +125,8 @@ class CutoverReadinessDiagnosticTests(unittest.TestCase):
             NativeSourceUnavailable("secret"),
             "secret",
             '"secret" false true 1\n"running" true false 0',
+            '"running" true false 0 "secret"',
+            '"running" true false 0 null',
         ):
             with self.subTest(result=type(result).__name__):
                 transport.read.side_effect = result if isinstance(result, Exception) else None
@@ -151,7 +154,8 @@ class CutoverReadinessDiagnosticTests(unittest.TestCase):
     ) -> None:
         host = self.readiness_host()
         host.probes.private_health.side_effect = NativeProgramFailed("secret probe body")
-        host.transport.read.return_value = '"exited" false true 137\n'
+        started_at = datetime.now(UTC).isoformat()
+        host.transport.read.return_value = f'"exited" false true 137 {json.dumps(started_at)}\n'
         with (
             patch.object(time, "monotonic", side_effect=[10, 10, 11, 12]),
             patch.object(time, "sleep") as sleep,
@@ -166,6 +170,7 @@ class CutoverReadinessDiagnosticTests(unittest.TestCase):
         self.assertEqual(diagnostic["failure"]["kind"], "transport_unavailable")
         self.assertTrue(diagnostic["container"]["oom_killed"])
         self.assertFalse(diagnostic["container"]["running"])
+        self.assertEqual(diagnostic["container"]["started_at"], started_at)
         host.runner.assert_not_called()
         self.assertEqual(sleep.call_count, 2)
         host.writers.require_drained.assert_called_once()
