@@ -198,6 +198,13 @@ class _Store(_RouteBindingReconcileFakeStore):
 
 
 class RouteBindingRefreshControllerTests(unittest.TestCase):
+    def test_noncanonical_testing_instance_reports_identity_conflict(self) -> None:
+        binding = _service_binding().model_copy(update={"instance": "Testing"})
+        profile = _profile(lanes=(ProductLaneProfile(instance="Testing", context=binding.context),))
+        store = _Store(profiles=(profile,), bindings=(binding,))
+        with self.assertRaises(RouteBindingRefreshTargetInvariantError):
+            discover_active_odoo_testing_route_bindings(store, target_limit=25)
+
     def test_discovers_only_active_service_owned_odoo_testing_bindings(self) -> None:
         testing = _service_binding()
         production = _service_binding(context="example-prod", instance="prod")
@@ -486,23 +493,18 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
             bearer_identity_config=_local_operator_bearer_config(),
             record_store_factory=lambda: store,
         )
-        for controller, confirmation in (
-            ("odoo-testing", "APPLY ODOO TESTING ROUTE BINDING REFRESH"),
-            ("odoo-stable", "APPLY ODOO STABLE ROUTE BINDING REFRESH"),
-        ):
-            with self.subTest(controller=controller):
-                response = await _asgi_request(
-                    app,
-                    "POST",
-                    f"/v1/route-bindings/{controller}/controller/run-once",
-                    headers={
-                        "Authorization": "Bearer local-operator-token",
-                        "Idempotency-Key": controller,
-                    },
-                    payload={**_refresh_payload(mode="apply"), "confirmation": confirmation},
-                )
-                self.assertEqual(response.status_code, 403, response.text)
-                self.assertEqual(store.list_route_binding_records(), before)
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/route-bindings/odoo-testing/controller/run-once",
+            headers={
+                "Authorization": "Bearer local-operator-token",
+                "Idempotency-Key": "odoo-testing",
+            },
+            payload=_refresh_payload(mode="apply"),
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(store.list_route_binding_records(), before)
 
     async def test_dry_run_discovers_only_testing_records_and_does_not_write(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

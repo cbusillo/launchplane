@@ -18,24 +18,12 @@ from control_plane.route_binding_reconcile import (
     RouteBindingReconcileStore,
     plan_route_binding_reconcile,
 )
-from control_plane.route_binding_external_reconcile import (
-    ExternalRouteBindingReconcilePlan,
-    ExternalRouteBindingReconcileRequest,
-    ExternalRouteBindingReconcileStore,
-    plan_external_route_binding_reconcile,
-)
 
 
 class RouteBindingRefreshControllerStore(RouteBindingReconcileStore, Protocol):
     def list_product_profile_records(
         self, *, driver_id: str = ""
     ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
-
-
-class StableRouteBindingRefreshControllerStore(
-    RouteBindingRefreshControllerStore, ExternalRouteBindingReconcileStore, Protocol
-):
-    pass
 
 
 class RouteBindingRefreshTargetLimitExceeded(ValueError):
@@ -76,9 +64,7 @@ class RouteBindingRefreshOutcome(BaseModel):
     current_record_sha256: str
     candidate_record_sha256: str
     stale_after: str = ""
-    reconcile_plan: RouteBindingReconcilePlan | ExternalRouteBindingReconcilePlan | None = Field(
-        default=None, exclude=True
-    )
+    reconcile_plan: RouteBindingReconcilePlan | None = Field(default=None, exclude=True)
 
 
 class RouteBindingRefreshControllerPlan(BaseModel):
@@ -96,29 +82,6 @@ def discover_active_odoo_testing_route_bindings(
     target_limit: int,
     include_record: Callable[[EnvironmentRouteBindingRecord], bool] | None = None,
 ) -> tuple[RouteBindingRefreshTarget, ...]:
-    return _discover_route_bindings(
-        record_store, target_limit=target_limit, remaining=False, include_record=include_record
-    )
-
-
-def discover_remaining_odoo_stable_route_bindings(
-    record_store: RouteBindingRefreshControllerStore,
-    *,
-    target_limit: int,
-    include_record: Callable[[EnvironmentRouteBindingRecord], bool] | None = None,
-) -> tuple[RouteBindingRefreshTarget, ...]:
-    return _discover_route_bindings(
-        record_store, target_limit=target_limit, remaining=True, include_record=include_record
-    )
-
-
-def _discover_route_bindings(
-    record_store: RouteBindingRefreshControllerStore,
-    *,
-    target_limit: int,
-    remaining: bool,
-    include_record: Callable[[EnvironmentRouteBindingRecord], bool] | None,
-) -> tuple[RouteBindingRefreshTarget, ...]:
     if target_limit < 1:
         raise ValueError("Route binding refresh target_limit must be positive.")
     targets: dict[tuple[str, str, str], RouteBindingRefreshTarget] = {}
@@ -127,9 +90,7 @@ def _discover_route_bindings(
             continue
         for lane in profile.lanes:
             instance = lane.instance.strip().lower()
-            if instance not in {"testing", "prod"}:
-                continue
-            if not remaining and instance != "testing":
+            if instance != "testing":
                 continue
             try:
                 record = record_store.read_route_binding_record(
@@ -148,12 +109,7 @@ def _discover_route_bindings(
                 )
             if record.status != "active":
                 continue
-            existing_testing_target = (
-                record.instance == "testing" and record.source.source_kind == "service"
-            )
-            if remaining == existing_testing_target:
-                continue
-            if not remaining and record.source.source_kind != "service":
+            if record.source.source_kind != "service":
                 continue
             if include_record is not None and not include_record(record):
                 continue
@@ -185,38 +141,6 @@ def plan_odoo_testing_route_binding_refresh(
         target_limit=target_limit,
         include_record=include_record,
     )
-    return _plan_refresh(
-        record_store=record_store,
-        targets=targets,
-        evaluated_at=evaluated_at,
-    )
-
-
-def plan_remaining_odoo_stable_route_binding_refresh(
-    *,
-    record_store: StableRouteBindingRefreshControllerStore,
-    evaluated_at: str,
-    target_limit: int,
-    include_record: Callable[[EnvironmentRouteBindingRecord], bool] | None = None,
-) -> RouteBindingRefreshControllerPlan:
-    targets = discover_remaining_odoo_stable_route_bindings(
-        record_store, target_limit=target_limit, include_record=include_record
-    )
-    return _plan_refresh(
-        record_store=record_store,
-        targets=targets,
-        evaluated_at=evaluated_at,
-        external_store=record_store,
-    )
-
-
-def _plan_refresh(
-    *,
-    record_store: RouteBindingRefreshControllerStore,
-    targets: tuple[RouteBindingRefreshTarget, ...],
-    evaluated_at: str,
-    external_store: ExternalRouteBindingReconcileStore | None = None,
-) -> RouteBindingRefreshControllerPlan:
     if not targets:
         return RouteBindingRefreshControllerPlan(
             status="empty",
@@ -229,31 +153,17 @@ def _plan_refresh(
         expected_current = RouteBindingExpectedCurrent(
             state="present", record_sha256=target.current_record_sha256
         )
-        reconcile_plan: RouteBindingReconcilePlan | ExternalRouteBindingReconcilePlan
-        if target.record.ingress.provider == "external" and external_store is not None:
-            reconcile_plan = plan_external_route_binding_reconcile(
-                record_store=external_store,
-                request=ExternalRouteBindingReconcileRequest(
-                    product=target.product,
-                    context=target.context,
-                    instance=target.instance,
-                    expected_current=expected_current,
-                    source_label=target.record.source.source_label,
-                    evaluated_at=evaluated_at,
-                ),
-            )
-        else:
-            reconcile_plan = plan_route_binding_reconcile(
-                record_store=record_store,
-                request=RouteBindingReconcileRequest(
-                    product=target.product,
-                    context=target.context,
-                    instance=target.instance,
-                    expected_current=expected_current,
-                    source_label=target.record.source.source_label,
-                    evaluated_at=evaluated_at,
-                ),
-            )
+        reconcile_plan = plan_route_binding_reconcile(
+            record_store=record_store,
+            request=RouteBindingReconcileRequest(
+                product=target.product,
+                context=target.context,
+                instance=target.instance,
+                expected_current=expected_current,
+                source_label=target.record.source.source_label,
+                evaluated_at=evaluated_at,
+            ),
+        )
         outcomes.append(route_binding_refresh_outcome(target.record, reconcile_plan))
     return RouteBindingRefreshControllerPlan(
         status=(
@@ -269,7 +179,7 @@ def _plan_refresh(
 
 def route_binding_refresh_outcome(
     record: EnvironmentRouteBindingRecord,
-    reconcile_plan: RouteBindingReconcilePlan | ExternalRouteBindingReconcilePlan,
+    reconcile_plan: RouteBindingReconcilePlan,
 ) -> RouteBindingRefreshOutcome:
     status: RouteBindingRefreshOutcomeStatus
     operation: Literal["refresh", "none"] = "none"
