@@ -136,6 +136,7 @@ def cancel_fixture(spec):
 
 try:
     if spec['mode'] in {'cancel', 'cancel-readback'}:
+        readback_predicate = ReadbackPredicate.SCHEDULE_EVIDENCE
         cancel_fixture(spec)
     else:
         run_fixture(spec)

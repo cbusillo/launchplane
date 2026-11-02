@@ -208,6 +208,7 @@ class PreviewFixtureAdapter:
         *,
         expected_fixture_sha256: str = "",
     ) -> PreviewFixtureReceipt:
+        self.failure_reason = None
         connection = self.connect(mutation=mode == "apply")
         binding = self.binding or self.capture_binding()
         selection = connection.selection
