@@ -199,37 +199,29 @@ else: print(json.dumps({'state':'absent'}))
 """
 
 
-def readiness_container_states(
-    transport: CutoverHostTransport, candidate: str, runner: Callable[[], str]
-) -> dict[str, object]:
+def readiness_container_state(transport: CutoverHostTransport, container: str) -> dict[str, object]:
     template = "{{json .State.Status}} {{json .State.Running}} {{json .State.OOMKilled}} {{json .State.ExitCode}}"
     try:
         output = transport.read(
-            ("docker", "inspect", "--format", template, candidate, runner()),
+            ("docker", "inspect", "--format", template, container),
             None,
             timeout_seconds=20,
         )
-        lines = output.splitlines()
-        if len(lines) != 2:
+        status, running, oom_killed, exit_code = json.loads("[" + ",".join(output.split()) + "]")
+        if (
+            status
+            not in {"created", "running", "paused", "restarting", "removing", "exited", "dead"}
+            or type(running) is not bool
+            or type(oom_killed) is not bool
+            or type(exit_code) is not int
+        ):
             return {"status": "unavailable"}
-        states: dict[str, object] = {}
-        for role, line in zip(("candidate_web", "probe_runner"), lines, strict=True):
-            status, running, oom_killed, exit_code = json.loads("[" + ",".join(line.split()) + "]")
-            if (
-                status
-                not in {"created", "running", "paused", "restarting", "removing", "exited", "dead"}
-                or type(running) is not bool
-                or type(oom_killed) is not bool
-                or type(exit_code) is not int
-            ):
-                return {"status": "unavailable"}
-            states[role] = {
-                "status": status,
-                "running": running,
-                "oom_killed": oom_killed,
-                "exit_code": exit_code,
-            }
-        return states
+        return {
+            "status": status,
+            "running": running,
+            "oom_killed": oom_killed,
+            "exit_code": exit_code,
+        }
     except (ValueError, OSError, TypeError):
         return {"status": "unavailable"}
 
@@ -1050,9 +1042,7 @@ class BoundOdooCutoverHost:
                         "elapsed_seconds": round(now - started, 3),
                         "timeout_seconds": self.runtime.readiness_timeout_seconds,
                         "failure": failure,
-                        "containers": readiness_container_states(
-                            self.transport, web.container, lambda: self.runner(plan.old)
-                        ),
+                        "container": readiness_container_state(self.transport, web.container),
                     }
                     raise ValueError(json.dumps(diagnostic, sort_keys=True)) from None
                 time.sleep(1)

@@ -1,19 +1,20 @@
 import base64
 from contextlib import redirect_stdout
 import io
+from http.client import IncompleteRead
 import json
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from urllib.error import URLError
 
 from control_plane.dokploy import cutover_probes
-from control_plane.dokploy.cutover_host import BoundOdooCutoverHost, readiness_container_states
+from control_plane.dokploy.cutover_host import BoundOdooCutoverHost, readiness_container_state
 from control_plane.dokploy.cutover_probes import CutoverProbes, PrivateHealthFailed
 from control_plane.dokploy.cutover_transport import CutoverHostTransport
-from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable, NativeProgramFailed
 from tests.support.prepared_public_fixture import WebsiteFixture
 from tests.test_odoo_cutover import release_plan
 
@@ -29,42 +30,52 @@ class CutoverReadinessDiagnosticTests(unittest.TestCase):
         self,
     ) -> None:
         for reason in (ConnectionRefusedError("secret"), TimeoutError("secret")):
-            output = io.StringIO()
-            with (
-                patch(
-                    "sys.stdin",
-                    io.StringIO(
-                        json.dumps(
-                            {
-                                "url": "http://private.invalid/secret",
-                                "host": "secret.invalid",
-                                "database": "secret",
-                            }
-                        )
-                    ),
-                ),
-                patch(
-                    "urllib.request.build_opener",
-                    return_value=Mock(open=Mock(side_effect=URLError(reason))),
-                ),
-                redirect_stdout(output),
-            ):
-                try:
-                    exec(cutover_probes.HTTP_OBSERVATION_PROGRAM, {})
-                except SystemExit as error:
-                    if error.code != 0:
-                        raise
-            value = json.loads(output.getvalue())
-            self.assertNotIn("secret", output.getvalue())
-            probes = CutoverProbes(
-                self.plan, Mock(return_value=json.dumps(value)), Mock(return_value="runner")
-            )
-            with self.assertRaises(ValueError) as failure:
-                probes.private_health(self.plan.new)
-            self.assertIn(
+            failure = self.private_http_failure(Mock(open=Mock(side_effect=URLError(reason))))
+            self.assertEqual(
                 "connection_refused" if isinstance(reason, ConnectionRefusedError) else "timeout",
-                str(failure.exception),
+                failure.kind,
             )
+
+    def test_http_protocol_and_body_limit_failures_remain_distinct_from_exec_failure(self) -> None:
+        for result, category in (
+            (IncompleteRead(b"secret"), "protocol_error"),
+            (TimeoutError("secret"), "timeout"),
+            (b"secret" * 4_000_000, "resource_exceeds_bound"),
+        ):
+            with self.subTest(category=category):
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.read.side_effect = result if isinstance(result, Exception) else None
+                response.read.return_value = result
+                failure = self.private_http_failure(Mock(open=Mock(return_value=response)))
+                self.assertEqual(failure.kind, category)
+
+    def private_http_failure(self, opener: Mock) -> PrivateHealthFailed:
+        output = io.StringIO()
+        with (
+            patch(
+                "sys.stdin",
+                io.StringIO(
+                    json.dumps(
+                        {
+                            "url": "http://private.invalid/secret",
+                            "host": "secret.invalid",
+                            "database": "secret",
+                        }
+                    )
+                ),
+            ),
+            patch("urllib.request.build_opener", return_value=opener),
+            redirect_stdout(output),
+        ):
+            exec(cutover_probes.HTTP_OBSERVATION_PROGRAM, {})
+        self.assertNotIn("secret", output.getvalue())
+        probes = CutoverProbes(
+            self.plan, Mock(return_value=output.getvalue()), Mock(return_value="runner")
+        )
+        with self.assertRaises(PrivateHealthFailed) as failure:
+            probes.private_health(self.plan.new)
+        return failure.exception
 
     def test_http_status_and_invalid_or_foreign_health_body_remain_distinct_failures(self) -> None:
         for status, body, category in (
@@ -86,9 +97,9 @@ class CutoverReadinessDiagnosticTests(unittest.TestCase):
                     )
                 )
                 probes = CutoverProbes(self.plan, execute, Mock(return_value="runner"))
-                with self.assertRaises(ValueError) as failure:
+                with self.assertRaises(PrivateHealthFailed) as failure:
                     probes.private_health(self.plan.new)
-                self.assertIn(category, str(failure.exception))
+                self.assertEqual(category, failure.exception.kind)
                 self.assertNotIn("secret", str(failure.exception))
 
         execute.return_value = json.dumps(
@@ -115,7 +126,7 @@ class CutoverReadinessDiagnosticTests(unittest.TestCase):
                 transport.read.side_effect = result if isinstance(result, Exception) else None
                 transport.read.return_value = result
                 self.assertEqual(
-                    readiness_container_states(transport, "secret", lambda: "secret"),
+                    readiness_container_state(transport, "secret"),
                     {"status": "unavailable"},
                 )
 
@@ -136,8 +147,8 @@ class CutoverReadinessDiagnosticTests(unittest.TestCase):
         self,
     ) -> None:
         host = self.readiness_host()
-        host.probes.private_health.side_effect = ValueError("secret probe body")
-        host.transport.read.return_value = '"exited" false true 137\n"running" true false 0\n'
+        host.probes.private_health.side_effect = NativeProgramFailed("secret probe body")
+        host.transport.read.return_value = '"exited" false true 137\n'
         with (
             patch.object(time, "monotonic", side_effect=[10, 10, 11, 12]),
             patch.object(time, "sleep") as sleep,
@@ -149,8 +160,10 @@ class CutoverReadinessDiagnosticTests(unittest.TestCase):
         self.assertEqual(diagnostic["attempts"], host.probes.private_health.call_count)
         self.assertEqual(diagnostic["elapsed_seconds"], 2)
         self.assertEqual(diagnostic["timeout_seconds"], host.runtime.readiness_timeout_seconds)
-        self.assertTrue(diagnostic["containers"]["candidate_web"]["oom_killed"])
-        self.assertFalse(diagnostic["containers"]["candidate_web"]["running"])
+        self.assertEqual(diagnostic["failure"]["kind"], "transport_unavailable")
+        self.assertTrue(diagnostic["container"]["oom_killed"])
+        self.assertFalse(diagnostic["container"]["running"])
+        host.runner.assert_not_called()
         self.assertEqual(sleep.call_count, 2)
         host.writers.require_drained.assert_called_once()
         host.observer.native_ready.assert_not_called()

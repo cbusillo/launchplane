@@ -504,10 +504,10 @@ maintenance payloads retain their original bytes and authority.
 
 Failed commands report only an allowlisted category and numeric exit code;
 timeouts and missing transport completion never prove that effects ended.
-Private health distinguishes connection failures, HTTP status, invalid health
-data and foreign runtime identity. When its existing retry deadline expires,
+Private health distinguishes connection failures, HTTP protocol/status and body
+limits, invalid health data and foreign runtime identity. When its existing retry deadline expires,
 readiness reports its start time, elapsed time, attempt count and configured
-budget, followed by a bounded read of the candidate web and probe runner's
+budget, followed by a bounded read of the candidate web container's
 running, OOM and exit state. Unavailable state stays unknown. Commands, stdin,
 response bodies, provider errors and container logs are excluded. These
 diagnostics do not change the original operation's reconciliation hold,

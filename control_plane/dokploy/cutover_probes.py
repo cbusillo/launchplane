@@ -19,6 +19,7 @@ from control_plane.testing_browser import launch_testing_browser
 
 HTTP_OBSERVATION_PROGRAM = r"""
 import base64,json,socket,sys
+from http.client import HTTPException
 from urllib.error import HTTPError,URLError
 from urllib.request import HTTPRedirectHandler,ProxyHandler,Request,build_opener
 class NoRedirect(HTTPRedirectHandler):
@@ -30,9 +31,13 @@ try:
     except HTTPError as error: response=error
     with response:
         body=response.read(20_000_001)
-        if len(body)>20_000_000: raise ValueError('resource exceeds capture bound')
-        headers={key.lower():value for key,value in response.headers.items() if key.lower() not in {'set-cookie','authorization','www-authenticate'}}
-        print(json.dumps({'status':response.status,'headers':headers,'body':base64.b64encode(body).decode()},sort_keys=True))
+        if len(body)>20_000_000:
+            print(json.dumps({'failure':'resource_exceeds_bound'}))
+        else:
+            headers={key.lower():value for key,value in response.headers.items() if key.lower() not in {'set-cookie','authorization','www-authenticate'}}
+            print(json.dumps({'status':response.status,'headers':headers,'body':base64.b64encode(body).decode()},sort_keys=True))
+except HTTPException:
+    print(json.dumps({'failure':'protocol_error'}))
 except OSError as error:
     reason=error.reason if isinstance(error,URLError) else error
     kind='timeout' if isinstance(reason,TimeoutError) else 'connection_refused' if isinstance(reason,ConnectionRefusedError) else 'dns' if isinstance(reason,socket.gaierror) else 'connection_unavailable'
@@ -90,6 +95,8 @@ class CutoverProbes:
             "connection_refused",
             "dns",
             "connection_unavailable",
+            "protocol_error",
+            "resource_exceeds_bound",
         }:
             raise PrivateHealthFailed(value["failure"])
         if (
