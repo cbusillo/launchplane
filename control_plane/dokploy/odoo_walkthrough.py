@@ -409,6 +409,10 @@ if connection_isolation(env.cr, apply=False):
 users=env['res.users'].sudo().with_context(active_test=False,tracking_disable=True,
     mail_create_nosubscribe=True,no_reset_password=True)
 key=__TASK_MARKER_PREFIX__+request['task_id']
+if readonly and request['operation']!='cleanup':
+    from odoo.addons.launchplane_readonly import policy as readonly_policy
+    if hasattr(readonly_policy,'operative_marker_key'):
+        key=readonly_policy.operative_marker_key(request['identity']['product'])
 raw=read_string_parameter(parameters,key)
 marker=json.loads(raw) if raw else None
 login=__TASK_LOGIN_PREFIX__+request['task_id']
