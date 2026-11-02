@@ -275,13 +275,17 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         )
         self.assertEqual(restored.preserve_original_reservation_id, reference)
 
-    def test_preservation_reference_cannot_authorize_a_refresh(self) -> None:
+    def test_preservation_reference_cannot_mix_with_unrecorded_recovery(self) -> None:
         reference = build_launchplane_mutation_reservation_id(
             scope="original-preview", route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key="donor"
         )
         with self.assertRaises(ValueError):
             OdooPreviewApplyEnvelope.model_validate(
-                {**_refresh_payload(), "preserve_original_reservation_id": reference}
+                {
+                    **_refresh_payload(),
+                    "preserve_original_reservation_id": reference,
+                    "unrecorded_original_reservation_id": reference,
+                }
             )
 
     def test_qualified_snapshot_preview_refresh_needs_no_first_snapshot(self) -> None:
@@ -346,6 +350,38 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
         self.assertTrue(execute.call_args.kwargs["preserve_existing_data"])
         self.assertFalse(execute.call_args.kwargs["restore_upstream"])
         self.assertFalse(execute.call_args.kwargs["restore_clean_snapshot"])
+
+    def test_upstream_import_and_snapshot_retention_keep_existing_evidence_path(self) -> None:
+        from control_plane.product_secret_copy import ProductSecretCopyFrom
+
+        for snapshot in (False, True):
+            with self.subTest(snapshot=snapshot):
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_preview_profile_payload()
+                )
+                profile.preview.data_transport_mode = "driver"
+                profile.preview.clean_testing_snapshot = snapshot
+                issued = _issued_plan(OdooPreviewApplyEnvelope.model_validate(_refresh_payload()))
+                if not snapshot:
+                    issued.plan_request.fishbowl_source = ProductSecretCopyFrom(
+                        context="cm", instance="testing", version_id="fixture-version"
+                    )
+                with (
+                    patch.object(preview_http, "preview_has_completed_restore", return_value=True),
+                    patch.object(
+                        preview_http,
+                        "preview_has_completed_retained_source",
+                        side_effect=ValueError("strict legacy intent unavailable"),
+                    ),
+                ):
+                    decision = preview_http.resolve_preview_source_decision(
+                        record_store=Mock(),
+                        profile=profile,
+                        issued_plan=issued,
+                        environment={"ODOO_UPSTREAM_HOST": "source.example.test"},
+                    )
+                self.assertEqual(decision.source, "retained")
+                self.assertEqual(decision.fishbowl_import, not snapshot)
 
     def test_changed_effective_source_refuses_before_the_driver_effect(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())

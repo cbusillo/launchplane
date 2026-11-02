@@ -114,8 +114,6 @@ not describe runtime authority until it is implemented, deployed, and activated.
   promotion, revision changes, and recorded admin overrides.
 - [mediaforce-releases.md](mediaforce-releases.md) — source-side macOS release
   adapter, host fencing/evidence contract, and separate activation prerequisites.
-- [`owner-control-channel.md`](owner-control-channel.md) — public canonical admin
-  challenge payloads, cross-host conformance artifact, and deferred runtime boundary.
 - [privileged-operations.md](privileged-operations.md) — typed human-governed
   planning, managed-rule authorization, redaction, and future execution boundary.
 - [change-impact-policy.md](change-impact-policy.md) — retired classifier history and the

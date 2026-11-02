@@ -56,6 +56,8 @@ def require_source_free_preview_history(
     plan = issued_plan.dry_run_plan
     if (
         issued_plan.operation != "refresh"
+        or effective_source is not None
+        and effective_source.source == "retained"
         or profile.preview.clean_testing_snapshot
         or (
             profile.preview.data_transport_mode != "none"
@@ -66,6 +68,13 @@ def require_source_free_preview_history(
         return
     if not isinstance(store, PostgresRecordStore):
         raise ValueError("Preview source history requires database storage.")
+    if effective_source is None:
+        from control_plane.odoo_preview_apply_http import preview_has_completed_retained_source
+
+        if preview_has_completed_retained_source(
+            record_store=store, profile=profile, issued_plan=issued_plan
+        ):
+            return
     matched = False
     for original in store.list_odoo_preview_originals(
         product=profile.product, number=issued_plan.plan_request.pr_number
