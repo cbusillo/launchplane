@@ -3,6 +3,7 @@ import os
 
 import click
 from pathlib import Path
+from typing import cast
 
 from control_plane import secrets
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -46,7 +47,7 @@ from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApply
 class PreviewQualificationMissing(ValueError):
     def __init__(self, message: str, *, usage: OdooTestingUsage | None = None) -> None:
         super().__init__(message)
-        self.reason = str(usage.payload()["reason_code"]) if usage is not None else None
+        self.reason = cast(str, usage.payload()["reason_code"]) if usage is not None else None
 
 
 @dataclass(frozen=True)
