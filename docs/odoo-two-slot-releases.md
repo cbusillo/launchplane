@@ -508,7 +508,9 @@ Private health distinguishes connection failures, HTTP protocol/status and body
 limits, invalid health data and foreign runtime identity. When its existing retry deadline expires,
 readiness reports its start time, elapsed time, attempt count and configured
 budget, followed by a bounded read of the candidate web container's
-running, OOM and exit state. Unavailable state stays unknown. Commands, stdin,
+running, OOM and exit state, including Docker's last-start timestamp. That
+timestamp may precede the readiness check and does not prove health or run-marker
+publication. Unavailable state stays unknown. Commands, stdin,
 response bodies, provider errors and container logs are excluded. These
 diagnostics do not change the original operation's reconciliation hold,
 readiness deadline, writer fences or recovery authority.
