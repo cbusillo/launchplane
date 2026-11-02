@@ -2524,6 +2524,33 @@ def _run_preview_operation(
     def run_issued_plan(
         operation_plan: OdooPreviewApplyInputsResult, *, allow_mutation: bool
     ) -> DurableProviderOperationResult:
+        preview_binding = ""
+
+        def preview_checkpoint() -> None:
+            nonlocal preview_binding
+            pre_mutation_guard()
+            if operation != "refresh":
+                return
+            from control_plane.disposable_lanes import (
+                DisposableLaneSafetyUnknown,
+                require_disposable_preview_operation,
+            )
+
+            try:
+                binding = require_disposable_preview_operation(
+                    cast(PostgresRecordStore, record_store),
+                    profile=profile,
+                    issued_plan=operation_plan,
+                    allow_unrecorded_creation=True,
+                )
+                if preview_binding and binding != preview_binding:
+                    raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
+                preview_binding = binding
+            except (FileNotFoundError, ValueError) as protection_error:
+                raise OdooPreviewPlanProvenanceError(
+                    code="disposable_lane_safety_unknown", message=str(protection_error)
+                ) from protection_error
+
         apply_request = validate_odoo_preview_issued_plan(
             plan_id=plan_id,
             issued_plan=operation_plan,
@@ -2554,8 +2581,8 @@ def _run_preview_operation(
             execute_apply=execute_apply,
             observe_apply=preview_hooks.observe_apply,
             supersession_is_quiescent=preview_hooks.quiescence_check,
-            pre_mutation_guard=pre_mutation_guard,
-            qualify_existing_preview=bool(disposal_original),
+            pre_mutation_guard=preview_checkpoint,
+            qualify_existing_preview=operation == "refresh" or bool(disposal_original),
             disposable_cleanup=operation == "destroy"
             and plan.get("reason") == "pull_request_not_open",
             allow_mutation=allow_mutation,

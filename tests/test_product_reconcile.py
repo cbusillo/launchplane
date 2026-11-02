@@ -5775,6 +5775,134 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def _record_preview_protection(self, protection: str) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        target = DokployTargetRecord(
+            context="cm", instance="pr-5", updated_at="2026-09-30T09:00:00Z"
+        )
+        if protection == "staff_testing":
+            target = target.model_copy(
+                update={
+                    "policies": DokployTargetPolicies(
+                        staff_testing_hold=DokployTargetStaffTestingHold(
+                            reason="Staff use this preview.",
+                            recorded_by="fixture",
+                            recorded_at=target.updated_at,
+                        )
+                    )
+                }
+            )
+        self.store.write_dokploy_target_record(target)
+        record_safety(
+            self.store,
+            "site",
+            "cm",
+            "pr-5",
+            usage="in_use" if protection == "in_use" else "unknown",
+            data="only_copy" if protection == "only_copy" else "unknown",
+            production_resources=protection
+            if protection in {"shared", "separation_ready"}
+            else "unknown",
+        )
+        self.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context="cm",
+                instance="prod",
+                display_name="Production",
+                provider_id="dokploy",
+                target_category="application",
+                provider_target_type="compose",
+                target_id=self.provider.targets[("cm", "cm-odoo-preview-pr-5")]
+                if protection == "alias"
+                else "production-target",
+                updated_at=target.updated_at,
+            )
+        )
+
+    def test_protected_automatic_refresh_resumes_same_intent_after_protection_clears(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+        for index, protection in enumerate(
+            ("in_use", "staff_testing", "only_copy", "shared", "separation_ready", "alias")
+        ):
+            with self.subTest(protection=protection):
+                self._record_preview_protection(protection)
+                self.request("preview", 5)
+                self.assertEqual(self.reconcile()["reason"], "already_serving")
+                pushed = f"{index + 1:040x}"
+                self.github.pull_request["head"] = {"sha": pushed}
+                self.github.add_run(51 + index, pushed, event="pull_request")
+                before = (
+                    self.store.list_preview_records(),
+                    self.store.list_preview_generation_records(),
+                )
+                effects = list(self.provider.applied)
+                self.request("preview", 5)
+                refused = self.run_once()
+                self.assertEqual(self.provider.applied, effects)
+                self.assertEqual(
+                    (
+                        self.store.list_preview_records(),
+                        self.store.list_preview_generation_records(),
+                    ),
+                    before,
+                )
+                self.assertEqual(refused.state, "failed")
+                self._record_preview_protection("clear")
+                self.request("preview", 5)
+                resumed = self.reconcile()
+                self.assertEqual(resumed["preview_plan_id"], refused.last_plan["preview_plan_id"])
+                self.assertEqual(resumed["preview_result_status"], "pass")
+                self.assertEqual(self.provider.applied, [*effects, ("refresh", 5)])
+
+    def test_automatic_refresh_rechecks_protection_after_planning_and_at_provider_effect(
+        self,
+    ) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        build = self.provider.build_inputs
+        execute = self.provider.execute_apply
+
+        def protect_after_plan(**kwargs: Any) -> dict[str, object]:
+            result = build(**kwargs)
+            self._record_preview_protection("in_use")
+            return result
+
+        def protect_before_effect(**kwargs: Any) -> dict[str, object]:
+            self._record_preview_protection("only_copy")
+            kwargs["provider_effect_checkpoint"]("compose_update")
+            return execute(**kwargs)
+
+        for stage, method, replacement in (
+            ("planned", "build_inputs", protect_after_plan),
+            ("effect", "execute_apply", protect_before_effect),
+        ):
+            with self.subTest(stage=stage):
+                self._record_preview_protection("clear")
+                pushed = ("b" if stage == "planned" else "c") * 40
+                self.github.pull_request["head"] = {"sha": pushed}
+                self.github.add_run(51 if stage == "planned" else 52, pushed, event="pull_request")
+                effects = list(self.provider.applied)
+                before = (
+                    self.store.list_preview_records(),
+                    self.store.list_preview_generation_records(),
+                )
+                self.request("preview", 5)
+                with patch.object(self.provider, method, side_effect=replacement):
+                    refused = self.run_once()
+                self.assertEqual(self.provider.applied, effects)
+                self.assertEqual(
+                    (
+                        self.store.list_preview_records(),
+                        self.store.list_preview_generation_records(),
+                    ),
+                    before,
+                )
+                self.assertEqual(refused.state, "failed")
+
     def test_changed_preview_binding_keeps_its_original_plan_until_guarded_renewal(self) -> None:
         from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_PLAN_TTL_SECONDS
         from control_plane.workflows.odoo_preview_runtime import (

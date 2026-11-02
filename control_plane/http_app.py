@@ -864,8 +864,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
     require_disposable_lane,
-    require_lane_target_ownership,
-    resolve_disposable_preview,
+    require_disposable_preview_operation,
     resolve_disposable_observation_binding,
     disposable_lane_observation_sha256,
 )
@@ -6967,13 +6966,6 @@ def create_launchplane_fastapi_app(
                         raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
                     preview_binding = binding
                     return
-                preview = resolve_disposable_preview(
-                    lane_store,
-                    current_profile,
-                    issued_plan.context,
-                    issued_plan.preview_slug,
-                    allow_destroyed=issued_plan.operation == "refresh",
-                )
                 from control_plane.preview_source import require_source_free_preview_history
 
                 require_source_free_preview_history(
@@ -6982,48 +6974,10 @@ def create_launchplane_fastapi_app(
                     issued_plan=issued_plan,
                     operation_record_id=operation_record_id,
                 )
-                compose_id = issued_plan.dry_run_plan.compose_ref
-                creating_recipient = (
-                    issued_plan.operation == "refresh"
-                    and preview.state == "destroyed"
-                    and compose_id.startswith("${created.composeId:")
-                )
-                if not creating_recipient and (
-                    not compose_id or compose_id.startswith("${created.")
-                ):
-                    raise DisposableLaneSafetyUnknown(
-                        "The existing preview target is not resolved."
-                    )
-                try:
-                    target_id = lane_store.read_dokploy_target_id_record(
-                        context_name=issued_plan.context, instance_name=issued_plan.preview_slug
-                    )
-                except FileNotFoundError:
-                    target_id = None
-                if (creating_recipient and target_id is not None) or (
-                    target_id is not None and compose_id != target_id.target_id
-                ):
-                    raise DisposableLaneSafetyUnknown(
-                        "The discovered preview target changed or aliases another lane."
-                    )
-                require_lane_target_ownership(
-                    (
-                        *lane_store.list_dokploy_target_id_records(),
-                        *cast(
-                            PostgresRecordStore, record_store
-                        ).list_physical_provider_target_records(),
-                    ),
-                    context=issued_plan.context,
-                    instance=issued_plan.preview_slug,
-                    target_id="" if creating_recipient else compose_id,
-                )
-                binding = require_disposable_lane(
-                    lane_store,
-                    product=product_profile.product,
-                    context=issued_plan.context,
-                    instance=issued_plan.preview_slug,
-                    preview=preview,
-                    preview_operation=issued_plan.operation,
+                binding = require_disposable_preview_operation(
+                    cast(PostgresRecordStore, record_store),
+                    profile=current_profile,
+                    issued_plan=issued_plan,
                 )
                 if preview_binding and binding != preview_binding:
                     raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
