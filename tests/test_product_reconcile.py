@@ -5857,6 +5857,56 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
                 self.assertEqual(resumed["preview_result_status"], "pass")
                 self.assertEqual(self.provider.applied, [*effects, ("refresh", 5)])
 
+    def test_pr_movement_after_first_preview_effect_does_not_interrupt_finalization(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        execute = self.provider.execute_apply
+        pushed = "b" * 40
+
+        def moved_after_effect(**kwargs: Any) -> dict[str, object]:
+            kwargs["provider_effect_checkpoint"]("compose_update")
+            self.github.pull_request["head"] = {"sha": pushed}
+            kwargs["provider_effect_checkpoint"]("compose_update")
+            return execute(**kwargs)
+
+        self.request("preview", 5)
+        with patch.object(self.provider, "execute_apply", side_effect=moved_after_effect):
+            completed = self.reconcile()
+        self.assertEqual(completed["preview_result_status"], "pass")
+        self.assertEqual(self.provider.applied, [("refresh", 5)])
+        self.github.add_run(51, pushed, event="pull_request")
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+        preview = self.store.list_preview_records()[0]
+        generation = self.store.read_preview_generation_record(preview.serving_generation_id)
+        self.assertEqual(generation.anchor_summary.head_sha, pushed)
+
+    def test_automatic_creation_keeps_recorded_protection_without_an_unused_witness(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        for protection in ("in_use", "staff_testing", "only_copy", "shared", "separation_ready"):
+            with self.subTest(protection=protection):
+                self._record_preview_protection(protection)
+                self.request("preview", 5)
+                refused = self.run_once()
+                self.assertEqual(refused.state, "failed")
+                self.assertEqual(self.provider.applied, [])
+                self.assertEqual(self.store.list_preview_records(), ())
+                self.assertEqual(self.store.list_preview_generation_records(), ())
+        self._record_preview_protection("clear")
+        target_binding = DokployTargetIdRecord(
+            context="cm",
+            instance="pr-5",
+            target_id="production-target",
+            updated_at="2026-09-30T09:00:00Z",
+        )
+        self.store.write_dokploy_target_id_record(target_binding)
+        self.request("preview", 5)
+        self.assertEqual(self.run_once().state, "failed")
+        self.assertEqual(self.provider.applied, [])
+        self.store.delete_dokploy_target_id_record(expected_record=target_binding)
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+        self.assertEqual(self.provider.applied, [("refresh", 5)])
+
     def test_automatic_refresh_rechecks_protection_after_planning_and_at_provider_effect(
         self,
     ) -> None:
@@ -5902,6 +5952,12 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
                     before,
                 )
                 self.assertEqual(refused.state, "failed")
+
+                self._record_preview_protection("clear")
+                self.request("preview", 5)
+                resumed = self.reconcile()
+                self.assertEqual(resumed["preview_plan_id"], refused.last_plan["preview_plan_id"])
+                self.assertEqual(resumed["preview_result_status"], "pass")
 
     def test_changed_preview_binding_keeps_its_original_plan_until_guarded_renewal(self) -> None:
         from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_PLAN_TTL_SECONDS

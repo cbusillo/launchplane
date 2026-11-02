@@ -2528,7 +2528,8 @@ def _run_preview_operation(
 
         def preview_checkpoint() -> None:
             nonlocal preview_binding
-            pre_mutation_guard()
+            if operation != "refresh" or plan.get("preview_mutation_attempted") is not True:
+                pre_mutation_guard()
             if operation != "refresh":
                 return
             from control_plane.disposable_lanes import (
