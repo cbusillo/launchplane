@@ -267,7 +267,7 @@ jobs:
   apply:
     if: needs.plan.outputs.recovery == 'true'
     needs: plan
-    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml@a3fbd1c47912b0b0975978a7cd8d18e040e28b2e # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml@77a3f4a1bec982a4375e545d2f5c587f1fcd29d3 # main
     with:
       allocation_control: ${{ inputs.allocation_control }}
       product: ${{ needs.plan.outputs.product }}

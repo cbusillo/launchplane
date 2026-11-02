@@ -55,7 +55,7 @@ name: Product Retirement
 
 jobs:
   retire:
-    uses: cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml@c922d5f1a0bf3ab17a829196042a96ba89d7b693 # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml@77a3f4a1bec982a4375e545d2f5c587f1fcd29d3 # main
     permissions:
       contents: read
       id-token: write

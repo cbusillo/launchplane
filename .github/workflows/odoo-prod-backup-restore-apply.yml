@@ -69,7 +69,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-restore-apply.yml@fc3746b61bc9dbf054d491a2352f8bd3c8e4ce1b # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-restore-apply.yml@77a3f4a1bec982a4375e545d2f5c587f1fcd29d3 # main
     with:
       product: ${{ inputs.product }}
       context: ${{ inputs.context }}

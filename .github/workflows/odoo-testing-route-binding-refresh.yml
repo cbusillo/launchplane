@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   refresh:
-    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-testing-route-binding-refresh.yml@f73e4616a6cbca2329ec6adaa0c76e4b3b3daf4b # main
+    uses: cbusillo/launchplane/.github/workflows/reusable-odoo-testing-route-binding-refresh.yml@77a3f4a1bec982a4375e545d2f5c587f1fcd29d3 # main
     permissions:
       contents: read
       id-token: write
