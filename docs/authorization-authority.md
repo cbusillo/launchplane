@@ -164,6 +164,13 @@ also has a bounded Director-agent path; that contract owns its safety and recove
 The [health alert drill](health-alert-drills.md) also has a bounded Director-agent
 send path; that contract owns its authorization and delivery rules.
 
+[Preview feedback remediation](operations.md#preview-feedback-remediation) admits
+the authenticated Director `local_operator` for an exact verified native Odoo
+retirement. This route-local standing path derives terminal `destroyed` feedback
+from the retained original and lifecycle evidence, bound to the reviewed dry run.
+It adds no grant to the general remediation action, other callers or statuses,
+and cannot change provider state, access, release or merge authority.
+
 Generic-web deploy recovery dry runs authorize the instance-scoped
 `generic_web_deploy_recovery.plan` action, with the existing execute grant as a
 compatibility alternative. The authenticated Director agent inherits this inert

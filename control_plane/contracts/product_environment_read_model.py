@@ -871,7 +871,7 @@ def _preview_refresh_warnings(
             f"PR #{request.pull_request_number}: {unavailable}"
             for request in product_preview_requests(record_store, product=profile.product)
             if request.pull_request_number is not None
-            and preview_refresh_failure(request)
+            and (failure := preview_refresh_failure(request, store=record_store))
             and (
                 unavailable := preview_review_unavailability(
                     store=cast(ProductReviewStore, record_store),
@@ -879,6 +879,7 @@ def _preview_refresh_warnings(
                     pull_request_number=request.pull_request_number,
                     head_sha=str(request.last_plan.get("head_sha") or ""),
                     request=request,
+                    refresh_failure=failure,
                 )
             )
         )

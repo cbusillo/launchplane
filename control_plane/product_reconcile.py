@@ -13,6 +13,7 @@ from __future__ import annotations
 from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
 from control_plane.timestamps import utc_now_timestamp as _utc_now
+from control_plane.contracts.product_reconcile import preview_failure_observed_at
 from control_plane.http_error_evidence import log_handled_error_cause
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
@@ -1821,6 +1822,7 @@ def _hold_preview_destroy(
             "The preview remains recorded; retirement requires an operator."
         ),
     )
+    _carry_preview_failure(plan, previous)
     return ReconcileOutcome(plan)
 
 
@@ -1832,6 +1834,7 @@ def _hold_preview_cleanup(plan: dict[str, object], reason: str) -> ReconcileOutc
         plan.pop("disposal_original_reservation_id", None)
     plan.pop("last_failed_error_code", None)
     plan.pop("last_failed_error_summary", None)
+    plan.pop("last_failed_at", None)
     plan.update(action="wait", held=True, reason=reason)
     return ReconcileOutcome(plan)
 
@@ -2768,8 +2771,24 @@ def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
         last_failed_error_code=code,
         last_failed_error_summary=summary,
         last_failed_head_sha=plan.get("head_sha", ""),
+        last_failed_at=_utc_now(),
     )
     return ReconcileOutcome(plan, error=summary)
+
+
+def _carry_preview_failure(
+    plan: dict[str, object], previous: Mapping[str, object], *, observed_at: str = ""
+) -> None:
+    for key in ("last_failed_error_code", "last_failed_error_summary"):
+        if key in previous:
+            plan[key] = previous[key]
+    if "last_failed_error_summary" not in previous:
+        return
+    failed_at = observed_at or previous.get("last_failed_at")
+    if isinstance(failed_at, str) and failed_at.strip():
+        plan["last_failed_at"] = failed_at
+    else:
+        plan.pop("last_failed_at", None)
 
 
 def _run_generic_web_preview_operation(
@@ -3177,9 +3196,9 @@ def run_product_reconcile_once(
         outcome = _preview_failure(dict(outcome.plan), str(code))
         if "action" not in outcome.plan and "destroy_retry_key" in outcome.plan:
             # A pre-plan read failure is not the destroy failure that exhausted the budget.
-            for key in ("last_failed_error_code", "last_failed_error_summary"):
-                if key in request.last_plan:
-                    outcome.plan[key] = request.last_plan[key]
+            _carry_preview_failure(
+                outcome.plan, request.last_plan, observed_at=preview_failure_observed_at(request)
+            )
     plan = dict(outcome.plan)
     timing = {
         "requested_at": request.requested_at,
@@ -3193,11 +3212,11 @@ def run_product_reconcile_once(
         and plan.get("action") != "destroy"
         and plan.get("reason") not in {"pull_request_not_open", "already_serving"}
         and plan.get("preview_result_status") != "pass"
-        and preview_refresh_failure(request)
+        and preview_refresh_failure(request, store=record_store)
     ):
-        for key in ("last_failed_error_code", "last_failed_error_summary"):
-            if key in request.last_plan:
-                plan[key] = request.last_plan[key]
+        _carry_preview_failure(
+            plan, request.last_plan, observed_at=preview_failure_observed_at(request)
+        )
         plan["last_failed_head_sha"] = request.last_plan.get(
             "last_failed_head_sha", request.last_plan.get("head_sha", "")
         )

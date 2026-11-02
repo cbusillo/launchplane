@@ -4875,6 +4875,34 @@ The route follows [GitHub delivery identity](#github-delivery-identity), accepts
 `.apply`, and never grants this mutation to preview workflow OIDC identities.
 Attach the remediation and companion feedback record ids to the governing issue.
 
+The authenticated Director `local_operator` can reconcile `destroyed` feedback
+without a new grant when the service verifies the exact completed native Odoo
+destroy original, its issued plan and matching destroyed lifecycle with no active
+or serving generation. Both dry run and apply retain a digest of that evidence;
+apply refuses a changed retirement or later failure, held wait, failed feedback
+or original operation. A harmless sweep or pending feedback does not renew a
+historical failure. Existing decision timestamps date inherited errors across
+queue pickup; missing stable evidence retains the refusal. The normal reconciler
+also stops carrying or reposting a failure superseded by verified retirement.
+Each genuine failure records its own `last_failed_at` alongside the retained
+failure fields. Harmless sweeps carry that original time unchanged, including
+when comment delivery deduplicates the same body. A carried legacy failure with
+no reliable date remains unqualified. Unavailable retirement lookups preserve
+failure attention and cannot interrupt reconcile completion.
+Exact completed
+replays return their original response even after newer evidence arrives; they
+perform no new mutation. The operation cannot manufacture retirement, clear a
+later failure or alter a provider. Other terminal statuses and callers retain
+their existing policy checks and reviewed-observation contract.
+Current preview warnings derive the same supersession from original evidence;
+historical reconcile failures and provider receipts remain unchanged.
+An open PR can acquire a genuine later held wait, such as an artifact-scan
+refusal. Warnings and reconciler feedback prefer a current error, then an
+error-free current held wait, ahead of an older retained provenance failure.
+Closed cleanup holds keep their cleanup behavior. Retirement never clears a
+new blocker.
+Open PRs retain their normal event reconciliation, including subsequent builds.
+
 ### VeriReel Preview Evidence Handoff
 
 > **Status:** this handoff is a product repository calling Launchplane, which

@@ -1,3 +1,6 @@
+from control_plane.contracts.preview_execution import (
+    odoo_preview_destroy_reason as _odoo_preview_destroy_reason,
+)
 import copy
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
@@ -631,7 +634,6 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         from control_plane.contracts.idempotency_record import format_launchplane_mutation_timestamp
         from control_plane.odoo_preview_apply_http import (
             OdooPreviewPlanProvenanceError,
-            _odoo_preview_destroy_reason,
             apply_odoo_preview_lifecycle_evidence,
             validate_odoo_preview_lifecycle_response_current,
         )
@@ -739,7 +741,6 @@ class LegacyOdooPreviewReconciliationTests(legacy_tests.LegacyPreviewReconciliat
         from control_plane.contracts.idempotency_record import format_launchplane_mutation_timestamp
         from control_plane.odoo_preview_apply_http import (
             OdooPreviewPlanProvenanceError,
-            _odoo_preview_destroy_reason,
             apply_odoo_preview_lifecycle_evidence,
             validate_odoo_preview_lifecycle_response_current,
         )

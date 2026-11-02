@@ -1,3 +1,6 @@
+from control_plane.contracts.preview_execution import (
+    odoo_preview_destroy_reason as _odoo_preview_destroy_reason,
+)
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,7 +16,6 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
 from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyEnvelope,
-    _odoo_preview_destroy_reason,
     issue_odoo_preview_apply_plan,
 )
 from control_plane.service_auth import (
