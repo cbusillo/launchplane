@@ -158,6 +158,7 @@ from control_plane.authz_candidate_preparation import (
     ordinary_agent_delivery_administration_removed,
 )
 from control_plane.contracts.authz_policy_record import (
+    AuthzPolicyConflictError,
     AuthzPolicyCompareWriteResult,
     LaunchplaneAuthzPolicyRecord,
     build_authz_policy_record_id,
@@ -6911,7 +6912,12 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ServiceIdentityAuthorityError(
                         "Service identity changes require a separate apply by an authorized administrator."
                     )
-                active_policy = self._locked_active_authz_policy_record(session).policy
+                try:
+                    active_policy = self._locked_active_authz_policy_record(session).policy
+                except AuthzPolicyConflictError as error:
+                    raise ServiceIdentityAuthorityError(
+                        "Current administrator authority is unavailable."
+                    ) from error
                 self._require_service_identity_administrator(active_policy, caller_identity)
             reservation_reader = getattr(
                 self._provider_evidence_context, "reservation_reader", None
@@ -20351,9 +20357,7 @@ class PostgresRecordStore(HumanSessionStore):
             statement = statement.with_for_update()
         rows = tuple(session.scalars(statement))
         if len(rows) != 1:
-            raise ServiceIdentityAuthorityError(
-                "Exactly one active authorization policy is required."
-            )
+            raise AuthzPolicyConflictError("Exactly one active authorization policy is required.")
         return self._read_authz_policy_row(rows[0])
 
     @staticmethod

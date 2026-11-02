@@ -8,7 +8,6 @@ from typing import Literal
 from httpx2 import Response
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
-    ServiceIdentityAuthorityError,
 )
 
 from cryptography.fernet import Fernet
@@ -16,6 +15,7 @@ from cryptography.fernet import Fernet
 from control_plane import secrets
 from control_plane.artifact_scan import GHCR_ARTIFACT_READ_INTEGRATION
 from control_plane.owner_secret_inputs import resolve_owner_secret_submission
+from control_plane.contracts.authz_policy_record import AuthzPolicyConflictError
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
@@ -181,7 +181,7 @@ class OwnerSecretInputTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             self.store,
             "_locked_active_authz_policy_record",
-            side_effect=ServiceIdentityAuthorityError("ambiguous policy"),
+            side_effect=AuthzPolicyConflictError("ambiguous policy"),
         ):
             refused = await self.post({**payload, "value": "must-not-be-stored"}, human=director)
         self.assertEqual(refused.status_code, 403, refused.text)

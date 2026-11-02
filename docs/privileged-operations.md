@@ -185,8 +185,6 @@ After an uncertain response the reason stays locked for a retry with the same
 source event; refresh the plan to check its state. Retired operation types have
 no cancellation control.
 
-## Admin Confirmation Contract Seam
-
 ## Authorization
 
 Privileged-operation routes do not use bare `LaunchplaneAuthzPolicy.allows`.
