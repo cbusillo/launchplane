@@ -1001,6 +1001,77 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         qualification.assert_called_once()
         remote.assert_not_called()
 
+    def test_plan_capacity_supports_preservation_without_snapshot_or_lane_changes(self) -> None:
+        from control_plane.preview_preservation import run_preview_preservation
+        from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsRequest
+
+        self.record_serving_original()
+        self.issued.operation = "refresh"
+        self.issued.dry_run_plan.operation = "refresh"
+        before = self.profile.model_dump(mode="json")
+        self.assertFalse(self.profile.preview.clean_testing_snapshot)
+        self.assertTrue(all(lane.odoo_testing_drill_storage is None for lane in self.profile.lanes))
+        budget = OdooTestingDrillStorageBudget(
+            database_bytes=1024, filestore_bytes=2048, staging_bytes=4096, reserve_bytes=8192
+        )
+        expected_budget = budget
+        source = {"provider_binding_sha256": "fixture"}
+
+        def remote(**kwargs: Any) -> None:
+            self.assertEqual(
+                kwargs["payload"]["storage_budget"], expected_budget.model_dump(mode="json")
+            )
+            kwargs["receive"](
+                {
+                    "type": "complete",
+                    "preservation_id": self.authority().preservation_id,
+                    "source": source,
+                    "volume_binding": {},
+                }
+            )
+
+        with (
+            patch(
+                "control_plane.preview_preservation.read_preview_preservation_source",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://fixture.invalid", "fixture"),
+            ),
+            patch(
+                "control_plane.dokploy.memory_capacity.preview_host_memory_floor", return_value=1024
+            ),
+            patch(
+                "control_plane.dokploy.native_copy_stream._read_remote", side_effect=remote
+            ) as dispatch,
+        ):
+            arguments: dict[str, Any] = dict(
+                store=self.store,
+                profile=self.profile,
+                issued_plan=self.issued,
+                original_reservation_id=self.original.record_id,
+                operation_record_id="fixture-new-operation",
+                control_plane_root=self.root,
+                mode="preflight",
+                timeout_seconds=30,
+                check=lambda: None,
+            )
+            self.issued.plan_request = OdooPreviewApplyInputsRequest.model_validate(
+                {
+                    **self.issued.plan_request.model_dump(mode="json"),
+                    "preservation_storage_budget": budget.model_dump(mode="json"),
+                }
+            )
+            run_preview_preservation(**arguments)
+            dispatch.assert_called_once()
+            self.assertEqual(self.profile.model_dump(mode="json"), before)
+            self.profile.preview.clean_testing_snapshot = True
+            self.profile.lanes[0].odoo_testing_drill_storage = expected_budget = budget.model_copy(
+                update={"reserve_bytes": 2 * budget.reserve_bytes}
+            )
+            run_preview_preservation(**arguments)
+
     def test_preserving_refresh_keeps_data_through_later_ordinary_refreshes(self) -> None:
         from control_plane import odoo_preview_apply_http as preview_http
         from control_plane.preview_source import require_source_free_preview_history

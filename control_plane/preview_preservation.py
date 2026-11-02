@@ -409,6 +409,7 @@ def run_preview_preservation(
     )
     budget = (
         snapshot_storage_budget(profile, profile.preview.context)
+        or issued_plan.plan_request.preservation_storage_budget
         if mode in {"preserve", "preflight"}
         else None
     )
