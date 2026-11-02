@@ -10,6 +10,7 @@ from collections.abc import Callable
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
@@ -463,6 +464,7 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                 with (
                     patch.object(sys, "argv", ["capture", payload, "frame:"]),
                     patch.object(subprocess, "run", side_effect=docker),
+                    patch("os.statvfs", return_value=SimpleNamespace(f_fsid=12345)),
                     patch.dict(
                         "os.environ",
                         {

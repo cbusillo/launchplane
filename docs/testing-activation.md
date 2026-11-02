@@ -802,25 +802,18 @@ volume. A separate durable child removes the original volume only after current
 candidate health and complete Launchplane, provider and local Docker inventories
 prove independent cleanup custody. The existing retained-volume host program
 checks the captured engine and backing identity, references, path aliases and
-same-boot monotonic permit before removal. New captures bind the full Docker volume
-metadata, engine, directory inode and nonzero `statvfs` filesystem ID. Kernel
-device numbers remain useful for same-run alias checks, but are not durable
-filesystem identity. Historical hashes remain immutable. The shared comparator
-can prove an old anonymous-device binding by exact hash equality with only its
-minor varied within the bounded range 1 through 65535; metadata, engine and inode
-must still agree. Other historical device changes remain held. A new-format
-filesystem mismatch cannot pass through this legacy comparison. Missing or zero
-filesystem identity prevents new captures; historical bindings still use their
-original exact or bounded comparison. Filesystems whose filesystem ID itself
-changes on remount, including some XFS placements, remain held rather than
-claiming reboot stability.
+same-boot monotonic permit before removal. That permit has its own bounded
+cleanup budget, independent of route-readiness freshness.
 
-This comparison applies to retained-volume sweeps and production-recipient
-retirement too. It creates no new removal authority. Terminal failed rebuilds
-and completed child refusals are not retried. A later rebuild carries the same
-saved predecessor bindings under its own fresh health proof and cleanup permits;
-expired original permits remain expired. That permit has its own bounded
-cleanup budget, independent of route-readiness freshness. Completed retirement requires final
+New captures bind full volume metadata, engine, inode and nonzero `statvfs`
+filesystem ID, replacing boot-specific device numbers. The shared sweep and
+production-recipient comparator preserves historical hashes: anonymous-device
+renumbering matches only when the original hash agrees with every other input,
+searching minor numbers 1 through 65535. Other historical device changes remain
+held. Zero filesystem IDs prevent new captures but permit historical comparison;
+new-format filesystem mismatches remain held. Filesystems whose ID changes on
+remount, including some XFS placements, remain held. Plans reviewed before this
+change require a fresh dry-run. Completed retirement requires final
 health and independent service, container and volume absence checks. A lost
 reply resumes the original receipts; a later staff hold or deployment is retained.
 The host program waits for Docker's asynchronous container teardown within a

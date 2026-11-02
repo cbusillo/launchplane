@@ -16,6 +16,9 @@ from control_plane.retained_volume_capture import (
 )
 
 
+FILESYSTEM_ID = 12345
+
+
 DOCKER_FIXTURE = r"""#!/usr/bin/env python3
 import json,os,sys,time
 from pathlib import Path
@@ -143,7 +146,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             engine_id,
             metadata.st_dev,
             metadata.st_ino,
-            backing_filesystem_id=os.statvfs(self.data).f_fsid,
+            backing_filesystem_id=FILESYSTEM_ID,
         )
 
     def run_program(
@@ -155,6 +158,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         engine_identity: str | None = None,
         retirement: dict[str, object] | None = None,
         observed_device: int | None = None,
+        filesystem_id: int = FILESYSTEM_ID,
     ) -> dict[str, object]:
         engine_id = self.state.get("engine", "engine-one")
         assert isinstance(engine_id, str)
@@ -183,7 +187,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                self.fixture_program(exhaust_budget, observed_device),
+                self.fixture_program(exhaust_budget, observed_device, filesystem_id=filesystem_id),
                 payload,
                 "FRAME:",
             ],
@@ -202,9 +206,10 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         exhaust_budget: bool = False,
         observed_device: int | None = None,
         program: str = RETAINED_VOLUME_SWEEP_HOST_PROGRAM,
+        filesystem_id: int = FILESYSTEM_ID,
     ) -> str:
         return (
-            "from pathlib import Path\nfrom unittest.mock import patch\nimport json,os\n"
+            "from pathlib import Path\nfrom unittest.mock import patch\nfrom types import SimpleNamespace\nimport json,os\n"
             "read_text=Path.read_text\nmount_reads=[0]\noriginal_stat=os.stat\n"
             "def fixture_stat(path,*args,**kwargs):\n"
             "    result=original_stat(path,*args,**kwargs)\n"
@@ -222,7 +227,8 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             f"    if {exhaust_budget!r} and mount_reads[0]>=2: return 1e9\n"
             "    state=json.loads(read_text(Path(os.environ['FAKE_DOCKER_STATE'])))\n"
             "    return float(state.get('clock',len(state.get('calls',[]))))\n"
-            "with patch.object(Path,'read_text',fixture_read), patch('time.monotonic',fixture_clock), patch('os.stat',fixture_stat):\n"
+            f"fixture_filesystem=SimpleNamespace(f_fsid={filesystem_id!r})\n"
+            "with patch('os.statvfs',return_value=fixture_filesystem), patch.object(Path,'read_text',fixture_read), patch('time.monotonic',fixture_clock), patch('os.stat',fixture_stat):\n"
             f"    exec({program!r})\n"
         )
 
@@ -236,7 +242,11 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         )
         self.assertEqual(
             self.run_program(
-                "readback", identity=digest, observed_device=device, operation="unstarted-original"
+                "readback",
+                identity=digest,
+                observed_device=device,
+                operation="unstarted-original",
+                filesystem_id=0,
             )["reason_code"],
             "never_started",
         )

@@ -22,7 +22,10 @@ class RetirementHostTests(unittest.TestCase):
         self.fixture.write_state()
 
     def resources(
-        self, retained: list[dict[str, Any]] | None = None, observed_device: int | None = None
+        self,
+        retained: list[dict[str, Any]] | None = None,
+        observed_device: int | None = None,
+        filesystem_id: int = sweep_tests.FILESYSTEM_ID,
     ) -> dict[str, Any]:
         spec: dict[str, Any] = {
             "project": self.project,
@@ -37,7 +40,9 @@ class RetirementHostTests(unittest.TestCase):
                 sys.executable,
                 "-c",
                 self.fixture.fixture_program(
-                    observed_device=observed_device, program=RETIREMENT_RESOURCE_PROGRAM
+                    observed_device=observed_device,
+                    program=RETIREMENT_RESOURCE_PROGRAM,
+                    filesystem_id=filesystem_id,
                 ),
                 base64.b64encode(json.dumps(spec).encode()).decode(),
                 "FRAME:",
@@ -73,6 +78,11 @@ class RetirementHostTests(unittest.TestCase):
         )
         saved = [{"name": "candidate", "identity": legacy}]
         self.assertEqual(self.resources(saved, os.makedev(0, 48))["volumes"][0]["identity"], legacy)
+        self.assertEqual(
+            self.resources(saved, os.makedev(0, 48), filesystem_id=0)["volumes"][0]["identity"],
+            legacy,
+        )
+        self.assertTrue(self.resources(filesystem_id=0)["unknown"])
         self.fixture.state["volume_labels"] = {"com.docker.compose.project": "replacement"}
         self.fixture.write_state()
         self.assertNotEqual(
