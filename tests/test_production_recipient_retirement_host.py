@@ -8,6 +8,7 @@ import unittest
 from typing import Any, cast
 
 from control_plane.production_recipient_retirement_host import RETIREMENT_RESOURCE_PROGRAM
+from control_plane.retained_volume_capture import retained_volume_identity
 from tests import test_retained_volume_sweep_program as sweep_tests
 
 
@@ -20,13 +21,15 @@ class RetirementHostTests(unittest.TestCase):
         self.fixture.state["volume_labels"] = {"com.docker.compose.project": self.project}
         self.fixture.write_state()
 
-    def resources(self) -> dict[str, Any]:
-        spec = {
+    def resources(self, retained: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        spec: dict[str, Any] = {
             "project": self.project,
             "target": "old-target",
             "application_service": "web",
             "volumes": ["candidate"],
         }
+        if retained is not None:
+            spec["resources"] = retained
         response = subprocess.run(
             [
                 sys.executable,
@@ -60,6 +63,17 @@ class RetirementHostTests(unittest.TestCase):
         self.fixture.state["volume_labels"] = {"com.docker.compose.project": "foreign"}
         self.fixture.write_state()
         self.assertTrue(self.resources()["volumes"][0]["held"])
+
+    def test_recaptured_resources_preserve_legacy_binding_and_refuse_changed_metadata(self) -> None:
+        metadata = self.fixture.data.stat()
+        legacy = retained_volume_identity(
+            self.fixture.volume(), "engine-one", metadata.st_dev, metadata.st_ino
+        )
+        saved = [{"name": "candidate", "identity": legacy}]
+        self.assertEqual(self.resources(saved)["volumes"][0]["identity"], legacy)
+        self.fixture.state["volume_labels"] = {"com.docker.compose.project": "replacement"}
+        self.fixture.write_state()
+        self.assertTrue(self.resources(saved)["unknown"])
 
     def test_stopped_testing_container_preserves_shared_storage(self) -> None:
         self.fixture.state.update(containers=["stopped-testing"], container_ref=True)
@@ -127,7 +141,17 @@ class RetirementHostTests(unittest.TestCase):
             "boot_id": "different-boot",
             "monotonic_deadline": 1000,
         }
-        self.assertEqual(self.fixture.run_program("apply", retirement=permit)["status"], "held")
+        metadata = self.fixture.data.stat()
+        legacy = retained_volume_identity(
+            self.fixture.volume(), "engine-one", os.makedev(0, 50), metadata.st_ino
+        )
+        device = os.makedev(0, 48)
+        self.assertEqual(
+            self.fixture.run_program(
+                "apply", retirement=permit, identity=legacy, observed_device=device
+            )["status"],
+            "held",
+        )
         self.assertEqual(
             self.fixture.run_program(
                 "apply", retirement={**permit, "boot_id": "fixture-boot", "monotonic_deadline": -1}
@@ -135,3 +159,13 @@ class RetirementHostTests(unittest.TestCase):
             "held",
         )
         self.assertFalse(json.loads(self.fixture.state_path.read_text()).get("removed"))
+        self.assertEqual(
+            self.fixture.run_program(
+                "apply",
+                operation="later-rebuild",
+                identity=legacy,
+                observed_device=device,
+                retirement={**permit, "boot_id": "fixture-boot"},
+            )["status"],
+            "removed",
+        )

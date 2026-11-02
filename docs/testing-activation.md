@@ -802,7 +802,23 @@ volume. A separate durable child removes the original volume only after current
 candidate health and complete Launchplane, provider and local Docker inventories
 prove independent cleanup custody. The existing retained-volume host program
 checks the captured engine and backing identity, references, path aliases and
-same-boot monotonic permit before removal. That permit has its own bounded
+same-boot monotonic permit before removal. New captures bind the full Docker volume
+metadata, engine, directory inode and nonzero `statvfs` filesystem ID. Kernel
+device numbers remain useful for same-run alias checks, but are not durable
+filesystem identity. Historical hashes remain immutable. The shared comparator
+can prove an old anonymous-device binding by exact hash equality with only its
+minor varied within the bounded range 1 through 65535; metadata, engine and inode
+must still agree. Other historical device changes remain held. A new-format
+filesystem mismatch cannot pass through this legacy comparison. Missing or zero
+filesystem identity remains unknown. Filesystems whose filesystem ID itself
+changes on remount, including some XFS placements, remain held rather than
+claiming reboot stability.
+
+This comparison applies to retained-volume sweeps and production-recipient
+retirement too. It creates no new removal authority. Terminal failed rebuilds
+and completed child refusals are not retried. A later rebuild carries the same
+saved predecessor bindings under its own fresh health proof and cleanup permits;
+expired original permits remain expired. That permit has its own bounded
 cleanup budget, independent of route-readiness freshness. Completed retirement requires final
 health and independent service, container and volume absence checks. A lost
 reply resumes the original receipts; a later staff hold or deployment is retained.

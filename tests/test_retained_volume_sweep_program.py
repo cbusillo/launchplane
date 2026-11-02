@@ -143,6 +143,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             engine_id,
             metadata.st_dev,
             metadata.st_ino,
+            backing_filesystem_id=os.statvfs(self.data).f_fsid,
         )
 
     def run_program(
@@ -153,6 +154,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         exhaust_budget: bool = False,
         engine_identity: str | None = None,
         retirement: dict[str, object] | None = None,
+        observed_device: int | None = None,
     ) -> dict[str, object]:
         engine_id = self.state.get("engine", "engine-one")
         assert isinstance(engine_id, str)
@@ -178,7 +180,13 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             "DOCKER_HOST": "tcp://inherited-remote.invalid:2376",
         }
         result = subprocess.run(
-            [sys.executable, "-c", self.fixture_program(exhaust_budget), payload, "FRAME:"],
+            [
+                sys.executable,
+                "-c",
+                self.fixture_program(exhaust_budget, observed_device),
+                payload,
+                "FRAME:",
+            ],
             capture_output=True,
             text=True,
             timeout=20,
@@ -190,10 +198,16 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         return cast(dict[str, object], json.loads(result.stdout.removeprefix("FRAME:"))["result"])
 
     @staticmethod
-    def fixture_program(exhaust_budget: bool = False) -> str:
+    def fixture_program(exhaust_budget: bool = False, observed_device: int | None = None) -> str:
         return (
             "from pathlib import Path\nfrom unittest.mock import patch\nimport json,os\n"
-            "read_text=Path.read_text\nmount_reads=[0]\n"
+            "read_text=Path.read_text\nmount_reads=[0]\noriginal_stat=os.stat\n"
+            "def fixture_stat(path,*args,**kwargs):\n"
+            "    result=original_stat(path,*args,**kwargs)\n"
+            "    state=json.loads(read_text(Path(os.environ['FAKE_DOCKER_STATE'])))\n"
+            f"    if {observed_device!r} is not None and Path(path)==Path(state['root'])/'volumes'/state['name']/'_data':\n"
+            f"        fields=list(result);fields[2]={observed_device!r};return os.stat_result(fields)\n"
+            "    return result\n"
             "def fixture_read(path,*args,**kwargs):\n"
             "    if path==Path('/proc/sys/kernel/random/boot_id'): return 'fixture-boot'\n"
             "    if path==Path('/proc/self/mountinfo'):\n"
@@ -204,9 +218,34 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             f"    if {exhaust_budget!r} and mount_reads[0]>=2: return 1e9\n"
             "    state=json.loads(read_text(Path(os.environ['FAKE_DOCKER_STATE'])))\n"
             "    return float(state.get('clock',len(state.get('calls',[]))))\n"
-            "with patch.object(Path,'read_text',fixture_read), patch('time.monotonic',fixture_clock):\n"
+            "with patch.object(Path,'read_text',fixture_read), patch('time.monotonic',fixture_clock), patch('os.stat',fixture_stat):\n"
             f"    exec({RETAINED_VOLUME_SWEEP_HOST_PROGRAM!r})\n"
         )
+
+    def test_legacy_device_renumbering_keeps_reference_and_original_receipt_fences(self) -> None:
+        digest = retained_volume_identity(
+            self.volume(), "engine-one", os.makedev(0, 50), self.data.stat().st_ino
+        )
+        device = os.makedev(0, 48)
+        self.assertEqual(
+            self.run_program(identity=digest, observed_device=device)["status"], "eligible"
+        )
+        self.state.update(containers=["stopped"], container_ref=True)
+        self.write_state()
+        self.assertEqual(
+            self.run_program(identity=digest, observed_device=device)["status"], "held"
+        )
+        self.state.update(containers=[], container_ref=False, rm_fail=True)
+        self.write_state()
+        self.assertEqual(
+            self.run_program("apply", identity=digest, observed_device=device)["reason_code"],
+            "no_effect",
+        )
+        self.assertEqual(
+            self.run_program("readback", identity=digest, observed_device=device)["reason_code"],
+            "no_effect",
+        )
+        self.assertFalse(json.loads(self.state_path.read_text()).get("removed", False))
 
     def test_started_receipt_with_a_present_volume_remains_unknown(self) -> None:
         directory = self.home / ".local" / "state" / "launchplane-retained-volume-sweep"
