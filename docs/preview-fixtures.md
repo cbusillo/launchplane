@@ -85,7 +85,8 @@ stderr or business values. The existing HTTP error `reason` carries that predica
 and the transport projects it as `summary.error_reason`. This describes the
 current request's failed host observation, including a recovery read, rather
 than reconstructing an earlier apply failure. Cancellation uses the neutral
-schedule-evidence predicate. Missing or invalid markers remain `schedule_evidence_complete`, which reports unavailable evidence
+schedule-evidence predicate. Missing or invalid markers remain
+`schedule_evidence_complete`, which reports unavailable evidence
 without guessing the child cause. A command failure does not identify the
 product's internal error. These diagnostics do not change apply recovery:
 pre-dispatch failures release their reservation, and failures after dispatch
