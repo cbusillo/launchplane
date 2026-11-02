@@ -20,6 +20,8 @@ It is null when the target has no environment overlay. Context/global settings,
 managed-secret values, provider values and retained operation snapshots are not
 compared. No values or value hashes are returned, and no secret versions are read.
 The existing target-inspection permissions and provider read still apply.
+The comparison also requires the existing exact-lane `secret.list` runtime-setting
+read permission; other inspectors receive null without reading runtime settings.
 
 This is temporary evidence for deleting the tracked-target layer, not another
 settings inventory or removal authorization. The target and runtime record are

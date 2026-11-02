@@ -260,6 +260,7 @@ def inspect_dokploy_target(
     host: str,
     token: str,
     request: DokployTargetInspectRequest,
+    compare_instance_settings: bool = False,
     fetch_target_payload: FetchDokployTargetPayload | None = None,
     fetch_compose_service_runtime: FetchDokployComposeServiceRuntime | None = None,
     fetch_compose_logs: FetchDokployComposeLogs | None = None,
@@ -494,9 +495,9 @@ def inspect_dokploy_target(
             "source_label": target_record.source_label,
             "updated_at": target_record.updated_at,
             "env_keys": sorted(target_record.env),
-            "instance_setting_comparison": _instance_setting_comparison(
-                record_store, target_record
-            ),
+            "instance_setting_comparison": _instance_setting_comparison(record_store, target_record)
+            if compare_instance_settings
+            else None,
         }
         if provider_target_record is None:
             result["provider_target_record"] = {"status": "missing"}

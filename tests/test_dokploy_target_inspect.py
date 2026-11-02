@@ -188,6 +188,7 @@ class DokployTargetInspectTests(unittest.TestCase):
                             context="cm_website",
                             instance="prod",
                         ),
+                        compare_instance_settings=True,
                         fetch_target_payload=_fake_target_payload,
                     )
                 stored_evidence = store.read_provider_target_record(
