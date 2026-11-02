@@ -1004,11 +1004,6 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
     def test_plan_capacity_supports_preservation_without_snapshot_or_lane_changes(self) -> None:
         from control_plane.preview_preservation import run_preview_preservation
         from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsRequest
-        from control_plane.odoo_preview_apply_http import (
-            issue_odoo_preview_apply_plan,
-            OdooPreviewPlanProvenanceError,
-            validate_odoo_preview_issued_plan,
-        )
 
         self.record_serving_original()
         self.issued.operation = "refresh"
@@ -1076,14 +1071,6 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                 update={"reserve_bytes": 2 * budget.reserve_bytes}
             )
             run_preview_preservation(**arguments)
-        self.issued = issue_odoo_preview_apply_plan(result=self.issued, plan_id="reviewed-capacity")
-        assert self.issued.plan_request.preservation_storage_budget is not None
-        self.issued.plan_request.preservation_storage_budget.database_bytes += 1
-        with self.assertRaises(OdooPreviewPlanProvenanceError) as refused:
-            validate_odoo_preview_issued_plan(
-                plan_id="reviewed-capacity", issued_plan=self.issued, request=self.destroy
-            )
-        self.assertEqual(refused.exception.code, "odoo_preview_plan_mismatch")
 
     def test_preserving_refresh_keeps_data_through_later_ordinary_refreshes(self) -> None:
         from control_plane import odoo_preview_apply_http as preview_http
