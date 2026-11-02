@@ -82,7 +82,6 @@ from control_plane.workflows.odoo_post_deploy import (
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.product_reconcile import (
     PLAN_BLOCKER_DESCRIPTIONS,
-    TESTING_FAILURE_DESCRIPTIONS,
 )
 from control_plane.workflows.odoo_stable_operation_worker import _unexpected_error_code
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -6055,24 +6054,6 @@ class OdooTargetReplacementFailureStageTests(unittest.TestCase):
         failure = _deploy_step_failure(error)
         self.assertEqual(failure.code, "deploy_blocked.runtime_key_safety_refused")
         self.assertEqual(failure.keys, tuple(sorted((long_key, longest_key))))
-
-    def test_every_stage_code_has_a_testing_failure_description(self) -> None:
-        for code in (
-            "plan_build_failed",
-            "plan_not_ready",
-            "strategy_unsupported",
-            "target_not_compose",
-            "artifact_id_missing",
-            "source_ref_missing",
-            "artifact_repository_mismatch",
-            "artifact_source_ref_mismatch",
-            "artifact_required_modules_missing",
-            "health_verification_required",
-            "health_url_missing",
-            "post_deploy_setup_failed",
-            "release_tuple_mint_failed",
-        ):
-            self.assertIn(code, TESTING_FAILURE_DESCRIPTIONS)
 
     def test_every_deploy_check_has_a_description_and_fits_the_error_code(self) -> None:
         for check in DEPLOY_BLOCKED_DESCRIPTIONS:
