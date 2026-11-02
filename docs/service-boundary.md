@@ -2846,6 +2846,8 @@ summary only: target ids, names, project/environment/server identity, domain
 summaries, source metadata, and environment key names/counts. The tracked target's
 `env_keys` lists stored override names separately from the provider's observed
 environment keys, so source-setting precedence can be checked without values.
+The temporary [target-versus-instance comparison](reviewed-retirement.md#plain-stored-settings)
+uses the same route with the existing runtime-setting read permission.
 It must not return
 raw provider payloads or environment values. A tracked target's `public_hosts`
 returns its stored product-config hostname intent separately from origin `domains`
