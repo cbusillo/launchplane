@@ -37,6 +37,8 @@ from control_plane.preview_pr_feedback_notifications import (
     deliver_preview_pr_feedback_notifications,
 )
 from control_plane.product_review_status import OwnerReviewStatus, owner_review_reference_url
+from control_plane.product_reconcile_read import preview_current_failure
+from control_plane.preview_retirement import verified_preview_retirement_digest
 from control_plane.testing_lane_hold import STAFF_TESTING_HOLD_REASON
 from control_plane.workflows.launchplane import (
     delete_github_issue_comment,
@@ -181,6 +183,10 @@ def _retain_preview_failure(
         or (candidate is not None and plan.get("pull_request_state") != "open")
     ):
         return candidate
+    if request.pull_request_number is not None and verified_preview_retirement_digest(
+        record_store, profile=profile, number=request.pull_request_number
+    ):
+        return candidate
     feedback_id = previous.get("feedback_id")
     if not isinstance(feedback_id, str) or not feedback_id:
         raise ValueError("The saved preview failure has no feedback record.")
@@ -257,13 +263,15 @@ def _preview_feedback(
     failure_summary = ""
     waiting_for = ""
     status: PreviewPrFeedbackStatus
-    if (action == "apply" and error) or (
+    if (action in {"apply", "wait"} and error) or (
         error
         and plan.get("last_failed_error_code") == "preview_build_failed"
         and plan.get("build_run_id")
     ):
         status = "failed"
         failure_summary = _failure_summary(error)
+    elif current_failure := preview_current_failure(plan):
+        status, failure_summary = "failed", current_failure
     elif action == "wait" and plan.get("reason") == "client_test_notes_required":
         status = "pending"
         waiting_for = CLIENT_REVIEW_NOTES_PENDING

@@ -97,7 +97,9 @@ from control_plane.odoo_preview_apply_http import (
     build_odoo_preview_apply_inputs_result,
     observe_odoo_preview_apply_result,
 )
-from control_plane.product_reconcile_read import product_reconcile_request_view
+from control_plane.product_reconcile_read import (
+    product_reconcile_request_view,
+)
 from control_plane.product_review_status import OwnerReviewStatus, owner_review_reference_url
 from control_plane.product_review import resolve_serving_preview
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
@@ -8241,7 +8243,11 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
                 self.store.list_held_odoo_preview_reservations(product="site"), held_before
             )
             self.assertEqual(self.owner_review_status_calls, [("site", 5)])
-            self.assertEqual(self.comments.writes, writes)
+            self.assertEqual(self.comments.writes, [*writes, ("PATCH", 5)])
+            feedback_id = cast(dict[str, object], held.last_plan["pr_feedback"])["feedback_id"]
+            assert isinstance(feedback_id, str)
+            feedback = self.store.read_preview_pr_feedback_record(feedback_id)
+            self.assertEqual(feedback.failure_summary, held.last_error)
 
             self.github.runs[50]["conclusion"] = "failure"
             self.request("preview", 5)

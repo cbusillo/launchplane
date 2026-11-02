@@ -200,6 +200,7 @@ def preview_review_unavailability(
     pull_request_number: int,
     head_sha: str = "",
     request: ProductReconcileRequestRecord | None = None,
+    refresh_failure: str | None = None,
 ) -> str:
     if not profile.preview.enabled:
         return ""
@@ -210,6 +211,7 @@ def preview_review_unavailability(
             pull_request_number=pull_request_number,
             head_sha=head_sha,
             request=request,
+            refresh_failure=refresh_failure,
         )
     except (SQLAlchemyError, ValueError, OSError):
         logging.getLogger(__name__).warning(
@@ -225,6 +227,7 @@ def _preview_review_unavailability(
     pull_request_number: int,
     head_sha: str,
     request: ProductReconcileRequestRecord | None,
+    refresh_failure: str | None,
 ) -> str:
     if request is None:
         request = product_preview_request(
@@ -235,7 +238,9 @@ def _preview_review_unavailability(
     )
     if serving.preview_url and head_sha and serving.head_sha == head_sha.lower():
         return ""
-    failure = preview_refresh_failure(request) if request is not None else ""
+    failure = refresh_failure
+    if failure is None:
+        failure = preview_refresh_failure(request, store=store) if request is not None else ""
     if failure:
         if not head_sha:
             return f"Preview refresh failed: {failure}; current review availability is unknown"
