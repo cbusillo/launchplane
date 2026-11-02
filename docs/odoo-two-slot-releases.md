@@ -502,6 +502,17 @@ bound. Decoded commands and output share a bounded buffer; incomplete or trailin
 compressed input refuses before execution. Native argv, stdin and sealed
 maintenance payloads retain their original bytes and authority.
 
+Failed commands report only an allowlisted category and numeric exit code;
+timeouts and missing transport completion never prove that effects ended.
+Private health distinguishes connection failures, HTTP status, invalid health
+data and foreign runtime identity. When its existing retry deadline expires,
+readiness reports its start time, elapsed time, attempt count and configured
+budget, followed by a bounded read of the candidate web and probe runner's
+running, OOM and exit state. Unavailable state stays unknown. Commands, stdin,
+response bodies, provider errors and container logs are excluded. These
+diagnostics do not change the original operation's reconciliation hold,
+readiness deadline, writer fences or recovery authority.
+
 The installed qualification uses isolated representative Odoo 20 data and the
 shipped web/scheduler commands. It must prove real scheduled ticks without HTTP,
 physical drain, coherent capture/restore, browser readiness, persisted prepared

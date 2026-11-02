@@ -18,20 +18,25 @@ from control_plane.testing_browser import launch_testing_browser
 
 
 HTTP_OBSERVATION_PROGRAM = r"""
-import base64,json,sys
-from urllib.error import HTTPError
+import base64,json,socket,sys
+from urllib.error import HTTPError,URLError
 from urllib.request import HTTPRedirectHandler,ProxyHandler,Request,build_opener
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs): return None
 spec=json.load(sys.stdin)
 request=Request(spec['url'],headers={'Host':spec['host'],'X-Odoo-Database':spec['database']})
-try: response=build_opener(ProxyHandler({}),NoRedirect()).open(request,timeout=20)
-except HTTPError as error: response=error
-with response:
-    body=response.read(20_000_001)
-    if len(body)>20_000_000: raise ValueError('resource exceeds capture bound')
-    headers={key.lower():value for key,value in response.headers.items() if key.lower() not in {'set-cookie','authorization','www-authenticate'}}
-    print(json.dumps({'status':response.status,'headers':headers,'body':base64.b64encode(body).decode()},sort_keys=True))
+try:
+    try: response=build_opener(ProxyHandler({}),NoRedirect()).open(request,timeout=20)
+    except HTTPError as error: response=error
+    with response:
+        body=response.read(20_000_001)
+        if len(body)>20_000_000: raise ValueError('resource exceeds capture bound')
+        headers={key.lower():value for key,value in response.headers.items() if key.lower() not in {'set-cookie','authorization','www-authenticate'}}
+        print(json.dumps({'status':response.status,'headers':headers,'body':base64.b64encode(body).decode()},sort_keys=True))
+except OSError as error:
+    reason=error.reason if isinstance(error,URLError) else error
+    kind='timeout' if isinstance(reason,TimeoutError) else 'connection_refused' if isinstance(reason,ConnectionRefusedError) else 'dns' if isinstance(reason,socket.gaierror) else 'connection_unavailable'
+    print(json.dumps({'failure':kind}))
 """
 
 
@@ -40,6 +45,12 @@ class NoRedirect(HTTPRedirectHandler):
         self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
     ) -> None:
         return None
+
+
+class PrivateHealthFailed(ValueError):
+    def __init__(self, kind: str, *, status: int | None = None) -> None:
+        self.kind, self.status = kind, status
+        super().__init__(f"Private health failed: {kind}; status={status}.")
 
 
 def readiness_fingerprint(contract: dict[str, Any]) -> str:
@@ -74,6 +85,13 @@ class CutoverProbes:
             ),
         )
         value: dict[str, Any] = json.loads(output)
+        if value.get("failure") in {
+            "timeout",
+            "connection_refused",
+            "dns",
+            "connection_unavailable",
+        }:
+            raise PrivateHealthFailed(value["failure"])
         if (
             type(value.get("status")) is not int
             or not isinstance(value.get("headers"), dict)
@@ -86,11 +104,18 @@ class CutoverProbes:
     def private_health(self, slot: OdooSlot) -> HealthcheckEvidence:
         path = "/launchplane/health"
         resource = self.private_resource(slot.private_url, path)
-        observed = runtime_identity_from_health_payload(
-            json.loads(base64.b64decode(resource["body"]))
-        )
-        if resource["status"] != 200 or observed != slot.runtime_identity:
-            raise ValueError("private endpoint differs from the exact slot")
+        if resource["status"] != 200:
+            raise PrivateHealthFailed("http_status", status=resource["status"])
+        try:
+            observed = runtime_identity_from_health_payload(
+                json.loads(base64.b64decode(resource["body"]))
+            )
+        except (ValueError, TypeError, KeyError):
+            raise PrivateHealthFailed("invalid_health") from None
+        if observed is None:
+            raise PrivateHealthFailed("invalid_health")
+        if observed != slot.runtime_identity:
+            raise PrivateHealthFailed("identity_mismatch")
         return HealthcheckEvidence(
             status="pass",
             verified=True,

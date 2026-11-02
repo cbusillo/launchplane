@@ -141,6 +141,44 @@ class CutoverHostTransportTests(unittest.TestCase):
                 )
         remote.assert_not_called()
 
+    def test_child_failures_retain_safe_categories_without_qualifying_mutation_completion(
+        self,
+    ) -> None:
+        argv = ("docker", "exec", "secret-container", "secret-command")
+        for failure in (
+            subprocess.CompletedProcess(argv, 17, stdout="secret-output", stderr="secret-error"),
+            subprocess.TimeoutExpired(argv, 600, output="secret-output", stderr="secret-error"),
+            OSError("secret-path"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                child = Mock()
+                if isinstance(failure, subprocess.CompletedProcess):
+                    child.return_value = failure
+                else:
+                    child.side_effect = failure
+
+                def remote(**kwargs: object) -> None:
+                    receive = cast(Callable[[dict[str, object]], None], kwargs["receive"])
+                    for frame in self.host_frames(kwargs["payload"], child):
+                        receive(frame)
+
+                transport = self.transport(Mock())
+                with patch.object(cutover_transport, "_read_remote", side_effect=remote):
+                    with self.assertRaises(cutover_transport.CutoverCommandFailed) as read:
+                        transport.read(argv, "secret-stdin")
+                    with self.assertRaises(RuntimeError) as mutation:
+                        transport(argv, "secret-stdin")
+                self.assertNotIn("secret", str(read.exception))
+                self.assertNotIn("secret", str(mutation.exception))
+                self.assertIn(str(read.exception), str(mutation.exception))
+                if isinstance(failure, subprocess.CompletedProcess):
+                    self.assertEqual(read.exception.returncode, failure.returncode)
+                    self.assertEqual(read.exception.kind, "exit")
+                elif isinstance(failure, subprocess.TimeoutExpired):
+                    self.assertEqual(read.exception.kind, "timeout")
+                else:
+                    self.assertEqual(read.exception.kind, "unavailable")
+
     def test_malformed_or_expanded_command_never_executes_on_host(self) -> None:
         raw = json.dumps(
             {"argv": ["docker", "exec", "native-runner"], "stdin": "inert", "timeout": 600}

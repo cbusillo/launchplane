@@ -2,7 +2,7 @@ from control_plane.durable_operation_authorization import DurableOperationAuthor
 import base64
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 import json
 import logging
 import hashlib
@@ -44,8 +44,9 @@ from control_plane.dokploy.cutover_host_state import (
     verify_shared_watched_directory,
     writer_service,
 )
-from control_plane.dokploy.cutover_probes import CutoverProbes
-from control_plane.dokploy.cutover_transport import CutoverHostTransport
+from control_plane.dokploy.cutover_probes import CutoverProbes, PrivateHealthFailed
+from control_plane.dokploy.cutover_transport import CutoverHostTransport, CutoverCommandFailed
+from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
 from control_plane.dokploy.cutover_writer_observer import NativeWriterObserver, container_addresses
 from control_plane.dokploy.cutover_writer_capabilities import NativeCronWriterCapabilities
 from control_plane.dokploy.cutover_restore_probe import (
@@ -57,6 +58,7 @@ from control_plane.dokploy.odoo_cutover import OdooSlotDriver
 from control_plane.dokploy.prepared_host import PreparedSiteDirectory
 from control_plane.dokploy.prepared_server import require_prepared_server
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.cutover_host import OdooCutoverHostRuntime
 from control_plane.dokploy.service_cutover import OdooHostCapabilities
 from control_plane.dokploy.slot_compose import (
     render_odoo_app_slot_compose,
@@ -197,6 +199,41 @@ else: print(json.dumps({'state':'absent'}))
 """
 
 
+def readiness_container_states(
+    transport: CutoverHostTransport, candidate: str, runner: Callable[[], str]
+) -> dict[str, object]:
+    template = "{{json .State.Status}} {{json .State.Running}} {{json .State.OOMKilled}} {{json .State.ExitCode}}"
+    try:
+        output = transport.read(
+            ("docker", "inspect", "--format", template, candidate, runner()),
+            None,
+            timeout_seconds=20,
+        )
+        lines = output.splitlines()
+        if len(lines) != 2:
+            return {"status": "unavailable"}
+        states: dict[str, object] = {}
+        for role, line in zip(("candidate_web", "probe_runner"), lines, strict=True):
+            status, running, oom_killed, exit_code = json.loads("[" + ",".join(line.split()) + "]")
+            if (
+                status
+                not in {"created", "running", "paused", "restarting", "removing", "exited", "dead"}
+                or type(running) is not bool
+                or type(oom_killed) is not bool
+                or type(exit_code) is not int
+            ):
+                return {"status": "unavailable"}
+            states[role] = {
+                "status": status,
+                "running": running,
+                "oom_killed": oom_killed,
+                "exit_code": exit_code,
+            }
+        return states
+    except (ValueError, OSError, TypeError):
+        return {"status": "unavailable"}
+
+
 class GuardedFileRoute(TraefikFileRoute):
     def __init__(self, target: TraefikRouteTarget, guard: Callable[[], None]) -> None:
         super().__init__(target)
@@ -236,7 +273,7 @@ class BoundOdooCutoverHost:
         if lane.host_runtime is None or lane.host_runtime != plan.host_runtime:
             raise ValueError("cutover host requires its persisted lane capabilities")
         self.plan, self.lane, self.store, self.root = plan, lane, store, root
-        self.runtime = lane.host_runtime
+        self.runtime: OdooCutoverHostRuntime = lane.host_runtime
         self.host, self.token = read_dokploy_config(control_plane_root=root)
         self.payloads = {slot.slot_id: self.payload(slot) for slot in (plan.old, plan.new)}
         servers = {str(payload.get("serverId") or "") for payload in self.payloads.values()}
@@ -980,14 +1017,44 @@ class BoundOdooCutoverHost:
         web = self.target(slot, web_writer)
         if not self.writers._running(web):
             self.transport(("docker", "start", web.container), None)
-        deadline = time.monotonic() + self.runtime.readiness_timeout_seconds
+        started = time.monotonic()
+        started_at = datetime.now(UTC).isoformat()
+        deadline = started + self.runtime.readiness_timeout_seconds
+        attempts = 0
         while True:
+            attempts += 1
             try:
                 self.probes.private_health(slot)
                 break
-            except (ValueError, OSError):
-                if time.monotonic() >= deadline:
-                    raise
+            except (ValueError, OSError) as error:
+                now = time.monotonic()
+                if now >= deadline:
+                    failure: dict[str, object] = {
+                        "kind": "io_unavailable"
+                        if isinstance(error, OSError)
+                        else "invalid_readback"
+                    }
+                    if isinstance(error, NativeSourceUnavailable):
+                        failure = {"kind": "transport_unavailable"}
+                    if isinstance(error, (PrivateHealthFailed, CutoverCommandFailed)):
+                        failure = {"kind": error.kind}
+                        if isinstance(error, PrivateHealthFailed):
+                            failure["status"] = error.status
+                        else:
+                            failure["returncode"] = error.returncode
+                    diagnostic = {
+                        "kind": "readiness_deadline_exceeded",
+                        "stage": "private_health",
+                        "started_at": started_at,
+                        "attempts": attempts,
+                        "elapsed_seconds": round(now - started, 3),
+                        "timeout_seconds": self.runtime.readiness_timeout_seconds,
+                        "failure": failure,
+                        "containers": readiness_container_states(
+                            self.transport, web.container, lambda: self.runner(plan.old)
+                        ),
+                    }
+                    raise ValueError(json.dumps(diagnostic, sort_keys=True)) from None
                 time.sleep(1)
         self.observer.native_ready(web)
         fenced = all(not self.writers._running(target) for target in targets)
