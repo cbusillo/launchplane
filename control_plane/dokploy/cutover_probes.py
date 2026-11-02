@@ -17,6 +17,9 @@ from control_plane.dokploy.slot_maintenance import ContainerCommand
 from control_plane.testing_browser import launch_testing_browser
 
 
+PRIVATE_RESOURCE_BYTES = 20_000_000
+
+
 HTTP_OBSERVATION_PROGRAM = r"""
 import base64,json,socket,sys
 from http.client import HTTPException
@@ -30,8 +33,8 @@ try:
     try: response=build_opener(ProxyHandler({}),NoRedirect()).open(request,timeout=20)
     except HTTPError as error: response=error
     with response:
-        body=response.read(20_000_001)
-        if len(body)>20_000_000:
+        body=response.read(__RESOURCE_BYTES__+1)
+        if len(body)>__RESOURCE_BYTES__:
             print(json.dumps({'failure':'resource_exceeds_bound'}))
         else:
             headers={key.lower():value for key,value in response.headers.items() if key.lower() not in {'set-cookie','authorization','www-authenticate'}}
@@ -42,7 +45,7 @@ except OSError as error:
     reason=error.reason if isinstance(error,URLError) else error
     kind='timeout' if isinstance(reason,TimeoutError) else 'connection_refused' if isinstance(reason,ConnectionRefusedError) else 'dns' if isinstance(reason,socket.gaierror) else 'connection_unavailable'
     print(json.dumps({'failure':kind}))
-"""
+""".replace("__RESOURCE_BYTES__", str(PRIVATE_RESOURCE_BYTES))
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -139,8 +142,8 @@ class CutoverProbes:
         except HTTPError as error:
             response = error
         with response:
-            body = response.read(20_000_001)
-            if len(body) > 20_000_000:
+            body = response.read(PRIVATE_RESOURCE_BYTES + 1)
+            if len(body) > PRIVATE_RESOURCE_BYTES:
                 raise ValueError("public observation exceeds the resource bound")
             return {
                 "status": response.status,

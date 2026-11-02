@@ -40,7 +40,10 @@ class CutoverReadinessDiagnosticTests(unittest.TestCase):
         for result, category in (
             (IncompleteRead(b"secret"), "protocol_error"),
             (TimeoutError("secret"), "timeout"),
-            (b"secret" * 4_000_000, "resource_exceeds_bound"),
+            (
+                b"secret" * (cutover_probes.PRIVATE_RESOURCE_BYTES // len(b"secret") + 1),
+                "resource_exceeds_bound",
+            ),
         ):
             with self.subTest(category=category):
                 response = MagicMock()
