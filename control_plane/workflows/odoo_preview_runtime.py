@@ -28,6 +28,7 @@ from control_plane.contracts.dokploy_target_record import (
 )
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewProviderCapabilities,
     OdooPreviewRuntimeBindingEvidence,
@@ -163,6 +164,11 @@ class OdooPreviewApplyInputsRequest(BaseModel):
     source: str = "odoo-preview-apply-inputs"
     timeout_seconds: int = Field(default=300, ge=1)
     no_cache: bool = False
+    preservation_storage_budget: OdooTestingDrillStorageBudget | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     fishbowl_source: ProductSecretCopyFrom | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
