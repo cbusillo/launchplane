@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+import base64
+import json
 import re
 from typing import Literal, Protocol, cast
 
@@ -48,6 +51,11 @@ from control_plane.legacy_testing_fence import capture_testing_fences
 
 
 ProductIncidentStatusFilter = Literal["all", "open", "resolved"]
+ProductIncidentOrder = Literal["attention", "opened"]
+
+
+class ProductIncidentQueryError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -81,6 +89,7 @@ class ProductIncidentReadStore(Protocol):
         check_kind: str = "",
         status: str = "",
         limit: int | None = None,
+        before: tuple[str, str] | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]: ...
 
     def list_public_ingress_observation_records(
@@ -293,6 +302,10 @@ class ProductEnvironmentIncidentList(BaseModel):
     context: str
     instance: str
     incidents: tuple[ProductIncidentSummary, ...] = ()
+    order: ProductIncidentOrder = "attention"
+    cursor: str | None = None
+    next_cursor: str | None = None
+    has_more: bool = False
     trust_state: FreshnessStatus = "recorded"
     provenance: DataProvenance
 
@@ -346,6 +359,8 @@ def build_product_environment_incident_list(
     status: ProductIncidentStatusFilter = "all",
     limit: int = 20,
     scope: ProductIncidentEnvironmentScope | None = None,
+    order: ProductIncidentOrder = "attention",
+    cursor: str | None = None,
 ) -> ProductEnvironmentIncidentList:
     incident_scope = _resolve_scope(
         record_store=record_store,
@@ -353,7 +368,37 @@ def build_product_environment_incident_list(
         environment=environment,
         scope=scope,
     )
-    if status == "all":
+    binding = [product, incident_scope.context, incident_scope.instance, status, order]
+    before = None
+    if cursor is not None:
+        try:
+            data = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
+            if (
+                order != "opened"
+                or not isinstance(data, list)
+                or len(data) != 7
+                or data[:5] != binding
+            ):
+                raise ValueError
+            if not isinstance(data[5], str) or not isinstance(data[6], str) or not data[6]:
+                raise ValueError
+            if datetime.fromisoformat(data[5]).tzinfo is None:
+                raise ValueError
+            before = (data[5], data[6])
+        except (ValueError, TypeError, UnicodeError) as error:
+            raise ProductIncidentQueryError(
+                "Incident cursor does not match this lane, status and order."
+            ) from error
+    if order == "opened":
+        records = record_store.list_public_ingress_incident_records(
+            product=product,
+            context_name=incident_scope.context,
+            instance_name=incident_scope.instance,
+            status="" if status == "all" else status,
+            before=before,
+            limit=limit + 1,
+        )
+    elif status == "all":
         open_incidents = record_store.list_public_ingress_incident_records(
             product=product,
             context_name=incident_scope.context,
@@ -366,18 +411,26 @@ def build_product_environment_incident_list(
             context_name=incident_scope.context,
             instance_name=incident_scope.instance,
             status="resolved",
-            limit=limit,
+            limit=limit + 1,
         )
-        incidents = (*sort_open_incidents(open_incidents), *resolved_incidents)[:limit]
+        records = (*sort_open_incidents(open_incidents), *resolved_incidents)
     else:
         records = record_store.list_public_ingress_incident_records(
             product=product,
             context_name=incident_scope.context,
             instance_name=incident_scope.instance,
             status=status,
-            limit=None if status == "open" else limit,
+            limit=None if status == "open" else limit + 1,
         )
-        incidents = sort_open_incidents(records)[:limit] if status == "open" else records
+        records = sort_open_incidents(records) if status == "open" else records
+    incidents = records[:limit]
+    has_more = len(records) > limit
+    next_cursor = None
+    if has_more and order == "opened":
+        last = incidents[-1]
+        next_cursor = base64.urlsafe_b64encode(
+            json.dumps([*binding, last.opened_at, last.incident_id]).encode()
+        ).decode()
     summaries = tuple(
         build_product_incident_summary(
             reminder_states=record_store.list_public_ingress_incident_reminder_state_records(
@@ -400,6 +453,10 @@ def build_product_environment_incident_list(
         context=incident_scope.context,
         instance=incident_scope.instance,
         incidents=summaries,
+        order=order,
+        cursor=cursor,
+        next_cursor=next_cursor,
+        has_more=has_more,
         provenance=DataProvenance(
             source_kind="record",
             source_record_id=summaries[0].incident_id if summaries else incident_scope.product,

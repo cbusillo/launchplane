@@ -349,6 +349,10 @@ export function incidentsForFixture(
     incidents: [activeIncident, resolvedIncident].filter(
       (incident): incident is ProductIncidentSummary => incident !== null,
     ),
+    order: "attention",
+    cursor: null,
+    next_cursor: null,
+    has_more: false,
     trust_state:
       incidentMode === "stale" ? "stale" : "recorded",
     provenance: provenance(
