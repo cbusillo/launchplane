@@ -58,7 +58,6 @@ from control_plane.dokploy.odoo_cutover import OdooSlotDriver
 from control_plane.dokploy.prepared_host import PreparedSiteDirectory
 from control_plane.dokploy.prepared_server import require_prepared_server
 from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.contracts.cutover_host import OdooCutoverHostRuntime
 from control_plane.dokploy.service_cutover import OdooHostCapabilities
 from control_plane.dokploy.slot_compose import (
     render_odoo_app_slot_compose,
@@ -263,10 +262,10 @@ class BoundOdooCutoverHost:
         self, plan: OdooCutoverPlan, lane: OdooCutoverLane, store: CutoverHostStore, root: Path
     ) -> None:
         runtime = lane.host_runtime
-        if runtime is None or runtime != plan.host_runtime:
+        if runtime != plan.host_runtime or runtime is None:
             raise ValueError("cutover host requires its persisted lane capabilities")
         self.plan, self.lane, self.store, self.root = plan, lane, store, root
-        self.runtime: OdooCutoverHostRuntime = runtime
+        self.runtime = runtime
         self.host, self.token = read_dokploy_config(control_plane_root=root)
         self.payloads = {slot.slot_id: self.payload(slot) for slot in (plan.old, plan.new)}
         servers = {str(payload.get("serverId") or "") for payload in self.payloads.values()}
