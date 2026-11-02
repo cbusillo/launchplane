@@ -434,8 +434,8 @@ The workflow derives the exact repository list from runtime inputs, rejects
 cross-repository-owner scopes that cannot be represented by one installation token, and
 mints a short-lived token through the commit-pinned official GitHub action. The
 App installation must cover every runtime-derived repository. Additional
-repositories under the same owner are supported, including an installation on
-all of that owner's repositories. The workflow validates coverage through the
+repositories under the same GitHub account are supported, including an
+installation on all repositories in that account. The workflow validates coverage through the
 installation API and reports only the required repository count and digest;
 it does not pass repository names to the token
 action because the action logs explicit repository inputs. The token requests
