@@ -15,9 +15,6 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
-from control_plane.contracts.owner_control_shadow_verifier import (
-    OwnerControlShadowVerifierConflictError,
-)
 from control_plane.http_routes.support import (
     ApiRouteRegistrar,
     ReadRouteDependencies,
@@ -204,7 +201,7 @@ def register_owner_secret_input_routes(
                 ),
                 identity=identity,
             )
-        except (PermissionError, OwnerControlShadowVerifierConflictError) as error:
+        except PermissionError as error:
             raise common.http_error(
                 status_code=403,
                 trace_id=trace_id,
