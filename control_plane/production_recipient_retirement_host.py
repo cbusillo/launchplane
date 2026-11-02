@@ -80,11 +80,9 @@ def capture():
         foreign=(labels.get('com.docker.compose.project') not in (None,project) or labels.get('dokploy.application.id') not in (None,spec['target']) or 'io.launchplane.production-recipient' in labels)
         paths[name]=point
         filesystem=os.statvfs(point).f_fsid
-        identity=retained_volume_identity(row,engine_id,metadata.st_dev,metadata.st_ino,backing_filesystem_id=filesystem)
         captured=next((item['identity'] for item in spec.get('resources',[]) if item['name']==name),None)
-        if captured is not None:
-            if not retained_volume_identity_matches(row,engine_id,metadata.st_dev,metadata.st_ino,filesystem,captured):
-                raise ValueError('volume identity changed')
+        identity=retained_volume_identity(row,engine_id,metadata.st_dev,metadata.st_ino,backing_filesystem_id=filesystem if captured is None or filesystem>0 else None)
+        if captured is not None and retained_volume_identity_matches(row,engine_id,metadata.st_dev,metadata.st_ino,filesystem,captured):
             identity=captured
         result.append({'name':name,'identity':identity,'engine_identity':retained_volume_engine_identity(engine_id),'held':not owned or foreign})
     containers=_batched_docker_inspect('container',identifiers('ps','-aq','--no-trunc'),load)

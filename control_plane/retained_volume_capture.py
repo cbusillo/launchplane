@@ -102,7 +102,8 @@ def retained_volume_identity_matches(
     captured: str,
 ) -> bool:
     if (
-        retained_volume_identity(
+        backing_filesystem_id > 0
+        and retained_volume_identity(
             volume,
             engine_id,
             backing_device,

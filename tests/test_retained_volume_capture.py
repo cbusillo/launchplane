@@ -108,6 +108,7 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
         volume: dict[str, object] = {"Name": "site-data", "CreatedAt": "original"}
         saved = retained_volume_identity(volume, "engine", 50, 88, backing_filesystem_id=123)
         self.assertTrue(retained_volume_identity_matches(volume, "engine", 48, 88, 123, saved))
+        self.assertFalse(retained_volume_identity_matches(volume, "engine", 48, 88, 0, saved))
         for row, engine, inode, filesystem in (
             (volume | {"CreatedAt": "replacement"}, "engine", 88, 123),
             (volume, "another-engine", 88, 123),
@@ -126,6 +127,9 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
         saved = retained_volume_identity(volume, "engine", os.makedev(0, 50), 88)
         self.assertTrue(
             retained_volume_identity_matches(volume, "engine", os.makedev(0, 48), 88, 123, saved)
+        )
+        self.assertTrue(
+            retained_volume_identity_matches(volume, "engine", os.makedev(0, 50), 88, 0, saved)
         )
         for row, engine, device, inode in (
             (volume | {"CreatedAt": "replacement"}, "engine", os.makedev(0, 48), 88),

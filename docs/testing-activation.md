@@ -810,7 +810,8 @@ can prove an old anonymous-device binding by exact hash equality with only its
 minor varied within the bounded range 1 through 65535; metadata, engine and inode
 must still agree. Other historical device changes remain held. A new-format
 filesystem mismatch cannot pass through this legacy comparison. Missing or zero
-filesystem identity remains unknown. Filesystems whose filesystem ID itself
+filesystem identity prevents new captures; historical bindings still use their
+original exact or bounded comparison. Filesystems whose filesystem ID itself
 changes on remount, including some XFS placements, remain held rather than
 claiming reboot stability.
 

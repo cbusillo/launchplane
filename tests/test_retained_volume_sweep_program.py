@@ -198,7 +198,11 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         return cast(dict[str, object], json.loads(result.stdout.removeprefix("FRAME:"))["result"])
 
     @staticmethod
-    def fixture_program(exhaust_budget: bool = False, observed_device: int | None = None) -> str:
+    def fixture_program(
+        exhaust_budget: bool = False,
+        observed_device: int | None = None,
+        program: str = RETAINED_VOLUME_SWEEP_HOST_PROGRAM,
+    ) -> str:
         return (
             "from pathlib import Path\nfrom unittest.mock import patch\nimport json,os\n"
             "read_text=Path.read_text\nmount_reads=[0]\noriginal_stat=os.stat\n"
@@ -219,7 +223,7 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
             "    state=json.loads(read_text(Path(os.environ['FAKE_DOCKER_STATE'])))\n"
             "    return float(state.get('clock',len(state.get('calls',[]))))\n"
             "with patch.object(Path,'read_text',fixture_read), patch('time.monotonic',fixture_clock), patch('os.stat',fixture_stat):\n"
-            f"    exec({RETAINED_VOLUME_SWEEP_HOST_PROGRAM!r})\n"
+            f"    exec({program!r})\n"
         )
 
     def test_legacy_device_renumbering_keeps_reference_and_original_receipt_fences(self) -> None:
@@ -229,6 +233,18 @@ class RetainedVolumeSweepProgramTests(unittest.TestCase):
         device = os.makedev(0, 48)
         self.assertEqual(
             self.run_program(identity=digest, observed_device=device)["status"], "eligible"
+        )
+        self.assertEqual(
+            self.run_program(
+                "readback", identity=digest, observed_device=device, operation="unstarted-original"
+            )["reason_code"],
+            "never_started",
+        )
+        self.assertEqual(
+            self.run_program(
+                "apply", identity=digest, observed_device=device, operation="unstarted-original"
+            )["reason_code"],
+            "never_started",
         )
         self.state.update(containers=["stopped"], container_ref=True)
         self.write_state()
