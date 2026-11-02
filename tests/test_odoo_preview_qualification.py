@@ -16,7 +16,14 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
 )
 from control_plane.contracts.secret_record import SecretBinding
-from control_plane.odoo_testing_usage import MAX_CREDENTIAL_CANDIDATES, credential_digest
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.http_app import LaunchplaneErrorDetail
+from control_plane.odoo_testing_usage import (
+    MAX_CREDENTIAL_CANDIDATES,
+    ODOO_USAGE_REASON_CODES,
+    OdooTestingUsage,
+    credential_digest,
+)
 from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
@@ -26,6 +33,7 @@ from control_plane.odoo_preview_apply_http import (
     apply_odoo_preview_lifecycle_evidence,
     build_odoo_preview_runtime_identity,
 )
+from control_plane.odoo_preview_qualification import PreviewQualificationMissing
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.test_disposable_lane_authority import _DisposableRuntimeAuthorityFixture
 from tests.test_odoo_preview_apply_execution import _issued_plan, _refresh_payload
@@ -504,6 +512,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                     response = await self.collect()
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertIn(code, response.text)
+                self.assertNotIn("reason", response.json()["error"])
                 self.remote.assert_not_called()
                 self.assertIsNone(
                     self.store.read_disposable_lane_safety(
@@ -512,6 +521,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                 )
 
     async def test_missing_and_unreadable_facts_refuse_without_publishing_safety(self) -> None:
+        resource_reason = f"resource_{ReadbackPredicate.MOUNTS.value}"
         for frame, code in (
             (
                 {"type": "complete", "unavailable": True, "reason_code": "session_file_unreadable"},
@@ -521,17 +531,59 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
                 {"type": "complete", "recent_signins": False, "authenticated_sessions": False},
                 "probe_result_invalid",
             ),
+            (
+                {"type": "complete", "unavailable": True, "reason_code": resource_reason},
+                resource_reason,
+            ),
+            (
+                {"type": "complete", "unavailable": True, "reason_code": "unrecognized_reason"},
+                "probe_result_invalid",
+            ),
+            (
+                {
+                    "type": "complete",
+                    "unavailable": True,
+                    "reason_code": "private-token@host.invalid/database?command=read",
+                },
+                "probe_result_invalid",
+            ),
         ):
             with self.subTest(code=code):
                 self.frame = frame
                 response = await self.collect()
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertIn("preview_qualification_missing:" + code, response.text)
+                error = LaunchplaneErrorDetail.model_validate(response.json()["error"])
+                self.assertEqual(error.code, "disposable_observation_refused")
+                self.assertEqual(error.reason, code)
+                self.assertNotIn("private-token", response.text)
+                self.assertEqual(
+                    self.store.read_preview_record(self.preview.preview_id), self.preview
+                )
+                self.assertEqual(
+                    self.store.read_preview_generation_record(self.generation.generation_id),
+                    self.generation,
+                )
+                self.assertEqual(
+                    self.store.read_idempotency_record_by_id(self.original.record_id), self.original
+                )
                 self.assertIsNone(
                     self.store.read_disposable_lane_safety(
                         self.profile.product, "cm", self.issued.preview_slug
                     )
                 )
+
+    def test_usage_reasons_fit_existing_error_contract(self) -> None:
+        for reason in (*ODOO_USAGE_REASON_CODES, "unrecognized_reason"):
+            with self.subTest(reason=reason):
+                usage = OdooTestingUsage(reason_code=reason)
+                refusal = PreviewQualificationMissing("unavailable", usage=usage)
+                error = LaunchplaneErrorDetail(
+                    code="disposable_observation_refused",
+                    message=str(refusal),
+                    reason=refusal.reason,
+                )
+                self.assertEqual(error.reason, usage.payload()["reason_code"])
 
     async def test_current_shared_alias_cannot_be_overwritten_by_preview_probe(self) -> None:
         self.store.write_dokploy_target_record(

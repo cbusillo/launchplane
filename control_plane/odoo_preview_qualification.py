@@ -44,7 +44,9 @@ from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApply
 
 
 class PreviewQualificationMissing(ValueError):
-    pass
+    def __init__(self, message: str, *, usage: OdooTestingUsage | None = None) -> None:
+        super().__init__(message)
+        self.reason = str(usage.payload()["reason_code"]) if usage is not None else None
 
 
 @dataclass(frozen=True)
@@ -302,7 +304,9 @@ def collect_odoo_preview_qualification(
             },
         )
         if usage.usage == "unknown" or not usage.resources_qualified:
-            raise PreviewQualificationMissing("preview_qualification_missing:" + usage.reason_code)
+            raise PreviewQualificationMissing(
+                "preview_qualification_missing:" + usage.reason_code, usage=usage
+            )
         for key, value in sorted(credentials.candidates):
             if credential_digest(credential_nonce, value) in usage.credential_hashes:
                 raise PreviewQualificationMissing(
