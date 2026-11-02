@@ -11,40 +11,24 @@ Neither path calls a provider, syncs a runtime, deploys, or restarts a lane.
 
 ## Plain stored settings
 
-For a values-free comparison before selecting a removal, request
-`GET /v1/products/{product}/secret-bindings?include_setting_sources=true`.
-It reuses product/environment and preview read permissions and refuses incomplete
-scope authority or shared context ownership. The additive `setting_sources`
-inventory groups configured key names by lane and source, reports retirement
-intent, and enumerates retained preview records separately.
-It reads no secret versions, decrypts nothing, calls no provider, and saves no
-review or configuration. A name overlap is not a value disagreement or proof of
-delivery. Odoo overrides report native parameter/addon names, reference scope and
-apply phases without their literal values or binding ids. A reference reports
-the configured binding's key/context/instance when it is inside this product;
-missing, disabled or outside-product pointers remain `unresolved_or_out_of_scope`.
-These metadata observations do not validate secret resolution. Secret record names
-and delivered binding keys remain distinct identities. Preview policies describe
-configured key names; these tables cannot reconstruct provider inputs, exact-preview overrides,
-or retained generation settings. Bounds report truncation; the tables
-are read independently, so this is an observation, not an atomic migration plan.
-The read does not score overlaps or implement a second resolver. Comparisons use
-these source names and the existing canonical mapping helpers as task evidence.
-Preview targets are enumerated, not compared to their running generations.
-Global runtime records and the legacy readers that consume them are excluded;
-this product-scoped read does not qualify their consumers or conflicts.
+For the tracked-target environment fold, reuse the existing
+`GET /v1/dokploy-targets/inspect?context=<context>&instance=<instance>` read.
+Its `tracked_target.instance_setting_comparison` groups target key names by
+whether the exact instance runtime record has the same string value, a different
+value, or no value, and separately reports target keys retired by that record.
+It is null when the target has no environment overlay. Context/global settings,
+managed-secret values, provider values and retained operation snapshots are not
+compared. No values or value hashes are returned, and no secret versions are read.
+The existing target-inspection permissions and provider read still apply.
 
-Use the repository's bounded reader with the installed admin transport:
-
-```bash
-uv run python scripts/read-setting-sources.py --product <product> \
-  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py
-```
-
-The reader prints only the source inventory and trace and exits nonzero on
-truncated coverage. An older service that
-omits the inventory is unavailable, never an empty result. This read does not
-authorize a setting fold, a production release, or removal of retained authority.
+This is temporary evidence for deleting the tracked-target layer, not another
+settings inventory or removal authorization. The target and runtime record are
+read separately; their timestamps identify an observation, not an atomic
+migration plan. A fold must recheck equality and retirement under its write
+locks, preserve generation-specific resource ownership and retained operations,
+and keep live delivery on accepted releases. Remove this comparison when the
+tracked-target layer is deleted. Existing lane declarations and values remain
+the destination; never overwrite a conflicting lane value to make a fold pass.
 
 `POST /v1/admin/runtime-settings/removal` accepts `mode: dry-run`, `apply`, or
 `readback`, an exact `product`, `scope` (`global`, `context`, `instance`),

@@ -328,6 +328,7 @@ def require_tracked_target_logs_store(
 
 def require_dokploy_target_inspect_store(record_store: object) -> DokployTargetInspectStore:
     required_methods = (
+        "list_runtime_environment_records",
         "read_dokploy_target_record",
         "read_dokploy_target_id_record",
         "read_provider_target_record",
