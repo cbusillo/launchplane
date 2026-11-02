@@ -597,6 +597,7 @@ from control_plane.odoo_post_deploy_http import (
 from control_plane import odoo_addon_settings_override as control_plane_odoo_addon_settings
 from control_plane import integration_allowances as control_plane_integration_allowances
 from control_plane.odoo_preview_import_source import PreviewImportSourceError
+from control_plane.odoo_preview_qualification import PreviewQualificationMissing
 from control_plane import testing_lane_hold as control_plane_testing_lane_hold
 from control_plane.odoo_app_maintenance_http import (
     ODOO_APP_MAINTENANCE_ROUTE as _ODOO_APP_MAINTENANCE_ROUTE,
@@ -24337,6 +24338,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="disposable_observation_refused",
                 message=str(error),
+                reason=error.reason if isinstance(error, PreviewQualificationMissing) else None,
             ) from error
 
     async def execute_product_retirement(

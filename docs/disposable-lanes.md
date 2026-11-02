@@ -2170,6 +2170,13 @@ of any matched production records. The authenticated agent requests collection;
 its supplied facts and references cannot affect the result. The existing stored
 actor kind and observation schema remain compatible with the previous image.
 
+An Odoo preview usage or resource qualification refusal retains its closed
+usage reason in `error.reason` on the existing HTTP 409
+`disposable_observation_refused` reply. The value uses the same classified
+payload filter as usage readback; unrecognized probe output remains
+`probe_result_invalid`. Other refusals and generic messages keep their existing
+behavior. No observation is published by a failed qualification.
+
 For Odoo testing, the read-only login/session probe described above can also
 publish `unused`. On a verified-down lane with a resettable data policy and a
 current completed service-created testing generation, collection can independently
