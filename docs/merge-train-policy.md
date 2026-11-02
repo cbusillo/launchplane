@@ -2593,15 +2593,12 @@ reconciliation or grants metadata authority.
 For a merged PR on the default branch, completed feedback discovers its native
 closing references and explicit source references in its title, body and issue
 comments from the PR author, repository owner or numerically trusted automation,
-using the catalog's shared reference parser. It refreshes their direct
-blocking dependents and parents, including neighbors of non-plan or held sources.
-Timeline-only issue mentions are recorded for review without expanding their
-neighborhood or changing them. The deduplicated neighborhood is bounded
-to 100 records and is discovered before metadata writes; it is not recursive.
-Each planning target's status derives from its current open native
-blockers and trusted structured wait through the same pinned pure package used
-by the catalog. The last blocker closing makes an otherwise clear open target
-active; remaining blockers and actual waits remain visible. Unread waits require
+using the catalog's shared reference parser. Timeline-only issue mentions are
+recorded for review without changing them. Source discovery is bounded to 100
+records and completes before metadata writes. Completion reads each source's
+native state, blockers and trusted wait through the same pinned pure package
+used by the catalog. It does not visit dependents or parents to refresh status;
+the catalog displays their current status when read. Unread source waits require
 owning review. Labels carry routing, share and type decisions and are never
 changed by completion. No issue is closed or reopened, and no issue body,
 comment, wait record or native relationship is rewritten.
@@ -2613,6 +2610,11 @@ sources and open finish lines require source acceptance review. A closed managed
 with an actual or unread wait keeps its full completion unverified. An
 issue-specific Project membership gap also keeps full completion in review. Configured
 Project mutations retain their existing capability and readback requirements.
+Read-only completion takes one source snapshot. Only a prepared Project write
+requires fresh pre-write and post-write snapshots; the post-write comparison
+preserves issue identity, content, native relationships, configuration and waits
+while allowing provider timestamp changes. Release-wait resolution verifies its
+authored wait record without a separate status-refresh call.
 Open non-closing sources receive `review_open_finish_line` in the saved receipt;
 their review is informational and does not prevent successful independent metadata
 repairs or delivery of the landing comment. Closing sources still require verified

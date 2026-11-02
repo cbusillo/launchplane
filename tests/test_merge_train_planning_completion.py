@@ -457,68 +457,6 @@ class PlanningCompletionTests(TestCase):
             saved = store.list_merge_train_pr_feedback_records(repository=_REPO)
             self.assertTrue(_receipt(saved[0])["ok"])
 
-    def test_landing_recomputes_direct_dependent_from_remaining_blockers_and_wait(self) -> None:
-        for remaining, waiting, expected in (
-            (False, False, "active"),
-            (True, False, "blocked"),
-            (False, True, "waiting"),
-        ):
-            with self.subTest(remaining=remaining, waiting=waiting):
-                self.provider = PlanningProvider()
-                dependent = copy.deepcopy(self.provider.issue)
-                dependent.update(
-                    number=8,
-                    node_id="issue8",
-                    state="open",
-                    state_reason=None,
-                    body="<!-- github-plan:managed-provenance -->\n"
-                    + _wait("waiting" if waiting else "clear"),
-                    labels=[{"name": _LABELS[key]} for key in ("plan", "blocked")],
-                )
-                body_before = dependent["body"]
-                blocker = {
-                    "number": 9,
-                    "state": "open",
-                    "repository_url": f"https://api.github.com/repos/{_REPO}",
-                }
-
-                def request(
-                    *, path: str, method: str = "GET", body: Any = None, **kwargs: Any
-                ) -> Any:
-                    from urllib.parse import unquote
-
-                    if "/issues/7/dependencies/blocking?" in path:
-                        return [
-                            {**dependent, "repository_url": f"https://api.github.com/repos/{_REPO}"}
-                        ]
-                    if path.endswith("/parent"):
-                        raise click.ClickException("not found") from HTTPError(
-                            path, 404, "Not Found", Message(), None
-                        )
-                    if "/issues/8" not in path:
-                        return self.provider.request(path=path, method=method, body=body, **kwargs)
-                    if "/comments?" in path or "/sub_issues?" in path:
-                        return []
-                    if "/dependencies/blocked_by?" in path:
-                        return [blocker] if remaining else []
-                    if method == "GET":
-                        return copy.deepcopy(dependent)
-                    if method == "POST":
-                        dependent["labels"].extend({"name": name} for name in body["labels"])
-                    elif method == "DELETE":
-                        name = unquote(path.rsplit("/", 1)[-1])
-                        dependent["labels"] = [
-                            item for item in dependent["labels"] if item["name"] != name
-                        ]
-                    return None
-
-                with patch.object(completion, "github_api_request", side_effect=request):
-                    result = self.record()
-                self.assertEqual(result.delivery_status, "delivered")
-                self.assertEqual(_receipt(result)["issues"][1]["derived_status"], expected)
-                self.assertEqual(dependent["body"], body_before)
-                self.assertEqual(dependent["state"], "open")
-
     def test_standalone_landing_persists_completion_before_returning(self) -> None:
         policy = _policy_record(
             (_REPO, MergeTrainSchedulerPolicy(enabled=True, mutate=True))

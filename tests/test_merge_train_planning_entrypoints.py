@@ -80,7 +80,7 @@ def _policy(*, authorized: bool = True, target_author: int = 73) -> MergeTrainPo
 
 def _graph() -> tuple[NativeGraphProvider, dict[str, str]]:
     graph = NativeGraphProvider(pull_number=9)
-    target = graph.add(_TARGET, 8, wait="waiting")
+    target = graph.add(_TARGET, 8, state="closed", wait="waiting")
     target.default_branch = "release"
     names = {key: f"target:{key}" for key in _LABELS}
     target.config = {"planning": {"labels": names}}
@@ -89,7 +89,7 @@ def _graph() -> tuple[NativeGraphProvider, dict[str, str]]:
         {"user": {"id": 73}, "body": _wait()},
         {"user": {"id": _BOT}, "body": _wait("waiting")},
     ]
-    graph.blocking = [graph.ref(_TARGET, 8)]
+    graph.nodes[_REPO, 7].pull_body = f"Refs {_TARGET}#8"
     return graph, names
 
 
@@ -115,11 +115,11 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
             ):
                 graph, _names = _graph()
                 target = graph.nodes[_TARGET, 8]
-                independent = graph.add(_REPO, 10)
-                graph.blocking.append(graph.ref(_REPO, 10))
+                independent = graph.add(_REPO, 10, state="closed")
+                graph.nodes[_REPO, 7].pull_body += f", {_REPO}#10"
                 if failure not in {"network", "503"}:
-                    graph.add(_TARGET, 9)
-                    graph.blocking.append(graph.ref(_TARGET, 9))
+                    graph.add(_TARGET, 9, state="closed")
+                    graph.nodes[_REPO, 7].pull_body += f", {_TARGET}#9"
                 policy = _policy()
                 store = FilesystemRecordStore(Path(directory))
                 store.write_merge_train_policy_record(policy)

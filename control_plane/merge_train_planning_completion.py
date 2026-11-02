@@ -493,19 +493,6 @@ def _reference(issue: dict[str, Any], default_repository: str) -> tuple[str, int
     return repository, number
 
 
-def _parent(scope: PlanningRepositoryScope, number: int) -> dict[str, Any] | None:
-    try:
-        return _object(
-            github_api_request(
-                path=f"/repos/{scope.repository}/issues/{number}/parent", token=scope.token
-            )
-        )
-    except click.ClickException as error:
-        if provider_failure(error).status_code == 404:
-            return None
-        raise
-
-
 def _snapshot(
     target: _Target,
     *,
@@ -559,9 +546,15 @@ def _snapshot(
     return _Snapshot(issue, configuration, relationships, wait, wait_failure)
 
 
-def _same_snapshot(first: _Snapshot, second: _Snapshot) -> bool:
+def _same_snapshot(first: _Snapshot, second: _Snapshot, *, project_updated: bool = False) -> bool:
+    issue_matches = first.issue == second.issue
+    if project_updated:
+        issue_matches = all(
+            first.issue.get(key) == second.issue.get(key)
+            for key in ("body", "state", "state_reason", "user", "title", "node_id")
+        )
     return (
-        first.issue == second.issue
+        issue_matches
         and first.config == second.config
         and first.relationships == second.relationships
         and same_wait_projection(first.issue, first.wait, second.wait)
@@ -651,18 +644,18 @@ def _reconcile_target(
             )
         except _IssueProjectReview as error:
             review = error.message
-    fresh = _snapshot(target)
-    if not _same_snapshot(snapshot, fresh):
-        raise PlanningCompletionReview(
-            "Planning issue, native graph, wait or configuration changed before reconciliation."
-        )
     if project is not None:
+        fresh = _snapshot(target)
+        if not _same_snapshot(snapshot, fresh):
+            raise PlanningCompletionReview(
+                "Planning issue, native graph, wait or configuration changed before reconciliation."
+            )
         row.update(writes_started=True, write_outcome="unknown")
         _sync_project(scope.token, project)
         row["write_outcome"] = "confirmed"
-    verified = _snapshot(target)
-    if not _same_snapshot(snapshot, verified):
-        raise PlanningCompletionReview("Planning metadata readback did not match.")
+        verified = _snapshot(target)
+        if not _same_snapshot(snapshot, verified, project_updated=True):
+            raise PlanningCompletionReview("Planning metadata readback did not match.")
     row.update(
         projection_outcome(derived, "reconciled" if row.get("writes_started") else "unchanged")
     )
@@ -680,19 +673,6 @@ def _reconcile_target(
         )
         if provider_failure(snapshot.wait_failure).retryable:
             raise snapshot.wait_failure
-
-
-def reconcile_issue_status(*, scope: PlanningRepositoryScope, number: int) -> dict[str, Any]:
-    row: dict[str, Any] = {"repo": scope.repository, "number": number}
-    now = datetime.now(timezone.utc)
-    _reconcile_target(
-        _Target(scope.repository, number, scope=scope),
-        row,
-        merged_at=now,
-        attempted=now,
-        author_trust_available=bool(scope.trusted_author_ids),
-    )
-    return row
 
 
 def reconcile_completed_change(
@@ -851,7 +831,7 @@ def reconcile_completed_change(
             )
             if len(targets) >= MAX_PLANNING_TARGETS:
                 error = PlanningCompletionReview(
-                    "Planning direct neighborhood exceeded its coverage bound."
+                    "Planning references exceeded their coverage bound."
                 )
                 target.discovery_error = error
                 overflow_target = target
@@ -897,20 +877,12 @@ def reconcile_completed_change(
         if not target.source or stopped or target.repository.casefold() in denied_repositories:
             continue
         try:
-            target.scope = resolve(target.repository)
-            path = f"/repos/{target.scope.repository}/issues/{target.number}"
-            if not target.closing_reference and "pull_request" in _object(
-                github_api_request(path=path, token=target.scope.token)
-            ):
+            resolved_scope = resolve(target.repository)
+            target.scope = resolved_scope
+            path = f"/repos/{resolved_scope.repository}/issues/{target.number}"
+            issue = _object(github_api_request(path=path, token=resolved_scope.token))
+            if not target.closing_reference and "pull_request" in issue:
                 continue
-            dependents = _pages(target.scope.token, path + "/dependencies/blocking")
-            for neighbor in dependents:
-                neighbor_repository, neighbor_number = _reference(neighbor, target.repository)
-                add(neighbor_repository, neighbor_number)
-            parent = _parent(target.scope, target.number)
-            if parent is not None:
-                parent_repository, parent_number = _reference(parent, target.repository)
-                add(parent_repository, parent_number)
         except (click.ClickException, KeyError, TypeError, ValueError) as error:
             target.discovery_error = error
             if overflow_target is not None:
@@ -965,7 +937,7 @@ def reconcile_completed_change(
         else:
             try:
                 if target.discovery_error is not None:
-                    row["phase"] = "neighborhood_discovery"
+                    row["phase"] = "source_discovery"
                     raise target.discovery_error
                 target.scope = resolve(target.repository)
                 _reconcile_target(
