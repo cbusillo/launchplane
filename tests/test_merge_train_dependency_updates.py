@@ -192,6 +192,12 @@ class RenovateClassificationTests(unittest.TestCase):
             ({"updateType": "digest"}, "patch_or_minor"),
             ({"updateType": "major", "newVersion": "3.0.0"}, "needs_review"),
             ({"newVersion": "3.0.0"}, "needs_review"),
+            ({"newVersion": "2.0.0"}, "needs_review"),
+            ({"updateType": "patch", "newVersion": "2.1.0"}, "needs_review"),
+            (
+                {"updateType": "patch", "currentVersion": "2.1.2", "newVersion": "2.1.1"},
+                "needs_review",
+            ),
             ({"updateType": "unknown"}, "needs_review"),
             ({"currentVersion": "0.1.0", "newVersion": "0.2.0"}, "needs_review"),
             ({"updateType": "digest", "newValue": "other-branch"}, "needs_review"),

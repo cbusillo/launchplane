@@ -1,8 +1,10 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import PurePosixPath
 import re
 
 import yaml
+
+from control_plane.merge_train_dependency_updates import dependency_version_update_type
 
 
 def dependency_reference_file(filename: str) -> bool:
@@ -22,19 +24,26 @@ def dependency_reference_file(filename: str) -> bool:
 
 
 def dependency_references_only(
-    filename: str, old: str, new: str, *, read: Callable[[str], object]
+    filename: str,
+    old: str,
+    new: str,
+    *,
+    read: Callable[[str], object],
+    declared_updates: Sequence[dict[str, str]],
 ) -> bool:
     if not dependency_reference_file(filename) or old == new:
         return False
     file = PurePosixPath(filename)
     if file.name == "Dockerfile" or file.name.endswith(".Dockerfile"):
-        return _docker_references_only(old, new)
+        return _docker_references_only(old, new, declared_updates)
     try:
         changes = _yaml_changes(yaml.compose(old), yaml.compose(new))
     except (yaml.YAMLError, RecursionError, ValueError):
         return False
     return bool(changes) and all(
-        _yaml_reference_change(filename, path, before, after, read=read)
+        _yaml_reference_change(
+            filename, path, before, after, read=read, declared_updates=declared_updates
+        )
         for path, before, after in changes
     )
 
@@ -88,6 +97,7 @@ def _yaml_reference_change(
     new: str,
     *,
     read: Callable[[str], object],
+    declared_updates: Sequence[dict[str, str]],
 ) -> bool:
     if not path:
         return False
@@ -101,7 +111,7 @@ def _yaml_reference_change(
             or (len(path) == 4 and path[:2] == ("runs", "steps"))
         )
     ):
-        return _action_reference_forward(old, new, read=read)
+        return _action_reference_forward(old, new, read=read, declared_updates=declared_updates)
     if (
         workflow
         and len(path) >= 5
@@ -110,29 +120,36 @@ def _yaml_reference_change(
         in {"python-version", "node-version", "go-version", "ruby-version", "java-version"}
         and "steps" in path
     ):
-        return _version_forward(old, new)
+        return _version_forward(old, new) and any(
+            update.get("depName") == str(path[-1]).removesuffix("-version")
+            and _declared_values(update) == (old, new)
+            for update in declared_updates
+        )
     if path[-1] == "image" and (
         (not workflow and len(path) == 3 and path[0] == "services")
         or (workflow and len(path) == 5 and path[0] == "jobs" and path[2] == "services")
         or (workflow and len(path) == 4 and path[0] == "jobs" and path[2] == "container")
     ):
-        return _image_reference_forward(old, new)
+        return _image_reference_forward(old, new, declared_updates)
     if workflow and len(path) == 3 and path[0] == "jobs" and path[2] == "container":
-        return _image_reference_forward(old, new)
+        return _image_reference_forward(old, new, declared_updates)
     return False
 
 
 def _version_forward(old: str, new: str) -> bool:
-    pattern = r"v?(\d+)(?:[.](\d+))?(?:[.](\d+))?(?P<suffix>-[a-zA-Z0-9.-]+)?"
-    before, after = re.fullmatch(pattern, old), re.fullmatch(pattern, new)
-    if before is None or after is None or before["suffix"] != after["suffix"]:
-        return False
-    old_parts = tuple(int(before[index] or 0) for index in (1, 2, 3))
-    new_parts = tuple(int(after[index] or 0) for index in (1, 2, 3))
-    return old_parts[0] == new_parts[0] and old_parts < new_parts
+    return dependency_version_update_type(old, new) in {"patch", "minor"}
 
 
-def _image_reference_forward(old: str, new: str) -> bool:
+def _declared_values(update: dict[str, str]) -> tuple[str, str]:
+    return (
+        update.get("currentValue") or update.get("currentVersion", ""),
+        update.get("newValue") or update.get("newVersion", ""),
+    )
+
+
+def _image_reference_forward(
+    old: str, new: str, declared_updates: Sequence[dict[str, str]]
+) -> bool:
     pattern = (
         r"(?P<name>[a-zA-Z0-9][a-zA-Z0-9./:_-]*):(?P<version>[^:@\s]+)(?:@sha256:[0-9a-f]{64})?"
     )
@@ -142,10 +159,30 @@ def _image_reference_forward(old: str, new: str) -> bool:
         and after is not None
         and before["name"] == after["name"]
         and _version_forward(before["version"], after["version"])
+        and any(
+            update.get("depName") == before["name"]
+            and _declared_values(update) == (before["version"], after["version"])
+            and all(
+                reference
+                == f"{before['name']}:{value}"
+                + (f"@{update[digest_key]}" if update.get(digest_key) else "")
+                for reference, value, digest_key in (
+                    (old, before["version"], "currentDigest"),
+                    (new, after["version"], "newDigest"),
+                )
+            )
+            for update in declared_updates
+        )
     )
 
 
-def _action_reference_forward(old: str, new: str, *, read: Callable[[str], object]) -> bool:
+def _action_reference_forward(
+    old: str,
+    new: str,
+    *,
+    read: Callable[[str], object],
+    declared_updates: Sequence[dict[str, str]],
+) -> bool:
     pattern = r"(?P<name>[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_./-]+)?)@(?P<ref>[^\s@]+)"
     before, after = re.fullmatch(pattern, old), re.fullmatch(pattern, new)
     if before is None or after is None or before["name"] != after["name"]:
@@ -153,9 +190,25 @@ def _action_reference_forward(old: str, new: str, *, read: Callable[[str], objec
     if any(part in {".", ".."} for part in before["name"].split("/")):
         return False
     old_ref, new_ref = before["ref"], after["ref"]
+    matching_updates = [
+        update
+        for update in declared_updates
+        if update.get("depName") == before["name"]
+        and (
+            (update.get("currentDigest"), update.get("newDigest")) == (old_ref, new_ref)
+            or _declared_values(update) == (old_ref, new_ref)
+        )
+    ]
+    if not matching_updates:
+        return False
     if _version_forward(old_ref, new_ref):
         return True
     if not all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in (old_ref, new_ref)):
+        return False
+    if not any(
+        re.fullmatch(r"v?\d+(?:[.]\d+)*(?:-[a-zA-Z0-9.-]+)?", _declared_values(update)[0])
+        for update in matching_updates
+    ):
         return False
     repository = "/".join(before["name"].split("/")[:2])
     comparison = read(f"/repos/{repository}/compare/{old_ref}...{new_ref}")
@@ -179,7 +232,7 @@ def _action_reference_forward(old: str, new: str, *, read: Callable[[str], objec
     )
 
 
-def _docker_references_only(old: str, new: str) -> bool:
+def _docker_references_only(old: str, new: str, declared_updates: Sequence[dict[str, str]]) -> bool:
     before, after = old.splitlines(), new.splitlines()
     if len(before) != len(after):
         return False
@@ -195,7 +248,9 @@ def _docker_references_only(old: str, new: str) -> bool:
             or new_match is None
             or old_match["prefix"] != new_match["prefix"]
             or old_match["suffix"] != new_match["suffix"]
-            or not _image_reference_forward(old_match["image"], new_match["image"])
+            or not _image_reference_forward(
+                old_match["image"], new_match["image"], declared_updates
+            )
         ):
             return False
         changed = True

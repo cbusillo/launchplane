@@ -17,6 +17,16 @@ from tests.test_merge_train_dependency_updates import INDIRECT_PATCH, renovate_m
 from tests.test_merge_train_github import _github_commit, _github_pull_request
 
 
+class DependencyReferenceReadTransport:
+    def __init__(self, responses: dict[str, object]) -> None:
+        self.responses = responses
+
+    def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
+        if method != "GET" or body is not None:
+            raise ValueError("dependency proof is read-only")
+        return self.responses[path]
+
+
 class DependencyBotPolicyTests(unittest.TestCase):
     def test_verified_action_updates_keep_branch_pins_and_unrelated_edits_for_review(self) -> None:
         identity = 711
@@ -51,19 +61,31 @@ class DependencyBotPolicyTests(unittest.TestCase):
                     currentValue=current_value,
                     newValue=current_value,
                 )
-                transport = RecordingMergeTrainGitHubTransport(
-                    responses=(
-                        [_github_commit(identity, message, sha="head-16", verified=verified)],
-                        [],
-                        {"files": [{"filename": ".github/workflows/ci.yml", "status": "modified"}]},
-                        *documents,
-                        {
+                prefix = f"/repos/{policy.repository}"
+                transport = DependencyReferenceReadTransport(
+                    {
+                        f"{prefix}/pulls/16/commits?per_page=100": [
+                            _github_commit(identity, message, sha="head-16", verified=verified)
+                        ],
+                        f"{prefix}/issues/16/timeline?per_page=100": [],
+                        f"{prefix}/compare/base-16...head-16": {
+                            "files": [
+                                {"filename": ".github/workflows/ci.yml", "status": "modified"}
+                            ],
+                            "base_commit": {"sha": "base-16"},
+                            "merge_base_commit": {"sha": "original-parent"},
+                        },
+                        f"{prefix}/contents/.github/workflows/ci.yml?ref=original-parent": documents[
+                            0
+                        ],
+                        f"{prefix}/contents/.github/workflows/ci.yml?ref=head-16": documents[1],
+                        f"/repos/example/action/compare/{'a' * 40}...{'b' * 40}": {
                             "status": "ahead",
                             "base_commit": {"sha": "a" * 40},
                             "merge_base_commit": {"sha": "a" * 40},
                             "commits": [{"sha": "b" * 40}],
                         },
-                    )
+                    }
                 )
                 reader = GitHubMergeTrainSnapshotReader(
                     transport=transport, repository_policy=policy

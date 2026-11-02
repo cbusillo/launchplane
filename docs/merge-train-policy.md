@@ -610,9 +610,11 @@ remain readable, but a removed bot cannot supply a new inferred exemption.
 Both formats require a complete immutable same-repository dependency-only diff.
 `workspace.toml` qualifies only when complete immutable TOML documents differ
 solely in exact devkit/runtime ref pins; shared-addon and other changes keep
-review. Workflow/action YAML, Compose images and Dockerfile frontend/base-image
+review. In the verified train-admission path, workflow/action YAML, Compose images and Dockerfile frontend/base-image
 references qualify only when complete immutable before/after documents prove
-that only supported dependency references changed. Workflow commands,
+that only supported dependency references changed from the PR's merge base.
+Every changed reference must match a named update's exact old/new values or
+digests from the verified commit metadata. Workflow commands,
 permissions, mapping/sequence changes, ambiguous YAML, file additions/renames,
 application code and unavailable evidence withhold this admission. Interpreter
 inputs and image tags must move forward within their current major with the
@@ -622,6 +624,8 @@ stale version comments cannot prove forward movement. Opaque container digest
 changes and branch-following workflow pins remain for agent review. The bot's
 declared update types, verified commit provenance, required checks and explicit
 Client-review overrides remain enforced.
+Other consumers retain the existing manifest/lockfile/workspace-only Client-review
+exemption; this admission proof does not change product review or release notes.
 
 Renovate automerge stays disabled; only the train lands changes. The empty table
 is omitted from policy serialization so it does not alter historical digests.

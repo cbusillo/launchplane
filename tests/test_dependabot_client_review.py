@@ -11,6 +11,21 @@ from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from tests.test_merge_train_github import _github_pull_request
 
 
+REFERENCE_UPDATES = (
+    {"depName": "docker/dockerfile", "currentValue": "1.6", "newValue": "1.28"},
+    {"depName": "example/runtime", "currentValue": "3.13", "newValue": "3.14"},
+    {"depName": "example/db", "currentValue": "17.1", "newValue": "17.2"},
+    {"depName": "python", "currentValue": "3.13", "newValue": "3.14"},
+    {
+        "depName": "example/action",
+        "currentValue": "v2",
+        "newValue": "v2",
+        "currentDigest": "a" * 40,
+        "newDigest": "b" * 40,
+    },
+)
+
+
 class DependabotClientReviewTests(unittest.TestCase):
     def test_client_repository_dependency_update_needs_no_notes_or_review(self) -> None:
         pull = _github_pull_request(16)
@@ -157,13 +172,15 @@ class DependabotClientReviewTests(unittest.TestCase):
         new: str,
         *,
         upstream_status: str = "ahead",
-        declared_updates: tuple[dict[str, str], ...] | None = None,
+        declared_updates: tuple[dict[str, str], ...] | None = REFERENCE_UPDATES,
+        current_base: str | None = None,
     ) -> bool:
         from control_plane.dependency_update_review import pure_dependency_update
 
         pull = _github_pull_request(16)
         pull["user"] = {"id": 49699333, "login": "configured-update-bot", "type": "Bot"}
         head_sha = cast(dict[str, str], pull["head"])["sha"]
+        base_sha = cast(dict[str, str], pull["base"])["sha"]
 
         def read(path: str) -> object:
             if path.startswith("/repos/example/action/compare/"):
@@ -174,8 +191,18 @@ class DependabotClientReviewTests(unittest.TestCase):
                     "commits": [{"sha": "b" * 40}],
                 }
             if "/compare/" in path:
-                return {"files": [{"filename": filename, "status": "modified"}]}
-            content = new if path.endswith("ref=" + head_sha) else old
+                return {
+                    "files": [{"filename": filename, "status": "modified"}],
+                    "base_commit": {"sha": base_sha},
+                    "merge_base_commit": {"sha": "original-parent"},
+                }
+            content = (
+                new
+                if path.endswith("ref=" + head_sha)
+                else current_base
+                if path.endswith("ref=" + base_sha) and current_base is not None
+                else old
+            )
             encoded = content.encode()
             return {
                 "encoding": "base64",
@@ -213,6 +240,13 @@ class DependabotClientReviewTests(unittest.TestCase):
         )
         new = old.replace("a" * 40, "b" * 40).replace("# v2.1", "# v2.2")
         self.assertTrue(self._reference_change(".github/workflows/ci.yml", old, new))
+        for updates in (None, ()):
+            with self.subTest(updates=updates):
+                self.assertFalse(
+                    self._reference_change(
+                        ".github/workflows/ci.yml", old, new, declared_updates=updates
+                    )
+                )
         self.assertFalse(
             self._reference_change(
                 ".github/workflows/ci.yml",
@@ -221,6 +255,7 @@ class DependabotClientReviewTests(unittest.TestCase):
                 declared_updates=({"updateType": "digest", "currentValue": "main"},),
             )
         )
+
         for status in ("behind", "diverged", "identical"):
             with self.subTest(status=status):
                 self.assertFalse(
@@ -238,6 +273,17 @@ class DependabotClientReviewTests(unittest.TestCase):
                 ".github/workflows/ci.yml",
                 old,
                 new.replace("jobs:\n", "jobs: {}\njobs:\n"),
+            )
+        )
+
+    def test_reference_proof_uses_pr_merge_base_after_unrelated_main_changes(self) -> None:
+        old = "# syntax=docker/dockerfile:1.6\nRUN original\n"
+        self.assertTrue(
+            self._reference_change(
+                "Dockerfile",
+                old,
+                old.replace(":1.6", ":1.28"),
+                current_base=old.replace("RUN original", "RUN current"),
             )
         )
 

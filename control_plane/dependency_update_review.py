@@ -85,7 +85,9 @@ def pure_dependency_update(
     comparison = _safe_read(
         read, f"{path}/compare/{quote(base_sha, safe='')}...{quote(head_sha, safe='')}"
     )
-    files = comparison.get("files") if isinstance(comparison, dict) else None
+    if not isinstance(comparison, dict):
+        return False
+    files = comparison.get("files")
     # GitHub comparisons return at most 300 files, even across commit pages.
     if not isinstance(files, list) or not files or len(files) >= 300:
         return False
@@ -116,17 +118,22 @@ def pure_dependency_update(
                 and _workspace_pin_only(read=read, path=path, base_sha=base_sha, head_sha=head_sha)
             ):
                 continue
-            if item.get("status") == "modified" and dependency_reference_file(filename):
-                if declared_updates is not None and any(
-                    update.get("updateType") == "digest"
-                    and re.fullmatch(
-                        r"v?\d+(?:[.]\d+)*(?:-[a-zA-Z0-9.-]+)?", update.get("currentValue", "")
-                    )
-                    is None
-                    for update in declared_updates
+            if (
+                declared_updates is not None
+                and item.get("status") == "modified"
+                and dependency_reference_file(filename)
+            ):
+                comparison_base = comparison.get("base_commit")
+                merge_base = comparison.get("merge_base_commit")
+                if (
+                    not isinstance(comparison_base, dict)
+                    or comparison_base.get("sha") != base_sha
+                    or not isinstance(merge_base, dict)
+                    or not isinstance(merge_base.get("sha"), str)
+                    or not merge_base["sha"]
                 ):
                     return False
-                old_content = _immutable_content(read, path, base_sha, filename)
+                old_content = _immutable_content(read, path, merge_base["sha"], filename)
                 new_content = _immutable_content(read, path, head_sha, filename)
                 if (
                     old_content is None
@@ -136,6 +143,7 @@ def pure_dependency_update(
                         old_content,
                         new_content,
                         read=lambda endpoint: _safe_read(read, endpoint),
+                        declared_updates=declared_updates,
                     )
                 ):
                     return False
