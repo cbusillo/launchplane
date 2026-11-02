@@ -130,7 +130,6 @@ jobs:
           require_env RUNNER_HOST_NAME
           require_env RUNNER_EXECUTION_LANE
           require_env RUNNER_SERVICE_USER
-          require_env RUNNER_RETAINED_WARM_BUILDERS
           require_env RUNNER_WORKDIR_ROOTS
           require_env RUNNER_GENERATED_RUN_CACHE_ROOTS
           require_env RUNNER_BUILDKIT_CACHE_BUDGETS
@@ -220,10 +219,6 @@ jobs:
               builder_args+=(--retained-warm-builder "$trimmed")
             fi
           done
-          if [ "${#builder_args[@]}" -eq 0 ]; then
-            echo "At least one retained warm builder is required." >&2
-            exit 1
-          fi
 
           runner_root_args=()
           IFS=',' read -r -a runner_roots <<< "$RUNNER_WORKDIR_ROOTS"
