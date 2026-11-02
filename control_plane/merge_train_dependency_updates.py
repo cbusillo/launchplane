@@ -45,7 +45,7 @@ def _dependabot_updates(message: str) -> list[dict[str, str]]:
         updates.append(
             {
                 "depName": name,
-                "updateType": declared or _version_update_type(old, new),
+                "updateType": declared or dependency_version_update_type(old, new),
                 "currentVersion": old,
                 "newVersion": new,
             }
@@ -93,14 +93,18 @@ def _update_qualifies(
             and _DIGEST.fullmatch(update.get("newDigest", ""))
         )
     old, new = update.get("currentVersion", ""), update.get("newVersion", "")
-    return update.get("updateType") == _version_update_type(old, new)
+    return update.get("updateType") == dependency_version_update_type(old, new)
 
 
-def _version_update_type(old_version: str, new_version: str) -> str:
+def dependency_version_update_type(old_version: str, new_version: str) -> str:
     old, new = _VERSION.match(old_version), _VERSION.match(new_version)
     if old is None or new is None or old.group("suffix") != new.group("suffix"):
         return ""
     if old.group("major") != new.group("major"):
+        return ""
+    old_parts = tuple(int(old.group(part) or "0") for part in ("major", "minor", "patch"))
+    new_parts = tuple(int(new.group(part) or "0") for part in ("major", "minor", "patch"))
+    if new_parts <= old_parts:
         return ""
     if (old.group("minor") or "0") != (new.group("minor") or "0"):
         return "minor" if old.group("major") != "0" else ""

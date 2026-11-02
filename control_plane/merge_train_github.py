@@ -103,7 +103,10 @@ from control_plane.merge_train_codeowners import (
     carried_change_requires_individual_landing,
 )
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
-from control_plane.merge_train_dependency_updates import classify_dependency_update
+from control_plane.merge_train_dependency_updates import (
+    classify_dependency_update,
+    UPDATE_FORMAT_PARSERS,
+)
 from control_plane.merge_train_handoff import (
     MergeTrainReadyHandoff,
     handoff_actor_allowed,
@@ -4639,6 +4642,11 @@ class GitHubMergeTrainSnapshotReader:
             read=lambda path: self.transport.request(method="GET", path=path),
             store=self._branch_refresh_store,
             repository_policy=self._repository_policy,
+            declared_updates=tuple(
+                update
+                for message in messages
+                for update in UPDATE_FORMAT_PARSERS[bot.metadata_format](message)
+            ),
         ):
             return "needs_review"
         return update_class
