@@ -33,6 +33,7 @@ from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_DISPATCH_SECONDS,
     WALKTHROUGH_READONLY_GROUP,
     WALKTHROUGH_LOGIN_PREFIX,
+    WALKTHROUGH_MARKER_PREFIX,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -989,6 +990,13 @@ class AccountProgramTests(unittest.TestCase):
     def setUp(self) -> None:
         self.addCleanup(logging.disable, logging.root.manager.disable)
         self.enterContext(patch.dict(sys.modules, {"odoo_website_settings": None}))
+        self.readonly_policy = SimpleNamespace()
+        self.enterContext(
+            patch.dict(
+                sys.modules,
+                {"odoo.addons.launchplane_readonly": SimpleNamespace(policy=self.readonly_policy)},
+            )
+        )
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.parameters: dict[str, str] = {TESTING_COPY_COMPLETION_PARAMETER: "testing-copy"}
@@ -1117,6 +1125,28 @@ class AccountProgramTests(unittest.TestCase):
         self.user.has_group.side_effect = lambda name: name == WALKTHROUGH_READONLY_GROUP
         self.users._launchplane_readonly_test_identity.return_value = self.user
 
+    def test_readonly_marker_uses_image_policy_for_provision_and_run(self) -> None:
+        self.configure_readonly_identity()
+        typed = task_request(read_only=True, task_id=canonical_json_sha256("example-odoo")[:32])
+        self.request.update(
+            task_id=typed.task_id,
+            groups=typed.groups,
+            identity={"environment_kind": "stable", "product": typed.product},
+        )
+        self.user.login = WALKTHROUGH_LOGIN_PREFIX + typed.task_id
+        marker_key = "image-owned-operative-marker"
+        derive_key = MagicMock(return_value=marker_key)
+        self.readonly_policy.operative_marker_key = derive_key
+        for operation in ("provision", "run"):
+            with self.subTest(operation=operation):
+                self.request["operation"] = operation
+                self.assertEqual(self.execute()["account_id"], self.user.id)
+                derive_key.assert_called_with(typed.product)
+        self.assertEqual(derive_key.call_count, 2)
+        self.assertEqual(json.loads(self.parameters[marker_key])["account_id"], self.user.id)
+        self.assertNotIn(WALKTHROUGH_MARKER_PREFIX + typed.task_id, self.parameters)
+        self.users.create.assert_not_called()
+
     def test_readonly_account_refuses_missing_product_guard_and_role_escalation(self) -> None:
         self.configure_readonly_identity()
         self.users._launchplane_readonly_test_identity.side_effect = RuntimeError(
@@ -1143,7 +1173,8 @@ class AccountProgramTests(unittest.TestCase):
             self.user, "active", updates["active"]
         )
         self.request.update({"operation": "cleanup", "binding": "current-generation"})
-        result = self.execute()
+        with patch.dict(sys.modules, {"odoo.addons.launchplane_readonly": None}):
+            result = self.execute()
         self.assertEqual(result["status"], "pass")
         self.assertFalse(self.user.active)
         self.assertNotEqual(self.user.write.call_args.args[0]["password"], self.request["password"])
@@ -1189,6 +1220,9 @@ class AccountProgramTests(unittest.TestCase):
         self.assertFalse(self.user.active)
 
     def test_provision_preserves_staff_and_does_not_reset_existing_task(self) -> None:
+        self.readonly_policy.operative_marker_key = MagicMock(
+            side_effect=AssertionError("Generic tasks cannot use the read-only policy")
+        )
         self.assertEqual(self.execute()["account_id"], self.user.id)
         self.users.create.assert_called_once()
         self.user.write.assert_not_called()
