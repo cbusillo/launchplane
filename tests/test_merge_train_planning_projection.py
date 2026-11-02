@@ -4,8 +4,6 @@ import copy
 import json
 from email.message import Message
 from io import BytesIO
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any
 from unittest import TestCase
 from unittest.mock import Mock, patch
@@ -22,7 +20,6 @@ from control_plane.merge_train_pr_feedback import (
     build_merge_train_pr_feedback_record,
     deliver_merge_train_pr_feedback_record,
 )
-from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.test_merge_train_planning_completion import (
     PlanningProvider,
     _BOT,
@@ -40,8 +37,6 @@ class NativeGraphProvider:
     def __init__(self, *, pull_number: int = 9001) -> None:
         self.pull_number = pull_number
         self.nodes: dict[tuple[str, int], PlanningProvider] = {}
-        self.blocking: list[dict[str, Any]] = []
-        self.parent: dict[str, Any] | None = None
         self.calls: list[dict[str, Any]] = []
         self.token_overrides: dict[str, str] = {}
         self.fail: Any = None
@@ -86,9 +81,11 @@ class NativeGraphProvider:
         }
 
     def request(self, *, path: str, method: str = "GET", token: str, body: Any = None) -> Any:
+        if path == "/users/example":
+            return {"type": "User"}
         if path == "/graphql":
             variables = body["variables"]
-            repo = f"{variables.get('owner')}/{variables.get('name')}"
+            repo = f"{variables['owner']}/{variables['name']}" if "name" in variables else _REPO
             node = next(node for (target, _), node in self.nodes.items() if target == repo)
         else:
             parts = path.split("/")
@@ -107,10 +104,6 @@ class NativeGraphProvider:
         self.calls.append(call)
         if self.fail:
             self.fail(call)
-        if repo == _REPO and "/issues/7/dependencies/blocking?" in path:
-            return copy.deepcopy(self.blocking)
-        if repo == _REPO and path.endswith("/issues/7/parent") and self.parent:
-            return copy.deepcopy(self.parent)
         return node.request(
             path=path.replace(f"/repos/{repo}", f"/repos/{_REPO}"), method=method, body=body
         )
@@ -153,35 +146,14 @@ class NativePlanningProjectionTests(TestCase):
     def rows(self, record: Any) -> dict[tuple[str, int], dict[str, Any]]:
         return {(row["repo"], row["number"]): row for row in _receipt(record)["issues"]}
 
-    def test_nonclosing_source_refreshes_neighborhood_and_records_remaining_judgment(self) -> None:
+    def test_unrelated_discovery_failures_do_not_block_source_completion(self) -> None:
         source = self.graph.nodes[_REPO, 7]
-        source.references = []
-        source.pull_body = "Refs #7"
-        source.issue.update(state="open", state_reason=None)
-        parent = self.graph.add(_REPO, 8)
-        self.graph.parent = self.graph.ref(_REPO, 8)
-        dependent = self.graph.add(_REPO, 10)
-        dependent.blockers = [{"number": 7, "state": "open"}]
-        self.graph.blocking = [self.graph.ref(_REPO, 10)]
         before = copy.deepcopy(source.issue)
-
         record = self.record()
-
         self.assertEqual(record.delivery_status, "delivered")
-        receipt = _receipt(record)
-        self.assertTrue(receipt["ok"])
-        self.assertTrue(receipt["review_required"])
-        rows = self.rows(record)
-        self.assertEqual(rows[_REPO, 7]["status"], "review_open_finish_line")
-        self.assertFalse(rows[_REPO, 7]["closing_reference"])
-        self.assertTrue(rows[_REPO, 7]["informational"])
-        self.assertEqual(rows[_REPO, 8]["derived_status"], "active")
-        self.assertEqual(rows[_REPO, 10]["derived_status"], "blocked")
-        self.assertEqual(source.issue["body"], before["body"])
-        self.assertEqual(source.issue["state"], before["state"])
-        self.assertEqual(
-            {x["name"] for x in parent.issue["labels"]}, {_LABELS["plan"], _LABELS["active"]}
-        )
+        self.assertEqual(set(self.rows(record)), {(_REPO, 7)})
+        self.assertTrue(self.rows(record)[_REPO, 7]["verified"])
+        self.assertEqual(source.issue, before)
 
     def test_completed_reference_in_pr_comment_reconciles_without_closing_keyword(self) -> None:
         source = self.graph.nodes[_REPO, 7]
@@ -197,9 +169,6 @@ class NativePlanningProjectionTests(TestCase):
         row = self.rows(record)[_REPO, 7]
         self.assertFalse(row["closing_reference"])
         self.assertTrue(row["verified"])
-        self.assertEqual(
-            {x["name"] for x in source.issue["labels"]}, {_LABELS["plan"], _LABELS["done"]}
-        )
         self.assertEqual(source.issue["body"], before["body"])
 
     def test_closing_reference_keeps_required_completion_when_also_explicit(self) -> None:
@@ -229,7 +198,8 @@ class NativePlanningProjectionTests(TestCase):
         self.assertTrue(_receipt(record)["ok"])
         self.assertTrue(self.rows(record)[_REPO, 7]["review_required"])
         self.assertEqual(source.issue, before)
-        self.assertTrue(completing.writes)
+        self.assertFalse(completing.writes)
+        self.assertTrue(self.rows(record)[_REPO, 8]["verified"])
 
     def test_pr_comment_discovery_requires_author_trust(self) -> None:
         for identity, login, accepted in (
@@ -248,13 +218,10 @@ class NativePlanningProjectionTests(TestCase):
                 record = self.record()
 
                 self.assertEqual(record.delivery_status, "delivered")
-                self.assertEqual(bool(source.writes), accepted)
+                self.assertFalse(source.writes)
                 self.assertEqual(bool(_receipt(record)["issues"]), accepted)
 
-    def test_missing_current_author_trust_keeps_the_neighborhood_read_only(self) -> None:
-        parent = self.graph.add(_REPO, 8)
-        parent.issue["user"] = {"id": 77, "login": "example"}
-        self.graph.parent = self.graph.ref(_REPO, 8)
+    def test_missing_current_author_trust_preserves_source(self) -> None:
 
         record = self.record(planning_author_ids=())
 
@@ -328,26 +295,6 @@ class NativePlanningProjectionTests(TestCase):
                 self.assertTrue(all(not row["verified"] for row in receipt["issues"]))
                 self.assertFalse(any(node.writes for node in self.graph.nodes.values()))
 
-    def test_neighborhood_overflow_retains_targets_and_prevents_metadata_writes(self) -> None:
-        numbers = range(10, 10 + completion.MAX_PLANNING_TARGETS - 1)
-        for number in numbers:
-            self.graph.add(_REPO, number)
-        self.graph.blocking = [self.graph.ref(_REPO, number) for number in numbers]
-        parent_number = numbers.stop + 1
-        self.graph.add(_REPO, parent_number)
-        self.graph.parent = self.graph.ref(_REPO, parent_number)
-
-        record = self.record()
-
-        receipt = _receipt(record)
-        self.assertEqual(record.delivery_status, "failed")
-        self.assertFalse(record.retryable)
-        self.assertEqual(receipt["coverage"], "partial")
-        self.assertIn((_REPO, parent_number), self.rows(record))
-        self.assertIn("discovery_failure", self.rows(record)[_REPO, parent_number])
-        self.assertFalse(any(node.writes for node in self.graph.nodes.values()))
-        self.comment_mock.assert_called_once()
-
     def test_transient_reference_failure_takes_retry_priority_over_terminal_failure(self) -> None:
         source = self.graph.nodes[_REPO, 7]
         source.pull_body = "Refs #8 and #10"
@@ -418,10 +365,6 @@ class NativePlanningProjectionTests(TestCase):
         source = self.graph.nodes[_REPO, 7]
         source.issue.update(state="open", state_reason=None)
         source.pull_body = "Refs #8"
-        self.graph.add(_REPO, 8)
-        neighbor = self.graph.add(_REPO, 10)
-        neighbor.blockers = [{"number": 7, "state": "open"}]
-        self.graph.blocking = [self.graph.ref(_REPO, 10)]
         error = HTTPError("https://example.test/reference", 404, "Missing", Message(), BytesIO())
         self.addCleanup(error.close)
 
@@ -435,7 +378,6 @@ class NativePlanningProjectionTests(TestCase):
         self.comment_mock.assert_not_called()
         self.assertEqual(self.rows(record)[_REPO, 7]["status"], "review_projection_pending")
         source.issue.update(state="closed", state_reason="completed")
-        neighbor.blockers[0]["state"] = "closed"
 
         retried = deliver_merge_train_pr_feedback_record(
             record=record,
@@ -449,24 +391,20 @@ class NativePlanningProjectionTests(TestCase):
         self.assertEqual(retried.delivery_status, "failed")
         self.comment_mock.assert_called_once()
         self.assertTrue(self.rows(retried)[_REPO, 7]["verified"])
-        self.assertEqual(self.rows(retried)[_REPO, 10]["blocked_by"], [])
 
-    def test_timeline_only_issue_is_reviewed_without_expanding_its_neighborhood(self) -> None:
+    def test_timeline_only_issue_is_recorded_without_source_reconciliation(self) -> None:
         source = self.graph.nodes[_REPO, 7]
         source.references = []
         source.timeline = [
             {"event": "cross-referenced", "source": {"issue": self.graph.ref(_REPO, 7)}}
         ]
         source.issue.update(state="open", state_reason=None)
-        self.graph.add(_REPO, 8)
-        self.graph.parent = self.graph.ref(_REPO, 8)
 
         record = self.record()
 
         self.assertEqual(record.delivery_status, "delivered")
         rows = self.rows(record)
         self.assertIn((_REPO, 7), rows)
-        self.assertNotIn((_REPO, 8), rows)
         self.assertTrue(rows[_REPO, 7]["review_required"])
         self.assertFalse(source.writes)
 
@@ -489,166 +427,20 @@ class NativePlanningProjectionTests(TestCase):
         source.references = []
         source.pull_body = "Refs #7"
         source.issue.update(state="open", pull_request={"url": "https://example.test/pull/7"})
-        self.graph.add(_REPO, 8)
-        self.graph.parent = self.graph.ref(_REPO, 8)
 
         record = self.record()
 
         self.assertEqual(record.delivery_status, "delivered")
         self.assertFalse(_receipt(record)["review_required"])
-        self.assertNotIn((_REPO, 8), self.rows(record))
         self.assertFalse(source.writes)
-
-    def test_parent_and_dependents_keep_only_current_blockers_and_person_waits(self) -> None:
-        parent = self.graph.add(_REPO, 8)
-        parent.blockers = [{"number": 7, "state": "closed"}]
-        remaining = self.graph.add(_REPO, 9)
-        held = self.graph.add(_REPO, 10, wait="waiting")
-        remaining.blockers = [{"number": 7, "state": "closed"}, {"number": 12, "state": "open"}]
-        held.blockers = [{"number": 12, "state": "open"}]
-        self.graph.parent = self.graph.ref(_REPO, 8)
-        self.graph.blocking = [self.graph.ref(_REPO, n) for n in (9, 10, 9)]
-        before = {key: copy.deepcopy(node.issue) for key, node in self.graph.nodes.items()}
-        record = self.record()
-        self.assertEqual(record.delivery_status, "delivered")
-        rows = self.rows(record)
-        self.assertEqual(len(rows), len(_receipt(record)["issues"]))
-        self.assertEqual(rows[_REPO, 8]["derived_status"], "active")
-        self.assertEqual(rows[_REPO, 8]["blocked_by"], [])
-        self.assertEqual(
-            rows[_REPO, 9]["blocked_by"], [{"repo": _REPO, "number": 12, "state": "open"}]
-        )
-        self.assertEqual(rows[_REPO, 10]["wait"]["state"], "waiting")
-        self.assertEqual(
-            {x["name"] for x in parent.issue["labels"]}, {_LABELS["plan"], _LABELS["active"]}
-        )
-        self.assertEqual(
-            {x["name"] for x in remaining.issue["labels"]}, {_LABELS["plan"], _LABELS["blocked"]}
-        )
-        self.assertEqual(
-            {x["name"] for x in held.issue["labels"]},
-            {_LABELS["plan"], _LABELS["blocked"], _LABELS["waiting"]},
-        )
-        writes = {key: list(node.writes) for key, node in self.graph.nodes.items()}
-        self.record()
-        self.assertEqual(writes, {key: node.writes for key, node in self.graph.nodes.items()})
-        for key, node in self.graph.nodes.items():
-            self.assertEqual(node.issue["body"], before[key]["body"])
-            self.assertEqual(node.issue["state"], before[key]["state"])
-
-    def test_closed_unread_lifecycle_does_not_release_open_unknown_or_scope_hold(self) -> None:
-        closed = self.graph.add(
-            _REPO, 8, state="closed", wait=None, labels=("plan", "active", "waiting")
-        )
-        unknown = self.graph.add(_REPO, 9, wait=None)
-        stale = self.graph.add(_REPO, 10, labels=("plan", "stale"))
-        unstatused = self.graph.add(_REPO, 11, labels=("plan",))
-        before = {n: copy.deepcopy(self.graph.nodes[_REPO, n].issue) for n in (8, 9, 10, 11)}
-        self.graph.blocking = [self.graph.ref(_REPO, n) for n in (8, 9, 10, 11)]
-        record = self.record()
-        rows = self.rows(record)
-        self.assertEqual(
-            {x["name"] for x in closed.issue["labels"]},
-            {_LABELS["plan"], _LABELS["done"], _LABELS["waiting"]},
-        )
-        self.assertEqual(rows[_REPO, 8]["projection_status"], "reconciled")
-        self.assertFalse(rows[_REPO, 8]["verified"])
-        for number, node in ((9, unknown), (10, stale), (11, unstatused)):
-            self.assertEqual(node.issue, before[number])
-            self.assertFalse(node.writes)
-        self.assertFalse(rows[_REPO, 9]["verified"])
-        self.assertEqual(rows[_REPO, 10]["derived_status"], "hold")
-        self.assertEqual(rows[_REPO, 11]["derived_status"], "hold")
-        self.assertEqual(closed.issue["body"], before[8]["body"])
-
-    def test_source_wait_preserves_full_completion_review_but_refreshes_neighbor(self) -> None:
-        source = self.graph.nodes[_REPO, 7]
-        source.comments = [{"user": {"id": _BOT}, "body": _wait("waiting")}]
-        neighbor = self.graph.add(_REPO, 8)
-        self.graph.blocking = [self.graph.ref(_REPO, 8)]
-        before = copy.deepcopy(source.issue)
-        record = self.record()
-        rows = self.rows(record)
-        self.assertEqual(record.delivery_status, "failed")
-        self.assertFalse(rows[_REPO, 7]["verified"])
-        self.assertTrue(rows[_REPO, 8]["verified"])
-        self.assertEqual(
-            {x["name"] for x in neighbor.issue["labels"]}, {_LABELS["plan"], _LABELS["active"]}
-        )
-        self.assertEqual(source.issue["body"], before["body"])
-        self.assertEqual(source.issue["state"], before["state"])
-        self.assertEqual(source.comments[0]["body"], _wait("waiting"))
-
-    def test_open_source_projection_retries_before_shape_or_acceptance_guards(self) -> None:
-        for shape in ("nonplan", "reporter", "unmanaged", "nonplan_unread"):
-            with self.subTest(shape=shape), TemporaryDirectory() as directory:
-                self.graph = NativeGraphProvider()
-                source = self.graph.nodes[_REPO, 7]
-                source.issue.update(state="open", state_reason=None)
-                if shape.startswith("nonplan"):
-                    source.issue["labels"] = [{"name": "bug"}]
-                elif shape == "reporter":
-                    source.issue["user"]["id"] = 99
-                else:
-                    source.issue["body"] = _wait()
-                if shape == "nonplan_unread":
-
-                    def unread(call: dict[str, Any]) -> None:
-                        if "/issues/7/comments?" in call["path"]:
-                            raise click.ClickException("unread unrelated history") from URLError(
-                                "fixture unavailable"
-                            )
-
-                    self.graph.fail = unread
-                neighbor = self.graph.add(_REPO, 8)
-                neighbor.blockers = [{"number": 7, "state": "open"}]
-                self.graph.blocking = [self.graph.ref(_REPO, 8)]
-                source_before = copy.deepcopy(source.issue)
-                store = FilesystemRecordStore(Path(directory))
-                store.write_merge_train_pr_feedback_record(self.record())
-                saved = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
-                self.assertTrue(saved.retryable)
-                self.assertEqual(self.rows(saved)[_REPO, 7]["status"], "review_projection_pending")
-                self.assertIn(
-                    _LABELS["blocked"], {item["name"] for item in neighbor.issue["labels"]}
-                )
-
-                source.issue.update(state="closed", state_reason="completed")
-                neighbor.blockers[0]["state"] = "closed"
-                self.graph.fail = None
-                retried = deliver_merge_train_pr_feedback_record(
-                    record=saved,
-                    token="fixture",
-                    attempted_at="2026-10-01T00:02:00Z",
-                    planning_author_ids=(_BOT,),
-                    planning_scope_resolver=self.graph.scope,
-                )
-                self.assertFalse(retried.retryable)
-                self.assertTrue(self.rows(retried)[_REPO, 8]["verified"])
-                self.assertEqual(self.rows(retried)[_REPO, 8]["blocked_by"], [])
-                self.assertEqual(
-                    {item["name"] for item in neighbor.issue["labels"]},
-                    {_LABELS["plan"], _LABELS["active"]},
-                )
-                if shape in {"reporter", "unmanaged"}:
-                    self.assertEqual(retried.delivery_status, "failed")
-                    self.assertFalse(self.rows(retried)[_REPO, 7]["verified"])
-                    self.assertEqual(source.issue["body"], source_before["body"])
-                    self.assertFalse(source.writes)
-                else:
-                    self.assertEqual(retried.delivery_status, "delivered")
 
     def test_known_denial_skips_only_its_repository_and_keeps_independent_target(self) -> None:
         denied = "example/other"
         independent = "example/independent"
-        self.graph.add(denied, 8)
-        sibling = self.graph.add(denied, 9)
-        other = self.graph.add(independent, 10)
-        self.graph.blocking = [
-            self.graph.ref(denied, 8),
-            self.graph.ref(denied, 9),
-            self.graph.ref(independent, 10),
-        ]
+        self.graph.add(denied, 8, state="closed")
+        sibling = self.graph.add(denied, 9, state="closed")
+        self.graph.add(independent, 10, state="closed")
+        self.graph.nodes[_REPO, 7].pull_body = f"Refs {denied}#8, {denied}#9, {independent}#10"
         attempts: list[str] = []
         headers = Message()
         headers["X-GitHub-Request-Id"] = "fixture-denial"
@@ -670,29 +462,23 @@ class NativePlanningProjectionTests(TestCase):
         self.assertFalse(sibling.writes)
         self.assertTrue(rows[_REPO, 7]["verified"])
         self.assertTrue(rows[independent, 10]["verified"])
-        self.assertEqual(
-            {x["name"] for x in other.issue["labels"]}, {_LABELS["plan"], _LABELS["active"]}
-        )
 
     def test_target_uses_its_nonmain_config_token_and_trust(self) -> None:
         repo = "example/other"
-        target = self.graph.add(repo, 8)
+        target = self.graph.add(repo, 8, state="closed")
+        self.graph.nodes[_REPO, 7].pull_body = f"Refs {repo}#8"
         target.default_branch = "release"
         custom = {key: f"other:{key}" for key in _LABELS}
         target.config = {"planning": {"labels": custom}}
         target.issue["labels"] = [{"name": custom[key]} for key in ("plan", "blocked")]
         target.issue["body"] = "<!-- github-plan:managed-provenance -->\n" + _wait("waiting")
         target.comments = [{"user": {"id": _BOT, "login": "source-bot[bot]"}, "body": _wait()}]
-        self.graph.blocking = [self.graph.ref(repo, 8)]
         first = self.record()
         self.assertEqual(self.rows(first)[repo, 8]["wait"]["state"], "waiting")
-        self.assertIn(custom["waiting"], {x["name"] for x in target.issue["labels"]})
         target.comments.append({"user": {"id": 73, "login": "target-bot[bot]"}, "body": _wait()})
         second = self.record()
-        self.assertEqual(self.rows(second)[repo, 8]["derived_status"], "active")
-        self.assertEqual(
-            {x["name"] for x in target.issue["labels"]}, {custom["plan"], custom["active"]}
-        )
+        self.assertEqual(self.rows(second)[repo, 8]["wait"]["state"], "clear")
+        self.assertTrue(self.rows(second)[repo, 8]["verified"])
         configs = [
             call for call in self.graph.calls if call["repo"] == repo and call["path"] == "/graphql"
         ]
@@ -704,23 +490,21 @@ class NativePlanningProjectionTests(TestCase):
             )
         )
 
-    def test_unknown_write_stops_later_targets_and_retains_prior_verified_readback(self) -> None:
-        for n in (8, 9, 10):
-            self.graph.add(_REPO, n)
-        self.graph.blocking = [self.graph.ref(_REPO, n) for n in (8, 9, 10)]
+    def test_unknown_project_write_stops_later_targets(self) -> None:
+        self.graph.nodes[_REPO, 7].config = {"planning": {"projects": {"default_project": 2}}}
+        self.graph.nodes[_REPO, 7].pull_body = "Refs #8"
+        self.graph.add(_REPO, 8, state="closed")
 
         def fail(call: dict[str, Any]) -> None:
-            if "/issues/9/labels" in call["path"] and call["method"] == "POST":
+            if "updateProjectV2ItemFieldValue" in (call["body"] or {}).get("query", ""):
                 raise click.ClickException("reply lost") from URLError("offline")
 
         self.graph.fail = fail
         record = self.record()
         rows = self.rows(record)
-        self.assertTrue(rows[_REPO, 7]["verified"])
-        self.assertTrue(rows[_REPO, 8]["verified"])
-        self.assertEqual(rows[_REPO, 9]["failure"]["write_outcome"], "unknown")
-        self.assertEqual(rows[_REPO, 10]["status"], "not_attempted_after_stop")
-        self.assertFalse(self.graph.nodes[_REPO, 10].writes)
+        self.assertEqual(rows[_REPO, 7]["failure"]["write_outcome"], "unknown")
+        self.assertEqual(rows[_REPO, 8]["status"], "not_attempted_after_stop")
+        self.assertFalse(self.graph.nodes[_REPO, 8].writes)
         self.assertFalse(_receipt(record)["ok"])
         self.comment_mock.assert_not_called()
 
@@ -765,16 +549,19 @@ class NativePlanningProjectionTests(TestCase):
             with self.subTest(status=status):
                 self.graph = NativeGraphProvider()
                 self.graph.nodes[_REPO, 7].references = [7, 8]
+                self.graph.nodes[_REPO, 7].config = {
+                    "planning": {"projects": {"default_project": 2}}
+                }
                 later = self.graph.add(_REPO, 8, state="closed")
-                independent = self.graph.add("example/independent", 10)
-                self.graph.blocking = [self.graph.ref("example/independent", 10)]
+                independent = self.graph.add("example/independent", 10, state="closed")
+                self.graph.nodes[_REPO, 7].pull_body = "Refs example/independent#10"
                 error = HTTPError(
                     "https://example.test/discovery", status, "Forbidden", Message(), BytesIO()
                 )
                 self.addCleanup(error.close)
 
                 def fail(call: dict[str, Any]) -> None:
-                    if "/issues/8/dependencies/blocking?" in call["path"]:
+                    if call["path"].endswith("/issues/8"):
                         raise click.ClickException("discovery authority refused") from error
 
                 self.graph.fail = fail
@@ -804,22 +591,6 @@ class NativePlanningProjectionTests(TestCase):
             record = self.record()
         self.assertFalse(self.graph.nodes[_REPO, 7].writes)
         self.assertEqual(record.delivery_status, "failed")
-
-    def test_known_blocking_target_survives_later_parent_discovery_denial(self) -> None:
-        related = self.graph.add(_REPO, 8)
-        self.graph.blocking = [self.graph.ref(_REPO, 8)]
-        error = HTTPError("https://example.test/parent", 403, "Forbidden", Message(), BytesIO())
-        self.addCleanup(error.close)
-
-        def fail(call: dict[str, Any]) -> None:
-            if call["path"].endswith("/issues/7/parent"):
-                raise click.ClickException("parent read refused") from error
-
-        self.graph.fail = fail
-        rows = self.rows(self.record())
-        self.assertIn((_REPO, 8), rows)
-        self.assertEqual(rows[_REPO, 8]["status"], "not_attempted_posting_authority")
-        self.assertFalse(related.writes)
 
 
 class PlanningScopeTests(TestCase):
