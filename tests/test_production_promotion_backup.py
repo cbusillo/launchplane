@@ -1034,7 +1034,6 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 lease_expires_at=(at + timedelta(minutes=5)).isoformat(),
                 claimed_at=at.isoformat(),
             )
-            self.assertIsNotNone(reclaimed_rollback)
             assert reclaimed_rollback is not None
             with (
                 patch(
@@ -1279,7 +1278,6 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         operation = store.list_verireel_prod_backup_gate_operation_records()[0]
         self.assertEqual(evidence.evidence["backup_operation_id"], operation.operation_id)
         self.assertEqual(evidence.evidence["backup_record_id"], operation.backup_record_id)
-        self.assertIsNotNone(operation.binding)
         assert operation.binding is not None
         self.assertEqual(evidence.evidence["policy_digest"], operation.binding.policy.policy_digest)
         self.assertTrue(evidence.required)
