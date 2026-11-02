@@ -78,6 +78,21 @@ invocations reuse them; a changed mode, fixture, container, generation or host
 package gets a different path, so updating a schedule cannot retarget a queued
 job. Each provider execution retains its own history.
 
+Host failures retain the existing closed `readback_failed_predicate` marker.
+It identifies runtime identity, review binding, fixture command completion,
+receipt validation or final runtime observation; it never includes child stdout,
+stderr or business values. The existing HTTP error `reason` carries that predicate,
+and the transport projects it as `summary.error_reason`. This describes the
+current request's failed host observation, including a recovery read, rather
+than reconstructing an earlier apply failure. Cancellation uses the neutral
+schedule-evidence predicate. Missing or invalid markers remain
+`schedule_evidence_complete`, which reports unavailable evidence
+without guessing the child cause. A command failure does not identify the
+product's internal error. These diagnostics do not change apply recovery:
+pre-dispatch failures release their reservation, and failures after dispatch
+remain `mutation_reconciliation_required` with the original key required.
+Historical failures without a retained predicate remain unknown.
+
 ## Review, apply and recover
 
 Use `scripts/preview-fixture.py` with the installed catalog transport.

@@ -6,6 +6,7 @@ import click
 from pathlib import Path
 from typing import cast
 
+from control_plane.copy_readback_diagnostics import readback_failure_evidence
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -78,6 +79,7 @@ class PreviewFixtureAdapter:
     request: PreviewFixtureRequest
     trace_id: str
     binding: PreviewFixtureBinding | None = None
+    failure_reason: str | None = None
 
     def selection(self, *, mutation: bool = False) -> reads.OdooRuntimeSelection:
         preview = self.store.read_preview_record(self.request.preview_id)
@@ -206,6 +208,7 @@ class PreviewFixtureAdapter:
         *,
         expected_fixture_sha256: str = "",
     ) -> PreviewFixtureReceipt:
+        self.failure_reason = None
         connection = self.connect(mutation=mode == "apply")
         binding = self.binding or self.capture_binding()
         selection = connection.selection
@@ -235,15 +238,21 @@ class PreviewFixtureAdapter:
             if lease is not None and phase == post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER:
                 lease.checkpoint_effect(phase)
 
-        evidence = run_fixture_schedule(
-            host=connection.host,
-            token=connection.token,
-            binding=binding,
-            mode=mode,
-            fixture=self.request.fixture,
-            before_provider_mutation=checkpoint,
-            expected_fixture_sha256=expected_fixture_sha256,
-        )
+        try:
+            evidence = run_fixture_schedule(
+                host=connection.host,
+                token=connection.token,
+                binding=binding,
+                mode=mode,
+                fixture=self.request.fixture,
+                before_provider_mutation=checkpoint,
+                expected_fixture_sha256=expected_fixture_sha256,
+            )
+        except post_deploy.OdooPostDeployReadbackFailure as error:
+            self.failure_reason = readback_failure_evidence(error.evidence)[
+                "readback_failed_predicate"
+            ]
+            raise
         encoded = evidence.get(PREVIEW_FIXTURE_RESULT_MARKER, "")
         if not encoded or len(encoded) > 65536:
             raise ValueError("Fixture receipt is unavailable.")
