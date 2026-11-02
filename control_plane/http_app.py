@@ -7557,11 +7557,16 @@ def create_launchplane_fastapi_app(
 
             try:
                 return await run_in_worker_thread(execute_fixture)
+            except LaunchplaneHTTPException as error:
+                if adapter.failure_reason is not None:
+                    error.structured_detail["reason"] = adapter.failure_reason
+                raise
             except (ValueError, FileNotFoundError, click.ClickException) as error:
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
                     code="preview_fixture_unavailable",
+                    reason=adapter.failure_reason,
                     message="The fixture or its preview evidence is unavailable; inspect the original operation.",
                 ) from error
         try:

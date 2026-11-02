@@ -1,11 +1,16 @@
+from control_plane.copy_readback_diagnostics import readback_predicate_library
+
 PREVIEW_FIXTURE_RESULT_MARKER = "preview_fixture_result"
 
 PREVIEW_FIXTURE_PROGRAM = (
-    "RESULT_MARKER = "
+    readback_predicate_library()
+    + "RESULT_MARKER = "
     + repr(PREVIEW_FIXTURE_RESULT_MARKER)
     + "\n"
     + r"""
 import json, os, re, selectors, subprocess, time
+
+readback_predicate = ReadbackPredicate.RUNTIME_IDENTITY
 
 def inspect_container(container):
     result = subprocess.run(['docker', 'inspect', container], capture_output=True, timeout=30, check=True)
@@ -35,12 +40,15 @@ def checked_container(spec, *, require_running):
     return web
 
 def run_fixture(spec):
+    global readback_predicate
     checked_container(spec, require_running=True)
     expected = spec['identity']
+    readback_predicate = ReadbackPredicate.REVIEW_BINDING
     digest = spec['expected_fixture_sha256']
     if not isinstance(digest, str) or (not re.fullmatch('[a-f0-9]{64}', digest) if spec['mode'] == 'apply' else digest != ''):
         raise ValueError('Fixture review digest unavailable')
     request = {key: spec[key] for key in ('identity', 'database', 'fixture', 'mode', 'expected_fixture_sha256')}
+    readback_predicate = ReadbackPredicate.FIXTURE_COMMAND
     child = subprocess.Popen(
         ['docker', 'exec', '-i', spec['container_id'], 'python3', '/opt/project/addons/launchplane_preview_fixture.py'],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -65,6 +73,7 @@ def run_fixture(spec):
         selector.close()
         if child.wait(timeout=max(1, deadline - time.monotonic())) != 0:
             raise ValueError('Fixture command failed')
+        readback_predicate = ReadbackPredicate.FIXTURE_RECEIPT
         receipt = json.loads(output)
         if (not isinstance(receipt, dict) or set(receipt) != {'identity','fixture','mode','fixture_sha256','committed','verified','records'}
                 or receipt.get('identity') != expected or receipt.get('fixture') != spec['fixture'] or receipt.get('mode') != spec['mode']
@@ -89,6 +98,7 @@ def run_fixture(spec):
             if key in identities:
                 raise ValueError('Fixture record identity repeated')
             identities.add(key)
+        readback_predicate = ReadbackPredicate.RUNTIME
         if inspect_container(spec['container_id'])['State']['Running'] is not True:
             raise ValueError('Preview stopped during fixture')
         print(RESULT_MARKER + '=' + json.dumps(receipt, separators=(',', ':')).encode().hex(), flush=True)
@@ -124,9 +134,14 @@ def cancel_fixture(spec):
         stopped = original_container_stopped(spec)
     print(RESULT_MARKER + '=' + json.dumps({'container_id': spec['container_id'], 'stopped': stopped}, separators=(',', ':')).encode().hex(), flush=True)
 
-if spec['mode'] in {'cancel', 'cancel-readback'}:
-    cancel_fixture(spec)
-else:
-    run_fixture(spec)
+try:
+    if spec['mode'] in {'cancel', 'cancel-readback'}:
+        cancel_fixture(spec)
+    else:
+        run_fixture(spec)
+except Exception:
+    print('readback_failed_predicate=' + readback_predicate, flush=True)
+    print('readback_failure_kind=unavailable', flush=True)
+    raise RuntimeError('Preview fixture failed') from None
 """
 )

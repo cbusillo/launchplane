@@ -128,6 +128,8 @@ class ReadbackPredicate(StrEnum):
     SCHEDULE_TRIGGER = "schedule_trigger_accepted"
     SCHEDULE_BASELINE = "schedule_baseline_readable"
     NATIVE_READ = "native_inspection_complete"
+    FIXTURE_COMMAND = "fixture_command_complete"
+    FIXTURE_RECEIPT = "fixture_receipt_valid"
     RUNNER_SELECTED = "runner_selected"
     WEB_SELECTED = "web_selected"
     RUNNER_RUNNING = "runner_running"
