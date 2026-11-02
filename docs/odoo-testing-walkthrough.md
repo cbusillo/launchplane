@@ -360,6 +360,13 @@ Cleanup uses only the native service marker and matching owned login, without
 depending on the product hook, role or fixture still working. It cannot adopt
 another account and still requires the current isolated receiver.
 
+When the image's `launchplane_readonly.policy` exports `operative_marker_key`,
+read-only provision and run derive that marker key from the runtime identity's
+product. Older images retain the task-derived key. The typed request fixes the
+task ID to the product hash, so both paths use the same key as the existing
+login, usage probes and cleanup. Cleanup requires no addon import; generic
+walkthroughs retain their task-derived markers.
+
 The product owns and tests its business permissions. Odoo ACLs add rights, so
 read-only ACL entries alone cannot enforce this contract. Its server guard must
 refuse business create/write/unlink, sudo business paths, scans, quantity/count
