@@ -1458,6 +1458,18 @@ deploy-fence incidents still require their own proved recovery.
 
 ### Lane health and identity history
 
+For complete retained incident enumeration, use the existing incident list
+with `status=all&order=opened&limit=50`, then follow `next_cursor` with the same
+product, context, instance, status and order until it is null. This order uses
+the stored opening stamp and incident id as descending string keys, so recovery between pages cannot
+move an occurrence past the cursor. `has_more` explicitly reports truncation.
+The default `order=attention` keeps critical/open incidents first for the UI;
+when truncated, restart in `opened` order to enumerate history. Pagination reads
+current retained records, not a transaction snapshot: newly opened incidents
+require a fresh traversal and statuses may change while reading. Exhaustion
+does not certify deleted records or historical product/check applicability.
+Confirm the deployed schema exposes these query fields before using them.
+
 `GET /v1/products/{product}/environments/{environment}/health-history` reads
 retained observations using the same lane-scoped `product_environment.read`
 authority as environment detail (or `preview.read` for a preview). It never runs

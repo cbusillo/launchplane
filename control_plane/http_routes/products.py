@@ -43,6 +43,8 @@ from control_plane.contracts.product_incident_read_model import (
     ProductEnvironmentIncidentList,
     ProductIncidentDetail,
     ProductIncidentReadModelCapabilityError,
+    ProductIncidentOrder,
+    ProductIncidentQueryError,
     ProductIncidentReferenceUnavailableError,
     ProductIncidentStatusFilter,
     build_product_environment_incident_detail,
@@ -1404,6 +1406,8 @@ def register_product_environment_read_routes(
         status: Annotated[ProductIncidentStatusFilter, Query()] = "all",
         limit: Annotated[int, Query(ge=1, le=50)] = 20,
         historical_context: Annotated[str, Query(max_length=200)] = "",
+        order: Annotated[ProductIncidentOrder, Query()] = "attention",
+        cursor: Annotated[str | None, Query(max_length=4096)] = None,
     ) -> ProductEnvironmentIncidentsResponse:
         trace_id = common.next_trace_id()
         incident_scope = _build_product_incident_scope(
@@ -1424,7 +1428,16 @@ def register_product_environment_read_routes(
                 status=status,
                 limit=limit,
                 scope=incident_scope,
+                order=order,
+                cursor=cursor,
             )
+        except ProductIncidentQueryError as error:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
         except ProductIncidentReferenceUnavailableError as error:
             raise common.http_error(
                 status_code=503,

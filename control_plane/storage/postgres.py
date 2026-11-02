@@ -30970,6 +30970,7 @@ class PostgresRecordStore(HumanSessionStore):
         check_kind: str = "",
         status: str = "",
         limit: int | None = None,
+        before: tuple[str, str] | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]:
         filters: list[object] = []
         if product:
@@ -30987,6 +30988,16 @@ class PostgresRecordStore(HumanSessionStore):
             )
         if status:
             filters.append(LaunchplanePublicIngressIncidentRow.status == status)
+        if before is not None:
+            filters.append(
+                or_(
+                    LaunchplanePublicIngressIncidentRow.opened_at < before[0],
+                    and_(
+                        LaunchplanePublicIngressIncidentRow.opened_at == before[0],
+                        LaunchplanePublicIngressIncidentRow.incident_id < before[1],
+                    ),
+                )
+            )
         records = self._list_models(
             model_type=PublicIngressIncidentRecord,
             orm_model=LaunchplanePublicIngressIncidentRow,

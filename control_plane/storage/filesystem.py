@@ -4634,6 +4634,7 @@ class FilesystemRecordStore:
         check_kind: str = "",
         status: str = "",
         limit: int | None = None,
+        before: tuple[str, str] | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]:
         records = [
             record
@@ -4651,6 +4652,7 @@ class FilesystemRecordStore:
             )
             and (not check_kind or record.check_kind == check_kind)
             and (not status or record.status == status)
+            and (before is None or (record.opened_at, record.incident_id) < before)
         ]
         records.sort(key=lambda record: (record.opened_at, record.incident_id), reverse=True)
         if limit is not None:

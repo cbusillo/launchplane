@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 import hashlib
 import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 from unittest.mock import patch
 
@@ -29,6 +31,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     build_public_ingress_reminder_state_id,
     public_ingress_material_fingerprint_sha256,
 )
+from control_plane.storage.filesystem import FilesystemRecordStore
 
 
 NOW = "2026-07-28T14:00:00Z"
@@ -683,6 +686,52 @@ class ProductIncidentReadModelTests(unittest.TestCase):
 
         self.assertEqual(len(result.incidents), 20)
         self.assertEqual(result.incidents[0].incident_id, critical.incident_id)
+        self.assertTrue(result.has_more)
+
+    def test_filesystem_incident_pages_exhaust_equal_time_records_and_keep_scope(self) -> None:
+        with TemporaryDirectory() as temporary:
+            store = FilesystemRecordStore(Path(temporary))
+            store.write_product_profile_record(_profile())
+            records = tuple(
+                _incident(incident_id=name, opened_at="2026-07-28T12:00:00")
+                for name in ("a", "b", "c")
+            )
+            for record in (
+                *records,
+                _incident(incident_id="foreign").model_copy(update={"context": "other"}),
+            ):
+                store.write_public_ingress_incident_record(record)
+            first = build_product_environment_incident_list(
+                record_store=store,
+                product="example-product",
+                environment="prod",
+                order="opened",
+                limit=2,
+            )
+            self.assertTrue(first.has_more)
+            second = build_product_environment_incident_list(
+                record_store=store,
+                product="example-product",
+                environment="prod",
+                order="opened",
+                limit=2,
+                cursor=first.next_cursor,
+            )
+            self.assertEqual(
+                [item.incident_id for item in (*first.incidents, *second.incidents)],
+                ["c", "b", "a"],
+            )
+            self.assertFalse(second.has_more)
+            self.assertIsNone(second.next_cursor)
+            exact = build_product_environment_incident_list(
+                record_store=store,
+                product="example-product",
+                environment="prod",
+                order="opened",
+                limit=len(records),
+            )
+            self.assertFalse(exact.has_more)
+            self.assertIsNone(exact.next_cursor)
 
     def test_authorized_scope_avoids_a_second_profile_read(self) -> None:
         class NoProfileReadStore(_Store):
