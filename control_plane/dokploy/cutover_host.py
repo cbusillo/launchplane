@@ -273,7 +273,7 @@ class BoundOdooCutoverHost:
         if lane.host_runtime is None or lane.host_runtime != plan.host_runtime:
             raise ValueError("cutover host requires its persisted lane capabilities")
         self.plan, self.lane, self.store, self.root = plan, lane, store, root
-        self.runtime: OdooCutoverHostRuntime = lane.host_runtime
+        self.runtime = cast(OdooCutoverHostRuntime, lane.host_runtime)
         self.host, self.token = read_dokploy_config(control_plane_root=root)
         self.payloads = {slot.slot_id: self.payload(slot) for slot in (plan.old, plan.new)}
         servers = {str(payload.get("serverId") or "") for payload in self.payloads.values()}
