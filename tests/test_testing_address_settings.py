@@ -263,7 +263,6 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         result = self.run_address(False)
         self.assertEqual(result.status, "completed")
         evidence = result.response_payload["result"]
-        self.assertIsInstance(evidence, dict)
         assert isinstance(evidence, dict)
         self.assertTrue(evidence["canonical_settings_verified"])
         self.assertEqual(self.events, ["environment", "deployment", "gate"])

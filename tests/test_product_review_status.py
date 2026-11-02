@@ -681,7 +681,6 @@ class OwnerReviewStatusTests(unittest.TestCase):
                     profile=profile,
                     pull_request_number=_PULL_REQUEST,
                 )
-                self.assertIsNotNone(result)
                 assert result is not None
                 self.assertEqual(result.state, expected)
                 self.assertFalse(
