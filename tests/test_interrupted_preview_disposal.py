@@ -47,20 +47,6 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
                 database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
             ),
         )
-        from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsRequest
-
-        allocation = self.provider.build_inputs(
-            profile=self.profile,
-            request=OdooPreviewApplyInputsRequest(
-                product=self.profile.product,
-                pr_number=5,
-                image_reference=self.profile.image.repository + "@sha256:" + "a" * 64,
-            ),
-        )["dry_run_plan"]
-        assert isinstance(allocation, dict)
-        self.provider.targets[(self.profile.preview.context, allocation["compose_name"])] = (
-            allocation["compose_ref"]
-        )
         self.native_interrupted = False
         self.fail_rebuild = False
         build = self.provider.build_inputs
@@ -188,10 +174,13 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
         self.request("preview", 5)
         result = self.run_once()
         self.assertEqual(result.state, "failed")
-        self.assertEqual(result.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(
+            result.last_plan["preview_result_error_code"], "disposable_lane_safety_unknown"
+        )
         self.assertFalse(self.provider.applied)
         held = self.store.list_held_odoo_preview_reservations(product="site")
         self.assertEqual([item.record_id for item in held], [self.original.record_id])
+        self.assertEqual(held[0].state, "reconcile_required")
 
     def test_native_custody_is_rechecked_under_execution_before_disposal(self) -> None:
         self.native.side_effect = [True, False, False]
