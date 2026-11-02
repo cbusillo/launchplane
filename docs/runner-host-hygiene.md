@@ -72,8 +72,8 @@ The metadata adapter uses the existing App through one exact, configured
 `launchplane_service` context SecretRecord/SecretBinding under
 `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY`. Global, instance and
 ambiguous key bindings fail closed. It verifies the App client ID, installation
-account, existing installation grants and complete runtime-derived repository
-set. Every issued token is limited to Actions/Administration/Metadata read;
+account, existing installation grants and coverage of every runtime-derived
+repository. Every issued token is limited to Actions/Administration/Metadata read;
 extra existing installation permissions require no grant change. Short-lived
 read tokens stay in the service and are revoked after each metadata request,
 including failed scope checks. One idle request reads the complete host sample
@@ -434,13 +434,16 @@ list self-hosted runner registrations; GitHub adds Metadata read implicitly.
 The workflow derives the exact repository list from runtime inputs, rejects
 cross-repository-owner scopes that cannot be represented by one installation token, and
 mints a short-lived token through the commit-pinned official GitHub action. The
-App installation itself must contain exactly the runtime-derived repository
-set. The workflow validates that set through the installation API using only
-public-safe counts and digests; it does not pass repository names to the token
+App installation must cover every runtime-derived repository. Additional
+repositories under the same owner are supported, including an installation on
+all of that owner's repositories. The workflow validates coverage through the
+installation API and reports only the observed repository count and digest;
+it does not pass repository names to the token
 action because the action logs explicit repository inputs. The token requests
 only Actions read and Administration read, and the action revokes it at job
 completion. There is no PAT, default `GITHUB_TOKEN`, or runner-registration-token
-fallback. Missing App configuration, missing or extra installation coverage, or
+fallback. Missing App configuration, missing required coverage, another owner's
+repositories, or
 an API that cannot see a named runner fails closed.
 Organization or enterprise registrations require an equivalent reader before
 they can be listed in the manifest. Generated-cache run-state reads use only

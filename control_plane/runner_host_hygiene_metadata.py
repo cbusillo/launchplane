@@ -18,6 +18,7 @@ from control_plane.contracts.runner_host_hygiene_idle import RunnerHostHygieneId
 from control_plane.workflows.launchplane import github_api_request
 from control_plane.workflows.runner_host_github_app import (
     read_github_app_installation_repositories,
+    validate_runner_host_github_repository_coverage,
 )
 from control_plane.workflows.runner_host_hygiene_executor import (
     build_github_idle_evidence_reader,
@@ -147,16 +148,13 @@ def _read_token(
         ) | frozenset(
             root.source_repository.lower() for root in configuration.generated_run_cache_roots
         )
-        if (
-            read_github_app_installation_repositories(
+        validate_runner_host_github_repository_coverage(
+            expected=expected,
+            observed=read_github_app_installation_repositories(
                 api_url="https://api.github.com",
                 bearer_token=token,
-            )
-            != expected
-        ):
-            raise ValueError(
-                "Hygiene App installation differs from the complete configured repository set."
-            )
+            ),
+        )
         yield token
     finally:
         github_api_request(method="DELETE", path="/installation/token", token=token)
