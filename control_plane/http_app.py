@@ -1301,7 +1301,6 @@ _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _EXTERNAL_ROUTE_BINDING_RECONCILE_ROUTE = "/v1/route-bindings/external/reconcile"
 _ROUTE_BINDING_RECONCILE_ROUTE = "/v1/route-bindings/reconcile"
 _ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE = "/v1/route-bindings/odoo-testing/controller/run-once"
-_ODOO_STABLE_ROUTE_BINDING_REFRESH_ROUTE = "/v1/route-bindings/odoo-stable/controller/run-once"
 _ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT = 25
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_EXPECTED_CONFIG_APPLY_ROUTE = "/v1/product-profiles/expected-config/apply"
@@ -2719,33 +2718,6 @@ class OdooTestingRouteBindingRefreshEnvelope(BaseModel):
             )
         if self.mode == "dry-run" and self.confirmation:
             raise ValueError("Odoo testing route binding refresh dry-run rejects confirmation")
-        return self
-
-
-class OdooStableRouteBindingRefreshEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    mode: Literal["dry-run", "apply"] = "dry-run"
-    reason: str = ""
-    confirmation: str = ""
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "OdooStableRouteBindingRefreshEnvelope":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported Odoo stable route binding refresh schema version")
-        self.reason = self.reason.strip()
-        self.confirmation = self.confirmation.strip()
-        if not self.reason:
-            raise ValueError("Odoo stable route binding refresh requires a reason")
-        if self.mode == "apply" and (
-            self.confirmation != "APPLY ODOO STABLE ROUTE BINDING REFRESH"
-        ):
-            raise ValueError(
-                "Odoo stable route binding refresh apply requires exact confirmation text"
-            )
-        if self.mode == "dry-run" and self.confirmation:
-            raise ValueError("Odoo stable route binding refresh dry-run rejects confirmation")
         return self
 
 
@@ -22636,26 +22608,15 @@ def create_launchplane_fastapi_app(
             ),
         )
 
-    async def run_odoo_route_binding_refresh(
+    async def run_odoo_testing_route_binding_refresh(
         request: Request,
-        refresh_request: OdooTestingRouteBindingRefreshEnvelope
-        | OdooStableRouteBindingRefreshEnvelope,
-        identity: LaunchplaneIdentity,
-        record_store: object,
-        idempotency_key: str,
-        *,
-        remaining: bool,
+        refresh_request: OdooTestingRouteBindingRefreshEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse:
-        route_path = (
-            _ODOO_STABLE_ROUTE_BINDING_REFRESH_ROUTE
-            if remaining
-            else _ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE
-        )
-        action_prefix = (
-            "route_binding.odoo_stable_refresh"
-            if remaining
-            else "route_binding.odoo_testing_refresh"
-        )
+        route_path = _ODOO_TESTING_ROUTE_BINDING_REFRESH_ROUTE
+        action_prefix = "route_binding.odoo_testing_refresh"
         trace_id = next_trace_id()
         controller_action = (
             f"{action_prefix}.apply" if refresh_request.mode == "apply" else f"{action_prefix}.plan"
@@ -22694,8 +22655,6 @@ def create_launchplane_fastapi_app(
         )
         try:
             controller_store = require_route_binding_refresh_controller_read_store(record_store)
-            if remaining:
-                require_external_route_binding_reconcile_store(record_store)
             mutation_store = (
                 require_route_binding_refresh_controller_store(record_store)
                 if refresh_request.mode == "apply"
@@ -22730,18 +22689,7 @@ def create_launchplane_fastapi_app(
 
         def binding_refresh_action(binding_record: EnvironmentRouteBindingRecord | None) -> str:
             if (
-                remaining
-                and binding_record is not None
-                and binding_record.ingress.provider == "external"
-            ):
-                return (
-                    "route_binding.external.apply"
-                    if refresh_request.mode == "apply"
-                    else "route_binding.external.plan"
-                )
-            if (
-                not remaining
-                and director_agent_identity(identity)
+                director_agent_identity(identity)
                 and binding_record is not None
                 and is_native_testing_binding(binding_record)
             ):
@@ -22767,24 +22715,12 @@ def create_launchplane_fastapi_app(
             return evaluation.decision == "allowed"
 
         try:
-            if remaining:
-                stable_store = cast(
-                    control_plane_route_binding_refresh_controller.StableRouteBindingRefreshControllerStore,
-                    controller_store,
-                )
-                controller_plan = control_plane_route_binding_refresh_controller.plan_remaining_odoo_stable_route_binding_refresh(
-                    record_store=stable_store,
-                    evaluated_at=utc_now_timestamp(),
-                    target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
-                    include_record=include_refresh_binding,
-                )
-            else:
-                controller_plan = control_plane_route_binding_refresh_controller.plan_odoo_testing_route_binding_refresh(
-                    record_store=controller_store,
-                    evaluated_at=utc_now_timestamp(),
-                    target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
-                    include_record=include_refresh_binding,
-                )
+            controller_plan = control_plane_route_binding_refresh_controller.plan_odoo_testing_route_binding_refresh(
+                record_store=controller_store,
+                evaluated_at=utc_now_timestamp(),
+                target_limit=_ODOO_TESTING_ROUTE_BINDING_REFRESH_TARGET_LIMIT,
+                include_record=include_refresh_binding,
+            )
         except (
             control_plane_route_binding_refresh_controller.RouteBindingRefreshTargetLimitExceeded
         ) as error:
@@ -23025,12 +22961,7 @@ def create_launchplane_fastapi_app(
                 mutation_result = mutation_store.reconcile_route_binding_record(
                     expected_record=reconcile_plan.current_record,
                     replacement_record=reconcile_plan.record,
-                    native_sources=reconcile_plan.native_review_sources
-                    if isinstance(
-                        reconcile_plan,
-                        control_plane_route_binding_reconcile.RouteBindingReconcilePlan,
-                    )
-                    else None,
+                    native_sources=reconcile_plan.native_review_sources,
                     mutation=DbOnlyMutationRequest(
                         scope=idempotency_scope(identity),
                         route_path=route_path,
@@ -23176,38 +23107,6 @@ def create_launchplane_fastapi_app(
                     mutation_store.release_mutation_reservation(reservation=controller_reservation)
                 except Exception:
                     _LOGGER.exception("Route refresh parent cleanup failed; trace_id=%s", trace_id)
-
-    async def run_odoo_testing_route_binding_refresh(
-        request: Request,
-        refresh_request: OdooTestingRouteBindingRefreshEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        return await run_odoo_route_binding_refresh(
-            request,
-            refresh_request,
-            identity,
-            record_store,
-            idempotency_key,
-            remaining=False,
-        )
-
-    async def run_odoo_stable_route_binding_refresh(
-        request: Request,
-        refresh_request: OdooStableRouteBindingRefreshEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        return await run_odoo_route_binding_refresh(
-            request,
-            refresh_request,
-            identity,
-            record_store,
-            idempotency_key,
-            remaining=True,
-        )
 
     async def apply_ingress_route(
         request: Request,
@@ -28707,24 +28606,6 @@ def create_launchplane_fastapi_app(
         status_code=202,
         operation_id="run_odoo_testing_route_binding_refresh",
         summary="Plan or apply bounded Odoo testing route-binding evidence refresh",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        _ODOO_STABLE_ROUTE_BINDING_REFRESH_ROUTE,
-        run_odoo_stable_route_binding_refresh,
-        methods=["POST"],
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        status_code=202,
-        operation_id="run_odoo_stable_route_binding_refresh",
-        summary="Plan or apply bounded remaining Odoo stable route-binding evidence refresh",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

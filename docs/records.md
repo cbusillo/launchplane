@@ -294,30 +294,17 @@ expiry, retrying with the same controller key replans already-refreshed records
 as unchanged and continues remaining due bindings. The controller never creates
 a missing binding or selects production.
 
-The separate remaining-stable controller at
-`POST /v1/route-bindings/odoo-stable/controller/run-once` discovers active Odoo
-testing and production bindings outside that testing controller's service-owned
-slice. It uses the managed reconcile planner for managed authority and the
-external reconcile planner for external authority, with each planner's own
-half-life. Only unchanged or refresh operations are eligible: external authority
-replacement is reported as conflict, never applied automatically. The existing
-testing controller remains testing-only. Both controllers share the bounded
-batch, per-binding CAS, parent replay and partial-progress recovery implementation.
+The testing controller filters discovery by existing target authority before
+planning and the target limit, then reauthorizes included targets before writing.
+Excluded targets are absent from results and unchanged. Finding bindings but no
+authorized target returns 403; an authorized blocked target still requires
+attention. Replay reauthorizes all stored outcomes even if the caller has since
+lost part of its scope.
 
-The stable controller requires its own `route_binding.odoo_stable_refresh.plan`
-or `.apply` capability in the Launchplane service context plus the exact target's
-managed `route_binding.read` / `.apply` or external
-`route_binding.external.plan` / `.apply` authority. Both controllers filter
-discovery by that existing authority before planning and the target limit, then
-reauthorize included targets before writing. Excluded targets are absent from
-results and unchanged. Finding bindings but no authorized target returns 403;
-an authorized blocked target still requires attention. Replay reauthorizes all
-stored outcomes even if the caller has since lost part of its scope. Its request accepts only
-schema version, mode, reason and confirmation. Apply requires
-`APPLY ODOO STABLE ROUTE BINDING REFRESH` and an Idempotency-Key. The new route
-grants no access and starts no schedule. Q193 declines a standing renewal clock;
-stored attestation expiry is diagnostic for operational health, while managed
-route changes retain their independent authority checks.
+Stable bindings have no separate timed evidence-refresh controller. Reads
+recheck unchanged managed sources; stored attestation expiry is diagnostic for
+operational health. Real route changes retain their independent authority checks
+and exact-lane reconciliation.
 
 Product authority bundle writes are the same atomicity boundary for product
 runtime/config ownership. PostgreSQL storage exposes a single
