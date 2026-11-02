@@ -275,6 +275,14 @@ reservation. The webhook request never waits on a deploy.
   - Read the PR state again after taking the preview's reservation and just
     before the provider apply; if it closed or moved its head, the reservation is released with no provider effect and the
     reconcile runs again.
+  - Automatic Odoo refresh uses the explicit apply path's disposable-preview
+    protection and resource qualification at each provider mutation boundary.
+    Recorded use, staff holds, only-needed copies and shared production resources
+    refuse refresh, including protection recorded after planning. An unchanged
+    serving build needs no mutation. Fresh creation and unprotected refresh keep
+    their existing UNKNOWN semantics without requiring a positive unused report.
+    After protection clears, the next normal reconciliation retries the retained
+    source intent through the same reservation and recovery rules.
   - A refused or failed destroy is attempted at most three times for the same
     preview lifecycle record, product-profile revision, context, and destroy
     reason. Busy operations, observation-only passes for unknown provider outcomes,
