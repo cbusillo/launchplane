@@ -4,7 +4,7 @@ from typing import Annotated, Literal, Protocol, cast
 
 import click
 from fastapi import Depends, Path, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from control_plane import service_status as control_plane_service_status
 from control_plane import tracked_target_logs as control_plane_tracked_target_logs
@@ -328,6 +328,7 @@ def require_tracked_target_logs_store(
 
 def require_dokploy_target_inspect_store(record_store: object) -> DokployTargetInspectStore:
     required_methods = (
+        "list_runtime_environment_records",
         "read_dokploy_target_record",
         "read_dokploy_target_id_record",
         "read_provider_target_record",
@@ -1093,6 +1094,14 @@ def register_dokploy_target_inspect_read_routes(
                     "expected_image": expected_image,
                 }
             )
+        except ValueError as error:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_dokploy_target_inspect",
+                message=str(error),
+            ) from error
+        try:
             try:
                 host, token = dokploy_source.read_dokploy_config(
                     control_plane_root=dependencies.control_plane_root,
@@ -1107,7 +1116,25 @@ def register_dokploy_target_inspect_read_routes(
                 host=host,
                 token=token,
                 request=inspect_request,
+                compare_instance_settings=bool(
+                    context.strip()
+                    and instance.strip()
+                    and common.authorization_allows(
+                        identity=identity,
+                        action="secret.list",
+                        product=LAUNCHPLANE_SERVICE_CONTEXT,
+                        context=context.strip(),
+                        target=AuthorizationTarget(scope="instance", instances=(instance.strip(),)),
+                    )
+                ),
             )
+        except ValidationError as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="dokploy_target_inspect_unavailable",
+                message="Stored target inspection evidence failed validation.",
+            ) from error
         except ValueError as error:
             raise common.http_error(
                 status_code=400,

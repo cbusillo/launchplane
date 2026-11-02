@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PRIVILEGED_OPERATION_WORKER_HEARTBEAT_FUTURE_SKEW_SECONDS,
     PRIVILEGED_OPERATION_WORKER_KIND,
@@ -120,6 +121,10 @@ class DokployTargetInspectRequest(BaseModel):
 
 
 class DokployTargetInspectStore(Protocol):
+    def list_runtime_environment_records(
+        self, *, scope: str = "", context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
+
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetRecord: ...
@@ -217,12 +222,45 @@ def _worker_heartbeat_evidence(
     }
 
 
+def _instance_setting_comparison(
+    record_store: DokployTargetInspectStore, target: DokployTargetRecord
+) -> dict[str, object] | None:
+    if not target.env:
+        return None
+    record = next(
+        (
+            record
+            for record in record_store.list_runtime_environment_records(
+                scope="instance", context_name=target.context, instance_name=target.instance
+            )
+            if record.scope == "instance"
+            and (record.context, record.instance) == (target.context, target.instance)
+        ),
+        None,
+    )
+    values = record.env if record else {}
+    return {
+        "same_value_keys": sorted(
+            key for key, value in target.env.items() if key in values and value == str(values[key])
+        ),
+        "different_value_keys": sorted(
+            key for key, value in target.env.items() if key in values and value != str(values[key])
+        ),
+        "missing_keys": sorted(target.env.keys() - values.keys()),
+        "retired_keys": sorted(target.env.keys() & set(record.retired_provider_keys))
+        if record
+        else [],
+        "instance_settings_updated_at": record.updated_at if record else None,
+    }
+
+
 def inspect_dokploy_target(
     *,
     record_store: DokployTargetInspectStore,
     host: str,
     token: str,
     request: DokployTargetInspectRequest,
+    compare_instance_settings: bool = False,
     fetch_target_payload: FetchDokployTargetPayload | None = None,
     fetch_compose_service_runtime: FetchDokployComposeServiceRuntime | None = None,
     fetch_compose_logs: FetchDokployComposeLogs | None = None,
@@ -457,6 +495,9 @@ def inspect_dokploy_target(
             "source_label": target_record.source_label,
             "updated_at": target_record.updated_at,
             "env_keys": sorted(target_record.env),
+            "instance_setting_comparison": _instance_setting_comparison(record_store, target_record)
+            if compare_instance_settings
+            else None,
         }
         if provider_target_record is None:
             result["provider_target_record"] = {"status": "missing"}
