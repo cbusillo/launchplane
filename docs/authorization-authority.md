@@ -48,29 +48,6 @@ access to an invalid policy or silently starting with bootstrap authority.
   change, as [Denial Handling](#denial-handling) requires, is not such a
   workaround.
 
-`owner-control` channel-session, issued-challenge, and shadow-verification event
-records are inert verification evidence, not authorization policy or grants.
-They define no HTTP action, route, managed set, workflow, secret, or production
-access path; every result persists `authority_state = 'inert'` and
-`authorizes_execution = false`. Adding these records does not make a
-self-asserted key, binding, or challenge authoritative.
-Service-only challenge derivation may fail closed unless the enrolled admin's immutable
-GitHub ID has exactly one ID-only managed rule for the descriptor's
-existing approval action. That read does not define a new action, grant access,
-or authorize approval or execution; rules that also depend on mutable login,
-organization, team, or role selectors are intentionally insufficient without a
-live authenticated human identity.
-
-Administrator-enrollment records are likewise inert evidence only. They may
-record a Director-created, 30-minute opaque challenge and a later server-derived
-candidate GitHub identity that proved control, but they do not create an
-admin, grant a policy action, change a managed set, or make any route
-or workflow available. Every record is fixed to no authority. A future bridge
-may compile a final enrolled record into a Director-gated DB-native policy change
-only after separate design, review, apply, and read-back work, and installing it
-is a Director decision. Landing enrollment storage does not approve or
-implement that bridge.
-
 Repository inventory follows the same authority boundary. Its
 `repository_inventory.read` and `repository_inventory.write` actions use the
 Launchplane service scope (`product=launchplane`, `context=launchplane`), but
@@ -1303,8 +1280,8 @@ part of historical policy records.
 ## Existing-identity policy version compatibility
 
 Authorization policy readers support schemas 2 and 3 for existing human,
-workflow, and terminal-agent identities. `owner-control` challenge derivation,
-authorization diagnostics, and feedback actor/worker resolution preserve the
+workflow, and terminal-agent identities. Authorization diagnostics and feedback
+actor/worker resolution preserve the
 same immutable identity, scope, role, current policy, expiry, and revocation
 checks across these versions. This does not register an ordinary-agent identity
 or enable ordinary-agent execution.

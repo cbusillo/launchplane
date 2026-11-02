@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from control_plane.contracts.authz_policy_record import AuthzPolicyConflictError
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.product_reconcile import ProductReconcileTarget
 from control_plane.contracts.product_profile_record import (
@@ -660,6 +661,25 @@ class RuntimeRemovalTests(unittest.TestCase):
 
 
 class RuntimeRemovalHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_policy_invariant_failure_returns_conflict_without_changing_settings(
+        self,
+    ) -> None:
+        with _database_app(policy(), director_agent=True) as (store, _, app):
+            store.write_runtime_environment_record(runtime())
+            with patch.object(
+                store,
+                "_locked_active_authz_policy_record",
+                side_effect=AuthzPolicyConflictError("ambiguous active policy"),
+            ):
+                async with lifespan_client(app) as client:
+                    refused = await client.post(
+                        ROUTE,
+                        json=request().model_dump(mode="json"),
+                        headers={"Authorization": "Bearer reader-token"},
+                    )
+            self.assertEqual(refused.status_code, 409, refused.text)
+            self.assertEqual(store.list_runtime_environment_records(), (runtime(),))
+
     async def test_invalid_inventory_row_is_not_reported_as_a_stale_removal_review(self) -> None:
         with _database_app(policy(), director_agent=True) as (store, _, app):
             store.write_runtime_environment_record(runtime())
