@@ -8,7 +8,7 @@ import subprocess
 import sys
 import runpy
 from tempfile import TemporaryDirectory
-from typing import Callable, Iterator, cast
+from typing import Any, Callable, Iterator, cast
 import unittest
 from unittest.mock import Mock, patch
 
@@ -27,6 +27,7 @@ from control_plane.contracts.preview_fixture import (
     PreviewFixtureRequest,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RUNTIME_IDENTITY_ENV_KEY
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.host_package import host_package
 from control_plane.odoo_app_maintenance_http import OdooAppMaintenanceEnvelope
 from control_plane.preview_fixture import (
@@ -933,6 +934,7 @@ class PreviewFixtureLaneTests(unittest.TestCase):
 
     def test_prefixed_runtime_reaches_apply_under_real_logical_lane_guards(self) -> None:
         with self.preview() as (store, adapter, slot), self.provider(adapter) as (calls, _binding):
+            adapter.failure_reason = ReadbackPredicate.FIXTURE_COMMAND
             selected = adapter.selection(mutation=True)
             self.assertNotEqual(selected.identity.instance, slot)
             self.assertEqual(
@@ -954,6 +956,7 @@ class PreviewFixtureLaneTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "completed")
             self.assertEqual(calls, ["readback", "dry-run", "apply"])
+            self.assertIsNone(adapter.failure_reason)
 
     def test_logical_target_registration_allows_reads_and_cancellation_readback(self) -> None:
         with self.preview() as (store, adapter, _slot), self.provider(adapter) as (_calls, binding):
@@ -1090,6 +1093,129 @@ class PreviewFixtureLaneTests(unittest.TestCase):
 
 
 class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_closed_host_failure_survives_schedule_and_http_without_changing_recovery(
+        self,
+    ) -> None:
+        from control_plane.dokploy import api
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import LocalOperatorIdentity
+
+        caller = LocalOperatorIdentity(subject="director-example", token_label="operator-example")
+        for mode, fail_at, reported in (
+            ("dry-run", "dry-run", ReadbackPredicate.FIXTURE_COMMAND),
+            ("readback", "readback", ReadbackPredicate.FIXTURE_COMMAND),
+            ("apply", "readback", ReadbackPredicate.FIXTURE_COMMAND),
+            ("apply", "dry-run", ReadbackPredicate.FIXTURE_COMMAND),
+            ("apply", "apply", ReadbackPredicate.FIXTURE_COMMAND),
+            ("readback", "readback", "PRIVATE-CUSTOMER"),
+        ):
+            with (
+                self.subTest(mode=mode, fail_at=fail_at, reported=reported),
+                PreviewFixtureLaneTests().preview() as (store, adapter, _slot),
+                PreviewFixtureLaneTests().provider(adapter) as (_calls, binding),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=StubVerifier(identity()),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate({"schema_version": 2}),
+                    record_store_factory=lambda: store,
+                    control_plane_root_path=adapter.root,
+                    bearer_identity_config=BearerIdentityConfig(
+                        local_operator_token="operator-example",
+                        local_operator_subject="director-example",
+                        local_operator_token_label="operator-example",
+                    ),
+                )
+
+                def schedule(**arguments: Any) -> dict[str, str]:
+                    actual_mode = cast(str, arguments["mode"])
+                    if actual_mode == fail_at:
+                        return run_fixture_schedule(**arguments)
+                    receipt = fixture_receipt(
+                        actual_mode,
+                        identity=binding.identity,
+                        records=[]
+                        if actual_mode == "readback"
+                        else fixture_receipt(actual_mode).records,
+                    )
+                    return {PREVIEW_FIXTURE_RESULT_MARKER: receipt.model_dump_json().encode().hex()}
+
+                def failed_schedule(**arguments: object) -> None:
+                    callback = cast(Callable[[], None], arguments["before_trigger"])
+                    callback()
+                    raise api.DokployScheduleExecutionFailed(
+                        schedule_id="fixture",
+                        deployment_status="error",
+                        provider_detail="PRIVATE-PROVIDER",
+                        cause="remote_command_exit",
+                        deployment_id="failed-fixture",
+                    )
+
+                with (
+                    patch(
+                        "control_plane.preview_fixture.run_fixture_schedule",
+                        side_effect=schedule,
+                    ),
+                    patch("control_plane.dokploy.host_package.ensure_schedule_host_package"),
+                    patch.object(
+                        api, "upsert_dokploy_schedule", return_value={"scheduleId": "fixture"}
+                    ),
+                    patch.object(api, "run_dokploy_schedule", side_effect=failed_schedule),
+                    patch.object(
+                        api,
+                        "fetch_dokploy_deployment_logs",
+                        return_value=(
+                            "readback_failed_predicate=" + reported,
+                            "readback_failure_kind=unavailable",
+                            "PRIVATE-CHILD-OUTPUT",
+                        ),
+                    ),
+                ):
+                    response = await request(
+                        app,
+                        "POST",
+                        "/v1/drivers/odoo/app-maintenance",
+                        headers={
+                            "Authorization": "Bearer operator-example",
+                            "Idempotency-Key": "fixture-example",
+                        },
+                        payload={
+                            "product": adapter.product,
+                            "maintenance": fixture_request(
+                                instance=adapter.request.instance,
+                                mode=mode,
+                                reviewed_plan_sha256=adapter.request.reviewed_plan_sha256
+                                if mode == "apply"
+                                else "",
+                            ).model_dump(mode="json"),
+                        },
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                error = response.json()["error"]
+                self.assertEqual(
+                    error["reason"],
+                    reported
+                    if reported in ReadbackPredicate
+                    else ReadbackPredicate.SCHEDULE_EVIDENCE,
+                )
+                self.assertEqual(
+                    error["code"],
+                    "mutation_reconciliation_required"
+                    if fail_at == "apply"
+                    else "preview_fixture_unavailable",
+                )
+                self.assertNotIn("PRIVATE", response.text)
+                record = store.read_idempotency_record(
+                    scope=idempotency_scope(caller),
+                    route_path="/v1/drivers/odoo/app-maintenance",
+                    idempotency_key="fixture-example",
+                )
+                if mode == "apply" and fail_at == "apply":
+                    self.assertIsNotNone(record)
+                    assert record is not None
+                    self.assertEqual(record.state, "reconcile_required")
+                else:
+                    self.assertIsNone(record)
+
     async def test_scoped_authority_and_saved_review_control_the_existing_maintenance_path(
         self,
     ) -> None:
@@ -1257,6 +1383,7 @@ class PreviewFixtureHostTests(unittest.TestCase):
         receipt: dict[str, object],
         *,
         stable: bool = False,
+        child_failure: bool = False,
         expected_fixture_sha256: str | None = None,
     ) -> Iterator[subprocess.CompletedProcess[str]]:
         with TemporaryDirectory() as directory:
@@ -1266,6 +1393,8 @@ class PreviewFixtureHostTests(unittest.TestCase):
             docker = root / "docker"
             docker.write_text(
                 "#!" + sys.executable + "\nimport json,os,sys\n"
+                "if sys.argv[1]!='inspect' and os.environ['FIXTURE_FAIL']=='1':\n"
+                " print('PRIVATE-CHILD-STDERR',file=sys.stderr);print('PRIVATE-CHILD-OUTPUT');sys.exit(1)\n"
                 "print(os.environ['FIXTURE_INSPECT'] if sys.argv[1]=='inspect' else os.environ['FIXTURE_REPLY'])\n"
             )
             docker.chmod(0o700)
@@ -1311,11 +1440,30 @@ class PreviewFixtureHostTests(unittest.TestCase):
                     "PATH": str(root) + os.pathsep + os.defpath,
                     "FIXTURE_INSPECT": json.dumps([config]),
                     "FIXTURE_REPLY": json.dumps(receipt),
+                    "FIXTURE_FAIL": "1" if child_failure else "0",
                 },
                 text=True,
                 capture_output=True,
                 timeout=15,
             )
+
+    def test_host_failure_retains_only_the_closed_failed_predicate(self) -> None:
+        good = fixture_receipt("apply").model_dump(mode="json")
+        for options, predicate in (
+            ({"stable": True}, ReadbackPredicate.RUNTIME_IDENTITY),
+            ({"expected_fixture_sha256": "invalid"}, ReadbackPredicate.REVIEW_BINDING),
+            ({"child_failure": True}, ReadbackPredicate.FIXTURE_COMMAND),
+        ):
+            with self.subTest(options=options), self.host(good, **options) as result:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("readback_failed_predicate=" + predicate, result.stdout)
+                self.assertNotIn(PREVIEW_FIXTURE_RESULT_MARKER + "=", result.stdout)
+                self.assertNotIn("PRIVATE-CHILD", result.stdout + result.stderr)
+        with self.host({**good, "private_data": "PRIVATE-CUSTOMER"}) as result:
+            self.assertIn(
+                "readback_failed_predicate=" + ReadbackPredicate.FIXTURE_RECEIPT, result.stdout
+            )
+            self.assertNotIn("PRIVATE-CUSTOMER", result.stdout + result.stderr)
 
     def test_packaged_host_accepts_bound_receipt_and_refuses_target_drift_and_private_output(
         self,
@@ -1492,6 +1640,11 @@ class PreviewFixtureCancellationHostTests(unittest.TestCase):
                 self.assertEqual(
                     PREVIEW_FIXTURE_RESULT_MARKER + "=" in result.stdout, permitted is not None
                 )
+                if permitted is None:
+                    self.assertIn(
+                        "readback_failed_predicate=" + ReadbackPredicate.SCHEDULE_EVIDENCE,
+                        result.stdout,
+                    )
                 if permitted is not None:
                     encoded = next(
                         line.partition("=")[2]
