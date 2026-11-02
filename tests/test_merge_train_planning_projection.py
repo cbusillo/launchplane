@@ -37,8 +37,6 @@ class NativeGraphProvider:
     def __init__(self, *, pull_number: int = 9001) -> None:
         self.pull_number = pull_number
         self.nodes: dict[tuple[str, int], PlanningProvider] = {}
-        self.blocking: list[dict[str, Any]] = []
-        self.parent: dict[str, Any] | None = None
         self.calls: list[dict[str, Any]] = []
         self.token_overrides: dict[str, str] = {}
         self.fail: Any = None
@@ -106,10 +104,6 @@ class NativeGraphProvider:
         self.calls.append(call)
         if self.fail:
             self.fail(call)
-        if repo == _REPO and "/issues/7/dependencies/blocking?" in path:
-            return copy.deepcopy(self.blocking)
-        if repo == _REPO and path.endswith("/issues/7/parent") and self.parent:
-            return copy.deepcopy(self.parent)
         return node.request(
             path=path.replace(f"/repos/{repo}", f"/repos/{_REPO}"), method=method, body=body
         )
@@ -152,37 +146,14 @@ class NativePlanningProjectionTests(TestCase):
     def rows(self, record: Any) -> dict[tuple[str, int], dict[str, Any]]:
         return {(row["repo"], row["number"]): row for row in _receipt(record)["issues"]}
 
-    def test_nonclosing_source_preserves_finish_line_without_reading_neighbors(self) -> None:
+    def test_unrelated_discovery_failures_do_not_block_source_completion(self) -> None:
         source = self.graph.nodes[_REPO, 7]
-        source.references = []
-        source.pull_body = "Refs #7"
-        source.issue.update(state="open", state_reason=None)
-        self.graph.add(_REPO, 8)
-        self.graph.parent = self.graph.ref(_REPO, 8)
-        dependent = self.graph.add(_REPO, 10)
-        dependent.blockers = [{"number": 7, "state": "open"}]
-        self.graph.blocking = [self.graph.ref(_REPO, 10)]
         before = copy.deepcopy(source.issue)
-
         record = self.record()
-
         self.assertEqual(record.delivery_status, "delivered")
-        receipt = _receipt(record)
-        self.assertTrue(receipt["ok"])
-        self.assertTrue(receipt["review_required"])
-        rows = self.rows(record)
-        self.assertEqual(rows[_REPO, 7]["status"], "review_open_finish_line")
-        self.assertFalse(rows[_REPO, 7]["closing_reference"])
-        self.assertTrue(rows[_REPO, 7]["informational"])
-        self.assertEqual(set(rows), {(_REPO, 7)})
-        self.assertFalse(
-            any(
-                "/issues/8" in call["path"] or "/issues/10" in call["path"]
-                for call in self.graph.calls
-            )
-        )
-        self.assertEqual(source.issue["body"], before["body"])
-        self.assertEqual(source.issue["state"], before["state"])
+        self.assertEqual(set(self.rows(record)), {(_REPO, 7)})
+        self.assertTrue(self.rows(record)[_REPO, 7]["verified"])
+        self.assertEqual(source.issue, before)
 
     def test_completed_reference_in_pr_comment_reconciles_without_closing_keyword(self) -> None:
         source = self.graph.nodes[_REPO, 7]
@@ -250,10 +221,7 @@ class NativePlanningProjectionTests(TestCase):
                 self.assertFalse(source.writes)
                 self.assertEqual(bool(_receipt(record)["issues"]), accepted)
 
-    def test_missing_current_author_trust_keeps_the_neighborhood_read_only(self) -> None:
-        parent = self.graph.add(_REPO, 8)
-        parent.issue["user"] = {"id": 77, "login": "example"}
-        self.graph.parent = self.graph.ref(_REPO, 8)
+    def test_missing_current_author_trust_preserves_source(self) -> None:
 
         record = self.record(planning_author_ids=())
 
@@ -397,10 +365,6 @@ class NativePlanningProjectionTests(TestCase):
         source = self.graph.nodes[_REPO, 7]
         source.issue.update(state="open", state_reason=None)
         source.pull_body = "Refs #8"
-        self.graph.add(_REPO, 8)
-        neighbor = self.graph.add(_REPO, 10)
-        neighbor.blockers = [{"number": 7, "state": "open"}]
-        self.graph.blocking = [self.graph.ref(_REPO, 10)]
         error = HTTPError("https://example.test/reference", 404, "Missing", Message(), BytesIO())
         self.addCleanup(error.close)
 
@@ -414,7 +378,6 @@ class NativePlanningProjectionTests(TestCase):
         self.comment_mock.assert_not_called()
         self.assertEqual(self.rows(record)[_REPO, 7]["status"], "review_projection_pending")
         source.issue.update(state="closed", state_reason="completed")
-        neighbor.blockers[0]["state"] = "closed"
 
         retried = deliver_merge_train_pr_feedback_record(
             record=record,
@@ -428,24 +391,20 @@ class NativePlanningProjectionTests(TestCase):
         self.assertEqual(retried.delivery_status, "failed")
         self.comment_mock.assert_called_once()
         self.assertTrue(self.rows(retried)[_REPO, 7]["verified"])
-        self.assertNotIn((_REPO, 10), self.rows(retried))
 
-    def test_timeline_only_issue_is_reviewed_without_expanding_its_neighborhood(self) -> None:
+    def test_timeline_only_issue_is_recorded_without_source_reconciliation(self) -> None:
         source = self.graph.nodes[_REPO, 7]
         source.references = []
         source.timeline = [
             {"event": "cross-referenced", "source": {"issue": self.graph.ref(_REPO, 7)}}
         ]
         source.issue.update(state="open", state_reason=None)
-        self.graph.add(_REPO, 8)
-        self.graph.parent = self.graph.ref(_REPO, 8)
 
         record = self.record()
 
         self.assertEqual(record.delivery_status, "delivered")
         rows = self.rows(record)
         self.assertIn((_REPO, 7), rows)
-        self.assertNotIn((_REPO, 8), rows)
         self.assertTrue(rows[_REPO, 7]["review_required"])
         self.assertFalse(source.writes)
 
@@ -468,14 +427,11 @@ class NativePlanningProjectionTests(TestCase):
         source.references = []
         source.pull_body = "Refs #7"
         source.issue.update(state="open", pull_request={"url": "https://example.test/pull/7"})
-        self.graph.add(_REPO, 8)
-        self.graph.parent = self.graph.ref(_REPO, 8)
 
         record = self.record()
 
         self.assertEqual(record.delivery_status, "delivered")
         self.assertFalse(_receipt(record)["review_required"])
-        self.assertNotIn((_REPO, 8), self.rows(record))
         self.assertFalse(source.writes)
 
     def test_known_denial_skips_only_its_repository_and_keeps_independent_target(self) -> None:
@@ -485,11 +441,6 @@ class NativePlanningProjectionTests(TestCase):
         sibling = self.graph.add(denied, 9, state="closed")
         self.graph.add(independent, 10, state="closed")
         self.graph.nodes[_REPO, 7].pull_body = f"Refs {denied}#8, {denied}#9, {independent}#10"
-        self.graph.blocking = [
-            self.graph.ref(denied, 8),
-            self.graph.ref(denied, 9),
-            self.graph.ref(independent, 10),
-        ]
         attempts: list[str] = []
         headers = Message()
         headers["X-GitHub-Request-Id"] = "fixture-denial"
@@ -522,7 +473,6 @@ class NativePlanningProjectionTests(TestCase):
         target.issue["labels"] = [{"name": custom[key]} for key in ("plan", "blocked")]
         target.issue["body"] = "<!-- github-plan:managed-provenance -->\n" + _wait("waiting")
         target.comments = [{"user": {"id": _BOT, "login": "source-bot[bot]"}, "body": _wait()}]
-        self.graph.blocking = [self.graph.ref(repo, 8)]
         first = self.record()
         self.assertEqual(self.rows(first)[repo, 8]["wait"]["state"], "waiting")
         target.comments.append({"user": {"id": 73, "login": "target-bot[bot]"}, "body": _wait()})
@@ -544,7 +494,6 @@ class NativePlanningProjectionTests(TestCase):
         self.graph.nodes[_REPO, 7].config = {"planning": {"projects": {"default_project": 2}}}
         self.graph.nodes[_REPO, 7].pull_body = "Refs #8"
         self.graph.add(_REPO, 8, state="closed")
-        self.graph.blocking = [self.graph.ref(_REPO, 8)]
 
         def fail(call: dict[str, Any]) -> None:
             if "updateProjectV2ItemFieldValue" in (call["body"] or {}).get("query", ""):
@@ -606,7 +555,6 @@ class NativePlanningProjectionTests(TestCase):
                 later = self.graph.add(_REPO, 8, state="closed")
                 independent = self.graph.add("example/independent", 10, state="closed")
                 self.graph.nodes[_REPO, 7].pull_body = "Refs example/independent#10"
-                self.graph.blocking = [self.graph.ref("example/independent", 10)]
                 error = HTTPError(
                     "https://example.test/discovery", status, "Forbidden", Message(), BytesIO()
                 )

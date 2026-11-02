@@ -2649,11 +2649,11 @@ prior results. Per-row success, verified evidence, coverage and full source
 completion are distinct. A known repository denial prevents that repository's
 writes while independent authorized repositories can continue. A global identity
 failure or unknown write outcome stops later writes. Discovery-time failures
-apply before any metadata write and retain already discovered neighbors. Failed
+apply before any metadata write and retain already discovered sources. Failed
 source evidence remains failed, with every verified prior result retained.
 A verified landing can publish terminal partial receipts through the existing
 incomplete-planning note while reconciliation remains failed. Incomplete source
-reference discovery or a neighborhood coverage overflow retains known targets
+reference discovery or a source reference coverage overflow retains known targets
 and explicitly partial coverage without metadata writes.
 Unknown writes, global identity failures, denial in the source repository and
 transient/quota failures still suppress publication. Existing retry classification

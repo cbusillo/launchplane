@@ -78,6 +78,7 @@ class PlanningProvider:
             "node_id": "issue7",
             "state": "closed",
             "state_reason": "completed",
+            "updated_at": "2026-09-30T23:58:00Z",
             "user": {"id": _BOT, "login": "example-bot[bot]"},
             "body": "<!-- github-plan:managed-provenance -->\n" + _wait(),
             "labels": [{"name": _LABELS[key]} for key in ("plan", "active")] + [{"name": "bug"}],
@@ -142,6 +143,7 @@ class PlanningProvider:
                 self.writes.append(("project", body))
                 if not self.drop_project_write:
                     self.project_status = "done"
+                    self.issue["updated_at"] = self.merged_at
                 return {
                     "data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "item7"}}}
                 }
@@ -203,12 +205,6 @@ class PlanningProvider:
             return copy.deepcopy(self.blockers)
         if "/sub_issues?" in path:
             return copy.deepcopy(self.children)
-        if "/dependencies/blocking?" in path:
-            return []
-        if path.endswith("/parent"):
-            raise click.ClickException("not found") from HTTPError(
-                path, 404, "Not Found", Message(), None
-            )
         if method == "GET" and path == f"/repos/{_REPO}":
             return {"default_branch": self.default_branch}
         if method == "GET" and path == f"/repos/{_REPO}/issues/{self.issue['number']}":
