@@ -94,6 +94,7 @@ def pure_dependency_update(
     changed_files = pull_request.get("changed_files")
     if changed_files is not None and changed_files != len(files):
         return False
+    comparison_merge_base = _comparison_merge_base(comparison, base_sha)
     for item in files:
         if not isinstance(item, dict) or item.get("status") not in {
             "added",
@@ -115,7 +116,10 @@ def pure_dependency_update(
             if (
                 filename == "workspace.toml"
                 and item.get("status") == "modified"
-                and _workspace_pin_only(read=read, path=path, base_sha=base_sha, head_sha=head_sha)
+                and comparison_merge_base is not None
+                and _workspace_pin_only(
+                    read=read, path=path, base_sha=comparison_merge_base, head_sha=head_sha
+                )
             ):
                 continue
             if (
@@ -123,17 +127,9 @@ def pure_dependency_update(
                 and item.get("status") == "modified"
                 and dependency_reference_file(filename)
             ):
-                comparison_base = comparison.get("base_commit")
-                merge_base = comparison.get("merge_base_commit")
-                if (
-                    not isinstance(comparison_base, dict)
-                    or comparison_base.get("sha") != base_sha
-                    or not isinstance(merge_base, dict)
-                    or not isinstance(merge_base.get("sha"), str)
-                    or not merge_base["sha"]
-                ):
+                if comparison_merge_base is None:
                     return False
-                old_content = _immutable_content(read, path, merge_base["sha"], filename)
+                old_content = _immutable_content(read, path, comparison_merge_base, filename)
                 new_content = _immutable_content(read, path, head_sha, filename)
                 if (
                     old_content is None
@@ -154,6 +150,19 @@ def pure_dependency_update(
             ):
                 return False
     return True
+
+
+def _comparison_merge_base(comparison: dict[str, object], base_sha: str) -> str | None:
+    base = comparison.get("base_commit")
+    merge_base = comparison.get("merge_base_commit")
+    if (
+        not isinstance(base, dict)
+        or base.get("sha") != base_sha
+        or not isinstance(merge_base, dict)
+    ):
+        return None
+    revision = merge_base.get("sha")
+    return revision if isinstance(revision, str) and revision else None
 
 
 def _immutable_content(

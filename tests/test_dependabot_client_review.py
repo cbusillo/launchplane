@@ -124,22 +124,31 @@ class DependabotClientReviewTests(unittest.TestCase):
     def test_workspace_only_exempts_devkit_runtime_pins_with_complete_immutable_files(self) -> None:
         from control_plane.dependency_update_review import pure_dependency_update
 
-        for slot, extra, expected in (
-            ("devkit", "", True),
-            ("runtime", "", True),
-            ("shared_addons", "", False),
-            ("devkit", '\ncommand = "new"', False),
+        for slot, extra, main_changed, expected in (
+            ("devkit", "", False, True),
+            ("runtime", "", False, True),
+            ("shared_addons", "", False, False),
+            ("devkit", '\ncommand = "new"', False, False),
+            ("devkit", "", True, True),
+            ("runtime", "", True, True),
         ):
             with self.subTest(slot=slot, extra=extra):
                 old = f'[repos.{slot}]\nrepository = "example/tool"\nref = "' + "a" * 40 + '"'
                 new = old.replace("a" * 40, "b" * 40) + extra
                 pull = _github_pull_request(16)
                 pull["user"] = {"id": 49699333, "login": "any-bot", "type": "Bot"}
+                base_sha = cast(dict[str, str], pull["base"])["sha"]
 
                 def read(path: str) -> object:
                     if "/compare/" in path:
-                        return {"files": [{"filename": "workspace.toml", "status": "modified"}]}
+                        return {
+                            "files": [{"filename": "workspace.toml", "status": "modified"}],
+                            "base_commit": {"sha": base_sha},
+                            "merge_base_commit": {"sha": "original-parent"},
+                        }
                     content = new if path.endswith("ref=head-16") else old
+                    if main_changed and path.endswith("ref=" + base_sha):
+                        content += '\n[workspace]\nname = "current main"'
                     return {
                         "encoding": "base64",
                         "content": base64.b64encode(content.encode()).decode(),
@@ -152,6 +161,46 @@ class DependabotClientReviewTests(unittest.TestCase):
                     ),
                     expected,
                 )
+
+    def test_reference_admission_preserves_client_notes_holds_and_visible_review(self) -> None:
+        from control_plane.client_test_notes import NOTHING_TO_TEST
+
+        policy = dependency_repository_policy()
+        profile = SimpleNamespace(
+            release_on_acceptance="held",
+            is_active=True,
+            repository=policy.repository,
+            owner=SimpleNamespace(is_set=True, review_label="owner-review"),
+        )
+        for body, expected_review, expected_error in (
+            (f"## Client test notes\n\n{NOTHING_TO_TEST}: dependency update.", False, False),
+            ("", True, True),
+            (
+                "## Client test notes\n\nClient change: New catalog behavior.\n- Check catalog.",
+                True,
+                False,
+            ),
+        ):
+            with self.subTest(body=body):
+                pull = _github_pull_request(16)
+                pull["user"] = {"id": 49699333, "login": "configured-bot", "type": "Bot"}
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        {"files": [{"filename": ".github/workflows/ci.yml", "status": "modified"}]},
+                    )
+                )
+                reader = GitHubMergeTrainSnapshotReader(
+                    transport=transport,
+                    repository_policy=policy,
+                    branch_refresh_store=cast(
+                        Any, SimpleNamespace(list_product_profile_records=lambda: (profile,))
+                    ),
+                )
+                intent = reader.client_review_intent(
+                    labels=(), repository=policy.repository, body=body, pull_request=pull
+                )
+                self.assertEqual(intent.review_required, expected_review)
+                self.assertEqual(bool(intent.error), expected_error)
 
     def test_configured_review_override_still_requires_notes(self) -> None:
         from control_plane.client_test_notes import change_client_review
