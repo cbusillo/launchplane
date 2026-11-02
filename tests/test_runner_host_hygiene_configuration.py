@@ -617,6 +617,12 @@ class HygieneMetadataTests(HygieneConfigurationFixture):
             self.assertTrue(all(value == "read" for value in body["permissions"].values()))
             self.assertEqual(calls[-1]["method"], "DELETE")
             scope.return_value = frozenset({"example/control", "example/other", "example/extra"})
+            covered = read_runner_host_hygiene_metadata(
+                configuration=configured, store=self.store, request=request, current_run_id=42
+            )
+            self.assertEqual(covered.run_states, result.run_states)
+            self.assertEqual(calls[-1]["method"], "DELETE")
+            scope.return_value = frozenset({"example/control", "example/extra"})
             with self.assertRaises(ValueError):
                 read_runner_host_hygiene_metadata(
                     configuration=configured, store=self.store, request=request, current_run_id=42
