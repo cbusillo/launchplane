@@ -10,6 +10,7 @@ from collections.abc import Callable
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
@@ -31,6 +32,7 @@ from control_plane.retained_volume_capture import (
     capture_retained_volumes,
     retained_volume_engine_identity,
     retained_volume_identity,
+    retained_volume_identity_matches,
 )
 
 
@@ -102,6 +104,44 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
         self.assertEqual(first, reordered)
         self.assertNotEqual(first, retained_volume_identity(volume, "engine-a", 2049, 89))
         self.assertNotEqual(first, retained_volume_identity(volume, "engine-b", 2049, 88))
+
+    def test_filesystem_identity_survives_device_renumbering_but_refuses_replacement(self) -> None:
+        volume: dict[str, object] = {"Name": "site-data", "CreatedAt": "original"}
+        saved = retained_volume_identity(volume, "engine", 50, 88, backing_filesystem_id=123)
+        self.assertTrue(retained_volume_identity_matches(volume, "engine", 48, 88, 123, saved))
+        self.assertFalse(retained_volume_identity_matches(volume, "engine", 48, 88, 0, saved))
+        for row, engine, inode, filesystem in (
+            (volume | {"CreatedAt": "replacement"}, "engine", 88, 123),
+            (volume, "another-engine", 88, 123),
+            (volume, "engine", 89, 123),
+            (volume, "engine", 88, 456),
+        ):
+            with self.subTest(row=row, engine=engine, inode=inode, filesystem=filesystem):
+                self.assertFalse(
+                    retained_volume_identity_matches(row, engine, 48, inode, filesystem, saved)
+                )
+
+    def test_legacy_identity_recovers_only_anonymous_device_drift(self) -> None:
+        import os
+
+        volume: dict[str, object] = {"Name": "site-data", "CreatedAt": "original"}
+        saved = retained_volume_identity(volume, "engine", os.makedev(0, 50), 88)
+        self.assertTrue(
+            retained_volume_identity_matches(volume, "engine", os.makedev(0, 48), 88, 123, saved)
+        )
+        self.assertTrue(
+            retained_volume_identity_matches(volume, "engine", os.makedev(0, 50), 88, 0, saved)
+        )
+        for row, engine, device, inode in (
+            (volume | {"CreatedAt": "replacement"}, "engine", os.makedev(0, 48), 88),
+            (volume, "another-engine", os.makedev(0, 48), 88),
+            (volume, "engine", os.makedev(8, 1), 88),
+            (volume, "engine", os.makedev(0, 48), 89),
+        ):
+            with self.subTest(row=row, engine=engine, device=device, inode=inode):
+                self.assertFalse(
+                    retained_volume_identity_matches(row, engine, device, inode, 123, saved)
+                )
 
     def test_capture_keeps_only_real_inventory_identity(self) -> None:
         volume = {
@@ -424,6 +464,7 @@ class RetainedVolumeCaptureTests(unittest.TestCase):
                 with (
                     patch.object(sys, "argv", ["capture", payload, "frame:"]),
                     patch.object(subprocess, "run", side_effect=docker),
+                    patch("os.statvfs", return_value=SimpleNamespace(f_fsid=12345)),
                     patch.dict(
                         "os.environ",
                         {

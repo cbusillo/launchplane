@@ -9,6 +9,7 @@ from control_plane.retained_volume_capture import (
     retained_volume_docker_command,
     retained_volume_engine_identity,
     retained_volume_identity,
+    retained_volume_identity_matches,
 )
 from control_plane.testing_application_capabilities import single_local_swarm_node
 
@@ -19,6 +20,7 @@ RETIREMENT_RESOURCE_PROGRAM = (
     + inspect.getsource(_batched_docker_inspect)
     + inspect.getsource(retained_volume_docker_command)
     + inspect.getsource(retained_volume_identity)
+    + inspect.getsource(retained_volume_identity_matches)
     + inspect.getsource(retained_volume_engine_identity)
     + inspect.getsource(single_local_swarm_node)
     + r"""
@@ -77,7 +79,12 @@ def capture():
         owned=(labels.get('com.docker.compose.project')==project or labels.get('dokploy.application.id')==spec['target'])
         foreign=(labels.get('com.docker.compose.project') not in (None,project) or labels.get('dokploy.application.id') not in (None,spec['target']) or 'io.launchplane.production-recipient' in labels)
         paths[name]=point
-        result.append({'name':name,'identity':retained_volume_identity(row,engine_id,metadata.st_dev,metadata.st_ino),'engine_identity':retained_volume_engine_identity(engine_id),'held':not owned or foreign})
+        filesystem=os.statvfs(point).f_fsid
+        captured=next((item['identity'] for item in spec.get('resources',[]) if item['name']==name),None)
+        identity=retained_volume_identity(row,engine_id,metadata.st_dev,metadata.st_ino,backing_filesystem_id=filesystem if captured is None or filesystem>0 else None)
+        if captured is not None and retained_volume_identity_matches(row,engine_id,metadata.st_dev,metadata.st_ino,filesystem,captured):
+            identity=captured
+        result.append({'name':name,'identity':identity,'engine_identity':retained_volume_engine_identity(engine_id),'held':not owned or foreign})
     containers=_batched_docker_inspect('container',identifiers('ps','-aq','--no-trunc'),load)
     project_path=Path('/etc/dokploy/compose')/project
     found=[]

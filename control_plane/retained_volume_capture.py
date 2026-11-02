@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 
@@ -69,16 +70,57 @@ def _batched_docker_inspect(
 
 
 def retained_volume_identity(
-    volume: Mapping[str, object], engine_id: str, backing_device: int, backing_inode: int
+    volume: Mapping[str, object],
+    engine_id: str,
+    backing_device: int,
+    backing_inode: int,
+    *,
+    backing_filesystem_id: int | None = None,
 ) -> str:
+    if backing_filesystem_id is not None and backing_filesystem_id <= 0:
+        raise ValueError("Backing filesystem identity is unavailable.")
     payload = {
-        "backing_device": backing_device,
+        **(
+            {"backing_device": backing_device}
+            if backing_filesystem_id is None
+            else {"backing_filesystem_id": backing_filesystem_id}
+        ),
         "backing_inode": backing_inode,
         "engine_id": engine_id,
         "volume": volume,
     }
     canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def retained_volume_identity_matches(
+    volume: Mapping[str, object],
+    engine_id: str,
+    backing_device: int,
+    backing_inode: int,
+    backing_filesystem_id: int,
+    captured: str,
+) -> bool:
+    if (
+        backing_filesystem_id > 0
+        and retained_volume_identity(
+            volume,
+            engine_id,
+            backing_device,
+            backing_inode,
+            backing_filesystem_id=backing_filesystem_id,
+        )
+        == captured
+    ):
+        return True
+    if retained_volume_identity(volume, engine_id, backing_device, backing_inode) == captured:
+        return True
+    if os.major(backing_device) != 0:
+        return False
+    return any(
+        retained_volume_identity(volume, engine_id, os.makedev(0, minor), backing_inode) == captured
+        for minor in range(1, 65536)
+    )
 
 
 def retained_volume_engine_identity(engine_id: str) -> str:
@@ -286,7 +328,7 @@ def capture():
         if volume.get('Mountpoint')!=str(expected) or expected.parent.is_symlink() or expected.is_symlink() or not expected.is_dir():
             raise ValueError('volume backing unavailable')
         stat=expected.stat()
-        volumes.append({'volume':volume,'volume_identity_sha256':retained_volume_identity(volume,engine,stat.st_dev,stat.st_ino),'engine_identity_sha256':retained_volume_engine_identity(engine),'backing_device':stat.st_dev,'backing_inode':stat.st_ino})
+        volumes.append({'volume':volume,'volume_identity_sha256':retained_volume_identity(volume,engine,stat.st_dev,stat.st_ino,backing_filesystem_id=os.statvfs(expected).f_fsid),'engine_identity_sha256':retained_volume_engine_identity(engine),'backing_device':stat.st_dev,'backing_inode':stat.st_ino})
     if single_local_swarm_node(docker)!=nodes or inspect_one('service',service['ID']).get('Spec')!=service.get('Spec'):
         raise ValueError('service inventory changed')
     if identifiers('service','ps','--no-trunc','--quiet',service['ID'])!=task_ids:
@@ -313,7 +355,8 @@ def capture():
         volume=row['volume']
         current=current_volumes[volume['Name']]
         stat=Path(volume['Mountpoint']).stat()
-        if current!=volume or (stat.st_dev,stat.st_ino)!=(row['backing_device'],row['backing_inode']):
+        if (current!=volume or (stat.st_dev,stat.st_ino)!=(row['backing_device'],row['backing_inode'])
+            or retained_volume_identity(current,engine,stat.st_dev,stat.st_ino,backing_filesystem_id=os.statvfs(Path(volume['Mountpoint'])).f_fsid)!=row['volume_identity_sha256']):
             raise ValueError('volume identity changed')
     return {'complete':True,'volumes':volumes}
 

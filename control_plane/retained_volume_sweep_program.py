@@ -5,12 +5,14 @@ from control_plane.retained_volume_capture import (
     retained_volume_docker_command,
     retained_volume_engine_identity,
     retained_volume_identity,
+    retained_volume_identity_matches,
 )
 
 
 RETAINED_VOLUME_SWEEP_HOST_PROGRAM = (
     "from collections.abc import Callable,Mapping,Sequence\nimport hashlib,json\n"
     + inspect.getsource(retained_volume_identity)
+    + inspect.getsource(retained_volume_identity_matches)
     + inspect.getsource(retained_volume_engine_identity)
     + inspect.getsource(_batched_docker_inspect)
     + inspect.getsource(retained_volume_docker_command)
@@ -338,7 +340,7 @@ try:
             elif receipt.get('outcome')=='no_effect':
                 volume=one_volume(name)
                 _,metadata=binding(volume,root)
-                if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:
+                if not retained_volume_identity_matches(volume,engine_id,metadata.st_dev,metadata.st_ino,os.statvfs(volume['Mountpoint']).f_fsid,captured):
                     raise Unknown()
                 emit('held','no_effect')
             else:
@@ -349,7 +351,7 @@ try:
                 raise Unknown()
             volume=one_volume(name)
             _,metadata=binding(volume,root)
-            if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:
+            if not retained_volume_identity_matches(volume,engine_id,metadata.st_dev,metadata.st_ino,os.statvfs(volume['Mountpoint']).f_fsid,captured):
                 raise Unknown()
             persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id,'outcome':'never_started','retirement':retirement})
             emit('held','never_started')
@@ -361,7 +363,7 @@ try:
             raise SystemExit
         volume=one_volume(name)
         backing,metadata=binding(volume,root)
-        if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:
+        if not retained_volume_identity_matches(volume,engine_id,metadata.st_dev,metadata.st_ino,os.statvfs(volume['Mountpoint']).f_fsid,captured):
             raise Held()
         inventory(backing,root)
         if not retirement:
@@ -371,7 +373,7 @@ try:
             raise SystemExit
         volume=one_volume(name)
         backing,metadata=binding(volume,root)
-        if retained_volume_identity(volume,engine_id,metadata.st_dev,metadata.st_ino)!=captured:
+        if not retained_volume_identity_matches(volume,engine_id,metadata.st_dev,metadata.st_ino,os.statvfs(volume['Mountpoint']).f_fsid,captured):
             raise Held()
         inventory(backing,root)
         if not retirement:
@@ -397,7 +399,7 @@ try:
         elif result.returncode!=0:
             current=one_volume(name)
             _,current_metadata=binding(current,root)
-            if retained_volume_identity(current,engine_id,current_metadata.st_dev,current_metadata.st_ino)!=captured:
+            if not retained_volume_identity_matches(current,engine_id,current_metadata.st_dev,current_metadata.st_ino,os.statvfs(current['Mountpoint']).f_fsid,captured):
                 raise Unknown()
             persist(receipt_path,{'operation':operation,'identity':captured,'volume':name,'started':True,'engine_id':engine_id,'outcome':'no_effect','retirement':retirement})
             emit('held','no_effect')

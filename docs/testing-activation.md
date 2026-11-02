@@ -803,7 +803,17 @@ candidate health and complete Launchplane, provider and local Docker inventories
 prove independent cleanup custody. The existing retained-volume host program
 checks the captured engine and backing identity, references, path aliases and
 same-boot monotonic permit before removal. That permit has its own bounded
-cleanup budget, independent of route-readiness freshness. Completed retirement requires final
+cleanup budget, independent of route-readiness freshness.
+
+New captures bind full volume metadata, engine, inode and nonzero `statvfs`
+filesystem ID, replacing boot-specific device numbers. The shared sweep and
+production-recipient comparator preserves historical hashes: anonymous-device
+renumbering matches only when the original hash agrees with every other input,
+searching minor numbers 1 through 65535. Other historical device changes remain
+held. Zero filesystem IDs prevent new captures but permit historical comparison;
+new-format filesystem mismatches remain held. Filesystems whose ID changes on
+remount, including some XFS placements, remain held. Plans reviewed before this
+change require a fresh dry-run. Completed retirement requires final
 health and independent service, container and volume absence checks. A lost
 reply resumes the original receipts; a later staff hold or deployment is retained.
 The host program waits for Docker's asynchronous container teardown within a
