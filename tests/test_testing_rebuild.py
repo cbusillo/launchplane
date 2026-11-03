@@ -568,7 +568,6 @@ class TestingRebuildTests(unittest.TestCase):
                 self.run_rebuild()
         record = self.store.load(self.plan)
         self.assertEqual(record.step, "rolling_back")
-        self.assertIsNotNone(record.preparation)
         assert record.preparation is not None
         for changes in (
             {"preparation": record.preparation.model_copy(update={"evidence_id": "other-copy"})},
