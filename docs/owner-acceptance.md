@@ -226,6 +226,7 @@ After a saved acceptance, a changed head or new open Client questions sends one
 new comment mentioning the Client when the current-head preview is ready.
 The receipt names the acceptance and version: a later acceptance can receive
 one new notice for that version, while retries within the same pair stay quiet.
+Carrying acceptance through the train does not start a new notification cycle.
 It names the accepted and current revisions, links their comparison, and includes
 the current test notes. Further reconciles of that acceptance and head update the same receipt
 without another notification, including after a lost POST response. An older or

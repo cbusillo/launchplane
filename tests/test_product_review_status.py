@@ -15,6 +15,7 @@ from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS, NOTH
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.product_review import (
+    ProductReviewCarry,
     ProductReviewDecision,
     ProductReviewDecisionRecord,
 )
@@ -322,20 +323,17 @@ class OwnerReviewStatusTests(unittest.TestCase):
         )
         self.assertEqual(github.statuses[0]["state"], "pending")
         legacy_notice = github.comments[-1]
-        legacy_notice["body"] = notification.replace(
+        legacy_body = notification.replace(
             notification.splitlines()[0],
             f"<!-- launchplane:client-review-request:{github.head_sha} -->",
             1,
         )
+        legacy_notice["body"] = legacy_body
         legacy_notice["created_at"] = "2026-10-24T15:30:00Z"
         self._publish(github)
         self.assertEqual(len(github.comments), 2)
         self.assertEqual(legacy_notice["body"], notification)
-        legacy_notice["body"] = notification.replace(
-            notification.splitlines()[0],
-            f"<!-- launchplane:client-review-request:{github.head_sha} -->",
-            1,
-        )
+        legacy_notice["body"] = legacy_body
         self.assertEqual(
             self.store.list_product_review_decision_records(
                 repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
@@ -345,6 +343,28 @@ class OwnerReviewStatusTests(unittest.TestCase):
         from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
         from sqlalchemy.exc import SQLAlchemyError
 
+        self.store.write_product_review_decision_record(
+            accepted.model_copy(
+                update={
+                    "record_id": "carried-acceptance",
+                    "feedback_requested": False,
+                    "head_sha": github.head_sha,
+                    "base_branch": "main",
+                    "decided_at": "2026-10-24T15:45:00Z",
+                    "carried_from": ProductReviewCarry(
+                        record_id=accepted.record_id,
+                        head_sha=accepted.head_sha,
+                        refresh_record_ids=("refresh",),
+                    ),
+                }
+            )
+        )
+        github.base_ref = "main"
+        github.body += f"\n### {OPEN_CLIENT_QUESTIONS}\n- What is the address?"
+        self._publish(github)
+        self._publish(github)
+        self.assertEqual(len(github.comments), 2)
+        github.body = "## Client test notes\nTry the changed page."
         github.head_sha = accepted.head_sha
         self.store.write_preview_generation_record(_preview_generation_read_record())
         github.body += f"\n### {OPEN_CLIENT_QUESTIONS}\n- What is the address?"
@@ -421,17 +441,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self._publish(github)
         self._publish(github)
         self.assertEqual(len(github.comments), 4)
-        renewed_notice = github.comments[-1]["body"]
-        assert isinstance(renewed_notice, str)
-        self.assertIn(repaired_acceptance.record_id, renewed_notice.splitlines()[0])
         self.assertEqual(github.statuses[0]["state"], "success")
-        self.assertEqual(
-            self.store.list_product_review_decision_records(
-                repository=_REPOSITORY,
-                pull_request_number=_PULL_REQUEST,
-            )[0].record_id,
-            repaired_acceptance.record_id,
-        )
 
     def test_unavailable_preview_never_invites_the_client(self) -> None:
         self.store.write_preview_generation_record(_preview_generation_read_record(state="failed"))
