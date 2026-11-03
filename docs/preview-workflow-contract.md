@@ -303,7 +303,9 @@ for that recorded recipient. It preserves the database and complete data
 directory before guarded retirement, without refreshing its artifact. Retirement
 keeps stopped-writer and physical-volume verification until teardown; it never
 uses refresh's post-apply allowance for reopened writers or changed source.
-The retained archive remains verifiable after the provider recipient is absent.
+The retained archive remains verifiable after the provider recipient is absent
+and after its own destroyed lifecycle record is published. Nonempty logs retain
+their existing additional-custody refusal before capture and teardown.
 
 The preview-apply-inputs request accepts `preservation_storage_budget`, using
 the existing reviewed database, file-store, staging and reserve byte limits.

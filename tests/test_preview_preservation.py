@@ -272,6 +272,20 @@ class PreviewPreservationProgramTests(unittest.TestCase):
         unserved.assert_not_called()
         self.assertEqual((self.paths["logs"] / "odoo.log").read_bytes(), b"retained log")
 
+    def test_recorded_retirement_retains_nonempty_log_custody(self) -> None:
+        self.spec.update(continuation=True, retirement=True)
+        log = self.paths["logs"] / "odoo.log"
+        log.write_bytes(b"retained log")
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertFalse(self.calls)
+        log.unlink()
+        receipt = self.preserve()
+        log.write_bytes(b"new log")
+        with self.assertRaises(RuntimeError):
+            self.namespace["verify_preservation_source"](receipt, self.source)
+        self.assertEqual(log.read_bytes(), b"new log")
+
     def test_continuation_preflight_and_capture_failures_keep_original_data(self) -> None:
         self.spec["continuation"] = True
         alias = self.paths["data"] / "alias"
@@ -829,13 +843,13 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             original_reservation_id=self.original.record_id,
         )
 
-    def admit(self) -> Any:
+    def admit(self, operation_record_id: str = "fixture-new-operation") -> Any:
         return require_preview_preservation_admission(
             store=self.store,
             profile=self.profile,
             issued_plan=self.issued,
             original_reservation_id=self.original.record_id,
-            operation_record_id="fixture-new-operation",
+            operation_record_id=operation_record_id,
         )
 
     def complete_original(self) -> None:
@@ -951,6 +965,58 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         self.issued.dry_run_plan.compose_ref = "different-recipient"
         with self.assertRaises(ValueError):
             self.admit()
+
+    def assert_retirement_receipt_survives_destroy(self, *, recorded: bool) -> None:
+        from control_plane.odoo_preview_apply_http import apply_odoo_preview_lifecycle_evidence
+
+        if recorded:
+            self.record_serving_original()
+        else:
+            self.complete_original()
+        before = self.admit()
+        adapter = self.adapter()
+        assert self.issued.plan_provenance is not None
+        operation = self.store.reserve_mutation(
+            scope="lifecycle-publication",
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=self.issued.plan_provenance.plan_id,
+            request_fingerprint="lifecycle-publication",
+            lease_owner="lifecycle-publication",
+            reconciliation_key=adapter.reconciliation_key(),
+            provider_target_key=adapter.target_key(),
+            original_intent=adapter.original_intent(),
+        ).record
+        assert operation is not None
+        self.store.checkpoint_mutation_provider_effect(
+            reservation=operation, effect_phase="compose_destroy"
+        )
+        apply_odoo_preview_lifecycle_evidence(
+            control_plane_root_path=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            issued_plan=self.issued,
+            driver_result={
+                "status": "pass",
+                "operation": "destroy",
+                "product": self.profile.product,
+                "repository": self.profile.repository,
+                "preview_slug": self.issued.preview_slug,
+                "preview_url": self.issued.preview_url,
+                "domain_host": self.issued.dry_run_plan.domain_host,
+                "compose_id": self.issued.dry_run_plan.compose_ref,
+                "compose_name": self.issued.dry_run_plan.compose_name,
+            },
+        )
+        self.assertEqual(self.authority().preservation_id, before.preservation_id)
+        self.assertEqual(self.admit(operation.record_id).preservation_id, before.preservation_id)
+        with self.assertRaises(ValueError):
+            self.admit("different-operation")
+
+    def test_unrecorded_receipt_survives_its_destroyed_lifecycle_publication(self) -> None:
+        self.assert_retirement_receipt_survives_destroy(recorded=False)
+
+    def test_recorded_receipt_survives_its_destroyed_lifecycle_publication(self) -> None:
+        self.assert_retirement_receipt_survives_destroy(recorded=True)
 
     def test_continuation_use_refusal_precedes_native_capture(self) -> None:
         from control_plane.odoo_testing_usage import OdooTestingUsage
@@ -1245,8 +1311,8 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
 
         self.record_serving_original()
-        for operation in ("refresh", "destroy"):
-            self.destroy.apply.dry_run_plan.operation = operation
+        for operation_kind in ("refresh", "destroy"):
+            self.destroy.apply.dry_run_plan.operation = operation_kind
             self.issued = _issued_plan(self.destroy)
             operation = prepare_odoo_preview_apply_operation(
                 control_plane_root=self.root,

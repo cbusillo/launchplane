@@ -129,6 +129,7 @@ def read_preview_preservation_authority(
         )
     ):
         raise ValueError("Original preview preservation does not match this target.")
+    original_records = original.response_payload.get("records")
     stable_identity = original.model_dump(
         include={
             "record_id",
@@ -164,11 +165,8 @@ def read_preview_preservation_authority(
         ),
         continuation=issued_plan.operation == "refresh",
         recorded_retirement=issued_plan.operation == "destroy"
-        and any(
-            profile.preview.slug_template.format(number=preview.anchor_pr_number)
-            == issued_plan.preview_slug
-            for preview in store.list_preview_records(context_name=issued_plan.context)
-        ),
+        and isinstance(original_records, dict)
+        and bool(original_records.get("generation_id")),
     )
 
 
@@ -268,27 +266,56 @@ def require_preview_preservation_admission(
             > parse_launchplane_mutation_timestamp(lookup.observed_at, field_name="observed_at")
         ):
             raise ValueError("Original preview preservation is waiting for its recovery grace.")
-    preview_matches = [
-        preview
-        for preview in store.list_preview_records(context_name=issued_plan.context)
-        if profile.preview.slug_template.format(number=preview.anchor_pr_number)
-        == issued_plan.preview_slug
-    ]
-    if authority.serving_recipient:
-        from control_plane.odoo_preview_qualification import read_preview_inspection_authority
+    from control_plane.workflows.launchplane import find_preview_record
 
-        if len(preview_matches) != 1 or preview_matches[0].state == "destroyed":
-            raise ValueError("Recorded preservation requires its serving preview.")
-        serving = read_preview_inspection_authority(store, preview_matches[0])
-        if (
-            serving.selection.identity.deployment_record_id != original.record_id
-            or serving.target_id.target_id != authority.compose_id
-        ):
-            raise ValueError("Recorded preservation requires the current serving original.")
-        if authority.continuation and issued_plan.plan_request.fishbowl_source is not None:
-            raise ValueError("Preserving continuation cannot import replacement data.")
-    elif preview_matches:
-        raise ValueError("Original-only preservation requires an unrecorded preview.")
+    preview = find_preview_record(
+        record_store=store,
+        context_name=issued_plan.context,
+        anchor_repo=profile.repository.partition("/")[2],
+        anchor_pr_number=issued_plan.plan_request.pr_number,
+    )
+    retired_by_this_operation = False
+    if preview is not None and preview.state == "destroyed":
+        from control_plane.contracts.preview_execution import (
+            matches_odoo_preview_service_destroy,
+            odoo_preview_destroy_reason,
+        )
+        from control_plane.contracts.idempotency_record import format_launchplane_mutation_timestamp
+        from control_plane.preview_reservation_recovery import original_preview_intent
+
+        operation = store.read_idempotency_record_by_id(operation_record_id)
+        provenance = issued_plan.plan_provenance
+        if operation is not None and provenance is not None and issued_plan.operation == "destroy":
+            retained = original_preview_intent(operation, profile=profile, store=store)
+            retired_by_this_operation = (
+                retained.issued_plan == issued_plan
+                and retained.apply_request.preserve_original_reservation_id == original.record_id
+                and bool(operation.provider_effect_phase)
+                and operation.provider_effect_phase not in PREVIEW_PRESERVATION_PHASES
+                and matches_odoo_preview_service_destroy(
+                    preview,
+                    odoo_preview_destroy_reason(
+                        plan_id=provenance.plan_id,
+                        issued_at=format_launchplane_mutation_timestamp(provenance.issued_at),
+                    ),
+                )
+            )
+    if not retired_by_this_operation:
+        if authority.serving_recipient:
+            from control_plane.odoo_preview_qualification import read_preview_inspection_authority
+
+            if preview is None or preview.state == "destroyed":
+                raise ValueError("Recorded preservation requires its serving preview.")
+            serving = read_preview_inspection_authority(store, preview)
+            if (
+                serving.selection.identity.deployment_record_id != original.record_id
+                or serving.target_id.target_id != authority.compose_id
+            ):
+                raise ValueError("Recorded preservation requires the current serving original.")
+            if authority.continuation and issued_plan.plan_request.fishbowl_source is not None:
+                raise ValueError("Preserving continuation cannot import replacement data.")
+        elif preview is not None:
+            raise ValueError("Original-only preservation requires an unrecorded preview.")
     if any(
         other.product != profile.product
         and issued_plan.context
@@ -547,6 +574,7 @@ def run_preview_preservation(
             "mode": mode,
             "continuation": authority.serving_recipient,
             "continuation_applied": continuation_applied,
+            "retirement": issued_plan.operation == "destroy",
             "require_stopped_writers": require_stopped_writers,
             "provider_effect_phase": dispatch_phase,
             "authority": authority.model_dump(mode="json"),
