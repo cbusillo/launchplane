@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Final, Literal
 from urllib.parse import quote, urlencode, urlsplit
 
+
 from control_plane.advisory_check_projection import (
     update_existing_advisory_check_projection,
     write_advisory_check_projection,
@@ -26,24 +27,30 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.github_app_identity import (
     GitHubAppInstallationToken,
     mint_repository_installation_token,
     resolve_advisory_github_app_identity,
     revoke_installation_token,
 )
-from control_plane.client_test_notes import change_client_review
+from control_plane.client_test_notes import (
+    change_client_review,
+    open_client_questions,
+    owner_test_notes,
+)
 from control_plane.dependency_update_review import pure_dependency_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane.product_review import (
     ProductReviewStore,
     applicable_product_review_decisions,
     preview_review_unavailability,
+    source_control_compare_url,
 )
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.product_review_carry import carry_owner_acceptance, record_decision_base
-from control_plane.product_review_feedback import publish_owner_feedback
+from control_plane.product_review_feedback import publish_owner_feedback, publish_review_comment
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
@@ -242,7 +249,7 @@ class OwnerReviewStatusPublisher:
                             base_branch=facts.base_branch,
                         )
                         if not synthetic:
-                            written = self._write_status(
+                            result = self._write_status(
                                 store=store,
                                 profile=profile,
                                 pull_request_number=pull_request_number,
@@ -253,9 +260,20 @@ class OwnerReviewStatusPublisher:
                                 and profile.owner.review_label.strip().casefold()
                                 not in facts.labels,
                             )
+                            if result is not None:
+                                written, carry_checked = result
+                                if carry_checked:
+                                    self._request_review_again(
+                                        store=store,
+                                        profile=profile,
+                                        pull_request_number=pull_request_number,
+                                        facts=facts,
+                                        token=token,
+                                        preview_request=preview_request,
+                                    )
             except Exception:
                 _LOGGER.warning(
-                    "Client review status could not be written.",
+                    "Client review publication could not finish.",
                     exc_info=True,
                     extra={"repository": repository, "pull_request_number": pull_request_number},
                 )
@@ -379,7 +397,7 @@ class OwnerReviewStatusPublisher:
         token: str,
         existing_only: bool = False,
         preview_request: ProductReconcileRequestRecord | None = None,
-    ) -> OwnerReviewStatus | None:
+    ) -> tuple[OwnerReviewStatus, bool] | None:
         intent = change_client_review(
             body=facts.body,
             labels=facts.labels,
@@ -387,6 +405,7 @@ class OwnerReviewStatusPublisher:
             pure_dependency_update=facts.pure_dependency_update,
             director_standing=profile.release_on_acceptance == "director_standing",
         )
+        carry_checked = False
         if existing_only:
             status = OwnerReviewStatus(
                 state="neutral", description="No Client preview review required"
@@ -421,7 +440,7 @@ class OwnerReviewStatusPublisher:
                     base_branch=facts.base_branch,
                 )
         else:
-            status = self._required_review_status(
+            status, carry_checked = self._required_review_status(
                 store=store,
                 profile=profile,
                 pull_request_number=pull_request_number,
@@ -470,7 +489,7 @@ class OwnerReviewStatusPublisher:
                 installation_token=installation_token,
                 api_request=self.api_request,
             )
-        return status
+        return status, carry_checked
 
     def _required_review_status(
         self,
@@ -481,7 +500,8 @@ class OwnerReviewStatusPublisher:
         facts: _PullRequestFacts,
         token: str,
         preview_request: ProductReconcileRequestRecord | None = None,
-    ) -> OwnerReviewStatus:
+    ) -> tuple[OwnerReviewStatus, bool]:
+        carry_checked = True
         try:
             record_decision_base(
                 store=store,
@@ -499,6 +519,7 @@ class OwnerReviewStatusPublisher:
                 read=lambda path: self.api_request(path=path, token=token),
             )
         except Exception:
+            carry_checked = False
             # Not carried: the head waits for the Client, as it would without a carry.
             _LOGGER.warning(
                 "Client acceptance could not be checked for a carry.",
@@ -524,7 +545,125 @@ class OwnerReviewStatusPublisher:
                 head_sha=facts.head_sha,
                 request=preview_request,
             ),
+        ), carry_checked
+
+    def _request_review_again(
+        self,
+        *,
+        store: ProductReviewStore,
+        profile: LaunchplaneProductProfileRecord,
+        pull_request_number: int,
+        facts: _PullRequestFacts,
+        token: str,
+        preview_request: ProductReconcileRequestRecord | None,
+    ) -> None:
+        decisions = store.list_product_review_decision_records(
+            repository=profile.repository, pull_request_number=pull_request_number
         )
+        latest = next(
+            iter(
+                applicable_product_review_decisions(
+                    decisions=decisions,
+                    profile=profile,
+                    pull_request_number=pull_request_number,
+                    base_branch=facts.base_branch,
+                )
+            ),
+            None,
+        )
+        if (
+            facts.state == "open"
+            and latest is not None
+            and latest.decision == "accepted"
+            and (
+                latest.head_sha != facts.head_sha
+                or open_client_questions(facts.body)
+                or self._preview_failed_after_acceptance(
+                    store=store,
+                    profile=profile,
+                    pull_request_number=pull_request_number,
+                    decision=latest,
+                    head_sha=facts.head_sha,
+                )
+            )
+            and not preview_review_unavailability(
+                store=store,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=facts.head_sha,
+                request=preview_request,
+            )
+        ):
+            review_url = owner_review_reference_url(
+                public_origin=self.public_origin or "",
+                repository=profile.repository,
+                pull_request_number=pull_request_number,
+            )
+            body = "\n".join(
+                (
+                    f"<!-- launchplane:client-review-request:{facts.head_sha} -->",
+                    f"@{profile.owner.github_login} this change needs another look.",
+                    "",
+                    f"Your acceptance covered version `{latest.head_sha}`. "
+                    f"The current version is `{facts.head_sha}`."
+                    if latest.head_sha != facts.head_sha
+                    else f"Your earlier acceptance covers version `{facts.head_sha}`.",
+                    f"[What changed since your acceptance]({source_control_compare_url(repository=profile.repository, before=latest.head_sha, after=facts.head_sha)})"
+                    if latest.head_sha != facts.head_sha
+                    else "The test notes now have questions for you."
+                    if open_client_questions(facts.body)
+                    else "The preview failed after your acceptance and is ready again.",
+                    "",
+                    owner_test_notes(facts.body).replace("@", "@\u200b"),
+                    "",
+                    f"[Open the preview and review this version]({review_url}). "
+                    "Write feedback on the pull request, and press Accept in Launchplane when the preview is right.",
+                )
+            )
+            publish_review_comment(
+                repository=profile.repository,
+                pull_request_number=pull_request_number,
+                body=body,
+                token=token,
+                app_id=self.github_feedback_app_id(control_plane_root=self.control_plane_root),
+                api_request=self.api_request,
+            )
+
+    @staticmethod
+    def _preview_failed_after_acceptance(
+        *,
+        store: ProductReviewStore,
+        profile: LaunchplaneProductProfileRecord,
+        pull_request_number: int,
+        decision: ProductReviewDecisionRecord,
+        head_sha: str,
+    ) -> bool:
+        try:
+            accepted_at = parse_launchplane_mutation_timestamp(
+                decision.decided_at, field_name="Client acceptance"
+            )
+        except ValueError:
+            return False
+        for feedback in store.list_preview_pr_feedback_records(
+            context_name=profile.preview.context,
+            anchor_pr_number=pull_request_number,
+        ):
+            if not (
+                feedback.product == profile.product
+                and feedback.repository.casefold() == profile.repository.casefold()
+                and feedback.revision == head_sha
+                and feedback.status == "failed"
+            ):
+                continue
+            try:
+                failed_at = parse_launchplane_mutation_timestamp(
+                    feedback.requested_at, field_name="preview failure"
+                )
+            except ValueError:
+                continue
+            if failed_at > accepted_at:
+                return True
+        return False
 
     def _advisory_token(self, repository: str, repository_id: str) -> GitHubAppInstallationToken:
         if self.github_app_token is not None:

@@ -95,8 +95,9 @@ this preview and it is right” beside the short test notes before accepting.
 Changing the serving head, URL or generation resets that confirmation. The
 service rereads the PR head on Accept and retains its existing exact-preview
 lock and notes gates. An unavailable head check or a preview still being
-updated cannot be accepted; Request changes remains available on an older
-serving preview. Opening a link and confirming records the Client's statement;
+updated cannot be accepted. Feedback belongs on the pull request, written by
+the Client or their agent; the review page offers only Accept and shows the
+latest comment from the named Client. Opening a link and confirming records the Client's statement;
 it cannot measure their attention. This decision never merges or publishes.
 
 Launchplane requests review when a pull request has real `Client test notes`
@@ -145,8 +146,7 @@ The [shared ready-handoff notes contract](https://github.com/cbusillo/codex-skil
 also defines the unanswered-questions subsection and shipping placeholder marker.
 Its validation extends the existing missing-notes gate: preview and release
 Accept stay disabled while questions remain. Preview acceptance rereads and
-validates the notes on the server before saving a decision. Request changes
-remains available. Clearing the questions restores normal notes validation;
+validates the notes on the server before saving a decision. Clearing the questions restores normal notes validation;
 Client repositories also check their committed shipping content in ordinary CI.
 The preview reconciler refreshes the Client-review check independently of
 preview planning and delivery, including a deferred operation, an unknown
@@ -222,6 +222,15 @@ When the Client supplies requested facts, the owning agent immediately acknowled
 that it is updating the preview and asks the Client to wait for its ready note.
 The agent incorporates the answers and removes resolved question items before
 asking the Client to review again. An acknowledgement does not resolve the request.
+After a saved acceptance, a changed head or new open Client questions sends one
+new comment mentioning the Client when the current-head preview is ready.
+It names the accepted and current revisions, links their comparison, and includes
+the current test notes. Further reconciles of that head update the same receipt
+without another notification, including after a lost POST response. An older or
+failed preview waits until its replacement is ready. A recorded failure after
+acceptance also requests another look once that same version is ready again. Existing acceptance stays
+bound to its recorded head unless the normal carry proof succeeds.
+
 The separate release invitation is described in [release-review.md](release-review.md).
 
 A Client does not need an authorization policy role to sign in. When GitHub
@@ -236,8 +245,8 @@ nothing. The release checklist is a separate decision bound to the testing
 candidate and its change list. See [release-review.md](release-review.md) and the
 Product Review API in [service-boundary.md](service-boundary.md).
 
-Each new preview decision is projected onto its pull request with the complete
-Client reason, immutable Client ID, reviewed commit, and a link to that saved
+Each new preview acceptance is projected onto its pull request with the
+immutable Client ID, reviewed commit, and a link to that saved
 decision in Launchplane. Publication uses the existing preview-feedback
 credential and verifies its GitHub `/user` identity. An unreadable identity or
 failed comment lookup leaves delivery pending; it never selects another credential.

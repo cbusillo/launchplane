@@ -174,6 +174,8 @@ class PullRequestNotes(NamedTuple):
     client_test_notes_error: str
     head_sha: str = ""
     state: str = ""
+    latest_client_comment: str = ""
+    latest_client_comment_url: str = ""
 
 
 UNREAD_PULL_REQUEST_NOTES = PullRequestNotes(
@@ -189,6 +191,7 @@ def read_pull_request_notes(
     profile: LaunchplaneProductProfileRecord,
     pull_request_number: int,
     trace_id: str,
+    include_client_comment: bool = True,
 ) -> PullRequestNotes:
     path = f"/repos/{quote(profile.repository)}/pulls/{pull_request_number}"
     try:
@@ -199,6 +202,8 @@ def read_pull_request_notes(
             context_name=profile.preview.context,
             repository=profile.repository,
         ) as token:
+            latest_comment = ""
+            latest_comment_url = ""
             pull = (
                 _read_release_github(
                     path=path, token=token, product=profile.product, trace_id=trace_id
@@ -206,6 +211,36 @@ def read_pull_request_notes(
                 if token
                 else None
             )
+            if include_client_comment and token and profile.owner.is_set:
+                try:
+                    for page in range(1, 11):
+                        comments = _read_release_github(
+                            path=f"/repos/{quote(profile.repository)}/issues/{pull_request_number}/comments?per_page=100&page={page}",
+                            token=token,
+                            product=profile.product,
+                            trace_id=trace_id,
+                        )
+                        if not isinstance(comments, list):
+                            raise ValueError("Client comment history is unavailable.")
+                        for comment in comments:
+                            if not isinstance(comment, dict):
+                                continue
+                            author = comment.get("user")
+                            if isinstance(author, dict) and author.get("id") == int(
+                                profile.owner.github_id
+                            ):
+                                body = comment.get("body")
+                                url = comment.get("html_url")
+                                latest_comment = body if isinstance(body, str) else ""
+                                latest_comment_url = url if isinstance(url, str) else ""
+                        if len(comments) < 100:
+                            break
+                    else:
+                        raise ValueError("Client comment history is incomplete.")
+                except (click.ClickException, OSError, ValueError):
+                    latest_comment = ""
+                    latest_comment_url = ""
+                    _LOGGER.warning("Client comment could not be read.", exc_info=True)
     except (click.ClickException, OSError, ValueError) as error:
         _LOGGER.warning(
             "product review pull request read failed product=%s trace_id=%s error_type=%s",
@@ -232,6 +267,8 @@ def read_pull_request_notes(
     state = pull.get("state")
     return PullRequestNotes(
         title=pull["title"],
+        latest_client_comment=latest_comment,
+        latest_client_comment_url=latest_comment_url,
         client_test_notes=owner_test_notes(body),
         client_test_notes_error=intent.error,
         head_sha=head_sha.lower()
