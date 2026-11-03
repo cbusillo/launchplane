@@ -3183,6 +3183,12 @@ def run_product_reconcile_once(
                 lease_held=lease.held,
             )
     except Exception as error:
+        if (
+            request.target_kind == "testing"
+            and isinstance(error, BuildProvenanceError)
+            and error.retry_at
+        ):
+            return _defer_rate_limited_reconcile(record_store, request, lease_owner, error)
         _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
         failed_plan: dict[str, object] = {"target": request.target_kind}
         if request.target_kind == "testing":
@@ -3349,6 +3355,35 @@ def run_product_reconcile_once(
 
         record_testing_delivery_attention(record_store, completed)
     return completed
+
+
+def _defer_rate_limited_reconcile(
+    record_store: ProductReconcileStore,
+    request: ProductReconcileRequestRecord,
+    lease_owner: str,
+    error: BuildProvenanceError,
+) -> ProductReconcileRequestRecord:
+    _LOGGER.warning("Product reconcile of %s deferred: %s", request.target_key, error)
+    plan: dict[str, object] = dict(request.last_plan)
+    plan.update(
+        target=request.target_kind,
+        action="wait",
+        held=True,
+        reason="github_rate_limited",
+        retry_at=error.retry_at,
+        quota_error=str(error),
+    )
+    record_store.request_product_reconcile(
+        ProductReconcileTarget(
+            product=request.product,
+            target_kind=request.target_kind,
+            pull_request_number=request.pull_request_number,
+        ),
+        _utc_now(),
+    )
+    return record_store.complete_product_reconcile_request(
+        request.target_key, lease_owner, "done", plan
+    )
 
 
 def _owner_review_status_writer(
@@ -3706,6 +3741,8 @@ def _testing_build_read[Result](read: Callable[[str], Result], path: str) -> Res
     try:
         return read(path)
     except BuildProvenanceError as error:
+        if error.retry_at:
+            raise
         failure = error.__cause__
         if isinstance(failure, HTTPError) and failure.code in {401, 403}:
             # The shared selector may skip an invalid build. An identity refusal
@@ -3919,6 +3956,8 @@ def _desired_release(
             )
             return verified, rejected, ""
         except BuildProvenanceError as error:
+            if error.retry_at:
+                raise
             rejected.append(
                 {"commit": commit, "run_id": error.run_id, "code": error.code, "error": str(error)}
             )

@@ -1,9 +1,12 @@
 import io
+from datetime import datetime, timedelta, timezone
 from email.message import Message
+from email.utils import format_datetime
 import json
 import unittest
 import zipfile
 from unittest.mock import MagicMock, Mock, patch
+from typing import cast
 from urllib.error import HTTPError, URLError
 
 from control_plane.build_provenance import (
@@ -17,6 +20,7 @@ from control_plane.build_provenance import (
     verify_generic_web_build,
 )
 from control_plane.contracts.artifact_identity import BuildPurpose
+from control_plane.github_read_cache import GitHubReadCache
 from tests.support.artifact_manifests import artifact_manifest_v2
 
 REPOSITORY = "example/site"
@@ -114,6 +118,86 @@ def _verify(
 
 
 class BuildProvenanceTests(unittest.TestCase):
+    def test_quota_deadline_honors_reset_and_retry_after(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        reset = now + timedelta(minutes=10)
+        later = now + timedelta(minutes=20)
+        for retry_after in ("1200", format_datetime(later)):
+            headers = Message()
+            headers["X-RateLimit-Remaining"] = "0"
+            headers["X-RateLimit-Reset"] = str(int(reset.timestamp()))
+            headers["Retry-After"] = retry_after
+            failure = HTTPError("https://api.github.com", 403, "Limited", headers, None)
+            self.addCleanup(failure.close)
+            with (
+                self.subTest(retry_after=retry_after),
+                patch("control_plane.build_provenance.datetime", wraps=datetime) as clock,
+                patch("control_plane.build_provenance.urlopen", side_effect=failure),
+                self.assertRaises(BuildProvenanceError) as caught,
+            ):
+                clock.now.return_value = now
+                GitHubBuildProvenanceTransport(token="deadline").get_json(
+                    "/repos/example/site/commits"
+                )
+            self.assertEqual(datetime.fromisoformat(caught.exception.retry_at), later)
+
+    def test_cached_history_never_substitutes_for_forbidden_or_unvalidated_responses(self) -> None:
+        path = "/repos/example/site/commits"
+        for status, primed in ((403, True), (304, False)):
+            cache = GitHubReadCache()
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = b"[]"
+            response.__enter__.return_value.headers = {"ETag": '"history"'}
+            failure = HTTPError(path, status, "Unavailable", Message(), None)
+            self.addCleanup(failure.close)
+            with (
+                self.subTest(status=status),
+                patch(
+                    "control_plane.build_provenance.urlopen",
+                    side_effect=[response, failure] if primed else [failure],
+                ),
+            ):
+                transport = GitHubBuildProvenanceTransport(token="read", read_cache=cache)
+                if primed:
+                    transport.get_json(path)
+                with self.assertRaises(BuildProvenanceError) as caught:
+                    transport.get_json(path)
+                self.assertEqual(caught.exception.retry_at, "")
+
+    def test_conditional_history_reads_revalidate_and_keep_credentials_separate(self) -> None:
+        cache = GitHubReadCache()
+        path = "/repos/example/site/commits?sha=main&per_page=100&page=1"
+        first = MagicMock()
+        first.__enter__.return_value.read.return_value = b'[{"sha":"old"}]'
+        first.__enter__.return_value.headers = {"ETag": '"history-old"'}
+        changed = MagicMock()
+        changed.__enter__.return_value.read.return_value = b'[{"sha":"new"}]'
+        changed.__enter__.return_value.headers = {"ETag": '"history-new"'}
+        unchanged = HTTPError(path, 304, "Not Modified", Message(), None)
+        self.addCleanup(unchanged.close)
+        with patch(
+            "control_plane.build_provenance.urlopen", side_effect=[first, unchanged, changed, first]
+        ) as read:
+            result = cast(
+                list[dict[str, str]],
+                GitHubBuildProvenanceTransport(token="one", read_cache=cache).get_json(path),
+            )
+            result[0]["sha"] = "caller edit"
+            self.assertEqual(
+                GitHubBuildProvenanceTransport(token="one", read_cache=cache).get_json(path),
+                [{"sha": "old"}],
+            )
+            self.assertEqual(
+                GitHubBuildProvenanceTransport(token="one", read_cache=cache).get_json(path),
+                [{"sha": "new"}],
+            )
+            GitHubBuildProvenanceTransport(token="other", read_cache=cache).get_json(path)
+        requests = [call.args[0] for call in read.call_args_list]
+        self.assertIsNone(requests[0].get_header("If-none-match"))
+        self.assertEqual(requests[1].get_header("If-none-match"), '"history-old"')
+        self.assertEqual(requests[2].get_header("If-none-match"), '"history-old"')
+        self.assertIsNone(requests[3].get_header("If-none-match"))
+
     def test_http_metadata_is_bounded_and_exception_cause_survives_all_read_paths(self) -> None:
         for stage in ("json", "archive", "redirect"):
             for unsafe in ("private-secret\nInjected: value", "9" * 200, "60"):
@@ -235,6 +319,7 @@ class BuildProvenanceTests(unittest.TestCase):
                     )
                 evidence = json.loads(str(caught.exception).split(": ", 1)[1])
                 self.assertEqual(evidence["classification"], classification)
+                self.assertEqual(bool(caught.exception.retry_at), classification == "rate_limited")
                 for header, field in (
                     ("X-RateLimit-Remaining", "rate_limit_remaining"),
                     ("X-RateLimit-Reset", "rate_limit_reset"),
