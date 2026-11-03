@@ -689,7 +689,6 @@ class PlanningScopeTests(TestCase):
                     else:
                         with self.assertRaises(PlanningScopeReview) as held:
                             resolver("example/other")
-                        self.assertIsNotNone(held.exception.credential_failure)
                         assert held.exception.credential_failure is not None
                         self.assertEqual(held.exception.credential_failure.status_code, int(result))
                         self.assertEqual(tokens, ["main", "release"])

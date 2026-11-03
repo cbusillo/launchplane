@@ -384,7 +384,6 @@ class ApplicationAllocationTests(_ApplicationStateVolumeFixture):
         row = self.store.read_idempotency_record(
             scope=scope, route_path=ROUTE, idempotency_key="first-testing-setup"
         )
-        self.assertIsNotNone(row)
         assert row is not None
         self.store.write_idempotency_record(
             row.model_copy(
