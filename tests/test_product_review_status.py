@@ -273,7 +273,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.store.write_preview_record(_preview_read_record())
         self.store.write_preview_generation_record(_preview_generation_read_record())
 
-    def test_client_re_review_is_once_per_head_and_preserves_acceptance_and_checks(self) -> None:
+    def test_client_re_review_is_once_per_acceptance_and_version_and_preserves_checks(self) -> None:
         github = _GitHub()
         self._publish(github)
         self.assertEqual(github.comments, [])
@@ -321,6 +321,21 @@ class OwnerReviewStatusTests(unittest.TestCase):
             notification,
         )
         self.assertEqual(github.statuses[0]["state"], "pending")
+        legacy_notice = github.comments[-1]
+        legacy_notice["body"] = notification.replace(
+            notification.splitlines()[0],
+            f"<!-- launchplane:client-review-request:{github.head_sha} -->",
+            1,
+        )
+        legacy_notice["created_at"] = "2026-10-24T15:30:00Z"
+        self._publish(github)
+        self.assertEqual(len(github.comments), 2)
+        self.assertEqual(legacy_notice["body"], notification)
+        legacy_notice["body"] = notification.replace(
+            notification.splitlines()[0],
+            f"<!-- launchplane:client-review-request:{github.head_sha} -->",
+            1,
+        )
         self.assertEqual(
             self.store.list_product_review_decision_records(
                 repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
@@ -347,7 +362,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self._publish(github)
         self.assertEqual(len(github.comments), 3)
         github.body = "## Client test notes\nTry the changed page."
-        repaired_head = "c" * 40
+        repaired_head = "b" * 40
         repaired_acceptance = accepted.model_copy(
             update={
                 "record_id": "accepted-before-preview-failure",
@@ -406,7 +421,17 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self._publish(github)
         self._publish(github)
         self.assertEqual(len(github.comments), 4)
+        renewed_notice = github.comments[-1]["body"]
+        assert isinstance(renewed_notice, str)
+        self.assertIn(repaired_acceptance.record_id, renewed_notice.splitlines()[0])
         self.assertEqual(github.statuses[0]["state"], "success")
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY,
+                pull_request_number=_PULL_REQUEST,
+            )[0].record_id,
+            repaired_acceptance.record_id,
+        )
 
     def test_unavailable_preview_never_invites_the_client(self) -> None:
         self.store.write_preview_generation_record(_preview_generation_read_record(state="failed"))

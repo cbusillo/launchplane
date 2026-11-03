@@ -601,7 +601,7 @@ class OwnerReviewStatusPublisher:
             )
             body = "\n".join(
                 (
-                    f"<!-- launchplane:client-review-request:{facts.head_sha} -->",
+                    f"<!-- launchplane:client-review-request:{latest.record_id}:{facts.head_sha} -->",
                     f"@{profile.owner.github_login} this change needs another look.",
                     "",
                     f"Your acceptance covered version `{latest.head_sha}`. "
@@ -617,7 +617,10 @@ class OwnerReviewStatusPublisher:
                     owner_test_notes(facts.body).replace("@", "@\u200b"),
                     "",
                     f"[Open the preview and review this version]({review_url}). "
-                    "Write feedback on the pull request, and press Accept in Launchplane when the preview is right.",
+                    "Write feedback on the pull request, and press Accept in Launchplane when the preview is right."
+                    if latest.head_sha != facts.head_sha
+                    else f"[Open the current preview]({review_url}). Your acceptance still applies; "
+                    "this notice does not ask for another approval. Put feedback or answers on the pull request.",
                 )
             )
             publish_review_comment(
@@ -626,6 +629,12 @@ class OwnerReviewStatusPublisher:
                 body=body,
                 token=token,
                 app_id=self.github_feedback_app_id(control_plane_root=self.control_plane_root),
+                legacy_receipt=(
+                    f"<!-- launchplane:client-review-request:{facts.head_sha} -->",
+                    parse_launchplane_mutation_timestamp(
+                        latest.decided_at, field_name="Client acceptance"
+                    ).replace(microsecond=0),
+                ),
                 api_request=self.api_request,
             )
 
