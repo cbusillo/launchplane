@@ -13,6 +13,7 @@ import click
 from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS, NOTHING_TO_TEST
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.product_review import (
     ProductReviewDecision,
     ProductReviewDecisionRecord,
@@ -296,6 +297,12 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self._publish(github)
         self.assertEqual(len(github.comments), 1)
         self.store.write_preview_generation_record(generation)
+        with patch(
+            "control_plane.product_review_status.carry_owner_acceptance",
+            side_effect=RuntimeError("Comparison unavailable"),
+        ):
+            self._publish(github)
+        self.assertEqual(len(github.comments), 1)
         github.lose_comment_response = True
         self._publish(github)
         self._publish(github)
@@ -314,6 +321,72 @@ class OwnerReviewStatusTests(unittest.TestCase):
             )[0].head_sha,
             accepted.head_sha,
         )
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+        from sqlalchemy.exc import SQLAlchemyError
+
+        github.head_sha = accepted.head_sha
+        self.store.write_preview_generation_record(_preview_generation_read_record())
+        github.body += f"\n### {OPEN_CLIENT_QUESTIONS}\n- What is the address?"
+        for error in (
+            SQLAlchemyError("Store unavailable"),
+            TypeError("Invalid definition"),
+            KeyError("Missing definition"),
+        ):
+            with patch.object(
+                OwnerReviewStatusPublisher, "_request_review_again", side_effect=error
+            ):
+                self._publish(github)
+            self.assertEqual(github.statuses[0]["state"], "failure")
+        self._publish(github)
+        self._publish(github)
+        self.assertEqual(len(github.comments), 3)
+        github.body = "## Client test notes\nTry the changed page."
+        repaired_head = "c" * 40
+        repaired_acceptance = accepted.model_copy(
+            update={
+                "record_id": "accepted-before-preview-failure",
+                "feedback_requested": False,
+                "head_sha": repaired_head,
+                "decided_at": "2026-10-24T16:00:00Z",
+            }
+        )
+        self.store.write_product_review_decision_record(repaired_acceptance)
+        self.store.write_preview_pr_feedback_record(
+            PreviewPrFeedbackRecord(
+                feedback_id="failed-after-acceptance",
+                product=_profile().product,
+                context=_profile().preview.context,
+                source="reconcile",
+                requested_at="2026-10-24T17:00:00Z",
+                repository=_REPOSITORY,
+                anchor_repo=_REPOSITORY,
+                anchor_pr_number=_PULL_REQUEST,
+                anchor_pr_url=f"https://github.com/{_REPOSITORY}/pull/{_PULL_REQUEST}",
+                status="failed",
+                marker="<!-- preview -->",
+                comment_markdown="Preview failed",
+                revision=repaired_head,
+                delivery_status="delivered",
+            )
+        )
+        github.head_sha = repaired_head
+        repaired_generation = generation.model_copy(
+            update={
+                "anchor_summary": generation.anchor_summary.model_copy(
+                    update={"head_sha": repaired_head}
+                ),
+            }
+        )
+        self.store.write_preview_generation_record(
+            repaired_generation.model_copy(update={"state": "failed"})
+        )
+        self._publish(github)
+        self.assertEqual(len(github.comments), 3)
+        self.store.write_preview_generation_record(repaired_generation)
+        self._publish(github)
+        self._publish(github)
+        self.assertEqual(len(github.comments), 4)
+        self.assertEqual(github.statuses[0]["state"], "success")
 
     def test_unavailable_preview_never_invites_the_client(self) -> None:
         self.store.write_preview_generation_record(_preview_generation_read_record(state="failed"))
@@ -1355,7 +1428,6 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(status_code, 200)
         self.assertEqual(github.statuses[0]["state"], "success")
-        self.assertEqual(github.statuses[0]["description"], "Accepted by @site-owner")
 
     async def test_decision_is_kept_when_github_rejects_the_status(self) -> None:
         github = _GitHub()

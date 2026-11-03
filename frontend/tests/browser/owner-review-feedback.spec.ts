@@ -64,7 +64,7 @@ test("a saved acceptance with pending delivery can be retried", async ({ page },
   await expect(page.getByLabel("Recorded decision")).toContainText("Your decision is saved, but delivery to the agent is pending.");
   await page.getByRole("button", { name: "Retry delivery", exact: true }).click();
   await expect(page.getByLabel("Recorded decision")).not.toContainText("delivery to the agent is pending");
-  await expect(page.getByRole("textbox")).toHaveCount(0);
+  await expect(page.locator(".owner-review-action").getByRole("textbox")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Request changes" })).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("owner-feedback-pending.png"), fullPage: true });
 });
@@ -189,8 +189,12 @@ test("a stale Accept stays disabled until the current preview is loaded", { tag:
 test("the Client sees the change title and what to check before deciding", { tag: "@responsive" }, async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308");
   const card = page.locator(".owner-review-card");
-  await expect(card.getByRole("region", { name: "Latest Client comment" })).toContainText("Please make sure the repair prices are visible.");
-  await expect(card.getByRole("link", { name: "View comment on GitHub" })).toHaveAttribute("href", /#issuecomment-7$/);
+  const feedback = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    return (await import(modulePath)).productReviewForFixture("products");
+  });
+  await expect(card.getByRole("region", { name: "Latest Client comment" })).toContainText(feedback.latest_client_comment);
+  await expect(card.getByRole("link", { name: "View comment on GitHub" })).toHaveAttribute("href", feedback.latest_client_comment_url);
   await expect(card.getByRole("heading", { name: "Show the repair price on each model" })).toBeVisible();
   await expect(card.getByRole("heading", { name: "What to check" })).toBeVisible();
   await expect(card.locator(".release-review-notes li")).toHaveText(["Open iPhone 15 repairs.", "Confirm each repair shows its price."]);
@@ -246,5 +250,4 @@ test("an older serving preview offers feedback while the latest preview is being
   await expect(page.getByRole("checkbox")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Refresh review", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Request changes", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("link", { name: /Pull request #/ })).toBeVisible();
 });

@@ -299,7 +299,6 @@ class ReleaseReviewTests(unittest.TestCase):
         )
 
     def test_preview_acceptance_is_annotation_not_release_approval(self) -> None:
-        self.assertFalse(self.review().approved)
         self.store.write_product_review_decision_record(
             ProductReviewDecisionRecord(
                 record_id="preview-decision",

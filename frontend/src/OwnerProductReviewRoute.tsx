@@ -303,7 +303,7 @@ function ProductReviewCard({
       <ProductReviewNotes review={review} />
       {review.latest_client_comment ? (
         <section aria-label="Latest Client comment">
-          <h4>Your latest feedback on the pull request</h4>
+          <h4>Latest Client feedback on the pull request</h4>
           <blockquote>{review.latest_client_comment}</blockquote>
           {safeExternalUrl(review.latest_client_comment_url || "") ? (
             <a href={review.latest_client_comment_url} target="_blank" rel="noreferrer">View comment on GitHub</a>

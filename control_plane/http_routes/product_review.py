@@ -81,6 +81,7 @@ class ProductReviewDecisionEnvelope(BaseModel):
     reviewed_preview_url: str = Field(min_length=1)
     reviewed_generation_id: str = Field(min_length=1)
     decision: Literal["accepted"]
+    reason: Literal[""] = ""
 
 
 class ProductReviewFeedbackRetryEnvelope(BaseModel):

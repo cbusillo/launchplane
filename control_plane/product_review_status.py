@@ -7,13 +7,13 @@ accepting the owner-review check run.
 from contextlib import ExitStack
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 import hashlib
 from pathlib import Path
 from typing import Final, Literal
 from urllib.parse import quote, urlencode, urlsplit
 
-import click
 
 from control_plane.advisory_check_projection import (
     update_existing_advisory_check_projection,
@@ -45,6 +45,7 @@ from control_plane.product_review import (
     ProductReviewStore,
     applicable_product_review_decisions,
     preview_review_unavailability,
+    source_control_compare_url,
 )
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
@@ -248,7 +249,7 @@ class OwnerReviewStatusPublisher:
                             base_branch=facts.base_branch,
                         )
                         if not synthetic:
-                            written = self._write_status(
+                            result = self._write_status(
                                 store=store,
                                 profile=profile,
                                 pull_request_number=pull_request_number,
@@ -259,9 +260,20 @@ class OwnerReviewStatusPublisher:
                                 and profile.owner.review_label.strip().casefold()
                                 not in facts.labels,
                             )
+                            if result is not None:
+                                written, carry_checked = result
+                                if carry_checked:
+                                    self._request_review_again(
+                                        store=store,
+                                        profile=profile,
+                                        pull_request_number=pull_request_number,
+                                        facts=facts,
+                                        token=token,
+                                        preview_request=preview_request,
+                                    )
             except Exception:
                 _LOGGER.warning(
-                    "Client review status could not be written.",
+                    "Client review publication could not finish.",
                     exc_info=True,
                     extra={"repository": repository, "pull_request_number": pull_request_number},
                 )
@@ -385,7 +397,7 @@ class OwnerReviewStatusPublisher:
         token: str,
         existing_only: bool = False,
         preview_request: ProductReconcileRequestRecord | None = None,
-    ) -> OwnerReviewStatus | None:
+    ) -> tuple[OwnerReviewStatus, bool] | None:
         intent = change_client_review(
             body=facts.body,
             labels=facts.labels,
@@ -393,6 +405,7 @@ class OwnerReviewStatusPublisher:
             pure_dependency_update=facts.pure_dependency_update,
             director_standing=profile.release_on_acceptance == "director_standing",
         )
+        carry_checked = False
         if existing_only:
             status = OwnerReviewStatus(
                 state="neutral", description="No Client preview review required"
@@ -427,7 +440,7 @@ class OwnerReviewStatusPublisher:
                     base_branch=facts.base_branch,
                 )
         else:
-            status = self._required_review_status(
+            status, carry_checked = self._required_review_status(
                 store=store,
                 profile=profile,
                 pull_request_number=pull_request_number,
@@ -476,7 +489,7 @@ class OwnerReviewStatusPublisher:
                 installation_token=installation_token,
                 api_request=self.api_request,
             )
-        return status
+        return status, carry_checked
 
     def _required_review_status(
         self,
@@ -487,7 +500,8 @@ class OwnerReviewStatusPublisher:
         facts: _PullRequestFacts,
         token: str,
         preview_request: ProductReconcileRequestRecord | None = None,
-    ) -> OwnerReviewStatus:
+    ) -> tuple[OwnerReviewStatus, bool]:
+        carry_checked = True
         try:
             record_decision_base(
                 store=store,
@@ -505,6 +519,7 @@ class OwnerReviewStatusPublisher:
                 read=lambda path: self.api_request(path=path, token=token),
             )
         except Exception:
+            carry_checked = False
             # Not carried: the head waits for the Client, as it would without a carry.
             _LOGGER.warning(
                 "Client acceptance could not be checked for a carry.",
@@ -514,6 +529,34 @@ class OwnerReviewStatusPublisher:
                     "pull_request_number": pull_request_number,
                 },
             )
+        return owner_review_status(
+            profile=profile,
+            pull_request_number=pull_request_number,
+            head_sha=facts.head_sha,
+            decisions=store.list_product_review_decision_records(
+                repository=profile.repository,
+                pull_request_number=pull_request_number,
+            ),
+            base_branch=facts.base_branch,
+            preview_unavailability=lambda: preview_review_unavailability(
+                store=store,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=facts.head_sha,
+                request=preview_request,
+            ),
+        ), carry_checked
+
+    def _request_review_again(
+        self,
+        *,
+        store: ProductReviewStore,
+        profile: LaunchplaneProductProfileRecord,
+        pull_request_number: int,
+        facts: _PullRequestFacts,
+        token: str,
+        preview_request: ProductReconcileRequestRecord | None,
+    ) -> None:
         decisions = store.list_product_review_decision_records(
             repository=profile.repository, pull_request_number=pull_request_number
         )
@@ -532,7 +575,22 @@ class OwnerReviewStatusPublisher:
             facts.state == "open"
             and latest is not None
             and latest.decision == "accepted"
-            and (latest.head_sha != facts.head_sha or open_client_questions(facts.body))
+            and (
+                latest.head_sha != facts.head_sha
+                or open_client_questions(facts.body)
+                or any(
+                    feedback.product == profile.product
+                    and feedback.repository.casefold() == profile.repository.casefold()
+                    and feedback.anchor_pr_number == pull_request_number
+                    and feedback.revision == facts.head_sha
+                    and feedback.status == "failed"
+                    and datetime.fromisoformat(feedback.requested_at)
+                    > datetime.fromisoformat(latest.decided_at)
+                    for feedback in store.list_preview_pr_feedback_records(
+                        context_name=profile.preview.context
+                    )
+                )
+            )
             and not preview_review_unavailability(
                 store=store,
                 profile=profile,
@@ -552,10 +610,14 @@ class OwnerReviewStatusPublisher:
                     f"@{profile.owner.github_login} this change needs another look.",
                     "",
                     f"Your acceptance covered version `{latest.head_sha}`. "
-                    f"The current version is `{facts.head_sha}`.",
-                    f"[What changed since your acceptance](https://github.com/{profile.repository}/compare/{latest.head_sha}...{facts.head_sha})"
+                    f"The current version is `{facts.head_sha}`."
                     if latest.head_sha != facts.head_sha
-                    else "The test notes now have questions for you.",
+                    else f"Your earlier acceptance covers version `{facts.head_sha}`.",
+                    f"[What changed since your acceptance]({source_control_compare_url(repository=profile.repository, before=latest.head_sha, after=facts.head_sha)})"
+                    if latest.head_sha != facts.head_sha
+                    else "The test notes now have questions for you."
+                    if open_client_questions(facts.body)
+                    else "The preview failed after your acceptance and is ready again.",
                     "",
                     owner_test_notes(facts.body).replace("@", "@\u200b"),
                     "",
@@ -563,31 +625,14 @@ class OwnerReviewStatusPublisher:
                     "Write feedback on the pull request, and press Accept in Launchplane when the preview is right.",
                 )
             )
-            try:
-                publish_review_comment(
-                    repository=profile.repository,
-                    pull_request_number=pull_request_number,
-                    body=body,
-                    token=token,
-                    app_id=self.github_feedback_app_id(control_plane_root=self.control_plane_root),
-                    api_request=self.api_request,
-                )
-            except (click.ClickException, OSError, ValueError):
-                _LOGGER.warning("Client re-review notification is pending.", exc_info=True)
-        return owner_review_status(
-            profile=profile,
-            pull_request_number=pull_request_number,
-            head_sha=facts.head_sha,
-            decisions=decisions,
-            base_branch=facts.base_branch,
-            preview_unavailability=lambda: preview_review_unavailability(
-                store=store,
-                profile=profile,
+            publish_review_comment(
+                repository=profile.repository,
                 pull_request_number=pull_request_number,
-                head_sha=facts.head_sha,
-                request=preview_request,
-            ),
-        )
+                body=body,
+                token=token,
+                app_id=self.github_feedback_app_id(control_plane_root=self.control_plane_root),
+                api_request=self.api_request,
+            )
 
     def _advisory_token(self, repository: str, repository_id: str) -> GitHubAppInstallationToken:
         if self.github_app_token is not None:

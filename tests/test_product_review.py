@@ -498,7 +498,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
 
         before = await self._get(app, owner)
-        written = await self._post(app, owner, decision="accepted")
+        written = await self._post(app, owner, decision="accepted", reason="")
         after = await self._get(app, owner)
 
         self.assertEqual(before.status_code, 200)
