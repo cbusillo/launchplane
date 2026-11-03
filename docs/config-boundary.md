@@ -365,12 +365,18 @@ read Launchplane's merge policy; an unavailable policy read means enrollment
 is unknown. Repository metadata can link the canonical train procedure under
 `docs` without copying those values.
 
-In `pyproject.toml`, Black's `tool.black.target-version` list accepts its
-supported lowercase Python target identifiers with
+In root or nested `pyproject.toml` files, Black's `tool.black.target-version`
+list accepts its supported lowercase Python target identifiers with
 `repo_metadata_ergonomics` evidence. The allowance applies only to that list's
 string elements; other target fields, runtime/provider values, credentials and
 unsupported identifiers remain findings. Black's target vocabulary is defined
 in [its TargetVersion enum](https://github.com/psf/black/blob/26.5.1/src/black/mode.py).
+
+Ruff's `target-version` and `per-file-target-version` Python identifiers are
+also developer metadata in `pyproject.toml` under `tool.ruff`, or in `ruff.toml`
+and `.ruff.toml`, including nested configuration files. The same bounded
+Python identifier check applies; sibling provider targets and credentials
+remain findings. See [Ruff's settings](https://docs.astral.sh/ruff/settings/#target-version).
 
 The reusable config-authority workflow's `python-version` input selects the
 interpreter for both the audit tool and Python AST parsing. Consumers using

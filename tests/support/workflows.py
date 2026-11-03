@@ -1,33 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias, cast
+from typing import TypeAlias
 
 
 YamlScalar: TypeAlias = str | int | bool | None
 YamlValue: TypeAlias = YamlScalar | list["YamlValue"] | dict[str, "YamlValue"]
 YamlMapping: TypeAlias = dict[str, YamlValue]
-
-SAME_REPO_PULL_REQUEST_IF = (
-    "github.event_name != 'pull_request' || "
-    "github.event.pull_request.head.repo.full_name == github.repository"
-)
-LAUNCHPLANE_REQUEST_USES = (
-    "./.github/actions/launchplane-request",
-    "cbusillo/launchplane/.github/actions/launchplane-request",
-)
-
-
-@dataclass(frozen=True)
-class WorkflowInvariantViolation:
-    workflow: str
-    invariant: str
-    message: str
-
-    def __str__(self) -> str:
-        return f"{self.workflow} [{self.invariant}]: {self.message}"
 
 
 @dataclass(frozen=True)
@@ -60,32 +41,11 @@ class Workflow:
     data: Mapping[str, YamlValue]
 
     @property
-    def label(self) -> str:
-        return self.path.name
-
-    @property
-    def name(self) -> str:
-        return _string_value(self.data.get("name"), default=self.path.stem)
-
-    @property
     def jobs(self) -> Mapping[str, YamlValue]:
         return _mapping_value(self.data.get("jobs"))
 
-    @property
-    def permissions(self) -> Mapping[str, YamlValue]:
-        return _mapping_value(self.data.get("permissions"))
-
     def job(self, job_id: str) -> Mapping[str, YamlValue]:
         return _mapping_value(self.jobs.get(job_id))
-
-    def job_permissions(self, job_id: str) -> Mapping[str, YamlValue]:
-        job_permissions = _mapping_value(self.job(job_id).get("permissions"))
-        if job_permissions:
-            return job_permissions
-        return self.permissions
-
-    def job_uses(self, job_id: str) -> str:
-        return _string_value(self.job(job_id).get("uses"))
 
     def steps(self, job_id: str) -> tuple[WorkflowStep, ...]:
         raw_steps = _sequence_value(self.job(job_id).get("steps"))
@@ -101,26 +61,6 @@ class Workflow:
             if step.name == name:
                 return step
         return None
-
-
-class WorkflowInvariantChecker:
-    def __init__(self, workflow: Workflow) -> None:
-        self.workflow = workflow
-        self._violations: list[WorkflowInvariantViolation] = []
-
-    @property
-    def violations(self) -> tuple[WorkflowInvariantViolation, ...]:
-        return tuple(self._violations)
-
-    def require(self, condition: bool, invariant: str, message: str) -> None:
-        if not condition:
-            self._violations.append(
-                WorkflowInvariantViolation(
-                    workflow=self.workflow.label,
-                    invariant=invariant,
-                    message=message,
-                )
-            )
 
 
 class _YamlParser:
@@ -264,94 +204,6 @@ def load_workflow(path: str | Path) -> Workflow:
     return Workflow(path=workflow_path, data=data)
 
 
-def launchplane_request_steps(workflow: Workflow) -> tuple[WorkflowStep, ...]:
-    request_steps: list[WorkflowStep] = []
-    for job_id in workflow.jobs:
-        for step in workflow.steps(job_id):
-            if any(step.uses.startswith(prefix) for prefix in LAUNCHPLANE_REQUEST_USES):
-                request_steps.append(step)
-    return tuple(request_steps)
-
-
-def workflow_scalar_values(value: YamlValue, path: str = "") -> Iterable[tuple[str, str]]:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            child_path = f"{path}.{key}" if path else key
-            yield from workflow_scalar_values(child, child_path)
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            yield from workflow_scalar_values(child, f"{path}[{index}]")
-    elif isinstance(value, str):
-        yield path, value
-    elif value is not None:
-        yield path, str(value)
-
-
-def check_launchplane_oidc_permissions(
-    workflow: Workflow,
-) -> tuple[WorkflowInvariantViolation, ...]:
-    checker = WorkflowInvariantChecker(workflow)
-    invariant = "launchplane-request-oidc-permissions"
-    for step in launchplane_request_steps(workflow):
-        permissions = workflow.job_permissions(step.job_id)
-        checker.require(
-            _string_value(permissions.get("contents")) == "read",
-            invariant,
-            f"job {step.job_id!r} step {step.name!r} must grant contents: read",
-        )
-        checker.require(
-            _string_value(permissions.get("id-token")) == "write",
-            invariant,
-            f"job {step.job_id!r} step {step.name!r} must grant id-token: write",
-        )
-    return checker.violations
-
-
-def check_forbidden_scalar_values(
-    workflow: Workflow,
-    *,
-    forbidden_values: Sequence[str],
-    invariant: str,
-) -> tuple[WorkflowInvariantViolation, ...]:
-    checker = WorkflowInvariantChecker(workflow)
-    for scalar_path, scalar in workflow_scalar_values(cast("YamlValue", workflow.data)):
-        for forbidden_value in forbidden_values:
-            checker.require(
-                forbidden_value not in scalar,
-                invariant,
-                f"forbidden value {forbidden_value!r} appears at {scalar_path}",
-            )
-    return checker.violations
-
-
-def check_launchplane_request_contract(
-    workflow: Workflow,
-    *,
-    expected_steps: Mapping[str, Mapping[str, str]],
-    invariant: str,
-) -> tuple[WorkflowInvariantViolation, ...]:
-    checker = WorkflowInvariantChecker(workflow)
-    observed_steps = {step.name: step for step in launchplane_request_steps(workflow)}
-    for step_name, expected_with in expected_steps.items():
-        step = observed_steps.get(step_name)
-        checker.require(step is not None, invariant, f"missing request step {step_name!r}")
-        if step is None:
-            continue
-        for key, expected_value in expected_with.items():
-            checker.require(
-                _string_value(step.with_values.get(key)) == expected_value,
-                invariant,
-                f"step {step_name!r} must set {key}: {expected_value}",
-            )
-    extra_steps = set(observed_steps) - set(expected_steps)
-    checker.require(
-        not extra_steps,
-        invariant,
-        f"unexpected request steps: {sorted(extra_steps)}",
-    )
-    return checker.violations
-
-
 def _mapping_value(value: YamlValue | None) -> Mapping[str, YamlValue]:
     if isinstance(value, dict):
         return value
@@ -374,15 +226,6 @@ def _string_value(value: YamlValue | None, *, default: str = "") -> str:
     if isinstance(value, int):
         return str(value)
     return default
-
-
-def _runner_labels(value: YamlValue | None) -> tuple[str, ...]:
-    if isinstance(value, list):
-        return tuple(_string_value(item) for item in value)
-    scalar = _string_value(value)
-    if scalar:
-        return (scalar,)
-    return ()
 
 
 def _split_key_value(text: str, line_number: int) -> tuple[str, str]:

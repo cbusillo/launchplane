@@ -1,527 +1,289 @@
+from __future__ import annotations
+
 import json
 import os
-import re
 import subprocess
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from unittest import TestCase
 
-from tests.support.workflows import SAME_REPO_PULL_REQUEST_IF
+from scripts.verify_repository_pins import (
+    UNTRUSTED_RUN_EXPRESSION_PATTERN,
+    _requires_conjunct,
+    _runner_expression_excludes_forks,
+    workflow_violations,
+)
 from tests.support.workflows import load_workflow
-from control_plane.contracts.record_fields import GIT_SHA1_PATTERN
 
-
-USES_LINE_PATTERN = re.compile(
-    r"^\s*(?:-\s+)?uses:\s*(?P<reference>[^#\s]+)(?:\s+#\s*(?P<provenance>.+?))?\s*$"
-)
-VERSION_PROVENANCE_PATTERN = re.compile(r"^v\d+(?:\.\d+){0,2}(?:[-+][A-Za-z0-9.-]+)?$")
-CONTAINER_TAG_PATTERN = re.compile(r"^v?\d+(?:\.\d+){0,2}(?:[-+][A-Za-z0-9.-]+)?$")
-STATIC_CONTAINER_REFERENCE_PATTERN = re.compile(
-    r"(?P<source>(?:[a-z0-9.-]+/)+[a-z0-9._/-]+|postgres):"
-    r"(?P<tag>v?[0-9][A-Za-z0-9._-]*)"
-    r"(?:@sha256:(?P<digest>[0-9a-f]{64}))?"
-)
-LOCAL_REFERENCE_PREFIXES = ("./.github/actions/", "./.github/workflows/")
-SELF_REUSABLE_WORKFLOW_PREFIX = "cbusillo/launchplane/.github/workflows/"
-FIRST_PARTY_CROSS_REPOSITORY_ACTION_PREFIX = "cbusillo/launchplane/.github/actions/"
-MUTABLE_REFERENCE_ALLOWLIST: Mapping[Path, frozenset[str]] = {}
-PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
-    Path(".github/workflows/product-onboarding.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml"}
-    ),
-    Path(".github/workflows/generic-web-preview-authorization.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml"}
-    ),
-    Path(".github/workflows/route-binding-reconcile.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-route-binding-reconcile.yml"}
-    ),
-    Path(".github/workflows/external-route-binding-reconcile.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml"}
-    ),
-    Path(".github/workflows/ingress-route-apply.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-ingress-route-apply.yml"}
-    ),
-    Path(".github/workflows/ingress-route-dry-run.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-ingress-route-dry-run.yml"}
-    ),
-    Path(".github/workflows/product-health-monitoring.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml"}
-    ),
-    Path(".github/workflows/product-prelaunch-rebuild-policy.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-product-prelaunch-rebuild-policy.yml"}
-    ),
-    Path(".github/workflows/odoo-testing-route-binding-refresh.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-odoo-testing-route-binding-refresh.yml"}
-    ),
-    Path(".github/workflows/odoo-target-replacement-plan.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-plan.yml"}
-    ),
-    Path(".github/workflows/odoo-target-replacement-apply.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-apply.yml"}
-    ),
-    Path(".github/workflows/odoo-website-bootstrap-override.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml"}
-    ),
-    Path(".github/workflows/odoo-prod-backup-verification.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-verification.yml"}
-    ),
-    Path(".github/workflows/odoo-prod-backup-restore-plan.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-restore-plan.yml"}
-    ),
-    Path(".github/workflows/odoo-prod-backup-restore-apply.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-restore-apply.yml"}
-    ),
-    Path(".github/workflows/odoo-prod-retained-volume-backup-import-plan.yml"): frozenset(
-        {
-            "cbusillo/launchplane/.github/workflows/"
-            "reusable-odoo-prod-retained-volume-backup-import-plan.yml"
-        }
-    ),
-    Path(".github/workflows/odoo-prod-retained-volume-backup-import-apply.yml"): frozenset(
-        {
-            "cbusillo/launchplane/.github/workflows/"
-            "reusable-odoo-prod-retained-volume-backup-import-apply.yml"
-        }
-    ),
-    Path(".github/workflows/tracked-target-logs.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-tracked-target-logs.yml"}
-    ),
-    Path(".github/workflows/product-retirement.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml"}
-    ),
-    Path(".github/workflows/detached-application-retirement.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml"}
-    ),
-    Path(".github/workflows/product-onboarding-manifest.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-stable-lane-repair.yml"}
-    ),
-}
-
-
-@dataclass(frozen=True)
-class ActionClassification:
-    trust: str
-    privilege: str
-
-
-@dataclass(frozen=True)
-class ActionReference:
-    path: Path
-    line_number: int
-    reference: str
-    provenance: str | None
-
-    @property
-    def location(self) -> str:
-        return f"{self.path}:{self.line_number}"
-
-
-@dataclass(frozen=True)
-class ContainerReference:
-    path: Path
-    line_number: int
-    source: str
-    tag: str
-    digest: str | None
-
-    @property
-    def location(self) -> str:
-        return f"{self.path}:{self.line_number}"
-
-
-APPROVED_REMOTE_ACTIONS: Mapping[str, ActionClassification] = {
-    "actions/cache": ActionClassification("GitHub-maintained", "cache transport"),
-    "actions/cache/restore": ActionClassification("GitHub-maintained", "cache restore"),
-    "actions/cache/save": ActionClassification("GitHub-maintained", "cache persistence"),
-    "actions/checkout": ActionClassification("GitHub-maintained", "repository checkout"),
-    "actions/create-github-app-token": ActionClassification(
-        "GitHub-maintained", "short-lived GitHub App token minting"
-    ),
-    "actions/download-artifact": ActionClassification("GitHub-maintained", "artifact download"),
-    "actions/github-script": ActionClassification("GitHub-maintained", "GitHub API interaction"),
-    "actions/setup-node": ActionClassification("GitHub-maintained", "Node runtime bootstrap"),
-    "actions/upload-artifact": ActionClassification("GitHub-maintained", "artifact upload"),
-    "astral-sh/setup-uv": ActionClassification("Third-party publisher", "Python tool bootstrap"),
-    "cbusillo/launchplane/.github/actions/launchplane-request": ActionClassification(
-        "First-party cross-repository", "OIDC-authenticated Launchplane API requests"
-    ),
-    "cbusillo/launchplane/.github/actions/generic-web-deploy-recovery-dry-run": (
-        ActionClassification(
-            "First-party cross-repository",
-            "bounded legacy generic-web deploy reservation inspection",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "protected generic-web target and record apply",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "protected generic-web preview authorization rotation and retirement",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-route-binding-reconcile.yml": (
-        ActionClassification("First-party same-repository", "route authority reconciliation")
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-odoo-testing-route-binding-refresh.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "testing route-binding evidence refresh",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-plan.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "exact-instance Odoo target replacement planning",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-odoo-target-replacement-apply.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "exact-instance Odoo target replacement apply",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-odoo-website-bootstrap-override.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "exact-instance Odoo website-bootstrap repair",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-verification.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "exact-instance Odoo production backup verification",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-restore-plan.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "exact-instance Odoo production backup restore planning",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-backup-restore-apply.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "exact-instance Odoo production backup restore apply",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-retained-volume-backup-import-plan.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "exact-instance Odoo retained-volume backup import planning",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-retained-volume-backup-import-apply.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "exact-instance Odoo retained-volume backup import apply",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-external-route-binding-reconcile.yml": (
-        ActionClassification(
-            "First-party same-repository", "external route authority reconciliation"
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-ingress-route-apply.yml": (
-        ActionClassification(
-            "First-party same-repository", "exact-instance reviewed ingress evidence apply"
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-ingress-route-dry-run.yml": (
-        ActionClassification(
-            "First-party same-repository", "exact-instance ingress route inspection"
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-product-health-monitoring.yml": (
-        ActionClassification(
-            "First-party same-repository", "exact-instance product health policy mutation"
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-product-prelaunch-rebuild-policy.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "exact-instance product prelaunch rebuild policy mutation",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-tracked-target-logs.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "exact-instance redacted target-log diagnostics",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-product-retirement.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "protected immutable product retirement",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-detached-application-retirement.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "protected immutable detached application retirement",
-        )
-    ),
-    "cbusillo/launchplane/.github/workflows/reusable-stable-lane-repair.yml": (
-        ActionClassification(
-            "First-party same-repository",
-            "protected immutable stable-lane profile repair",
-        )
-    ),
-    "docker/build-push-action": ActionClassification(
-        "Third-party publisher", "container build and publication"
-    ),
-    "docker/login-action": ActionClassification(
-        "Third-party publisher", "container registry authentication"
-    ),
-    "docker/setup-buildx-action": ActionClassification(
-        "Third-party publisher", "container build bootstrap"
-    ),
-    "github/codeql-action/analyze": ActionClassification(
-        "GitHub-maintained", "code scanning analysis"
-    ),
-    "github/codeql-action/init": ActionClassification(
-        "GitHub-maintained", "code scanning initialization"
-    ),
-}
-APPROVED_CONTAINER_IMAGES: Mapping[str, ActionClassification] = {
-    "mcr.microsoft.com/playwright": ActionClassification(
-        "First-party publisher", "isolated browser-smoke runtime"
-    ),
-    "ghcr.io/aquasecurity/trivy": ActionClassification(
-        "Third-party publisher", "runtime image vulnerability scanning"
-    ),
-    "ghcr.io/gitleaks/gitleaks": ActionClassification(
-        "Third-party publisher", "repository secret scanning"
-    ),
-    "postgres": ActionClassification("Official image", "integration-test database"),
-    "rhysd/actionlint": ActionClassification("Third-party publisher", "workflow linting"),
-}
-
-
-UNTRUSTED_RUN_EXPRESSION_PATTERN = re.compile(
-    r"\$\{\{[^}]*\b(?:inputs\s*[.\[]|github\s*(?:\.\s*event\b|\[\s*'event'|\.\s*head_ref\b"
-    r"|\[\s*'head_ref'))"
+_SAME_REPO_CONDITION = (
+    "github.event_name != 'pull_request' || "
+    "github.event.pull_request.head.repo.full_name == github.repository"
 )
 
 
-def _normalized_expression(expression: str) -> str:
-    return " ".join(expression.split())
-
-
-def _strip_enclosing_parentheses(expression: str) -> str:
-    while expression.startswith("(") and expression.endswith(")"):
-        depth = 0
-        for index, character in enumerate(expression):
-            depth += {"(": 1, ")": -1}.get(character, 0)
-            if depth == 0 and index < len(expression) - 1:
-                return expression
-        expression = expression[1:-1].strip()
-    return expression
-
-
-def _requires_conjunct(expression: str, required: str) -> bool:
-    """Whether `required` must hold for the whole expression to be true."""
-    expression = _normalized_expression(expression)
-    if expression.startswith("${{") and expression.endswith("}}"):
-        expression = expression[3:-2].strip()
-    expression = _strip_enclosing_parentheses(expression)
-    required = _strip_enclosing_parentheses(_normalized_expression(required))
-    if expression == required:
-        return True
-    conjuncts: list[str] = []
-    depth = 0
-    start = 0
-    index = 0
-    while index < len(expression):
-        character = expression[index]
-        depth += {"(": 1, ")": -1}.get(character, 0)
-        if depth == 0 and expression.startswith("||", index):
-            return False
-        if depth == 0 and expression.startswith("&&", index):
-            conjuncts.append(expression[start:index].strip())
-            start = index + 2
-            index += 1
-        index += 1
-    conjuncts.append(expression[start:].strip())
-    return any(
-        conjunct != expression and _requires_conjunct(conjunct, required) for conjunct in conjuncts
-    )
-
-
-def _runner_expression_excludes_forks(expression: str) -> bool:
-    """Prove the static runner choice gates its self-hosted branch before checkout."""
-    match = re.fullmatch(
-        r"\$\{\{\s*fromJSON\((?P<condition>.*?)\s*&&\s*"
-        r"'(?P<reserved>\[.*?])'\s*\|\|\s*'(?P<hosted>\[.*?])'\s*\)\s*}}",
-        expression,
-        flags=re.DOTALL,
-    )
-    if match is None:
-        return False
-    try:
-        reserved = json.loads(match["reserved"])
-        hosted = json.loads(match["hosted"])
-    except json.JSONDecodeError:
-        return False
+def _safe_workflow() -> str:
     return (
-        isinstance(reserved, list)
-        and "self-hosted" in reserved
-        and isinstance(hosted, list)
-        and bool(hosted)
-        and all(isinstance(label, str) and label != "self-hosted" for label in hosted)
-        and _requires_conjunct(match["condition"], SAME_REPO_PULL_REQUEST_IF)
+        '"on": [pull_request, pull_request_target]\n'
+        "jobs:\n  arbitrary_job:\n"
+        "    runs-on: [self-hosted, fixture]\n"
+        f"    if: {_SAME_REPO_CONDITION}\n"
+        f"    container: postgres:17@sha256:{'b' * 64}\n"
+        "    steps:\n"
+        f"      - uses: actions/checkout@{'a' * 40} # v1.0.0\n"
+        '      - run: echo "$TITLE"\n'
+        "        env:\n          TITLE: ${{ github.event.pull_request.title }}\n"
+        f"      - run: docker run --volume /var/lib/postgresql/data:rw postgres:17@sha256:{'b' * 64}\n"
     )
-
-
-def _run_scripts() -> Iterator[tuple[Path, str, str]]:
-    for path in _action_reference_files():
-        data = load_workflow(path).data
-        jobs = data.get("jobs")
-        step_groups: list[tuple[str, object]] = []
-        if isinstance(jobs, dict):
-            step_groups.extend(
-                (str(job_id), job.get("steps"))
-                for job_id, job in jobs.items()
-                if isinstance(job, dict)
-            )
-        runs = data.get("runs")
-        if isinstance(runs, dict):
-            step_groups.append(("runs", runs.get("steps")))
-        for group, steps in step_groups:
-            if not isinstance(steps, list):
-                continue
-            for step in steps:
-                if isinstance(step, dict) and isinstance(step.get("run"), str):
-                    yield path, f"{group}:{step.get('name') or step.get('id') or '?'}", step["run"]
-
-
-def _action_reference_files() -> tuple[Path, ...]:
-    workflow_root = Path(".github/workflows")
-    workflow_files = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
-    composite_action_files = sorted(Path(".github/actions").rglob("action.y*ml"))
-    return tuple(workflow_files + composite_action_files)
-
-
-def _action_references() -> Iterator[ActionReference]:
-    for path in _action_reference_files():
-        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            match = USES_LINE_PATTERN.match(line)
-            if match is None:
-                continue
-            yield ActionReference(
-                path=path,
-                line_number=line_number,
-                reference=match.group("reference"),
-                provenance=match.group("provenance"),
-            )
-
-
-def _container_references() -> Iterator[ContainerReference]:
-    for path in sorted(Path(".github/workflows").glob("*.yml")):
-        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            for match in STATIC_CONTAINER_REFERENCE_PATTERN.finditer(line):
-                yield ContainerReference(
-                    path=path,
-                    line_number=line_number,
-                    source=match.group("source"),
-                    tag=match.group("tag"),
-                    digest=match.group("digest"),
-                )
 
 
 class GitHubActionsSecurityTests(TestCase):
-    def test_local_launchplane_request_actions_use_trusted_same_repo_checkout(self) -> None:
-        violations: list[str] = []
-        workflow_root = Path(".github/workflows")
-        workflow_paths = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
-        for path in workflow_paths:
-            workflow = load_workflow(path)
-            trigger = workflow.data.get("on")
-            if not isinstance(trigger, dict):
-                trigger = {}
-            for job_id in workflow.jobs:
-                local_steps = [
-                    step
-                    for step in workflow.steps(job_id)
-                    if step.uses == "./.github/actions/launchplane-request"
-                ]
-                if not local_steps:
-                    continue
-                checkout_steps = [
-                    step
-                    for step in workflow.steps(job_id)
-                    if step.uses.startswith("actions/checkout@")
-                ]
-                if "workflow_call" in trigger:
-                    violations.append(
-                        f"{path}:{job_id}: workflow_call jobs must use the immutable remote "
-                        "launchplane-request action because local action code can come from the caller."
-                    )
-                if len(checkout_steps) != 1:
-                    violations.append(
-                        f"{path}:{job_id}: local launchplane-request use requires exactly one "
-                        "trusted checkout step."
-                    )
-                    continue
-                checkout = checkout_steps[0]
-                if "repository" in checkout.with_values or "ref" in checkout.with_values:
-                    violations.append(
-                        f"{path}:{job_id}: local launchplane-request checkout must use the "
-                        "workflow's exact same-repository revision without repository/ref overrides."
+    def test_arbitrary_workflow_with_all_safety_properties_passes(self) -> None:
+        self.assertEqual(
+            workflow_violations(_safe_workflow(), path=Path(".github/workflows/unrelated.yaml")), []
+        )
+
+    def test_environment_names_are_not_action_or_script_fields(self) -> None:
+        workflow = _safe_workflow() + "env:\n  uses: fixture-value\n  run: ${{ inputs.title }}\n"
+        self.assertEqual(
+            workflow_violations(workflow, path=Path(".github/workflows/unrelated.yml")), []
+        )
+
+    def test_unsafe_workflow_properties_are_refused(self) -> None:
+        safe = _safe_workflow()
+        cases = (
+            ("mutable action", safe.replace("a" * 40, "main"), "action_reference_not_immutable"),
+            (
+                "untrusted checkout",
+                safe.replace(
+                    " # v1.0.0",
+                    " # v1.0.0\n        with:\n          ref: ${{ github.event.pull_request.head.sha }}",
+                ),
+                "pull_request_target_checkout_untrusted",
+            ),
+            ("missing digest", safe.replace("@sha256:" + "b" * 64, ""), "container_digest_missing"),
+            (
+                "fork runner",
+                safe.replace(f"    if: {_SAME_REPO_CONDITION}\n", ""),
+                "runner_fork_isolation_missing",
+            ),
+            (
+                "fork guard bypass",
+                safe.replace(
+                    f"if: {_SAME_REPO_CONDITION}",
+                    f"if: ({_SAME_REPO_CONDITION}) || always()",
+                ),
+                "runner_fork_isolation_missing",
+            ),
+            (
+                "unproven dynamic runner",
+                safe.replace("[self-hosted, fixture]", "${{ matrix.runner }}").replace(
+                    f"    if: {_SAME_REPO_CONDITION}\n", ""
+                ),
+                "runner_fork_isolation_missing",
+            ),
+            (
+                "untrusted shell input",
+                safe.replace('echo "$TITLE"', 'echo "${{ github.event.pull_request.title }}"'),
+                "untrusted_run_expression",
+            ),
+            (
+                "unclassified action",
+                safe.replace("actions/checkout@", "unknown/action@"),
+                "action_source_unclassified",
+            ),
+            (
+                "unclassified image",
+                safe.replace("postgres:17", "unknown/image:17"),
+                "container_source_unclassified",
+            ),
+            (
+                "service image",
+                safe.replace(
+                    "    steps:", "    services:\n      db:\n        image: postgres:17\n    steps:"
+                ),
+                "container_digest_missing",
+            ),
+            (
+                "script image",
+                safe.replace('echo "$TITLE"', "docker run postgres:17"),
+                "container_digest_missing",
+            ),
+            (
+                "embedded topology",
+                safe.replace('echo "$TITLE"', "echo odoo-tenant-cm"),
+                "product_topology_embedded",
+            ),
+        )
+        for name, workflow, code in cases:
+            with self.subTest(name=name):
+                self.assertIn(
+                    code,
+                    {
+                        v.code
+                        for v in workflow_violations(
+                            workflow, path=Path(".github/workflows/unrelated.yaml")
+                        )
+                    },
+                )
+
+    def test_local_request_action_requires_prior_trusted_checkout(self) -> None:
+        safe = _safe_workflow().replace(
+            '      - run: echo "$TITLE"',
+            '      - uses: ./.github/actions/launchplane-request\n      - run: echo "$TITLE"',
+        )
+        self.assertEqual(
+            workflow_violations(safe, path=Path(".github/workflows/unrelated.yml")), []
+        )
+        for workflow in (
+            safe.replace("pull_request, pull_request_target", "workflow_call"),
+            safe.replace(" # v1.0.0", " # v1.0.0\n        with:\n          ref: refs/heads/other"),
+            safe.replace(
+                "    steps:\n", "    steps:\n      - uses: ./.github/actions/launchplane-request\n"
+            ),
+        ):
+            with self.subTest(workflow=workflow):
+                self.assertIn(
+                    "local_request_checkout_untrusted",
+                    {
+                        v.code
+                        for v in workflow_violations(
+                            workflow, path=Path(".github/workflows/unrelated.yml")
+                        )
+                    },
+                )
+
+    def test_guard_text_inside_a_string_does_not_isolate_forks(self) -> None:
+        text = "'x && github.event.pull_request.head.repo.full_name == github.repository && y'"
+        workflow = _safe_workflow().replace(
+            f"if: {_SAME_REPO_CONDITION}", f'if: "{text} == {text}"'
+        )
+        self.assertIn(
+            "runner_fork_isolation_missing",
+            {
+                item.code
+                for item in workflow_violations(
+                    workflow, path=Path(".github/workflows/unrelated.yml")
+                )
+            },
+        )
+
+    def test_trusted_pull_request_target_refs_pass(self) -> None:
+        for ref in (
+            "${{ github.sha }}",
+            "${{ github.event.pull_request.base.sha }}",
+            "refs/heads/reviewed-base",
+            "c" * 40,
+        ):
+            with self.subTest(ref=ref):
+                workflow = _safe_workflow().replace(
+                    " # v1.0.0", f" # v1.0.0\n        with:\n          ref: {ref}"
+                )
+                self.assertEqual(
+                    workflow_violations(workflow, path=Path(".github/workflows/unrelated.yml")), []
+                )
+
+    def test_reusable_checkout_of_pr_head_requires_excluding_target_event(self) -> None:
+        for checkout in (
+            "ref: ${{ github.event.pull_request.head.sha }}",
+            "ref: ${{ github['event']['pull_request']['head']['sha'] }}",
+            "ref: ${{ github . event . pull_request . head . sha }}",
+            "ref: ${{ github.head_ref }}",
+            "ref: refs/pull/${{ github.event.pull_request.number }}/merge",
+            "ref: refs/pull/${{ github.event.number }}/head",
+            "ref: ${{ github.event.pull_request.merge_commit_sha }}",
+            "repository: ${{ github.event.pull_request.head.repo.full_name }}",
+        ):
+            workflow = (
+                _safe_workflow()
+                .replace("pull_request, pull_request_target", "workflow_call")
+                .replace(" # v1.0.0", f" # v1.0.0\n        with:\n          {checkout}")
+            )
+            with self.subTest(checkout=checkout):
+                self.assertIn(
+                    "pull_request_target_checkout_untrusted",
+                    {item.code for item in workflow_violations(workflow, path=Path("fixture.yml"))},
+                )
+                ordinary_only = workflow.replace(
+                    f"if: {_SAME_REPO_CONDITION}",
+                    "if: github.event_name != 'pull_request_target'",
+                )
+                self.assertEqual(workflow_violations(ordinary_only, path=Path("fixture.yml")), [])
+
+    def test_browser_images_match_the_supplied_dependency_version(self) -> None:
+        for version in ("9.8.7", "8.7.6"):
+            workflow = _safe_workflow().replace(
+                "postgres:17", f"mcr.microsoft.com/playwright:v{version}-noble"
+            )
+            with self.subTest(version=version):
+                self.assertEqual(
+                    workflow_violations(
+                        workflow, path=Path("fixture.yml"), playwright_version=version
+                    ),
+                    [],
+                )
+                for dependency_version in (None, "0.0.1"):
+                    self.assertIn(
+                        "browser_image_version_mismatch",
+                        {
+                            item.code
+                            for item in workflow_violations(
+                                workflow,
+                                path=Path("fixture.yml"),
+                                playwright_version=dependency_version,
+                            )
+                        },
                     )
 
-        self.assertEqual([], violations)
+    def test_composites_share_checkout_and_request_action_trust(self) -> None:
+        base = (
+            "runs:\n  using: composite\n  steps:\n"
+            f"    - uses: actions/checkout@{'a' * 40} # v1.0.0\n"
+        )
+        unsafe = base + "      with:\n        ref: ${{ github.event.pull_request.head.sha }}\n"
+        for action, code in (
+            (unsafe, "pull_request_target_checkout_untrusted"),
+            (
+                base + "    - uses: ./.github/actions/launchplane-request\n",
+                "local_request_checkout_untrusted",
+            ),
+            (
+                "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/launchplane-request\n",
+                "local_request_checkout_untrusted",
+            ),
+        ):
+            with self.subTest(code=code, action=action):
+                self.assertIn(
+                    code,
+                    {item.code for item in workflow_violations(action, path=Path("action.yml"))},
+                )
+        ordinary_only = unsafe.replace(
+            "      with:", "      if: github.event_name != 'pull_request_target'\n      with:"
+        )
+        self.assertEqual(workflow_violations(ordinary_only, path=Path("action.yml")), [])
+        remote_request = base + (
+            "    - uses: cbusillo/launchplane/.github/actions/launchplane-request@"
+            f"{'a' * 40} # launchplane-request\n"
+        )
+        self.assertEqual(workflow_violations(remote_request, path=Path("action.yml")), [])
 
-    def test_pull_request_jobs_on_self_hosted_runners_exclude_forks(self) -> None:
-        same_repo_guard = f"({SAME_REPO_PULL_REQUEST_IF})"
-        violations: list[str] = []
-        workflow_root = Path(".github/workflows")
-        workflow_paths = sorted((*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")))
-        for path in workflow_paths:
-            workflow = load_workflow(path)
-            trigger = workflow.data.get("on")
-            if isinstance(trigger, dict):
-                events = set(trigger)
-            elif isinstance(trigger, list):
-                events = {str(event) for event in trigger}
-            else:
-                events = {str(trigger)}
-            if "pull_request" not in events:
-                continue
-            for job_id in workflow.jobs:
-                job = workflow.job(job_id)
-                runs_on = job.get("runs-on")
-                labels = runs_on if isinstance(runs_on, list) else [runs_on]
-                # Selector scripts run from the checked-out PR and are not a
-                # trust boundary: dynamic CI lanes still need the job guard.
-                if not any(
-                    "self-hosted" in str(label) or "needs.runner_pool.outputs.runner" in str(label)
-                    for label in labels
-                ):
-                    continue
-                condition = str(job.get("if", ""))
-                if "always()" in condition and not _requires_conjunct(condition, "!cancelled()"):
-                    violations.append(
-                        f"{path}:{job_id}: self-hosted pull_request jobs using always() "
-                        "must stop on cancellation so they release superseded runs."
-                    )
-                if not (
-                    _requires_conjunct(condition, same_repo_guard)
-                    or _runner_expression_excludes_forks(str(runs_on))
-                ):
-                    violations.append(
-                        f"{path}:{job_id}: self-hosted pull_request jobs must be gated to "
-                        "same-repository pull requests."
-                    )
+    def test_one_bad_image_is_reported_once(self) -> None:
+        workflow = _safe_workflow().replace("@sha256:" + "b" * 64, "", 1)
+        self.assertEqual(
+            [item.code for item in workflow_violations(workflow, path=Path("fixture.yml"))],
+            ["container_digest_missing"],
+        )
 
-        self.assertEqual([], violations)
+    def test_reference_comments_belong_to_each_occurrence(self) -> None:
+        reference = f"actions/checkout@{'a' * 40}"
+        workflow = _safe_workflow() + f"      - uses: {reference}\n"
+        self.assertEqual(
+            [item.code for item in workflow_violations(workflow, path=Path("fixture.yml"))],
+            ["action_provenance_invalid"],
+        )
+        commented = workflow.rstrip() + f" # v1.0.0\n      - run: echo '{reference}'\n"
+        self.assertEqual(workflow_violations(commented, path=Path("fixture.yml")), [])
 
     def test_static_runner_choice_requires_trust_before_self_hosted_selection(self) -> None:
-        guard = f"({SAME_REPO_PULL_REQUEST_IF})"
+        guard = f"({_SAME_REPO_CONDITION})"
         for condition, fallback, safe in (
             (f"{guard} && startsWith(github.head_ref, 'candidate/')", '["ubuntu-latest"]', True),
             ("startsWith(github.head_ref, 'candidate/')", '["ubuntu-latest"]', False),
@@ -539,7 +301,7 @@ class GitHubActionsSecurityTests(TestCase):
                 self.assertEqual(_runner_expression_excludes_forks(expression), safe)
 
     def test_same_repository_guard_must_hold_for_the_whole_condition(self) -> None:
-        guard = f"({SAME_REPO_PULL_REQUEST_IF})"
+        guard = f"({_SAME_REPO_CONDITION})"
         for expression, required in (
             (f"needs.a.outputs.verified != 'true' && {guard}", True),
             (f"{guard} && always()", True),
@@ -569,17 +331,6 @@ class GitHubActionsSecurityTests(TestCase):
                 self.assertEqual(
                     UNTRUSTED_RUN_EXPRESSION_PATTERN.search(script) is not None, matches
                 )
-
-    def test_run_scripts_read_untrusted_values_through_the_environment(self) -> None:
-        # An expression in a run script is pasted into the shell before it runs,
-        # so a crafted input or event field becomes code. Pass it through env.
-        violations = [
-            f"{path}:{step}: {match.group()}"
-            for path, step, script in _run_scripts()
-            for match in UNTRUSTED_RUN_EXPRESSION_PATTERN.finditer(script)
-        ]
-
-        self.assertEqual([], violations)
 
     def test_product_repo_config_authority_revision_validation_fails_closed(self) -> None:
         workflow = load_workflow(".github/workflows/reusable-product-repo-config-authority.yml")
@@ -626,103 +377,3 @@ class GitHubActionsSecurityTests(TestCase):
                     expected_exit_code,
                     f"stdout={result.stdout}\nstderr={result.stderr}",
                 )
-
-    def test_action_reference_parser_covers_inline_step_syntax(self) -> None:
-        match = USES_LINE_PATTERN.match(
-            "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
-        )
-
-        assert match is not None
-        self.assertEqual(
-            match.group("reference"),
-            "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
-        )
-        self.assertEqual(match.group("provenance"), "v7.0.0")
-
-    def test_remote_action_references_are_classified_and_immutably_pinned(self) -> None:
-        violations: list[str] = []
-
-        for action in _action_references():
-            if action.reference.startswith("./"):
-                if not action.reference.startswith(LOCAL_REFERENCE_PREFIXES):
-                    violations.append(
-                        f"{action.location}: unsupported local action reference {action.reference!r}."
-                    )
-                if "@" in action.reference:
-                    violations.append(
-                        f"{action.location}: local action reference must not include a ref."
-                    )
-                continue
-
-            if action.reference in MUTABLE_REFERENCE_ALLOWLIST.get(action.path, frozenset()):
-                continue
-
-            source, separator, revision = action.reference.rpartition("@")
-            if not separator:
-                violations.append(
-                    f"{action.location}: remote action reference must include a full commit SHA."
-                )
-                continue
-            if source.startswith(SELF_REUSABLE_WORKFLOW_PREFIX):
-                allowed_pinned_sources = PINNED_SELF_REUSABLE_WORKFLOWS.get(
-                    action.path, frozenset()
-                )
-                if source not in allowed_pinned_sources:
-                    violations.append(
-                        f"{action.location}: same-repository reusable workflows must use a "
-                        "relative path unless the exact pinned identity is an approved trust anchor."
-                    )
-            if source not in APPROVED_REMOTE_ACTIONS:
-                violations.append(
-                    f"{action.location}: unclassified remote action source {source!r}."
-                )
-            if GIT_SHA1_PATTERN.fullmatch(revision) is None:
-                violations.append(
-                    f"{action.location}: remote action {source!r} must use a 40-character SHA."
-                )
-            if action.provenance is None:
-                violations.append(
-                    f"{action.location}: remote action {source!r} must document its provenance."
-                )
-            elif source == "cbusillo/launchplane/.github/actions/launchplane-request":
-                if action.provenance != "launchplane-request":
-                    violations.append(
-                        f"{action.location}: first-party cross-repository action provenance "
-                        "must be 'launchplane-request'."
-                    )
-            elif source.startswith(FIRST_PARTY_CROSS_REPOSITORY_ACTION_PREFIX):
-                if action.provenance != "main":
-                    violations.append(
-                        f"{action.location}: first-party cross-repository action provenance "
-                        "must be 'main'."
-                    )
-            elif source.startswith(SELF_REUSABLE_WORKFLOW_PREFIX):
-                if action.provenance != "main":
-                    violations.append(
-                        f"{action.location}: pinned same-repository workflow provenance must be 'main'."
-                    )
-            elif VERSION_PROVENANCE_PATTERN.fullmatch(action.provenance) is None:
-                violations.append(
-                    f"{action.location}: release provenance must use a version tag, not {action.provenance!r}."
-                )
-
-        self.assertFalse(violations, "\n".join(violations))
-
-    def test_static_container_references_are_classified_and_digest_pinned(self) -> None:
-        violations: list[str] = []
-
-        for image in _container_references():
-            if image.source not in APPROVED_CONTAINER_IMAGES:
-                violations.append(
-                    f"{image.location}: unclassified container image source {image.source!r}."
-                )
-            if image.digest is None:
-                violations.append(
-                    f"{image.location}: container image {image.source!r} must use a sha256 digest."
-                )
-            if CONTAINER_TAG_PATTERN.fullmatch(image.tag) is None:
-                violations.append(
-                    f"{image.location}: container image tag {image.tag!r} is not reviewable."
-                )
-
-        self.assertFalse(violations, "\n".join(violations))
