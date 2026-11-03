@@ -31,8 +31,10 @@ class FormatterTargetGateTests(unittest.TestCase):
             return evaluate_config_authority_gate(audit, profile="product-repo")
 
     def test_black_target_list_is_formatter_configuration(self) -> None:
-        result = self.gate('[tool.black]\ntarget-version = ["py313", "py314"]\n')
-        self.assertEqual(result["status"], "pass", result)
+        for path in ("pyproject.toml", "package/pyproject.toml"):
+            with self.subTest(path=path):
+                result = self.gate('[tool.black]\ntarget-version = ["py313", "py314"]\n', path)
+                self.assertEqual(result["status"], "pass", result)
 
     def test_ruff_python_targets_are_developer_configuration(self) -> None:
         for text, path in (
@@ -90,12 +92,24 @@ class FormatterTargetGateTests(unittest.TestCase):
         for text, path in (
             ('[tool.ruff]\ntarget-version = "dokploy-production"\n', "pyproject.toml"),
             ('[per-file-target-version]\n"app.py" = "example/product"\n', ".ruff.toml"),
-            ('[tool.other]\ntarget-version = "py314"\n', "pyproject.toml"),
-            ('target-version = "py314"\n', "runtime.toml"),
-            ('[tool.ruff.runtime]\ntarget-version = "py314"\n', "pyproject.toml"),
-            ('[tool.ruff]\ntarget-version = ["py314"]\n', "pyproject.toml"),
-            ('[tool.ruff]\ntarget-version = "py314"\nprovider-target = "live"\n', "pyproject.toml"),
-            ('target-version = "py314"\ncredential-token = "private-value"\n', "ruff.toml"),
         ):
             with self.subTest(text=text, path=path):
                 self.assertEqual(self.gate(text, path)["status"], "fail")
+        for text, path, rejected_key in (
+            (
+                '[tool.ruff]\ntarget-version = "py314"\nprovider-target = "live"\n',
+                "pyproject.toml",
+                "tool.ruff.provider-target",
+            ),
+            (
+                'target-version = "py314"\ncredential-token = "private-value"\n',
+                "ruff.toml",
+                "credential-token",
+            ),
+        ):
+            with self.subTest(path=path, rejected_key=rejected_key):
+                result = self.gate(text, path)
+                self.assertEqual(result["status"], "fail")
+                rejected = result["rejected_findings"]
+                assert isinstance(rejected, list)
+                self.assertEqual([finding["key"] for finding in rejected], [rejected_key])

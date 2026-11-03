@@ -365,8 +365,8 @@ read Launchplane's merge policy; an unavailable policy read means enrollment
 is unknown. Repository metadata can link the canonical train procedure under
 `docs` without copying those values.
 
-In `pyproject.toml`, Black's `tool.black.target-version` list accepts its
-supported lowercase Python target identifiers with
+In root or nested `pyproject.toml` files, Black's `tool.black.target-version`
+list accepts its supported lowercase Python target identifiers with
 `repo_metadata_ergonomics` evidence. The allowance applies only to that list's
 string elements; other target fields, runtime/provider values, credentials and
 unsupported identifiers remain findings. Black's target vocabulary is defined

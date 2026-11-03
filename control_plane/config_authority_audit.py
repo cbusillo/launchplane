@@ -3117,9 +3117,11 @@ def _severity(*, rule_id: str, key: str) -> str:
     return "medium"
 
 
-def _is_ruff_python_target(*, path: str, key: str) -> bool:
+def _is_python_tool_target(*, path: str, key: str) -> bool:
     filename = PurePosixPath(path).name
     if filename == "pyproject.toml":
+        if re.fullmatch(r"tool\.black\.target-version\[[0-9]+]", key):
+            return True
         key = key.removeprefix("tool.ruff.") if key.startswith("tool.ruff.") else ""
     elif filename not in {"ruff.toml", ".ruff.toml"}:
         return False
@@ -3169,11 +3171,7 @@ def _allow_reason(
         ):
             return ALLOW_REASON_SCHEMA_ONLY
     if (
-        (
-            normalized == "pyproject.toml"
-            and re.fullmatch(r"tool\.black\.target-version\[[0-9]+]", key)
-            or _is_ruff_python_target(path=normalized, key=key)
-        )
+        _is_python_tool_target(path=normalized, key=key)
         and isinstance(value, str)
         and re.fullmatch(r"py3(?:[3-9]|1[0-5])", value)
     ):
