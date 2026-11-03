@@ -37,13 +37,30 @@ class DependencyBotPolicyTests(unittest.TestCase):
             ),
         )
         old = "jobs:\n  test:\n    steps:\n      - uses: example/action@" + "a" * 40 + "\n"
-        for current_value, extra, verified, expected in (
-            ("v2", "", True, "patch_or_minor"),
-            ("main", "", True, "needs_review"),
-            ("v2", "permissions: write-all\n", True, "needs_review"),
-            ("v2", "", False, "needs_review"),
+        for current_value, extra, verified, upstream_status, filename, expected in (
+            ("v2", "", True, "ahead", ".github/workflows/ci.yml", "patch_or_minor"),
+            ("main", "", True, "ahead", ".github/workflows/ci.yml", "needs_review"),
+            (
+                "v2",
+                "permissions: write-all\n",
+                True,
+                "ahead",
+                ".github/workflows/ci.yml",
+                "needs_review",
+            ),
+            ("v2", "", False, "ahead", ".github/workflows/ci.yml", "needs_review"),
+            ("v2", "", True, "behind", "package.json", "needs_review"),
+            ("v2", "", True, "diverged", "package.json", "needs_review"),
+            ("v2", "", True, "identical", "package.json", "needs_review"),
+            ("v2", "", True, "", "package.json", "needs_review"),
         ):
-            with self.subTest(current_value=current_value, extra=extra, verified=verified):
+            with self.subTest(
+                current_value=current_value,
+                extra=extra,
+                verified=verified,
+                upstream_status=upstream_status,
+                filename=filename,
+            ):
                 new = old.replace("a" * 40, "b" * 40) + extra
                 documents = tuple(
                     {
@@ -69,9 +86,7 @@ class DependencyBotPolicyTests(unittest.TestCase):
                         ],
                         f"{prefix}/issues/16/timeline?per_page=100": [],
                         f"{prefix}/compare/base-16...head-16": {
-                            "files": [
-                                {"filename": ".github/workflows/ci.yml", "status": "modified"}
-                            ],
+                            "files": [{"filename": filename, "status": "modified"}],
                             "base_commit": {"sha": "base-16"},
                             "merge_base_commit": {"sha": "original-parent"},
                         },
@@ -80,7 +95,7 @@ class DependencyBotPolicyTests(unittest.TestCase):
                         ],
                         f"{prefix}/contents/.github/workflows/ci.yml?ref=head-16": documents[1],
                         f"/repos/example/action/compare/{'a' * 40}...{'b' * 40}": {
-                            "status": "ahead",
+                            "status": upstream_status,
                             "base_commit": {"sha": "a" * 40},
                             "merge_base_commit": {"sha": "a" * 40},
                             "commits": [{"sha": "b" * 40}],

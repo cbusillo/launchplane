@@ -71,6 +71,7 @@ from control_plane.contracts.merge_train_structural_provenance import (
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
 from control_plane.contracts.text_fields import require_text
 from control_plane.dependency_update_review import dependency_update_policy, pure_dependency_update
+from control_plane.dependency_reference_update import dependency_digest_moves_forward
 from control_plane.contracts.merge_train_policy import MergeTrainEnqueuePolicy
 from control_plane.artifact_release_inputs import repository_key
 from control_plane.client_release_repositories import (
@@ -4628,6 +4629,9 @@ class GitHubMergeTrainSnapshotReader:
             messages,
             metadata_format=bot.metadata_format,
             allowed_update_types=bot.allowed_update_types,
+            digest_moves_forward=lambda update: dependency_digest_moves_forward(
+                update, read=lambda path: self.transport.request(method="GET", path=path)
+            ),
         )
         if update_class != "patch_or_minor":
             return update_class
