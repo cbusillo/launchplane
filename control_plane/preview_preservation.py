@@ -266,6 +266,13 @@ def require_preview_preservation_admission(
             > parse_launchplane_mutation_timestamp(lookup.observed_at, field_name="observed_at")
         ):
             raise ValueError("Original preview preservation is waiting for its recovery grace.")
+    if any(
+        item.anchor_repo != profile.repository.partition("/")[2]
+        and profile.preview.slug_template.format(number=item.anchor_pr_number)
+        == issued_plan.preview_slug
+        for item in store.list_preview_records(context_name=issued_plan.context)
+    ):
+        raise ValueError("Original preview preservation aliases another repository's preview.")
     from control_plane.workflows.launchplane import find_preview_record
 
     preview = find_preview_record(

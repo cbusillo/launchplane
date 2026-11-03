@@ -281,6 +281,7 @@ class PreviewPreservationProgramTests(unittest.TestCase):
         self.assertFalse(self.calls)
         log.unlink()
         receipt = self.preserve()
+        self.namespace["verify_preservation_source"](receipt, self.source)
         log.write_bytes(b"new log")
         with self.assertRaises(RuntimeError):
             self.namespace["verify_preservation_source"](receipt, self.source)
@@ -948,17 +949,14 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         )
         self.store.complete_mutation_reservation(completion=completion)
 
-    def test_recorded_preview_continues_only_from_its_serving_original(self) -> None:
+    def test_recorded_preservation_binds_the_serving_original(self) -> None:
         self.record_serving_original()
         before = self.store.read_original_mutation_intent(self.original)
         retirement = self.admit()
-        self.assertTrue(retirement.recorded_retirement)
-        self.assertTrue(retirement.serving_recipient)
-        self.assertFalse(retirement.continuation)
         self.issued.operation = "refresh"
         self.issued.dry_run_plan.operation = "refresh"
         authority = self.admit()
-        self.assertTrue(authority.continuation)
+        self.assertNotEqual(authority.preservation_id, retirement.preservation_id)
         self.assertEqual(authority.original_reservation_id, self.original.record_id)
         self.assertEqual(self.store.read_original_mutation_intent(self.original), before)
         self.assertNotIn("effective_source", before)
@@ -1635,6 +1633,28 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             assert recovered.record is not None
             self.assertEqual(recovered.record.record_id, first.record.record_id)
             execute.assert_called_once()
+
+    def test_foreign_repository_same_slug_refuses_preservation(self) -> None:
+        from control_plane.contracts.preview_record import PreviewRecord
+
+        self.complete_original()
+        self.store.write_preview_record(
+            PreviewRecord(
+                preview_id="foreign-preview",
+                context=self.issued.context,
+                anchor_repo="former-repository",
+                anchor_pr_number=self.issued.plan_request.pr_number,
+                anchor_pr_url="https://example.test/former-repository/pull/42",
+                preview_label="Former repository recipient",
+                canonical_url=self.issued.preview_url,
+                state="active",
+                created_at=self.original.created_at,
+                updated_at=self.original.updated_at,
+                eligible_at=self.original.created_at,
+            )
+        )
+        with self.assertRaises(ValueError):
+            self.admit()
 
     def test_same_slug_target_disagreement_refuses_before_reservation_or_copy(self) -> None:
         self.complete_original()
@@ -2327,9 +2347,18 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                     floor.assert_not_called()
 
     def test_verification_start_uses_current_phase_inside_short_dispatch_guard(self) -> None:
+        self.assert_guarded_verification_start(recorded=False)
+
+    def test_recorded_verification_keeps_stopped_writer_guards_during_teardown(self) -> None:
+        self.assert_guarded_verification_start(recorded=True)
+
+    def assert_guarded_verification_start(self, *, recorded: bool) -> None:
         from control_plane.preview_preservation import run_preview_preservation
 
-        self.record_serving_original()
+        if recorded:
+            self.record_serving_original()
+        else:
+            self.complete_original()
         adapter = self.adapter()
         operation = self.store.reserve_mutation(
             scope="guarded-verification",
@@ -2374,7 +2403,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
 
                 def remote(**kwargs: Any) -> None:
                     self.assertFalse(inside)
-                    self.assertTrue(kwargs["payload"]["continuation"])
+                    self.assertEqual(kwargs["payload"]["continuation"], recorded)
                     self.assertFalse(kwargs["payload"]["continuation_applied"])
                     native = capture_namespace(kwargs["program"])
 
