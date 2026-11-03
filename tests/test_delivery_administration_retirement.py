@@ -177,7 +177,6 @@ class DeliveryAdministrationRetirementTests(unittest.TestCase):
                 )
                 result = store.read_privileged_operation_record(plan.operation_id)
                 self.assertEqual(result.status, "executed")
-                self.assertIsInstance(result.execution, ManagedAuthzPolicySetExecutionEvidence)
                 assert isinstance(result.execution, ManagedAuthzPolicySetExecutionEvidence)
                 self.assertTrue(result.execution.changed)
                 self.assertFalse(result.execution.reconciliation_required)

@@ -29,7 +29,6 @@ class ApplicationStateVolumeRecoveryEdgeTests(volume_fixtures._ApplicationStateV
                     reservation=reservation, lease_seconds=600
                 )
                 self.assertEqual(renewed.status, "updated")
-                self.assertIsNotNone(renewed.record)
                 assert renewed.record is not None
                 self.assertNotEqual(renewed.record.lease_expires_at, reservation.lease_expires_at)
                 for changes in (

@@ -558,7 +558,6 @@ class RepositoryNameStorageTests(unittest.TestCase):
         )
         self.assertEqual(status.controller_state, canonical)
         self.assertEqual(status.admission, before.admission)
-        self.assertIsNotNone(status.controller_diagnostics)
         assert status.controller_diagnostics is not None
         self.assertEqual(status.controller_diagnostics.reconciliation_status, "required")
         self.assertTrue(status.controller_diagnostics.reconciliation_detail)

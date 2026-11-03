@@ -705,7 +705,6 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(evidence.target_category, "service")
         self.assertEqual(evidence.provider_target_type, "managed-service")
         self.assertEqual(evidence.provider_deploy_mode, "service-api")
-        self.assertIsNotNone(evidence.target_reference)
         assert evidence.target_reference is not None
         self.assertEqual(evidence.target_reference.target_name, "syo-prod-service")
 

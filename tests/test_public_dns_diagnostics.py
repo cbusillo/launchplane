@@ -171,7 +171,6 @@ class PublicDnsDiagnosticTests(unittest.TestCase):
                     http_get=lambda url, timeout: HttpObservation(200, url, 0),
                 )
                 dns = result.records[0].targets[0].dns
-                self.assertIsNotNone(dns)
                 assert dns is not None
                 self.assertEqual(dns.failure_code, failure)
                 self.assertEqual(dns.status, "unavailable" if failure else "match")

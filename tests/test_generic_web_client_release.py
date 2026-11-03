@@ -2608,7 +2608,6 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_release_review_decision_records(product=self.profile.product), (winner,)
         )
-        self.assertIsNotNone(winner)
         assert winner is not None
         self.assertEqual(self.provider.deployed_artifacts, [winner.checklist.candidate.artifact_id])
 

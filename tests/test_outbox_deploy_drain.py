@@ -92,7 +92,6 @@ class OutboxDeployDrainTests(unittest.TestCase):
         )
         self.store.write_outbox_delivery_record(notification)
         claimed = self.store.claim_next_outbox_delivery_record(lease_owner="old-image")
-        self.assertIsNotNone(claimed.record)
         assert claimed.record is not None
         self.assertEqual(claimed.record.delivery_id, notification.delivery_id)
         with patch.dict(os.environ, self.replacement):

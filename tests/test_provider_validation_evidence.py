@@ -42,7 +42,6 @@ class ProviderValidationEvidenceTests(unittest.TestCase):
         original = (
             failure.error if isinstance(failure.error, ValidationError) else failure.error.__cause__
         )
-        self.assertIsInstance(original, ValidationError)
         assert isinstance(original, ValidationError)
         self.assertTrue(validation)
         self.assertTrue(all(row["loc"][0] == field for row in validation))

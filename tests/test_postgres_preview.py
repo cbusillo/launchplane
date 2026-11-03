@@ -1126,7 +1126,6 @@ class PostgresPreviewDriverTests(unittest.TestCase):
         self.assertEqual(
             template_lookup.call_args.kwargs["template_instance"], profile.lanes[0].instance
         )
-        self.assertIsNotNone(result.runtime_identity)
         assert result.runtime_identity is not None
         self.assertEqual(result.runtime_identity.product, profile.product)
         self.assertNotIn("POSTGRES_PASSWORD", captured_env)

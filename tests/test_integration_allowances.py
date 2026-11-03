@@ -240,7 +240,6 @@ class IntegrationAllowancesPlanTests(unittest.TestCase):
         self.assertFalse(unchanged.changed)
         change = unchanged.changes[0]
         self.assertEqual(change.action, "unchanged")
-        self.assertIsNotNone(change.after)
         assert change.after is not None
         self.assertEqual(change.after.recorded_by, "first-operator")
         self.assertEqual(

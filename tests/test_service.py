@@ -786,7 +786,6 @@ class GitHubHumanAuthTests(unittest.TestCase):
         ):
             config = load_github_oauth_config_from_env()
 
-        self.assertIsNotNone(config)
         assert config is not None
         self.assertFalse(config.cookie_secure)
         self.assertEqual(config.public_url, "https://launchplane.example")
@@ -2875,7 +2874,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(apply_payload["result"]["report"]["counts"], {"created": 1})
         self.assertEqual(audit_status, 202)
         self.assertEqual(audit_payload["result"]["report"]["counts"], {"complete": 1})
-        self.assertIsNotNone(provider_target)
         assert provider_target is not None
         self.assertEqual(provider_target.target_id, "app-verireel-testing")
 

@@ -1210,7 +1210,6 @@ class PreviewFixtureHttpTests(unittest.IsolatedAsyncioTestCase):
                     idempotency_key="fixture-example",
                 )
                 if mode == "apply" and fail_at == "apply":
-                    self.assertIsNotNone(record)
                     assert record is not None
                     self.assertEqual(record.state, "reconcile_required")
                 else:

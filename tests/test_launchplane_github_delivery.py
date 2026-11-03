@@ -198,7 +198,6 @@ class DeliveryGitHubTokenTests(unittest.TestCase):
                 purpose="pull_request_feedback",
                 report_failure=True,
             )
-        self.assertIsNotNone(issued)
         assert issued is not None
         self.assertEqual(issued.app_id, self.identity.app_id)
         self.assertEqual(issued.app_slug, "example-delivery")

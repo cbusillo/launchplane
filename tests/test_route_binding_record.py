@@ -492,7 +492,6 @@ class RouteBindingStorageTests(unittest.TestCase):
 
         self.assertEqual(result.status, "created")
         self.assertEqual(loaded_record, record)
-        self.assertIsNotNone(stored_completion)
         assert stored_completion is not None
         self.assertEqual(stored_completion.state, "completed")
         self.assertEqual(stored_completion.response_trace_id, "trace-route-binding-create")
@@ -526,7 +525,6 @@ class RouteBindingStorageTests(unittest.TestCase):
 
         self.assertEqual(result.status, "unchanged")
         self.assertEqual(result.current_record, record)
-        self.assertIsNotNone(stored_completion)
         assert stored_completion is not None
         self.assertEqual(stored_completion.state, "completed")
 
@@ -734,7 +732,6 @@ class RouteBindingEvidenceTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.status, "ready")
-        self.assertIsNotNone(plan.record)
         assert plan.record is not None
         self.assertEqual(plan.record.ingress.endpoint_key, "example-edge")
         self.assertEqual(plan.record.tls.owner, "provider")
@@ -1274,7 +1271,6 @@ class RouteBindingReconcileTests(unittest.TestCase):
         self.assertEqual(plan.status, "ready")
         self.assertEqual(plan.operation, "refresh")
         self.assertEqual(plan.findings[0].code, "external_route_authority_handoff")
-        self.assertIsNotNone(plan.record)
         assert plan.record is not None
         self.assertEqual(plan.record.source.source_kind, "service")
         self.assertEqual(plan.record.ingress.provider, "npmplus")
@@ -1686,7 +1682,6 @@ class RouteBindingHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"]["route_binding_status"], "created")
         self.assertNotIn("provider_evidence", payload["result"]["record"]["provider_target"])
         self.assertEqual(loaded.ingress.endpoint_key, "example-edge")
-        self.assertIsNotNone(stored_reservation)
         assert stored_reservation is not None
         self.assertEqual(stored_reservation.state, "completed")
 

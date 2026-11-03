@@ -3890,7 +3890,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(result.state, "delivered")
         self.assertEqual(result.action, "skipped_no_prior_issue")
         attempt_result = result.payload["attempt_result"]
-        self.assertIsInstance(attempt_result, dict)
         assert isinstance(attempt_result, dict)
         self.assertEqual(attempt_result["delivery_status"], "skipped")
 

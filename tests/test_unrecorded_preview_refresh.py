@@ -148,7 +148,6 @@ class UnrecordedPreviewRefreshTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(kwargs["qualify_existing_preview"])
             self.assertEqual(self.store.list_preview_records(), ())
             reservation = self.store.read_idempotency_record_by_id(kwargs["deployment_record_id"])
-            self.assertIsNotNone(reservation)
             assert reservation is not None
             decision = kwargs["expected_source_decision"]
             self.assertEqual(

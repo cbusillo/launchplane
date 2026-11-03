@@ -271,7 +271,6 @@ class BuildProvenanceTests(unittest.TestCase):
         manifest = _verify(FakeGitHub(runs=[_run()])).manifest
 
         self.assertEqual(manifest.artifact_id, "artifact-site-run-7-1")
-        self.assertIsNotNone(manifest.source_build)
         assert manifest.source_build is not None
         self.assertEqual(manifest.source_build.purpose, "release")
         self.assertEqual(manifest.source_build.github_artifact_id, 70)

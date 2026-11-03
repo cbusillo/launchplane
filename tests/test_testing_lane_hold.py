@@ -486,7 +486,6 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
                 route_path=TESTING_HOLD_APPLY_ROUTE,
                 idempotency_key="admin-lift",
             )
-            self.assertIsNotNone(receipt)
             assert receipt is not None
             self.assertTrue(receipt.recorded_at)
             self.assertEqual(receipt.response_trace_id, lifted.json()["trace_id"])

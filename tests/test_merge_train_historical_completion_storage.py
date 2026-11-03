@@ -514,7 +514,6 @@ class HistoricalCompletionContractTests(unittest.TestCase):
             historical=True,
         )
         historical_completion = observation.historical_completion
-        self.assertIsNotNone(historical_completion)
         assert historical_completion is not None
         self.assertEqual(historical_completion.authority_state, "observation_only")
         self.assertEqual(observation.landing_plan.entries[0].status, "stale")

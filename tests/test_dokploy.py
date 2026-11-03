@@ -664,7 +664,6 @@ class DokployConfigTests(unittest.TestCase):
             )
         )
 
-        self.assertIsNotNone(source_of_truth)
         assert source_of_truth is not None
         self.assertEqual(len(source_of_truth.targets), 1)
         self.assertEqual(source_of_truth.targets[0].target_id, "target-ver-prod")

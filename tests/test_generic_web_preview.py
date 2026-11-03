@@ -1576,7 +1576,6 @@ class GenericWebPreviewTests(unittest.TestCase):
 
         self.assertEqual(result.refresh_status, "pass")
         self.assertEqual(result.application_id, "app-preview")
-        self.assertIsNotNone(result.runtime_identity)
         assert result.runtime_identity is not None
         self.assertEqual(result.runtime_identity.environment_kind, "preview")
         self.assertEqual(result.runtime_identity.source_git_ref, "abc123")

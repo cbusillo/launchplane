@@ -2719,7 +2719,6 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(apply_response.status_code, 202)
         self.assertNotIn(plaintext, json.dumps(dry_run_response.json(), sort_keys=True))
         self.assertNotIn(plaintext, json.dumps(apply_response.json(), sort_keys=True))
-        self.assertIsNotNone(apply_idempotency_record)
         assert apply_idempotency_record is not None
         self.assertTrue(apply_idempotency_record.request_fingerprint.startswith("hmac-sha256:"))
         self.assertNotIn(plaintext, apply_idempotency_record.request_fingerprint)
