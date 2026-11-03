@@ -51,6 +51,7 @@ from control_plane.contracts.product_reconcile import (
     ProductReconcileTarget,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.release_review import PullRequestNotes
 
 _REPOSITORY = "every/example-site"
 _PULL_REQUEST = 42
@@ -269,6 +270,50 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.store = FilesystemRecordStore(state_dir=Path(temporary_directory.name))
         self.store.write_preview_record(_preview_read_record())
         self.store.write_preview_generation_record(_preview_generation_read_record())
+
+    def test_changed_accepted_head_mentions_client_once_when_preview_is_ready(self) -> None:
+        github = _GitHub()
+        self._publish(github)
+        self.assertEqual(github.comments, [])
+        accepted = _decision(decision="accepted", decided_at="2026-10-24T15:00:00Z")
+        self.store.write_product_review_decision_record(accepted)
+        self._publish(github)
+        self.assertEqual(len(github.comments), 1)
+        github.head_sha = "b" * 40
+        self._publish(github)
+        self.assertEqual(len(github.comments), 1)
+        generation = _preview_generation_read_record()
+        generation = generation.model_copy(
+            update={
+                "anchor_summary": generation.anchor_summary.model_copy(
+                    update={"head_sha": github.head_sha}
+                ),
+            }
+        )
+        self.store.write_preview_generation_record(
+            generation.model_copy(update={"state": "failed"})
+        )
+        self._publish(github)
+        self.assertEqual(len(github.comments), 1)
+        self.store.write_preview_generation_record(generation)
+        github.lose_comment_response = True
+        self._publish(github)
+        self._publish(github)
+        self._publish(github)
+        self.assertEqual(len(github.comments), 2)
+        notification = github.comments[-1]["body"]
+        assert isinstance(notification, str)
+        self.assertIn(f"@{_profile().owner.github_login}", notification)
+        self.assertIn(github.head_sha, notification)
+        self.assertIn(accepted.head_sha, notification)
+        self.assertIn(f"/compare/{accepted.head_sha}...{github.head_sha}", notification)
+        self.assertEqual(github.statuses[0]["state"], "pending")
+        self.assertEqual(
+            self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+            )[0].head_sha,
+            accepted.head_sha,
+        )
 
     def test_unavailable_preview_never_invites_the_client(self) -> None:
         self.store.write_preview_generation_record(_preview_generation_read_record(state="failed"))
@@ -1256,7 +1301,7 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             session_store=InMemoryHumanSessionStore(),
         )
 
-    async def _record_changes_requested(self, github: _GitHub) -> int:
+    async def _record_acceptance(self, github: _GitHub) -> int:
         self.store.write_product_profile_record(_profile())
         self.store.write_preview_record(_preview_read_record(anchor_pr_number=_PULL_REQUEST))
         self.store.write_preview_generation_record(
@@ -1268,6 +1313,13 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: self.store,
             human_session_manager=self.session_manager,
             owner_review_status_publisher=_publisher(github),
+            product_review_notes_reader=lambda *_: PullRequestNotes(
+                title="Check the page",
+                client_test_notes="Try the changed page.",
+                client_test_notes_error="",
+                head_sha=github.head_sha,
+                state="open",
+            ),
         )
         session = self.session_manager.issue(
             GitHubHumanIdentity(
@@ -1288,8 +1340,7 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             payload={
                 "repository": _REPOSITORY,
                 "pull_request": _PULL_REQUEST,
-                "decision": "changes_requested",
-                "reason": "The price is wrong.",
+                "decision": "accepted",
                 "reviewed_head_sha": _HEAD_SHA,
                 "reviewed_preview_url": _preview_read_record().canonical_url,
                 "reviewed_generation_id": _preview_generation_read_record().generation_id,
@@ -1300,27 +1351,27 @@ class OwnerReviewStatusHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_recording_a_decision_updates_the_pull_request_status(self) -> None:
         github = _GitHub()
 
-        status_code = await self._record_changes_requested(github)
+        status_code = await self._record_acceptance(github)
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(github.statuses[0]["state"], "failure")
-        self.assertEqual(github.statuses[0]["description"], "Changes requested by @site-owner")
+        self.assertEqual(github.statuses[0]["state"], "success")
+        self.assertEqual(github.statuses[0]["description"], "Accepted by @site-owner")
 
     async def test_decision_is_kept_when_github_rejects_the_status(self) -> None:
         github = _GitHub()
         github.fail_writes = True
 
-        status_code = await self._record_changes_requested(github)
+        status_code = await self._record_acceptance(github)
 
         self.assertEqual(status_code, 200)
         decisions = self.store.list_product_review_decision_records(
             repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
         )
-        self.assertEqual([record.decision for record in decisions], ["changes_requested"])
+        self.assertEqual([record.decision for record in decisions], ["accepted"])
         self.assertEqual(decisions[0].feedback_url, "")
 
         github.fail_writes = False
-        self.assertEqual(await self._record_changes_requested(github), 200)
+        self.assertEqual(await self._record_acceptance(github), 200)
         saved = self.store.list_product_review_decision_records(
             repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
         )

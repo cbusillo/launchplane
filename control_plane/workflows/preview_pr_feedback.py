@@ -582,7 +582,8 @@ def _render_preview_pr_feedback_markdown(
                     "",
                     "1. Open the preview above and try the change. What to check is listed in "
                     "the test notes in the pull request description.",
-                    f"2. Record **Accept** or **Request changes** in Launchplane: {owner_review_url}",
+                    "2. Write what should change on this pull request, yourself or through your agent.",
+                    f"3. Press **Accept** in Launchplane when the preview is right: {owner_review_url}",
                     "",
                     "Accept approves this one change; nothing goes live yet. "
                     "Your decision does not merge or deploy anything. A GitHub approval or comment "

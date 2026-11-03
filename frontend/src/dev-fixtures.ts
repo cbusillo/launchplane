@@ -2522,6 +2522,8 @@ export function productReviewForFixture(
     pull_request_number: 308,
     pull_request_url: "https://github.com/example/control-plane/pull/308",
     pull_request_title: scenario === "notes-unavailable" ? "" : "Show the repair price on each model",
+    latest_client_comment: "Please make sure the repair prices are visible.",
+    latest_client_comment_url: "https://github.com/example/control-plane/pull/308#issuecomment-7",
     client_test_notes: {
       "missing-notes": "",
       "notes-unavailable": "",

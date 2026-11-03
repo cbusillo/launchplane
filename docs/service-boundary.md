@@ -4280,8 +4280,8 @@ acceptance. See [pending request withdrawal](owner-acceptance.md#withdrawing-a-p
 for replay, readback and later-request behavior.
 
 `POST /v1/product-review/decisions` takes `{repository, pull_request, decision,
-reason, reviewed_head_sha, reviewed_preview_url, reviewed_generation_id}` with
-`decision` of `accepted` or `changes_requested` (reason required). The three
+reviewed_head_sha, reviewed_preview_url, reviewed_generation_id}` with
+`decision` of `accepted`. Feedback belongs on the pull request. The three
 `reviewed_*` fields are required evidence copied from the GET response. The
 service compares them with the currently serving preview before saving, under
 the decision lock. A mismatch returns `409 product_review_preview_changed`

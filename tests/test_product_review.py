@@ -289,7 +289,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         human: GitHubHumanIdentity,
         *,
         decision: str,
-        reason: str = "",
+        reason: str | None = None,
         reviewed: dict[str, str] | None = None,
     ) -> Response:
         session = self.session_manager.issue(human)
@@ -302,7 +302,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                 "repository": _REPOSITORY,
                 "pull_request": _PULL_REQUEST,
                 "decision": decision,
-                "reason": reason,
+                **({"reason": reason} if reason is not None else {}),
                 **(reviewed if reviewed is not None else self._reviewed_preview()),
             },
         )
@@ -341,10 +341,8 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     (),
                 )
-        changed = await self._post(
-            app, owner, decision="changes_requested", reason="Fix the price."
-        )
-        self.assertEqual(changed.status_code, 200)
+        changed = await self._post(app, owner, decision="changes_requested")
+        self.assertEqual(changed.status_code, 400)
         self.pull_request_notes = current_notes
         read = (await self._get(app, owner)).json()
         self.assertTrue(read["preview_is_current"])
@@ -426,19 +424,15 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                     )
                 self.store.write_preview_generation_record(generation)
                 self.store.write_preview_record(preview)
-                for decision in ("accepted", "changes_requested"):
-                    response = await self._post(
-                        app,
-                        owner,
-                        decision=decision,
-                        reason="Fix the price.",
-                        reviewed=reviewed,
-                    )
-                    self.assertEqual(response.status_code, 409)
-                    self.assertEqual(
-                        response.json()["error"]["code"], "product_review_preview_changed"
-                    )
-                    self.publisher.publish.assert_not_called()
+                response = await self._post(
+                    app,
+                    owner,
+                    decision="accepted",
+                    reviewed=reviewed,
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["error"]["code"], "product_review_preview_changed")
+                self.publisher.publish.assert_not_called()
                 self.assertEqual(
                     self.store.list_product_review_decision_records(
                         repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
@@ -497,14 +491,14 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             title="Show the repair price",
             client_test_notes="Open the price list.",
             client_test_notes_error="",
+            latest_client_comment="Please show the repair price.",
+            latest_client_comment_url="https://github.com/every/example-site/pull/42#issuecomment-7",
         )
         app = self._app()
         owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
 
         before = await self._get(app, owner)
-        written = await self._post(
-            app, owner, decision="changes_requested", reason="The price is wrong."
-        )
+        written = await self._post(app, owner, decision="accepted")
         after = await self._get(app, owner)
 
         self.assertEqual(before.status_code, 200)
@@ -516,10 +510,13 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(before.json()["latest_decision"])
         self.assertEqual(before.json()["pull_request_title"], "Show the repair price")
         self.assertEqual(before.json()["client_test_notes"], "Open the price list.")
+        self.assertEqual(
+            before.json()["latest_client_comment"], self.pull_request_notes.latest_client_comment
+        )
         self.assertEqual(written.status_code, 200)
         latest = after.json()["latest_decision"]
-        self.assertEqual(latest["decision"], "changes_requested")
-        self.assertEqual(latest["reason"], "The price is wrong.")
+        self.assertEqual(latest["decision"], "accepted")
+        self.assertEqual(latest["reason"], "")
         self.assertEqual(latest["owner_github_login"], "site-owner")
         self.assertEqual(latest["head_sha"], "abcdef1234567890abcdef1234567890abcdef12")
 
@@ -554,10 +551,8 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                         repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
                     )
                 )
-        requested = await self._post(
-            app, owner, decision="changes_requested", reason="Please fill in the facts."
-        )
-        self.assertEqual(requested.status_code, 200)
+        requested = await self._post(app, owner, decision="changes_requested")
+        self.assertEqual(requested.status_code, 400)
         self.pull_request_notes = self.pull_request_notes._replace(
             title="Contact page",
             client_test_notes=f"Check the contact page.\n### {OPEN_CLIENT_QUESTIONS}\n",
@@ -802,14 +797,14 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "browser_mutation_denied")
 
-    async def test_requesting_changes_without_a_reason_is_rejected(self) -> None:
+    async def test_requesting_changes_is_rejected(self) -> None:
         self._write_product()
 
         response = await self._post(
             self._app(),
             _human(login="site-owner", github_id=_OWNER_GITHUB_ID),
             decision="changes_requested",
-            reason="  ",
+            reason="The repair price is wrong.",
         )
 
         self.assertGreaterEqual(response.status_code, 400)

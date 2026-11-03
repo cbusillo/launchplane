@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Final, Literal
 from urllib.parse import quote, urlencode, urlsplit
 
+import click
+
 from control_plane.advisory_check_projection import (
     update_existing_advisory_check_projection,
     write_advisory_check_projection,
@@ -32,7 +34,11 @@ from control_plane.github_app_identity import (
     resolve_advisory_github_app_identity,
     revoke_installation_token,
 )
-from control_plane.client_test_notes import change_client_review
+from control_plane.client_test_notes import (
+    change_client_review,
+    open_client_questions,
+    owner_test_notes,
+)
 from control_plane.dependency_update_review import pure_dependency_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane.product_review import (
@@ -43,7 +49,7 @@ from control_plane.product_review import (
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 from control_plane.product_review_carry import carry_owner_acceptance, record_decision_base
-from control_plane.product_review_feedback import publish_owner_feedback
+from control_plane.product_review_feedback import publish_owner_feedback, publish_review_comment
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
@@ -508,14 +514,71 @@ class OwnerReviewStatusPublisher:
                     "pull_request_number": pull_request_number,
                 },
             )
+        decisions = store.list_product_review_decision_records(
+            repository=profile.repository, pull_request_number=pull_request_number
+        )
+        latest = next(
+            iter(
+                applicable_product_review_decisions(
+                    decisions=decisions,
+                    profile=profile,
+                    pull_request_number=pull_request_number,
+                    base_branch=facts.base_branch,
+                )
+            ),
+            None,
+        )
+        if (
+            facts.state == "open"
+            and latest is not None
+            and latest.decision == "accepted"
+            and (latest.head_sha != facts.head_sha or open_client_questions(facts.body))
+            and not preview_review_unavailability(
+                store=store,
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=facts.head_sha,
+                request=preview_request,
+            )
+        ):
+            review_url = owner_review_reference_url(
+                public_origin=self.public_origin or "",
+                repository=profile.repository,
+                pull_request_number=pull_request_number,
+            )
+            body = "\n".join(
+                (
+                    f"<!-- launchplane:client-review-request:{facts.head_sha} -->",
+                    f"@{profile.owner.github_login} this change needs another look.",
+                    "",
+                    f"Your acceptance covered version `{latest.head_sha}`. "
+                    f"The current version is `{facts.head_sha}`.",
+                    f"[What changed since your acceptance](https://github.com/{profile.repository}/compare/{latest.head_sha}...{facts.head_sha})"
+                    if latest.head_sha != facts.head_sha
+                    else "The test notes now have questions for you.",
+                    "",
+                    owner_test_notes(facts.body).replace("@", "@\u200b"),
+                    "",
+                    f"[Open the preview and review this version]({review_url}). "
+                    "Write feedback on the pull request, and press Accept in Launchplane when the preview is right.",
+                )
+            )
+            try:
+                publish_review_comment(
+                    repository=profile.repository,
+                    pull_request_number=pull_request_number,
+                    body=body,
+                    token=token,
+                    app_id=self.github_feedback_app_id(control_plane_root=self.control_plane_root),
+                    api_request=self.api_request,
+                )
+            except (click.ClickException, OSError, ValueError):
+                _LOGGER.warning("Client re-review notification is pending.", exc_info=True)
         return owner_review_status(
             profile=profile,
             pull_request_number=pull_request_number,
             head_sha=facts.head_sha,
-            decisions=store.list_product_review_decision_records(
-                repository=profile.repository,
-                pull_request_number=pull_request_number,
-            ),
+            decisions=decisions,
             base_branch=facts.base_branch,
             preview_unavailability=lambda: preview_review_unavailability(
                 store=store,

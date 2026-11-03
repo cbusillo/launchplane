@@ -58,11 +58,32 @@ def publish_owner_feedback(
     api_request: Callable[..., object],
 ) -> str:
     """Reconcile one comment while the caller holds the stored PR's review lock."""
+    body = owner_feedback_comment(decision, review_url=review_url)
+    return publish_review_comment(
+        repository=decision.repository,
+        pull_request_number=decision.pull_request_number,
+        body=body,
+        token=token,
+        actor_id=actor_id,
+        app_id=app_id,
+        api_request=api_request,
+    )
+
+
+def publish_review_comment(
+    *,
+    repository: str,
+    pull_request_number: int,
+    body: str,
+    token: str,
+    actor_id: int = 0,
+    app_id: int = 0,
+    api_request: Callable[..., object],
+) -> str:
     if app_id < 1 and actor_id < 1:
         raise ValueError("Client feedback requires a delivery identity.")
-    body = owner_feedback_comment(decision, review_url=review_url)
     marker = body.splitlines()[0]
-    path = f"/repos/{quote(decision.repository)}/issues/{decision.pull_request_number}/comments"
+    path = f"/repos/{quote(repository)}/issues/{pull_request_number}/comments"
     matches: list[dict[str, object]] = []
     for page in range(1, 11):
         comments = api_request(path=f"{path}?per_page=100&page={page}", token=token)
@@ -106,14 +127,11 @@ def publish_owner_feedback(
         # changed public origin or an edited comment must not strand a decision
         # after a successful POST whose response/receipt write was lost.
         updated = api_request(
-            path=f"/repos/{quote(decision.repository)}/issues/comments/{comment_id}",
+            path=f"/repos/{quote(repository)}/issues/comments/{comment_id}",
             token=token,
             method="PATCH",
             body={"body": body},
         )
         if not isinstance(updated, dict) or updated.get("id") != comment_id:
             raise ValueError("Client feedback repair was not confirmed.")
-    return (
-        f"https://github.com/{decision.repository}/pull/{decision.pull_request_number}"
-        f"#issuecomment-{comment_id}"
-    )
+    return f"https://github.com/{repository}/pull/{pull_request_number}#issuecomment-{comment_id}"

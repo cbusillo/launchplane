@@ -191,9 +191,9 @@ function OwnerPreviewReviewRoute({
         <p className="eyebrow">Product decision</p>
         <h1 data-route-heading tabIndex={-1}>Review this change</h1>
         <p>
-          Open the preview and look at the change. Then accept it, or say what
-          should change. Your decision does not publish the site.
-          Your decision and feedback are shared on the pull request for the agent to read.
+          Open the preview and look at the change. Write what should change on the
+          pull request, yourself or through your agent. Press Accept here when the
+          preview is right. Accept does not publish the site.
         </p>
       </div>
       {!lookup.valid ? (
@@ -301,6 +301,15 @@ function ProductReviewCard({
         </p>
       ) : null}
       <ProductReviewNotes review={review} />
+      {review.latest_client_comment ? (
+        <section aria-label="Latest Client comment">
+          <h4>Your latest feedback on the pull request</h4>
+          <blockquote>{review.latest_client_comment}</blockquote>
+          {safeExternalUrl(review.latest_client_comment_url || "") ? (
+            <a href={review.latest_client_comment_url} target="_blank" rel="noreferrer">View comment on GitHub</a>
+          ) : null}
+        </section>
+      ) : null}
       {review.latest_decision ? (
         <LatestDecision
           key={review.latest_decision.record_id}
@@ -383,6 +392,8 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
         pull_request_title: review.pull_request_title,
         client_test_notes: review.client_test_notes,
         client_test_notes_error: review.client_test_notes_error,
+        latest_client_comment: review.latest_client_comment,
+        latest_client_comment_url: review.latest_client_comment_url,
         preview_is_current: samePreview && review.preview_is_current,
         cannot_accept_reason: samePreview ? review.cannot_accept_reason : response.cannot_accept_reason,
       });
@@ -455,7 +466,6 @@ function ProductReviewDecisionForm({
   previewOpened: boolean;
 }) {
   const [previewConfirmed, setPreviewConfirmed] = useState(false);
-  const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
   const [recorded, setRecorded] = useState(false);
@@ -466,17 +476,16 @@ function ProductReviewDecisionForm({
     setFailure("");
   }, [review]);
 
-  const record = async (decision: ProductReviewDecisionRecord["decision"]) => {
+  const record = async () => {
     setBusy(true);
     setFailure("");
     setRecorded(false);
-    const decisionReason = decision === "changes_requested" ? reason.trim() : "";
     try {
       const response = fixtureMode
         ? await loadDevFixtures().then((fixtures) =>
             fixtures.productReviewForFixture(
               fixtureMode,
-              fixtures.productReviewDecisionForFixture(decision, decisionReason),
+              fixtures.productReviewDecisionForFixture("accepted", ""),
             ),
           )
         : await writeProductReviewDecision({
@@ -485,10 +494,8 @@ function ProductReviewDecisionForm({
             reviewed_head_sha: review.head_sha,
             reviewed_preview_url: review.preview_url,
             reviewed_generation_id: review.preview_generation_id,
-            decision,
-            reason: decisionReason,
+            decision: "accepted",
           });
-      setReason(response.latest_decision?.feedback_url ? "" : decisionReason);
       setRecorded(true);
       onDecided(response);
     } catch (writeError) {
@@ -513,18 +520,6 @@ function ProductReviewDecisionForm({
       className="owner-review-action"
       aria-label={`Decision for ${review.display_name || review.product}`}
     >
-      <label>
-        <span>What should change? (needed only when you request changes)</span>
-        <textarea
-          maxLength={4000}
-          value={reason}
-          disabled={busy || stale}
-          onChange={(event) => {
-            setRecorded(false);
-            setReason(event.target.value);
-          }}
-        />
-      </label>
       {review.preview_is_current ? (
         <label className="owner-review-preview-confirmation">
           <input
@@ -542,19 +537,11 @@ function ProductReviewDecisionForm({
             className="button button-primary"
             type="button"
             disabled={busy || stale || !previewOpened || !previewConfirmed || Boolean(review.client_test_notes_error)}
-            onClick={() => void record("accepted")}
+            onClick={() => void record()}
           >
             Accept
           </button>
         ) : null}
-        <button
-          className="button"
-          type="button"
-          disabled={busy || stale || !reason.trim()}
-          onClick={() => void record("changes_requested")}
-        >
-          Request changes
-        </button>
       </div>
       {review.preview_is_current && !previewOpened ? <p className="owner-review-state">Open the preview, check the notes above, then confirm that it is right.</p> : null}
       {!review.preview_is_current ? <OwnerReviewState>{review.cannot_accept_reason}</OwnerReviewState> : null}

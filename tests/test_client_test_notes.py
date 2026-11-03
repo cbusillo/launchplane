@@ -16,7 +16,9 @@ class ClientTestNotesTests(unittest.TestCase):
         from control_plane.release_review import read_pull_request_notes
         from tests.support.profiles import product_profile_payload
 
-        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload("site"))
+        payload = product_profile_payload("site")
+        payload["owner"] = {"github_login": "client", "github_id": "9001"}
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
         for body, labels, blocked in (
             (
                 "## Client test notes\nNothing for the Client to test: CI only.",
@@ -38,13 +40,24 @@ class ClientTestNotesTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.release_review._read_release_github",
-                    return_value={
-                        "title": "Checkout",
-                        "body": body,
-                        "labels": [{"name": label} for label in labels],
-                        "head": {"sha": "A" * 40},
-                        "state": "open",
-                    },
+                    side_effect=[
+                        {
+                            "title": "Checkout",
+                            "body": body,
+                            "labels": [{"name": label} for label in labels],
+                            "head": {"sha": "A" * 40},
+                            "state": "open",
+                        },
+                        [
+                            {"body": "Earlier feedback", "user": {"id": 9001}},
+                            {
+                                "body": "Please fix the price",
+                                "html_url": "https://github.com/example/site/pull/42#issuecomment-7",
+                                "user": {"id": 9001},
+                            },
+                            {"body": "Unrelated comment", "user": {"id": 9}},
+                        ],
+                    ],
                 ),
             ):
                 notes = read_pull_request_notes(
@@ -56,6 +69,8 @@ class ClientTestNotesTests(unittest.TestCase):
                 self.assertEqual(bool(notes.client_test_notes_error), blocked)
                 self.assertEqual(notes.head_sha, "a" * 40)
                 self.assertEqual(notes.state, "open")
+                self.assertEqual(notes.latest_client_comment, "Please fix the price")
+                self.assertTrue(notes.latest_client_comment_url.endswith("#issuecomment-7"))
                 self.assertEqual(
                     notes.client_test_notes_error,
                     change_client_review(
