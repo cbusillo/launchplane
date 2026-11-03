@@ -427,7 +427,14 @@ def workflow_violations(
             for match in STATIC_CONTAINER_REFERENCE_PATTERN.finditer(value):
                 check_image(match.group())
 
-    def check_steps(value: object) -> list[Mapping[str, object]]:
+    def check_steps(
+        value: object,
+        *,
+        group: str,
+        inherited_context: bool,
+        direct_target: bool = False,
+        condition: str = "",
+    ) -> None:
         if not isinstance(value, list):
             raise ValueError(f"Workflow {path} steps must be a list.")
         steps = [_mapping(step) for step in value]
@@ -440,19 +447,6 @@ def workflow_violations(
                     "untrusted_run_expression",
                     "Pass untrusted inputs and event values through the environment.",
                 )
-        return steps
-
-    check_values(data)
-    runs = _mapping(data.get("runs", {}))
-    check_steps(runs.get("steps", []))
-    trigger = data.get("on")
-    events = set(trigger) if isinstance(trigger, (dict, list)) else {trigger}
-    jobs = _mapping(data.get("jobs", {}))
-    for job_id, raw_job in jobs.items():
-        job = _mapping(raw_job)
-        if "uses" in job:
-            check_reference(job["uses"])
-        steps = check_steps(job.get("steps", []))
         checkouts = [
             (index, step)
             for index, step in enumerate(steps)
@@ -467,14 +461,19 @@ def workflow_violations(
                 f"{ref} {inputs.get('repository', '')}",
             )
             checkout_context = re.sub(r"\s*\.\s*", ".", checkout_context).lower()
-            inherited_untrusted_ref = "workflow_call" in events and (
+            inherited_untrusted_ref = inherited_context and (
                 "github.event.pull_request.head" in checkout_context
                 or "github.head_ref" in checkout_context
             )
-            excludes_target = _requires_conjunct(
-                str(job.get("if", "")), "github.event_name != 'pull_request_target'"
-            ) or _requires_conjunct(str(job.get("if", "")), "github.event_name == 'pull_request'")
-            if ("pull_request_target" in events or inherited_untrusted_ref) and not excludes_target:
+            excludes_target = any(
+                _requires_conjunct(value, required)
+                for value in (condition, str(checkout.get("if", "")))
+                for required in (
+                    "github.event_name != 'pull_request_target'",
+                    "github.event_name == 'pull_request'",
+                )
+            )
+            if (direct_target or inherited_untrusted_ref) and not excludes_target:
                 trusted_ref = (
                     ref
                     in (
@@ -495,15 +494,15 @@ def workflow_violations(
                 ):
                     reject(
                         "pull_request_target_checkout_untrusted",
-                        f"Job {job_id} must check out a trusted repository ref.",
+                        f"{group} must check out a trusted repository ref.",
                     )
         for index, step in enumerate(steps):
             if step.get("uses") != "./.github/actions/launchplane-request":
                 continue
-            if "workflow_call" in events or len(checkouts) != 1:
+            if inherited_context or len(checkouts) != 1:
                 reject(
                     "local_request_checkout_untrusted",
-                    f"Job {job_id} requires one trusted same-repository checkout.",
+                    f"{group} requires one trusted same-repository checkout.",
                 )
                 continue
             checkout_index, checkout = checkouts[0]
@@ -511,8 +510,26 @@ def workflow_violations(
             if checkout_index >= index or "ref" in inputs or "repository" in inputs:
                 reject(
                     "local_request_checkout_untrusted",
-                    f"Job {job_id} must check out its exact workflow revision before the local request action.",
+                    f"{group} must check out its exact workflow revision before the local request action.",
                 )
+
+    check_values(data)
+    runs = _mapping(data.get("runs", {}))
+    check_steps(runs.get("steps", []), group="Composite action", inherited_context=True)
+    trigger = data.get("on")
+    events = set(trigger) if isinstance(trigger, (dict, list)) else {trigger}
+    jobs = _mapping(data.get("jobs", {}))
+    for job_id, raw_job in jobs.items():
+        job = _mapping(raw_job)
+        if "uses" in job:
+            check_reference(job["uses"])
+        check_steps(
+            job.get("steps", []),
+            group=f"Job {job_id}",
+            inherited_context="workflow_call" in events,
+            direct_target="pull_request_target" in events,
+            condition=str(job.get("if", "")),
+        )
         if "pull_request" in events:
             runner = str(job.get("runs-on", ""))
             if "self-hosted" in runner or "${{" in runner:
@@ -543,7 +560,7 @@ def workflow_violations(
         pattern.search(text) for pattern in REAL_TOPOLOGY_PATTERNS
     ):
         reject("product_topology_embedded", "Workflow product topology belongs in runtime records.")
-    return violations
+    return list(dict.fromkeys(violations))
 
 
 def verify_workflow_pins(root: Path, revision: str) -> list[ActionPinViolation]:

@@ -230,6 +230,45 @@ class GitHubActionsSecurityTests(TestCase):
                         },
                     )
 
+    def test_composites_share_checkout_and_request_action_trust(self) -> None:
+        base = (
+            "runs:\n  using: composite\n  steps:\n"
+            f"    - uses: actions/checkout@{'a' * 40} # v1.0.0\n"
+        )
+        unsafe = base + "      with:\n        ref: ${{ github.event.pull_request.head.sha }}\n"
+        for action, code in (
+            (unsafe, "pull_request_target_checkout_untrusted"),
+            (
+                base + "    - uses: ./.github/actions/launchplane-request\n",
+                "local_request_checkout_untrusted",
+            ),
+            (
+                "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/launchplane-request\n",
+                "local_request_checkout_untrusted",
+            ),
+        ):
+            with self.subTest(code=code, action=action):
+                self.assertIn(
+                    code,
+                    {item.code for item in workflow_violations(action, path=Path("action.yml"))},
+                )
+        ordinary_only = unsafe.replace(
+            "      with:", "      if: github.event_name != 'pull_request_target'\n      with:"
+        )
+        self.assertEqual(workflow_violations(ordinary_only, path=Path("action.yml")), [])
+        remote_request = base + (
+            "    - uses: cbusillo/launchplane/.github/actions/launchplane-request@"
+            f"{'a' * 40} # launchplane-request\n"
+        )
+        self.assertEqual(workflow_violations(remote_request, path=Path("action.yml")), [])
+
+    def test_one_bad_image_is_reported_once(self) -> None:
+        workflow = _safe_workflow().replace("@sha256:" + "b" * 64, "", 1)
+        self.assertEqual(
+            [item.code for item in workflow_violations(workflow, path=Path("fixture.yml"))],
+            ["container_digest_missing"],
+        )
+
     def test_static_runner_choice_requires_trust_before_self_hosted_selection(self) -> None:
         guard = f"({_SAME_REPO_CONDITION})"
         for condition, fallback, safe in (

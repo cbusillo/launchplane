@@ -103,7 +103,7 @@ The required CI `repository_pins` job enforces this policy on committed workflow
 and composite actions for both same-repository and fork pull requests. Security
 CI also runs actionlint. The linter also requires Playwright images to match the frontend dependency at
 the same committed revision. It rejects untrusted checkout refs in
-`pull_request_target` jobs and explicit pull-request head refs in reusable jobs
+`pull_request_target` jobs and explicit pull-request head refs in reusable jobs and composite actions
 that do not exclude that event, untrusted expressions pasted into shell scripts,
 unsafe local request-action checkouts, embedded product topology, and fork
 access to self-hosted runners. Self-hosted pull-request jobs need a necessary
