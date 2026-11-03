@@ -62,6 +62,10 @@ def _mapping(value: object) -> Mapping[str, object]:
     return value
 
 
+def _text(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def verify_worker_pins(root: Path, revision: str, repository: str) -> list[str]:
     violations: list[str] = []
     for path in WRAPPER_PATHS:
@@ -455,7 +459,7 @@ def workflow_violations(
         group: str,
         inherited_context: bool,
         direct_target: bool = False,
-        condition: str = "",
+        job_condition: str = "",
     ) -> None:
         if not isinstance(value, list):
             raise ValueError(f"Workflow {path} steps must be a list.")
@@ -472,7 +476,7 @@ def workflow_violations(
         checkouts = [
             (index, step)
             for index, step in enumerate(steps)
-            if str(step.get("uses", "")).startswith("actions/checkout@")
+            if _text(step.get("uses")).startswith("actions/checkout@")
         ]
         for _, checkout in checkouts:
             inputs = _mapping(checkout.get("with", {}))
@@ -480,7 +484,7 @@ def workflow_violations(
             checkout_context = re.sub(
                 r"\[\s*'(\w+)'\s*]",
                 r".\1",
-                f"{ref} {inputs.get('repository', '')}",
+                f"{_text(ref)} {_text(inputs.get('repository'))}",
             )
             checkout_context = re.sub(r"\s*\.\s*", ".", checkout_context).lower()
             inherited_untrusted_ref = inherited_context and (
@@ -491,7 +495,7 @@ def workflow_violations(
             )
             excludes_target = any(
                 _requires_conjunct(value, required)
-                for value in (condition, str(checkout.get("if", "")))
+                for value in (job_condition, _text(checkout.get("if")))
                 for required in (
                     "github.event_name != 'pull_request_target'",
                     "github.event_name == 'pull_request'",
@@ -552,12 +556,13 @@ def workflow_violations(
             group=f"Job {job_id}",
             inherited_context="workflow_call" in events,
             direct_target="pull_request_target" in events,
-            condition=str(job.get("if", "")),
+            job_condition=_text(job.get("if")),
         )
         if "pull_request" in events:
-            runner = str(job.get("runs-on", ""))
+            raw_runner = job.get("runs-on", "")
+            runner = raw_runner if isinstance(raw_runner, str) else json.dumps(raw_runner)
             if "self-hosted" in runner or "${{" in runner:
-                condition = str(job.get("if", ""))
+                condition = _text(job.get("if"))
                 if "always()" in condition and not _requires_conjunct(condition, "!cancelled()"):
                     reject(
                         "runner_cancellation_missing",
@@ -610,7 +615,6 @@ def verify_workflow_pins(root: Path, revision: str) -> list[ActionPinViolation]:
         cwd=root,
         capture_output=True,
         text=True,
-        check=False,
         timeout=10,
     )
     playwright_version = None
@@ -664,7 +668,7 @@ def main() -> None:
         yaml.YAMLError,
         KeyError,
     ) as error:
-        parser.exit(1, f"Pin verification failed: {error}\n")
+        raise SystemExit(f"Pin verification failed: {error}") from error
     print(
         json.dumps(
             {
