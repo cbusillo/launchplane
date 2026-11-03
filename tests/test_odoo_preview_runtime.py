@@ -471,7 +471,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "ready")
-        self.assertIsNotNone(result.runtime_plan.target)
         assert result.runtime_plan.target is not None
         self.assertEqual(result.runtime_plan.target.target_id, "compose-cm-pr-45")
         self.assertEqual(result.dry_run_plan.compose_ref, "compose-cm-pr-45")
@@ -510,7 +509,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         self.assertEqual(result.status, "ready")
         self.assertEqual(result.runtime_plan.operation, "destroy")
-        self.assertIsNotNone(result.runtime_plan.target)
         assert result.runtime_plan.target is not None
         self.assertEqual(result.runtime_plan.target.target_id, "compose-cm-pr-45")
         self.assertEqual(result.dry_run_plan.compose_ref, "compose-cm-pr-45")
@@ -553,7 +551,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "ready")
-        self.assertIsNotNone(result.runtime_plan.target)
         assert result.runtime_plan.target is not None
         self.assertEqual(result.runtime_plan.target.target_id, "compose-cm-pr-45")
         self.assertEqual(result.dry_run_plan.compose_ref, "compose-cm-pr-45")
