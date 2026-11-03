@@ -561,18 +561,15 @@ layer because it validates service authentication and deployment wiring rather
 than deterministic UI behavior.
 
 Workflows are checked where they execute: CI runs them, `security.yml` runs
-actionlint over every workflow, and `tests/test_github_actions_security.py`
-holds the rules that apply to all of them. Workflow tests take one of three
-forms:
+actionlint, and `scripts/verify_repository_pins.py` enforces shared workflow
+properties on committed inputs. Its tests use arbitrary passing and violating
+fixtures. They never assert the text or structure of a tracked workflow.
 
-- Run an embedded script step with inputs (through `tests/support/workflows.py`
-  `load_workflow` and `step_named`) and assert its output or exit code.
-- Enforce a rule over every workflow, such as fork pull requests never reaching
-  self-hosted runners, remote actions being pinned to a full commit SHA, or
-  `run:` scripts reading inputs and event fields through `env` instead of
-  `${{ }}`, and name the workflow file and violated rule on failure.
-- Check that two real files agree, such as an admin wrapper's inputs and the
-  pinned worker it forwards to.
+Workflow behavior tests run an embedded script step with inputs through
+`tests/support/workflows.py` (`load_workflow` and `step_named`) and assert its
+output or exit code. Rules shared by workflows, browser-image dependency
+agreement, and wrapper/pinned-worker interface agreement belong in the linter.
+Their tests supply fixtures rather than reading tracked workflow text.
 
 ## HTTP and ASGI contracts
 

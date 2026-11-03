@@ -66,11 +66,6 @@ jobs:
       - name: Install Python
         run: uv python install
 
-      - name: Enforce immutable GitHub Action references
-        run: >-
-          uv run --no-project python -m unittest
-          tests.test_github_actions_security
-
       - name: Lint GitHub Actions workflows
         run: |
           docker run --rm \
@@ -98,11 +93,6 @@ jobs:
 
       - name: Install Python
         run: uv python install
-
-      - name: Enforce immutable GitHub Action references
-        run: >-
-          uv run --no-project python -m unittest
-          tests.test_github_actions_security
 
       - name: Lint GitHub Actions workflows
         run: |
