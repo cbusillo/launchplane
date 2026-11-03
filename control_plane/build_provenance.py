@@ -7,6 +7,9 @@ are never evidence. See docs/artifact-provenance.md.
 """
 
 import io
+from datetime import datetime, timezone
+from hashlib import sha256
+from math import ceil
 from http.client import HTTPException
 import json
 import re
@@ -26,6 +29,13 @@ from control_plane.contracts.artifact_identity import (
 )
 
 from control_plane.github_response_headers import normalized_github_quota_response_headers
+from control_plane.github_read_cache import GitHubReadCache
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+from control_plane.merge_train_provider_failure import (
+    ProviderFailure,
+    provider_failure,
+    provider_retry_deadline,
+)
 
 BUILD_WORKFLOW_PATH = ".github/workflows/build.yml"
 MANIFEST_ARTIFACT_PREFIX = "artifact-manifest-"
@@ -33,6 +43,7 @@ MANIFEST_ARTIFACT_PREFIX = "artifact-manifest-"
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 FIRST_PARENT_PAGE_LIMIT = 3
 _GITHUB_API = "https://api.github.com"
+_BUILD_READ_CACHE = GitHubReadCache()
 
 
 BuildProvenanceReasonCode = Literal[
@@ -67,11 +78,17 @@ class BuildProvenanceError(Exception):
     """
 
     def __init__(
-        self, message: str, *, code: BuildProvenanceReasonCode, run_id: int | None = None
+        self,
+        message: str,
+        *,
+        code: BuildProvenanceReasonCode,
+        run_id: int | None = None,
+        retry_at: str = "",
     ) -> None:
         super().__init__(message)
         self.code = code
         self.run_id = run_id
+        self.retry_at = retry_at
 
 
 class BuildProvenanceTransport(Protocol):
@@ -83,12 +100,51 @@ class BuildProvenanceTransport(Protocol):
 class GitHubBuildProvenanceTransport:
     """Read-only GitHub transport for one repository-scoped installation token."""
 
-    def __init__(self, *, token: str, timeout_seconds: float = 30) -> None:
-        self._token = token
+    def __init__(
+        self,
+        *,
+        token: str | GitHubAppInstallationToken,
+        timeout_seconds: float = 30,
+        read_cache: GitHubReadCache | None = None,
+    ) -> None:
+        self._token = token.token if isinstance(token, GitHubAppInstallationToken) else token
         self._timeout_seconds = timeout_seconds
+        self._read_cache = read_cache if read_cache is not None else _BUILD_READ_CACHE
+        scope = (
+            json.dumps(
+                (
+                    token.app_id,
+                    token.installation_id,
+                    token.repository_id,
+                    token.permissions,
+                    token.repository_private,
+                )
+            )
+            if isinstance(token, GitHubAppInstallationToken)
+            else token
+        )
+        self._cache_namespace = sha256(f"{_GITHUB_API}\0{scope}".encode()).hexdigest()
 
     def get_json(self, path: str) -> object:
-        return json.loads(self._read(self._api_request(path)) or b"null")
+        cached = self._read_cache.get(self._cache_namespace, path)
+        request = self._api_request(path)
+        if cached is not None and cached.etag:
+            request.add_header("If-None-Match", cached.etag)
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:
+                payload = json.loads(response.read() or b"null")
+                etag = response.headers.get("ETag", "")
+                if isinstance(etag, str) and etag:
+                    self._read_cache.put(self._cache_namespace, path, etag=etag, payload=payload)
+                else:
+                    self._read_cache.discard(self._cache_namespace, path)
+                return payload
+        except HTTPError as error:
+            if error.code == 304 and cached is not None and cached.etag:
+                return cached.payload
+            raise _github_read_failure(path, error) from error
+        except (URLError, OSError, HTTPException) as error:
+            raise _github_read_failure(path, error) from error
 
     def get_bytes(self, path: str) -> bytes:
         """Download a redirected archive without sending the token to the storage host."""
@@ -123,13 +179,6 @@ class GitHubBuildProvenanceTransport:
             },
         )
 
-    def _read(self, request: Request) -> bytes:
-        try:
-            with urlopen(request, timeout=self._timeout_seconds) as response:
-                return bytes(response.read())
-        except (HTTPError, URLError, OSError, HTTPException) as error:
-            raise _github_read_failure(request.full_url, error) from error
-
 
 def _github_read_failure(
     path: str, error: Exception, *, stage: Literal["api", "storage"] = "api"
@@ -155,9 +204,13 @@ def _github_read_failure(
     }
     if isinstance(error, URLError) and not isinstance(error, HTTPError):
         evidence["reason_type"] = type(error.reason).__name__[:64]
+    headers = (
+        normalized_github_quota_response_headers(error.headers)
+        if isinstance(error, HTTPError) and stage == "api"
+        else {}
+    )
     if isinstance(error, HTTPError):
         evidence["status"] = error.code
-        headers = normalized_github_quota_response_headers(error.headers) if stage == "api" else {}
         for header, field in (
             ("x-ratelimit-remaining", "rate_limit_remaining"),
             ("x-ratelimit-reset", "rate_limit_reset"),
@@ -176,7 +229,13 @@ def _github_read_failure(
             evidence["request_id"] = request_id
         if error.code == 429 or (
             error.code == 403
-            and (evidence.get("rate_limit_remaining") == 0 or "retry-after" in headers)
+            and (
+                evidence.get("rate_limit_remaining") == 0
+                or "retry-after" in headers
+                or (
+                    stage == "api" and error.fp is not None and provider_failure(error).rate_limited
+                )
+            )
         ):
             evidence["classification"] = "rate_limited"
         elif error.code == 401:
@@ -187,8 +246,23 @@ def _github_read_failure(
             evidence["classification"] = "transient"
         else:
             evidence["classification"] = "http_error"
+    retry_at = ""
+    if evidence["classification"] == "rate_limited" and stage == "api":
+        deadline = provider_retry_deadline(
+            ProviderFailure(
+                remaining=headers.get("x-ratelimit-remaining", ""),
+                reset=headers.get("x-ratelimit-reset", ""),
+                retry_after=headers.get("retry-after", ""),
+            ),
+            now=datetime.now(timezone.utc),
+        )
+        retry_at = datetime.fromtimestamp(ceil(deadline.timestamp()), tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
     return BuildProvenanceError(
-        f"GitHub read failed: {json.dumps(evidence, sort_keys=True)}", code="github_read_failed"
+        f"GitHub read failed: {json.dumps(evidence, sort_keys=True)}",
+        code="github_read_failed",
+        retry_at=retry_at,
     )
 
 

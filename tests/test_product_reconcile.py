@@ -9021,6 +9021,75 @@ class ProductReconcileGrantTests(ProductReconcileTestCase):
 
 
 class ProductReconcileFailureTests(ProductReconcileTestCase):
+    def test_quota_during_forward_order_proof_remains_retryable(self) -> None:
+        self._running_release(1, OLDER)
+        self.request()
+        self.github.add_run(7, DEPLOYABLE)
+        original = self.github.get_json
+        headers = Message()
+        headers["X-RateLimit-Remaining"] = "0"
+        headers["Retry-After"] = "60"
+        failure = HTTPError("https://api.github.com", 403, "Limited", headers, None)
+        self.addCleanup(failure.close)
+        comparison_reads: list[str] = []
+
+        def get_json(path: str) -> object:
+            if "/compare/" in path:
+                comparison_reads.append(path)
+                with patch("control_plane.build_provenance.urlopen", side_effect=failure):
+                    return GitHubBuildProvenanceTransport(token="read").get_json(path)
+            return original(path)
+
+        with patch.object(self.github, "get_json", side_effect=get_json):
+            result = self.run_once()
+        self.assertEqual(len(comparison_reads), 1)
+        self.assertEqual(result.state, "pending")
+        self.assertTrue(result.last_plan["retry_at"])
+        self.assertIsNone(self.store.claim_next_product_reconcile_request("early", 600))
+        self.assertEqual(self.store.list_public_ingress_incident_records(), ())
+        self.assertEqual(self.provider.applied, [])
+
+    def test_testing_build_quota_defers_instead_of_rejecting_candidate(self) -> None:
+        self.github.add_run(7, DEPLOYABLE)
+        original_get = self.github.get_json
+        for limited in (True, False):
+            with self.subTest(limited=limited):
+                self.request()
+                headers = Message()
+                if limited:
+                    headers["X-RateLimit-Remaining"] = "0"
+                    headers["Retry-After"] = "60"
+                failure = HTTPError("https://api.github.com", 403, "Unavailable", headers, None)
+                self.addCleanup(failure.close)
+
+                def get_json(path: str) -> object:
+                    if "/artifacts?" not in path:
+                        return original_get(path)
+                    with patch("control_plane.build_provenance.urlopen", side_effect=failure):
+                        return GitHubBuildProvenanceTransport(token="private").get_json(path)
+
+                with patch.object(self.github, "get_json", side_effect=get_json):
+                    result = self.run_once()
+                self.assertEqual(result.state, "pending" if limited else "done")
+                if limited:
+                    self.assertEqual(result.last_plan["reason"], "github_rate_limited")
+                    self.assertNotIn("rejected_builds", result.last_plan)
+                    self.assertEqual(self.store.list_public_ingress_incident_records(), ())
+                    retry = self.store.claim_next_product_reconcile_request(
+                        "settle", 600, now=str(result.last_plan["retry_at"])
+                    )
+                    assert retry is not None
+                    self.store.complete_product_reconcile_request(
+                        retry.target_key, "settle", "done", {}
+                    )
+                else:
+                    self.assertNotEqual(result.last_plan.get("reason"), "github_rate_limited")
+                    self.assertEqual(result.last_plan["reason"], "no_verified_build")
+                    rejected = result.last_plan["rejected_builds"]
+                    assert isinstance(rejected, list) and isinstance(rejected[0], dict)
+                    self.assertEqual(rejected[0]["code"], "github_read_failed")
+                self.assertEqual(self.provider.applied, [])
+
     def write_policy_without_app(self) -> None:
         record = build_test_merge_train_policy_record(repository=REPOSITORY)
         policy = record.policy.model_dump(mode="json")
@@ -9040,7 +9109,9 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
         self.github.add_run(7, chain[-1])
         headers = Message()
         headers["X-RateLimit-Remaining"] = "0"
-        headers["X-RateLimit-Reset"] = "1793502000"
+        headers["X-RateLimit-Reset"] = str(
+            int((datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp())
+        )
         headers["X-GitHub-Request-Id"] = "ABCD:1234:5678:90AB"
         headers["Authorization"] = "private-token"
         reads: list[str] = []
@@ -9075,8 +9146,10 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
             self.assertLogs("control_plane.product_reconcile", "WARNING") as logs,
         ):
             result = self.run_once()
-        self.assertEqual(result.state, "failed")
-        evidence = json.loads(result.last_error.split(": ", 1)[1])
+        self.assertEqual(result.state, "pending")
+        self.assertEqual(result.last_error, "")
+        quota_error = str(result.last_plan["quota_error"])
+        evidence = json.loads(quota_error.split(": ", 1)[1])
         self.assertEqual(evidence["status"], 403)
         self.assertEqual(evidence["route"], "commit_history")
         self.assertEqual(evidence["classification"], "rate_limited")
@@ -9084,14 +9157,37 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
         self.assertEqual(evidence["rate_limit_remaining"], 0)
         self.assertEqual(evidence["rate_limit_reset"], int(headers["X-RateLimit-Reset"]))
         for unsafe in ("private-token", "private-response-message", "https://", REPOSITORY):
-            self.assertNotIn(unsafe, result.last_error)
+            self.assertNotIn(unsafe, quota_error)
             self.assertNotIn(unsafe, " ".join(logs.output))
         body.read.assert_not_called()
         self.assertEqual(len(reads), 3)
-        self.assertEqual(result.last_plan["last_failed_error_code"], "github_read_failed")
-        self.assertTrue(result.last_plan["failure_trace_id"])
+        self.assertEqual(result.last_plan["reason"], "github_rate_limited")
+        self.assertTrue(result.last_plan["retry_at"])
+        self.assertIsNone(self.store.claim_next_product_reconcile_request("early", 600))
+        self.assertEqual(self.store.list_public_ingress_incident_records(), ())
+        from control_plane.testing_delivery_monitor import monitor_testing_delivery_once
+
+        monitor_testing_delivery_once(self.store)
+        self.assertEqual(self.store.list_public_ingress_incident_records(), ())
         self.assertEqual(self.provider.applied, [])
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
+        target = ProductReconcileTarget(product="site", target_kind="testing")
+        self.store.request_product_reconcile(target, result.updated_at)
+        self.assertIsNone(self.store.claim_next_product_reconcile_request("new-event", 600))
+        other = ProductReconcileTarget(product="other", target_kind="testing")
+        self.store.request_product_reconcile(other, result.updated_at)
+        claimed = self.store.claim_next_product_reconcile_request("other", 600)
+        assert claimed is not None
+        self.assertEqual(claimed.target_key, other.target_key)
+        self.store.complete_product_reconcile_request(other.target_key, "other", "done", {})
+        retry_at = str(result.last_plan["retry_at"])
+        self.assertGreaterEqual(
+            datetime.fromisoformat(retry_at).timestamp(), int(headers["X-RateLimit-Reset"])
+        )
+        with patch.object(self.store, "_database_mutation_timestamp", return_value=retry_at):
+            retried = self.run_once()
+        self.assertEqual(retried.state, "done", retried.last_error)
+        self.assertNotIn("retry_at", retried.last_plan)
 
     def test_missing_build_workflow_is_a_noop_only_with_complete_actions_inventory(self) -> None:
         scenarios: tuple[tuple[dict[str, object] | int, str, str], ...] = (
@@ -9211,7 +9307,23 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
                 return_value=token,
             ) as mint,
         ):
-            resolve_build_provenance_transport(self.store, profile)
+            first = MagicMock()
+            first.__enter__.return_value.read.return_value = b"[]"
+            first.__enter__.return_value.headers = {"ETag": '"same-history"'}
+            unchanged = HTTPError("https://api.github.com", 304, "Not Modified", Message(), None)
+            self.addCleanup(unchanged.close)
+            mint.side_effect = [token, replace(token, token="renewed")]
+            with patch(
+                "control_plane.build_provenance.urlopen", side_effect=[first, unchanged]
+            ) as read:
+                path = f"/repos/{REPOSITORY}/commits?sha=main"
+                resolve_build_provenance_transport(self.store, profile).get_json(path)
+                self.assertEqual(
+                    resolve_build_provenance_transport(self.store, profile).get_json(path), []
+                )
+            second = read.call_args_list[1].args[0]
+            self.assertEqual(second.get_header("If-none-match"), '"same-history"')
+            self.assertEqual(second.get_header("Authorization"), "Bearer renewed")
 
         self.assertEqual(mint.call_args.kwargs["repository_id"], REPOSITORY_ID)
         self.assertEqual(mint.call_args.kwargs["repository"], REPOSITORY)

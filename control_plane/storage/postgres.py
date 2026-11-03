@@ -26862,16 +26862,18 @@ class PostgresRecordStore(HumanSessionStore):
                 observed_at=observed_at, lease_seconds=lease_seconds
             )
             row_model = LaunchplaneProductReconcileRequestRow
+            retry_at = row_model.payload["last_plan"]["retry_at"].as_string()
             statement = (
                 select(row_model)
                 .where(
+                    or_(retry_at.is_(None), retry_at <= observed_at),
                     or_(
                         row_model.state == "pending",
                         and_(
                             row_model.state == "running",
                             row_model.lease_expires_at < observed_at,
                         ),
-                    )
+                    ),
                 )
                 .order_by(row_model.requested_at.asc(), row_model.target_key.asc())
                 .limit(20)
