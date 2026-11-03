@@ -336,15 +336,42 @@ REAL_TOPOLOGY_PATTERNS = (
 def workflow_violations(
     text: str, *, path: Path, playwright_version: str | None = None
 ) -> list[ActionPinViolation]:
-    data = yaml.load(text, Loader=WorkflowLoader)
+    loader = WorkflowLoader(text)
+    try:
+        node = loader.get_single_node()
+        data = loader.construct_document(node) if node is not None else None
+    finally:
+        loader.dispose()
     if not isinstance(data, dict):
         raise ValueError(f"Workflow {path} must be a mapping.")
+    reference_lines: dict[int, int] = {}
+    visited: set[int] = set()
+
+    def locate_references(value: object, source: yaml.Node) -> None:
+        if not isinstance(value, (dict, list)) or id(value) in visited:
+            return
+        visited.add(id(value))
+        if isinstance(value, dict) and isinstance(source, yaml.MappingNode):
+            for key, child in source.value:
+                if key.value == "uses":
+                    reference_lines[id(value)] = child.start_mark.line
+                locate_references(value.get(key.value), child)
+        elif isinstance(value, list) and isinstance(source, yaml.SequenceNode):
+            for child_value, child in zip(value, source.value, strict=True):
+                locate_references(child_value, child)
+
+    assert node is not None
+    locate_references(data, node)
+    lines = text.splitlines()
     violations: list[ActionPinViolation] = []
 
-    def reject(code: str, message: str) -> None:
-        violations.append(ActionPinViolation(code=code, message=message, path=path))
+    def reject(code: str, message: str, *, line_number: int | None = None) -> None:
+        violations.append(
+            ActionPinViolation(code=code, message=message, path=path, line_number=line_number)
+        )
 
-    def check_reference(reference: object) -> None:
+    def check_reference(site: Mapping[str, object]) -> None:
+        reference = site["uses"]
         if not isinstance(reference, str):
             reject("action_reference_invalid", "Action references must be strings.")
             return
@@ -370,14 +397,8 @@ def workflow_violations(
                 "worker_identity_unapproved",
                 "Repository-qualified workers must be approved for their caller.",
             )
-        provenance = next(
-            (
-                line.partition("#")[2].strip()
-                for line in text.splitlines()
-                if reference in line and "#" in line
-            ),
-            "",
-        )
+        line = reference_lines[id(site)]
+        provenance = lines[line].partition("#")[2].strip()
         if source == "cbusillo/launchplane/.github/actions/launchplane-request":
             valid_provenance = provenance == "launchplane-request"
         elif source.startswith(
@@ -390,6 +411,7 @@ def workflow_violations(
             reject(
                 "action_provenance_invalid",
                 "Remote pins must retain their release or first-party provenance.",
+                line_number=line + 1,
             )
 
     def check_image(image: object) -> None:
@@ -440,7 +462,7 @@ def workflow_violations(
         steps = [_mapping(step) for step in value]
         for step in steps:
             if "uses" in step:
-                check_reference(step["uses"])
+                check_reference(step)
             script = step.get("run")
             if isinstance(script, str) and UNTRUSTED_RUN_EXPRESSION_PATTERN.search(script):
                 reject(
@@ -462,8 +484,10 @@ def workflow_violations(
             )
             checkout_context = re.sub(r"\s*\.\s*", ".", checkout_context).lower()
             inherited_untrusted_ref = inherited_context and (
-                "github.event.pull_request.head" in checkout_context
+                "github.event.pull_request" in checkout_context
+                or "github.event.number" in checkout_context
                 or "github.head_ref" in checkout_context
+                or "refs/pull/" in checkout_context
             )
             excludes_target = any(
                 _requires_conjunct(value, required)
@@ -522,7 +546,7 @@ def workflow_violations(
     for job_id, raw_job in jobs.items():
         job = _mapping(raw_job)
         if "uses" in job:
-            check_reference(job["uses"])
+            check_reference(job)
         check_steps(
             job.get("steps", []),
             group=f"Job {job_id}",

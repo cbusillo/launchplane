@@ -187,6 +187,9 @@ class GitHubActionsSecurityTests(TestCase):
             "ref: ${{ github['event']['pull_request']['head']['sha'] }}",
             "ref: ${{ github . event . pull_request . head . sha }}",
             "ref: ${{ github.head_ref }}",
+            "ref: refs/pull/${{ github.event.pull_request.number }}/merge",
+            "ref: refs/pull/${{ github.event.number }}/head",
+            "ref: ${{ github.event.pull_request.merge_commit_sha }}",
             "repository: ${{ github.event.pull_request.head.repo.full_name }}",
         ):
             workflow = (
@@ -268,6 +271,16 @@ class GitHubActionsSecurityTests(TestCase):
             [item.code for item in workflow_violations(workflow, path=Path("fixture.yml"))],
             ["container_digest_missing"],
         )
+
+    def test_reference_comments_belong_to_each_occurrence(self) -> None:
+        reference = f"actions/checkout@{'a' * 40}"
+        workflow = _safe_workflow() + f"      - uses: {reference}\n"
+        self.assertEqual(
+            [item.code for item in workflow_violations(workflow, path=Path("fixture.yml"))],
+            ["action_provenance_invalid"],
+        )
+        commented = workflow.rstrip() + f" # v1.0.0\n      - run: echo '{reference}'\n"
+        self.assertEqual(workflow_violations(commented, path=Path("fixture.yml")), [])
 
     def test_static_runner_choice_requires_trust_before_self_hosted_selection(self) -> None:
         guard = f"({_SAME_REPO_CONDITION})"

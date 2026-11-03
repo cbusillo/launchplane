@@ -41,32 +41,11 @@ class Workflow:
     data: Mapping[str, YamlValue]
 
     @property
-    def label(self) -> str:
-        return self.path.name
-
-    @property
-    def name(self) -> str:
-        return _string_value(self.data.get("name"), default=self.path.stem)
-
-    @property
     def jobs(self) -> Mapping[str, YamlValue]:
         return _mapping_value(self.data.get("jobs"))
 
-    @property
-    def permissions(self) -> Mapping[str, YamlValue]:
-        return _mapping_value(self.data.get("permissions"))
-
     def job(self, job_id: str) -> Mapping[str, YamlValue]:
         return _mapping_value(self.jobs.get(job_id))
-
-    def job_permissions(self, job_id: str) -> Mapping[str, YamlValue]:
-        job_permissions = _mapping_value(self.job(job_id).get("permissions"))
-        if job_permissions:
-            return job_permissions
-        return self.permissions
-
-    def job_uses(self, job_id: str) -> str:
-        return _string_value(self.job(job_id).get("uses"))
 
     def steps(self, job_id: str) -> tuple[WorkflowStep, ...]:
         raw_steps = _sequence_value(self.job(job_id).get("steps"))
