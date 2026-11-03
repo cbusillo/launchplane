@@ -6,7 +6,7 @@ from unittest.mock import patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scripts.verify_repository_pins import WRAPPER_PATHS, verify_worker_pins
+from scripts.verify_repository_pins import WRAPPER_PATHS, verify_worker_pins, verify_workflow_pins
 from tests.test_first_party_action_pins import (
     _initialize_repository,
     _commit,
@@ -17,6 +17,32 @@ from control_plane.first_party_action_pins import build_action_pin_report
 
 
 class RepositoryPinVerifierTests(unittest.TestCase):
+    def test_workflow_lint_uses_committed_workflows_and_composite_actions(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _git(root, "init", "-b", "main")
+            _git(root, "config", "user.name", "Fixture")
+            _git(root, "config", "user.email", "fixture@example.invalid")
+            workflow = root / ".github/workflows/arbitrary.yaml"
+            action = root / ".github/actions/arbitrary/action.yml"
+            workflow.parent.mkdir(parents=True)
+            action.parent.mkdir(parents=True)
+            reference = f"actions/checkout@{'a' * 40} # v1.0.0"
+            workflow.write_text(f"jobs:\n  arbitrary:\n    steps:\n      - uses: {reference}\n")
+            action.write_text(f"runs:\n  using: composite\n  steps:\n    - uses: {reference}\n")
+            revision = _commit(root, "safe fixture")
+            workflow.write_text(workflow.read_text().replace("a" * 40, "main"))
+            action.write_text(action.read_text().replace("a" * 40, "v1"))
+            self.assertEqual(verify_workflow_pins(root, revision), [])
+            _commit(root, "mutable fixture references")
+            violations = verify_workflow_pins(root, "HEAD")
+            self.assertEqual(
+                {item.path for item in violations},
+                {workflow.relative_to(root), action.relative_to(root)},
+            )
+            self.assertEqual({item.code for item in violations}, {"action_reference_not_immutable"})
+            self.assertEqual(verify_workflow_pins(root, revision), [])
+
     def setUp(self) -> None:
         repository_environment = patch.dict(os.environ, {"GITHUB_REPOSITORY": ""})
         repository_environment.start()
