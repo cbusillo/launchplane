@@ -383,11 +383,6 @@ interpreter for both the audit tool and Python AST parsing. Consumers using
 syntax newer than the default must supply their supported interpreter version
 (for example, `python-version: "3.14"`). The workflow passes that choice directly
 to `uv run --python`, including when a checkout already has a virtual environment.
-
-For repositories with service event checks enabled, the worker admits one source
-scan after each deploy/reconcile poll, including polls that completed work.
-The scan runs separately so it cannot block the next deploy or rollback poll;
-shutdown waits for the admitted scan to finish.
 Coverage-failure handling is described below.
 Adopt the landed immutable workflow/scanner revision and the input in
 the consumer's own maintenance issue; changing formatter settings to evade a
