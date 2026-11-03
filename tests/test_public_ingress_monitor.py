@@ -883,7 +883,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
             + timedelta(seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS / 2),
         )
         self.assertEqual(verification.provenance.freshness_status, "recorded")
-        self.assertIsNotNone(verification.runtime_target)
         assert verification.runtime_target is not None
         self.assertEqual(verification.runtime_target.runtime_identity_status, "mismatch")
         extra_check = ProductLaneHealthCheck(name="not-yet-probed")
@@ -1329,7 +1328,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
         tls_record = next(record for record in store.records if record.check_kind == "tls")
         self.assertEqual(tls_record.status, "pass")
         self.assertIsNone(tls_record.failure_code)
-        self.assertIsNotNone(tls_record.targets[0].tls)
         assert tls_record.targets[0].tls is not None
         self.assertEqual(tls_record.targets[0].tls.status, "valid")
         self.assertEqual(tls_record.targets[0].tls.recorded.owner, "launchplane")
@@ -1382,7 +1380,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(result.fail_count, 1)
         tls_record = next(record for record in store.records if record.check_kind == "tls")
         self.assertEqual(tls_record.failure_code, "connection_timeout")
-        self.assertIsNotNone(tls_record.targets[0].tls)
         assert tls_record.targets[0].tls is not None
         self.assertEqual(tls_record.targets[0].tls.status, "unreachable")
         self.assertEqual(store.incidents[0].check_kind, "tls")
@@ -1864,7 +1861,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(store.records[0].failure_code, "private_endpoint_not_found")
         self.assertEqual(store.records[0].targets[0].url, "private-endpoint://missing-runtime")
         material_fingerprint = store.records[0].material_fingerprint
-        self.assertIsNotNone(material_fingerprint)
         assert material_fingerprint is not None
         self.assertEqual(
             material_fingerprint.route_authority.kind,
@@ -2012,7 +2008,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(store.records[0].check_kind, "provider")
         self.assertEqual(store.records[0].failure_code, "provider_check_unavailable")
         material_fingerprint = store.records[0].material_fingerprint
-        self.assertIsNotNone(material_fingerprint)
         assert material_fingerprint is not None
         self.assertEqual(
             material_fingerprint.route_authority.kind,
