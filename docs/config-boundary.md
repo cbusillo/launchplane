@@ -372,6 +372,12 @@ string elements; other target fields, runtime/provider values, credentials and
 unsupported identifiers remain findings. Black's target vocabulary is defined
 in [its TargetVersion enum](https://github.com/psf/black/blob/26.5.1/src/black/mode.py).
 
+Ruff's `target-version` and `per-file-target-version` Python identifiers are
+also developer metadata in `pyproject.toml` under `tool.ruff`, or in `ruff.toml`
+and `.ruff.toml`, including nested configuration files. The same bounded
+Python identifier check applies; sibling provider targets and credentials
+remain findings. See [Ruff's settings](https://docs.astral.sh/ruff/settings/#target-version).
+
 The reusable config-authority workflow's `python-version` input selects the
 interpreter for both the audit tool and Python AST parsing. Consumers using
 syntax newer than the default must supply their supported interpreter version

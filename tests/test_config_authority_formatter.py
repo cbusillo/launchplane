@@ -16,6 +16,7 @@ class FormatterTargetGateTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             _init_repo(root)
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
             (root / path).write_text("# baseline\n")
             _commit_all(root)
             base = _git(root, "rev-parse", "HEAD")
@@ -32,6 +33,19 @@ class FormatterTargetGateTests(unittest.TestCase):
     def test_black_target_list_is_formatter_configuration(self) -> None:
         result = self.gate('[tool.black]\ntarget-version = ["py313", "py314"]\n')
         self.assertEqual(result["status"], "pass", result)
+
+    def test_ruff_python_targets_are_developer_configuration(self) -> None:
+        for text, path in (
+            ('[tool.ruff]\ntarget-version = "py314"\n', "pyproject.toml"),
+            ('target-version = "py314"\n', "ruff.toml"),
+            ('target-version = "py314"\n', ".ruff.toml"),
+            ('[tool.ruff.per-file-target-version]\n"app.py" = "py314"\n', "pyproject.toml"),
+            ('[per-file-target-version]\n"app.py" = "py314"\n', "ruff.toml"),
+            ('[tool.ruff]\ntarget-version = "py314"\n', "package/pyproject.toml"),
+            ('target-version = "py314"\n', "package/.ruff.toml"),
+        ):
+            with self.subTest(text=text, path=path):
+                self.assertEqual(self.gate(text, path)["status"], "pass")
 
     def test_malformed_and_runtime_targets_remain_rejected(self) -> None:
         for value in (
@@ -71,3 +85,17 @@ class FormatterTargetGateTests(unittest.TestCase):
         rejected = json.dumps(result["rejected_findings"])
         self.assertIn("provider-target", rejected)
         self.assertIn("credential-token", rejected)
+
+    def test_ruff_allowance_keeps_runtime_values_and_other_fields_rejected(self) -> None:
+        for text, path in (
+            ('[tool.ruff]\ntarget-version = "dokploy-production"\n', "pyproject.toml"),
+            ('[per-file-target-version]\n"app.py" = "example/product"\n', ".ruff.toml"),
+            ('[tool.other]\ntarget-version = "py314"\n', "pyproject.toml"),
+            ('target-version = "py314"\n', "runtime.toml"),
+            ('[tool.ruff.runtime]\ntarget-version = "py314"\n', "pyproject.toml"),
+            ('[tool.ruff]\ntarget-version = ["py314"]\n', "pyproject.toml"),
+            ('[tool.ruff]\ntarget-version = "py314"\nprovider-target = "live"\n', "pyproject.toml"),
+            ('target-version = "py314"\ncredential-token = "private-value"\n', "ruff.toml"),
+        ):
+            with self.subTest(text=text, path=path):
+                self.assertEqual(self.gate(text, path)["status"], "fail")

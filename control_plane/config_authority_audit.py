@@ -3117,6 +3117,15 @@ def _severity(*, rule_id: str, key: str) -> str:
     return "medium"
 
 
+def _is_ruff_python_target(*, path: str, key: str) -> bool:
+    filename = PurePosixPath(path).name
+    if filename == "pyproject.toml":
+        key = key.removeprefix("tool.ruff.") if key.startswith("tool.ruff.") else ""
+    elif filename not in {"ruff.toml", ".ruff.toml"}:
+        return False
+    return key == "target-version" or bool(re.fullmatch(r"per-file-target-version\..+", key))
+
+
 def _allow_reason(
     *,
     path: str,
@@ -3160,10 +3169,12 @@ def _allow_reason(
         ):
             return ALLOW_REASON_SCHEMA_ONLY
     if (
-        normalized == "pyproject.toml"
-        and re.fullmatch(r"tool\.black\.target-version\[[0-9]+]", key)
+        (
+            normalized == "pyproject.toml"
+            and re.fullmatch(r"tool\.black\.target-version\[[0-9]+]", key)
+            or _is_ruff_python_target(path=normalized, key=key)
+        )
         and isinstance(value, str)
-        # Black's supported target identifiers, not arbitrary TARGET values.
         and re.fullmatch(r"py3(?:[3-9]|1[0-5])", value)
     ):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
