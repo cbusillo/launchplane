@@ -322,18 +322,6 @@ class OwnerReviewStatusTests(unittest.TestCase):
             notification,
         )
         self.assertEqual(github.statuses[0]["state"], "pending")
-        legacy_notice = github.comments[-1]
-        legacy_body = notification.replace(
-            notification.splitlines()[0],
-            f"<!-- launchplane:client-review-request:{github.head_sha} -->",
-            1,
-        )
-        legacy_notice["body"] = legacy_body
-        legacy_notice["created_at"] = "2026-10-24T15:30:00Z"
-        self._publish(github)
-        self.assertEqual(len(github.comments), 2)
-        self.assertEqual(legacy_notice["body"], notification)
-        legacy_notice["body"] = legacy_body
         self.assertEqual(
             self.store.list_product_review_decision_records(
                 repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
@@ -364,6 +352,18 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self._publish(github)
         self._publish(github)
         self.assertEqual(len(github.comments), 2)
+        legacy_notice = github.comments[-1]
+        carried_notification = legacy_notice["body"]
+        assert isinstance(carried_notification, str)
+        legacy_notice["body"] = carried_notification.replace(
+            carried_notification.splitlines()[0],
+            f"<!-- launchplane:client-review-request:{github.head_sha} -->",
+            1,
+        )
+        legacy_notice["created_at"] = "2026-10-24T15:30:00Z"
+        self._publish(github)
+        self.assertEqual(len(github.comments), 2)
+        self.assertEqual(legacy_notice["body"], carried_notification)
         github.body = "## Client test notes\nTry the changed page."
         github.head_sha = accepted.head_sha
         self.store.write_preview_generation_record(_preview_generation_read_record())

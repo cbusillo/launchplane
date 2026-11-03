@@ -234,6 +234,10 @@ failed preview waits until its replacement is ready. A recorded failure after
 acceptance also reports once that same version is ready again. The saved
 acceptance still applies; that notice adds no second approval gate. Existing acceptance stays
 bound to its recorded head unless the normal carry proof succeeds.
+Remove the head-only receipt matcher, its shared publisher parameter and its
+legacy fixture when [VeriReel PR 573](https://github.com/cbusillo/verireel/pull/573)
+closes or merges; its [existing notice](https://github.com/cbusillo/verireel/pull/573#issuecomment-6607147415)
+is the compatibility case.
 
 The separate release invitation is described in [release-review.md](release-review.md).
 
