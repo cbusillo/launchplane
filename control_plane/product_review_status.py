@@ -557,24 +557,20 @@ class OwnerReviewStatusPublisher:
         token: str,
         preview_request: ProductReconcileRequestRecord | None,
     ) -> None:
-        decisions = store.list_product_review_decision_records(
-            repository=profile.repository, pull_request_number=pull_request_number
-        )
-        latest = next(
-            iter(
-                applicable_product_review_decisions(
-                    decisions=decisions,
-                    profile=profile,
-                    pull_request_number=pull_request_number,
-                    base_branch=facts.base_branch,
-                )
+        decisions = applicable_product_review_decisions(
+            decisions=store.list_product_review_decision_records(
+                repository=profile.repository, pull_request_number=pull_request_number
             ),
-            None,
+            profile=profile,
+            pull_request_number=pull_request_number,
+            base_branch=facts.base_branch,
         )
+        latest = next(iter(decisions), None)
+        if latest is None or latest.decision != "accepted":
+            return
+        acceptance = next((record for record in decisions if record.carried_from is None), latest)
         if (
             facts.state == "open"
-            and latest is not None
-            and latest.decision == "accepted"
             and (
                 latest.head_sha != facts.head_sha
                 or open_client_questions(facts.body)
@@ -582,7 +578,7 @@ class OwnerReviewStatusPublisher:
                     store=store,
                     profile=profile,
                     pull_request_number=pull_request_number,
-                    decision=latest,
+                    decision=acceptance,
                     head_sha=facts.head_sha,
                 )
             )
@@ -601,8 +597,10 @@ class OwnerReviewStatusPublisher:
             )
             body = "\n".join(
                 (
-                    f"<!-- launchplane:client-review-request:{facts.head_sha} -->",
-                    f"@{profile.owner.github_login} this change needs another look.",
+                    f"<!-- launchplane:client-review-request:{acceptance.record_id}:{facts.head_sha} -->",
+                    f"@{profile.owner.github_login} this change needs another look."
+                    if latest.head_sha != facts.head_sha
+                    else f"@{profile.owner.github_login} there is news on the version you accepted.",
                     "",
                     f"Your acceptance covered version `{latest.head_sha}`. "
                     f"The current version is `{facts.head_sha}`."
@@ -617,7 +615,10 @@ class OwnerReviewStatusPublisher:
                     owner_test_notes(facts.body).replace("@", "@\u200b"),
                     "",
                     f"[Open the preview and review this version]({review_url}). "
-                    "Write feedback on the pull request, and press Accept in Launchplane when the preview is right.",
+                    "Write feedback on the pull request, and press Accept in Launchplane when the preview is right."
+                    if latest.head_sha != facts.head_sha
+                    else f"[Open the current preview]({review_url}). Your acceptance still applies; "
+                    "this notice does not ask for another approval. Put feedback or answers on the pull request.",
                 )
             )
             publish_review_comment(
@@ -626,6 +627,12 @@ class OwnerReviewStatusPublisher:
                 body=body,
                 token=token,
                 app_id=self.github_feedback_app_id(control_plane_root=self.control_plane_root),
+                legacy_receipt=(
+                    f"<!-- launchplane:client-review-request:{facts.head_sha} -->",
+                    parse_launchplane_mutation_timestamp(
+                        acceptance.decided_at, field_name="Client acceptance"
+                    ).replace(microsecond=0),
+                ),
                 api_request=self.api_request,
             )
 

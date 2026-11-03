@@ -15,6 +15,7 @@ from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS, NOTH
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.product_review import (
+    ProductReviewCarry,
     ProductReviewDecision,
     ProductReviewDecisionRecord,
 )
@@ -273,7 +274,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.store.write_preview_record(_preview_read_record())
         self.store.write_preview_generation_record(_preview_generation_read_record())
 
-    def test_client_re_review_is_once_per_head_and_preserves_acceptance_and_checks(self) -> None:
+    def test_client_re_review_is_once_per_acceptance_and_version_and_preserves_checks(self) -> None:
         github = _GitHub()
         self._publish(github)
         self.assertEqual(github.comments, [])
@@ -330,6 +331,40 @@ class OwnerReviewStatusTests(unittest.TestCase):
         from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
         from sqlalchemy.exc import SQLAlchemyError
 
+        self.store.write_product_review_decision_record(
+            accepted.model_copy(
+                update={
+                    "record_id": "carried-acceptance",
+                    "feedback_requested": False,
+                    "head_sha": github.head_sha,
+                    "base_branch": "main",
+                    "decided_at": "2026-10-24T15:45:00Z",
+                    "carried_from": ProductReviewCarry(
+                        record_id=accepted.record_id,
+                        head_sha=accepted.head_sha,
+                        refresh_record_ids=("refresh",),
+                    ),
+                }
+            )
+        )
+        github.base_ref = "main"
+        github.body += f"\n### {OPEN_CLIENT_QUESTIONS}\n- What is the address?"
+        self._publish(github)
+        self._publish(github)
+        self.assertEqual(len(github.comments), 2)
+        legacy_notice = github.comments[-1]
+        carried_notification = legacy_notice["body"]
+        assert isinstance(carried_notification, str)
+        legacy_notice["body"] = carried_notification.replace(
+            carried_notification.splitlines()[0],
+            f"<!-- launchplane:client-review-request:{github.head_sha} -->",
+            1,
+        )
+        legacy_notice["created_at"] = "2026-10-24T15:30:00Z"
+        self._publish(github)
+        self.assertEqual(len(github.comments), 2)
+        self.assertEqual(legacy_notice["body"], carried_notification)
+        github.body = "## Client test notes\nTry the changed page."
         github.head_sha = accepted.head_sha
         self.store.write_preview_generation_record(_preview_generation_read_record())
         github.body += f"\n### {OPEN_CLIENT_QUESTIONS}\n- What is the address?"
@@ -347,7 +382,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self._publish(github)
         self.assertEqual(len(github.comments), 3)
         github.body = "## Client test notes\nTry the changed page."
-        repaired_head = "c" * 40
+        repaired_head = "b" * 40
         repaired_acceptance = accepted.model_copy(
             update={
                 "record_id": "accepted-before-preview-failure",
