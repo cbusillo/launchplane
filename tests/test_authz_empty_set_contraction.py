@@ -119,7 +119,6 @@ class EmptySetContractionTests(unittest.TestCase):
         expected = policy.model_copy(update={"github_humans": policy.github_humans[:1]})
         self.assertEqual(apply.updated_policy, expected)
         evidence = apply.schema_v3_write_evidence
-        self.assertIsInstance(evidence, AuthzPolicySchemaV3MaintenanceEvidence)
         assert isinstance(evidence, AuthzPolicySchemaV3MaintenanceEvidence)
         self.assertIsInstance(evidence.caller, AuthzPolicyGitHubActionsCallerBinding)
         self.assertEqual(evidence.expected_record_id, active.record_id)

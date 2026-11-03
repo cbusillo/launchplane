@@ -370,7 +370,6 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                         control_plane_root=Path("/unused"),
                         include_permissions=True,
                     )
-                    self.assertIsInstance(credential, GitHubAppInstallationToken)
                     assert isinstance(credential, GitHubAppInstallationToken)
                     issued = credential.token
                     cached = resolve_merge_train_github_token(

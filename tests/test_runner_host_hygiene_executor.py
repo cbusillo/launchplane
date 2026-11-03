@@ -881,7 +881,6 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             )
         terminal_audit = audit_poster.audits[-1]
         post_apply_report = terminal_audit.post_apply_report
-        self.assertIsNotNone(post_apply_report)
         assert post_apply_report is not None
         self.assertEqual(
             post_apply_report.docker_reclaimable_bytes,
@@ -913,7 +912,6 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         terminal_audit = audit_poster.audits[-1]
         post_apply_report = terminal_audit.post_apply_report
-        self.assertIsNotNone(post_apply_report)
         assert post_apply_report is not None
         warm_image = next(
             image for image in post_apply_report.image_inventory if image.is_warm_builder
@@ -1021,7 +1019,6 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         terminal_audit = audit_poster.audits[-1]
         post_apply_report = terminal_audit.post_apply_report
-        self.assertIsNotNone(post_apply_report)
         assert post_apply_report is not None
         self.assertEqual(post_apply_report.runner_workdir_bytes, 12_345_678)
 
@@ -2227,7 +2224,6 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             )
             assert envelope is not None
             self.assertEqual(envelope.execution_state, "action_started")
-            self.assertIsNotNone(envelope.action_authorization)
             assert envelope.action_authorization is not None
             self.assertEqual(
                 envelope.planned_audit.pre_apply_report.free_disk_bytes,
@@ -2394,7 +2390,6 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         )
         terminal_audit = audit_poster.audits[-1]
         post_apply_report = terminal_audit.post_apply_report
-        self.assertIsNotNone(post_apply_report)
         assert post_apply_report is not None
         self.assertNotIn(
             target_volume,

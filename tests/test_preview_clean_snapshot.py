@@ -1476,7 +1476,6 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                     stdout=subprocess.PIPE,
                     pass_fds=descriptors,
                 )
-                self.assertIsNotNone(child.stdout)
                 assert child.stdout is not None
                 self.assertEqual(child.stdout.readline(), b"ready\n")
             return command(arguments, **kwargs)

@@ -216,7 +216,6 @@ class RuntimeDependencyHealthTests(unittest.TestCase):
             )
             self.assertEqual(result.status, expected_status)
             health = result.targets[-1].dependency_health
-            self.assertIsNotNone(health)
             assert health is not None
             self.assertEqual(health.status, expected_coverage)
 
@@ -322,7 +321,6 @@ class RuntimeDependencyHealthTests(unittest.TestCase):
         )
         self.assertEqual(result.failure_code, "wrong_runtime_identity")
         evidence = result.targets[-1].dependency_health
-        self.assertIsNotNone(evidence)
         assert evidence is not None
         self.assertEqual(evidence.results, {"database": "fail"})
 

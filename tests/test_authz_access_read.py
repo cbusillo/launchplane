@@ -448,7 +448,6 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(policy_records, (active_record,))
-        self.assertIsNotNone(denial_record)
         assert denial_record is not None
         self.assertEqual(
             denial_record.route_path,
@@ -1242,7 +1241,6 @@ class AuthzAccessReadHttpTests(unittest.IsolatedAsyncioTestCase):
                 store.close()
 
         self.assertEqual(response.status_code, 403, response.text)
-        self.assertIsNotNone(denial_record)
         assert denial_record is not None
         self.assertEqual(denial_record.policy_record_id, denied_record.record_id)
         self.assertEqual(denial_record.policy_revision, denied_record.revision)

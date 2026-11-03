@@ -892,7 +892,6 @@ class GuardedMergeAdmissionScenarioTests(unittest.TestCase):
         )
         second = self._admit(guard)
 
-        self.assertIsNotNone(reconciled)
         assert reconciled is not None
         self.assertEqual(reconciled.status, "rejected")
         self.assertEqual(reconciled.reason, "reconciliation_confirmed_no_effect")

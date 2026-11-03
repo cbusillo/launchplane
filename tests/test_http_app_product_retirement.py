@@ -2171,7 +2171,6 @@ class ProductRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         route_path="/v1/product-retirement",
                         idempotency_key=self.headers["Idempotency-Key"],
                     )
-                    self.assertIsNotNone(held)
                     assert held is not None
                     self.assertEqual(held.state, "reconcile_required")
                 store.close()

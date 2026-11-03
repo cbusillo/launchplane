@@ -1501,7 +1501,6 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(plan.plan_status, "ready")
         self.assertEqual(plan.context, "cm")
         self.assertEqual(plan.expected_artifact_id, "artifact-cm-testing")
-        self.assertIsNotNone(plan.current_target)
         assert plan.current_target is not None
         self.assertEqual(plan.current_target.required_volume_keys_missing, ())
         self.assertEqual(
@@ -2212,9 +2211,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         wait_deploy.assert_called_once()
         post_deploy.assert_called_once()
         self.assertFalse(post_deploy.call_args.kwargs["run_destructive_restore"])
-        self.assertIsNotNone(store.odoo_instance_override_record)
         assert store.odoo_instance_override_record is not None
-        self.assertIsNotNone(store.odoo_instance_override_record.website_bootstrap)
         assert store.odoo_instance_override_record.website_bootstrap is not None
         self.assertEqual(
             store.odoo_instance_override_record.website_bootstrap.canonical_url,
@@ -3972,7 +3969,6 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     )
                     self.assertTrue(store.environment_inventories)
                     self.assertTrue(store.release_tuples)
-                    self.assertIsNotNone(store.fresh_generation)
                     assert store.fresh_generation is not None
                     self.assertTrue(store.fresh_generation.completed_at)
                     self.assertEqual(

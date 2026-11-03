@@ -3282,7 +3282,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     decoded = validate_preview_scope(
                         restored_settings.env, context=restored_profile.preview.context
                     )
-                    self.assertIsNotNone(decoded)
                     assert decoded is not None
                     self.assertEqual(
                         len(decoded.addon_settings), len(encoded_payload["addon_settings"])
@@ -4138,7 +4137,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertTrue(reached_lock)
         self.assertEqual([record.operation_id for record in completed], [operation_id])
         self.assertEqual(operation.status, "execution_failed")
-        self.assertIsNotNone(operation.execution)
         assert operation.execution is not None
         self.assertEqual(
             operation.execution.failure_code,
@@ -4147,7 +4145,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertFalse(operation.execution.reconciliation_required)
         self.assertEqual(current_after_denial, (active_record,))
         self.assertEqual(inner_lookup.status, "missing")
-        self.assertIsNotNone(outer_lookup.record)
         assert outer_lookup.record is not None
         self.assertEqual(outer_lookup.record.state, "completed")
         self.assertEqual(outer_lookup.record.response_status_code, 409)
@@ -5362,7 +5359,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.schema_version, 1)
         self.assertEqual(loaded.state, "completed")
@@ -5444,7 +5440,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.provider_target_key, reconciliation_key)
         self.assertEqual(blocked.status, "target_busy")
@@ -8029,7 +8024,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         {"delivery_id": failure.delivery_id},
                     )
                     claimed = store.claim_next_outbox_delivery_record(lease_owner="worker-b")
-                    self.assertIsNotNone(claimed.record)
                     assert claimed.record is not None
                     self.assertEqual(claimed.record.delivery_id, unrelated.delivery_id)
                     waiting = store.read_outbox_delivery_record(recovery.delivery_id)
@@ -8114,13 +8108,11 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 second_store.close()
 
-        self.assertIsNotNone(first_claim)
         assert first_claim is not None
         self.assertEqual(first_claim.lease_owner, "worker-a")
         self.assertIsNone(second_claim)
         self.assertFalse(stale_owner_heartbeat)
         self.assertEqual(recovered_ids, (first_claim.operation_id,))
-        self.assertIsNotNone(recovered_claim)
         assert recovered_claim is not None
         self.assertEqual(recovered_claim.lease_owner, "worker-b")
         self.assertEqual(recovered_claim.attempt, 2)
@@ -8476,7 +8468,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         self.assertFalse(worker.is_alive())
                         self.assertEqual(len(stale_owner_result), 1)
                         lock_error = stale_owner_result[0]
-                        self.assertIsInstance(lock_error, OperationalError)
                         assert isinstance(lock_error, OperationalError)
                         self.assertEqual(getattr(lock_error.orig, "sqlstate", ""), "55P03")
                     finally:
@@ -8520,7 +8511,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 second_store.close()
 
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.request_fingerprint, "fingerprint-first")
 
@@ -8566,7 +8556,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(sorted(statuses), ["acquired", "in_progress"])
         self.assertEqual(conflict.status, "conflict")
-        self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.state, "running")
         self.assertEqual(stored.attempt, 1)
@@ -8704,7 +8693,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(sorted(statuses), ["replayed", "written"])
         self.assertEqual(stored_profile, profile)
-        self.assertIsNotNone(stored_reservation)
         assert stored_reservation is not None
         self.assertEqual(stored_reservation.state, "completed")
         self.assertEqual(stored_reservation.attempt, 1)
@@ -8743,7 +8731,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(acquired.status, "acquired")
         self.assertEqual(result.status, "written")
-        self.assertIsNotNone(stored_reservation)
         assert stored_reservation is not None
         self.assertEqual(stored_reservation.state, "completed")
         self.assertEqual(stored_reservation.attempt, 2)
@@ -11187,7 +11174,6 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             self.addCleanup(first.close)
             self.addCleanup(second.close)
             with first.testing_replacement_execution_lock("operation-a") as check:
-                self.assertIsNotNone(check)
                 assert check is not None
                 check()
                 with second.testing_replacement_execution_lock("operation-a") as competing:

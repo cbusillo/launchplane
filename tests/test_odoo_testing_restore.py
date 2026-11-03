@@ -1356,7 +1356,6 @@ class FreshTestingHostProgramTests(unittest.TestCase):
     def test_website_exclusion_is_required_before_web_start(self) -> None:
         status, output = self.run_program()
         self.assertEqual(status, 0, output)
-        self.assertIsNotNone(self.website_settings_call)
         assert self.website_settings_call is not None
         self.assertEqual(self.website_settings_call[-2:], [self.database, self.gen.instance])
         readback = next(

@@ -65,7 +65,6 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202, response.text)
         result = response.json()["result"]
         preparation = self.store.read_disposable_resource_preparation(result["operation_id"])
-        self.assertIsNotNone(preparation)
         assert preparation is not None
         self.assertFalse(preparation.initial_apply_started_at)
         self.assertEqual(
@@ -340,7 +339,6 @@ class InitialTestingBootstrapScenario(FreshTestingBootstrapScenario):
         with self.store.odoo_synchronous_lane_reservation(
             product=self.profile.product, context=self.fixture.context, instance="testing"
         ) as owner:
-            self.assertIsNotNone(owner)
             assert owner is not None
             self.assertEqual(owner.operation_id, self.fixture.operation.operation_id)
         with self.assertRaises(ValueError):

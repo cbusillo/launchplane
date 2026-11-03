@@ -599,7 +599,6 @@ class NativeHistoricalDispositionPostgresTests(unittest.TestCase):
                 adoptable_active_actions=("select_next_action",),
             )
             replay_authority = store.authorize_merge_train_historical_completion(request)
-            self.assertIsNotNone(replay_authority.replay_record)
             assert replay_authority.replay_record is not None
             self.assertEqual(replay_authority.replay_record.state, "completed")
 

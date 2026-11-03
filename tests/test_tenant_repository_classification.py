@@ -48,7 +48,6 @@ class TenantRepositoryClassificationDomainTests(unittest.TestCase):
             )
             self.assertEqual(read_model.status, "available")
             self.assertEqual(read_model.history_count, 1)
-            self.assertIsNotNone(read_model.current_record)
             assert read_model.current_record is not None
             self.assertEqual(read_model.current_record.classification_revision, 1)
 
@@ -106,7 +105,6 @@ class TenantRepositoryClassificationDomainTests(unittest.TestCase):
             )
             self.assertEqual(read_model.status, "available")
             self.assertEqual(read_model.history_count, 2)
-            self.assertIsNotNone(read_model.current_record)
             assert read_model.current_record is not None
             self.assertEqual(read_model.current_record.classification_revision, 2)
 

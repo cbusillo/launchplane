@@ -1294,7 +1294,6 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.effects, [])
         self.assertEqual(self.current(), self.fixture.before)
         readback = self.checkpoint().route
-        self.assertIsInstance(readback, TestingOriginalIngressReadback)
         assert isinstance(readback, TestingOriginalIngressReadback)
         self.assertEqual(readback.predecessor_state, "present")
         self.assertNotIn("public_health", readback.model_dump())
@@ -2489,7 +2488,6 @@ class NativeTestingWorkerTests(unittest.TestCase):
             route_path=REBUILD_ROUTE,
             idempotency_key=self.operation.operation_id,
         )
-        self.assertIsNotNone(original)
         assert original is not None
         self.assertFalse(original.provider_effect_started_at)
         self.assertEqual(self.effects, [])

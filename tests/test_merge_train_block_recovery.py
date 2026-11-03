@@ -735,7 +735,6 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             ],
         }
         proof = self.client.read_setup_failure_recovery(candidate=candidate)
-        self.assertIsNotNone(proof)
         assert proof is not None
         self.assertEqual(proof.job_id, job["id"])
         self.assertEqual(proof.head_sha, fixture["head_sha"])

@@ -533,7 +533,6 @@ class ProductIncidentReadModelTests(unittest.TestCase):
                 environment="prod",
                 incident_id=store.open_incident.incident_id,
             )
-        self.assertIsNotNone(detail.opening_observation)
         assert detail.opening_observation is not None
         self.assertEqual(
             set(detail.opening_observation.provider_operation_references),

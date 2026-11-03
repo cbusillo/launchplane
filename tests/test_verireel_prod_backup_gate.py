@@ -115,7 +115,6 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                 "authorization": authorization,
             }
         )
-        self.assertIsNotNone(record.authorization)
         assert record.authorization is not None
         self.assertEqual(record.authorization.managed_rule_id, "verireel-prod-backup-gate")
 

@@ -572,7 +572,6 @@ class AuthzPolicyOperationActivationHttpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
-        self.assertIsNotNone(denial_record)
         assert denial_record is not None
         self.assertEqual(denial_record.route_path, _DRY_RUN_ROUTE)
         self.assertEqual(denial_record.action, "authz_policy_grant.write")

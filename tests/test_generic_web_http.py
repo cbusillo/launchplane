@@ -878,15 +878,12 @@ class GenericWebHttpTests(unittest.TestCase):
                     route_path="/v1/drivers/generic-web/deploy",
                     idempotency_key="generic-web-deploy-retired-alias",
                 )
-                self.assertIsNotNone(idempotency_record)
                 assert idempotency_record is not None
                 legacy_response_payload = idempotency_record.response_payload
                 legacy_result_payload = legacy_response_payload.get("result")
-                self.assertIsInstance(legacy_result_payload, dict)
                 assert isinstance(legacy_result_payload, dict)
                 legacy_result_payload["target_type"] = "application"
                 legacy_records_payload = legacy_response_payload.get("records")
-                self.assertIsInstance(legacy_records_payload, dict)
                 assert isinstance(legacy_records_payload, dict)
                 legacy_records_payload["target_type"] = "application"
                 store.write_idempotency_record(

@@ -205,7 +205,6 @@ class MergeTrainSchedulerPassTests(TestCase):
                 self.assertEqual(evidence.list_open_pull_requests("cbusillo/alpha", limit=1), ())
             # The controller still needs its credential after admission evidence completes.
             self.assertIs(kwargs["token"], credential)
-            self.assertIsInstance(evaluator.technical_check_client, GitHubMergeTrainClient)
             assert isinstance(evaluator.technical_check_client, GitHubMergeTrainClient)
             technical_transport = evaluator.technical_check_client.transport
             assert isinstance(technical_transport, UrllibMergeTrainGitHubTransport)

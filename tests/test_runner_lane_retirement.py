@@ -377,7 +377,6 @@ class RunnerLaneRetirementExecutorTests(unittest.TestCase):
 
         self.assertEqual(result.status, "audit_delivery_pending")
         self.assertIsNone(result.terminal_response)
-        self.assertIsNotNone(result.terminal_audit)
         assert result.terminal_audit is not None
         self.assertEqual(result.terminal_audit.status, "completed")
         self.assertIn("workflow artifact", result.message)

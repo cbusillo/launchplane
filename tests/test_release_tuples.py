@@ -169,7 +169,6 @@ class ReleaseTupleTests(unittest.TestCase):
             source_label="fake release tuple store",
         )
 
-        self.assertIsNotNone(catalog)
         assert catalog is not None
         self.assertEqual(
             catalog.contexts["verireel"].channels["testing"].tuple_id,

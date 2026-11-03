@@ -587,7 +587,6 @@ class GitHubActionsSecurityTests(TestCase):
             "launchplane-config-authority",
             "Validate Launchplane audit tool revision",
         )
-        self.assertIsNotNone(step)
         assert step is not None
 
         revision = "a" * 40
@@ -633,7 +632,6 @@ class GitHubActionsSecurityTests(TestCase):
             "      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
         )
 
-        self.assertIsNotNone(match)
         assert match is not None
         self.assertEqual(
             match.group("reference"),

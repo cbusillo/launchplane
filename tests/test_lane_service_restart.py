@@ -1135,7 +1135,6 @@ class ServiceRestartTests(unittest.TestCase):
             ).events
             if event.event_type == "service_restart"
         )
-        self.assertIsNotNone(event.restart_recovery)
         assert event.restart_recovery is not None
         self.payload = event.restart_recovery.request.model_dump(mode="json")
         self.payload["mode"] = "reconcile"

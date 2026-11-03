@@ -500,7 +500,6 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
         )
         # The hold moves with the lane, so a deploy queued behind the lock still waits.
         hold = read_staff_testing_hold(record_store=self.store, context=self.context)
-        self.assertIsNotNone(hold)
         assert hold is not None
         self.assertEqual(hold.purpose, "isolation_staging")
         self.assert_production_unchanged()
