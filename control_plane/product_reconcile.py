@@ -3740,7 +3740,7 @@ def _testing_build_read[Result](read: Callable[[str], Result], path: str) -> Res
         if isinstance(failure, HTTPError) and failure.code in {401, 403}:
             # The shared selector may skip an invalid build. An identity refusal
             # is not an invalid build and must stop before another candidate read.
-            if urlsplit(failure.geturl()).hostname == "api.github.com":
+            if urlsplit(failure.url).hostname == "api.github.com":
                 raise NativeSourceAuthorizationDenied(
                     "The existing build reader refused access."
                 ) from error

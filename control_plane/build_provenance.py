@@ -204,9 +204,13 @@ def _github_read_failure(
     }
     if isinstance(error, URLError) and not isinstance(error, HTTPError):
         evidence["reason_type"] = type(error.reason).__name__[:64]
+    headers = (
+        normalized_github_quota_response_headers(error.headers)
+        if isinstance(error, HTTPError) and stage == "api"
+        else {}
+    )
     if isinstance(error, HTTPError):
         evidence["status"] = error.code
-        headers = normalized_github_quota_response_headers(error.headers) if stage == "api" else {}
         for header, field in (
             ("x-ratelimit-remaining", "rate_limit_remaining"),
             ("x-ratelimit-reset", "rate_limit_reset"),
