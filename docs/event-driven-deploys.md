@@ -817,10 +817,11 @@ budget refuses verification. Scans have a four-minute read budget under a
 ten-minute lease; an expired lease is recovered and its older attempt cannot
 publish a check or stored result. Publication holds the database delivery fence
 through the provider write and completion; different deliveries for one
-repository are serialized. A separate scan thread is admitted after deploy and
-reconcile polling; a slow source read does not hold up newly queued operations.
-With no branch opted in, idle polling skips the scan table. The source migration
-adds a PostgreSQL index on scan state and receipt time for enabled queue reads.
+repository are serialized. A separate scan thread is admitted after each deploy
+or reconcile poll, including polls that completed work; a slow source read does
+not hold up newly queued operations. With no branch opted in, polling skips the
+scan table. The source migration adds a PostgreSQL index on scan state and receipt
+time for enabled queue reads.
 
 PR, recorded-candidate and merge-group results use the existing checks-only
 App's `launchplane/config-authority/current-comparison/<encoded-base-branch>`
