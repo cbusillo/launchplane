@@ -81,6 +81,12 @@ class PreviewPreservationAuthority(BaseModel):
     server_id: str
     continuation: bool = Field(default=False, exclude_if=lambda value: not value)
 
+    recorded_retirement: bool = Field(default=False, exclude_if=lambda value: not value)
+
+    @property
+    def serving_recipient(self) -> bool:
+        return self.continuation or self.recorded_retirement
+
     @property
     def preservation_id(self) -> str:
         return canonical_json_sha256(self.model_dump(mode="json"))
@@ -157,6 +163,12 @@ def read_preview_preservation_authority(
             captured_schedule_binding=captured_schedule_binding,
         ),
         continuation=issued_plan.operation == "refresh",
+        recorded_retirement=issued_plan.operation == "destroy"
+        and any(
+            profile.preview.slug_template.format(number=preview.anchor_pr_number)
+            == issued_plan.preview_slug
+            for preview in store.list_preview_records(context_name=issued_plan.context)
+        ),
     )
 
 
@@ -262,18 +274,18 @@ def require_preview_preservation_admission(
         if profile.preview.slug_template.format(number=preview.anchor_pr_number)
         == issued_plan.preview_slug
     ]
-    if authority.continuation:
+    if authority.serving_recipient:
         from control_plane.odoo_preview_qualification import read_preview_inspection_authority
 
         if len(preview_matches) != 1 or preview_matches[0].state == "destroyed":
-            raise ValueError("Preserving continuation requires its recorded serving preview.")
+            raise ValueError("Recorded preservation requires its serving preview.")
         serving = read_preview_inspection_authority(store, preview_matches[0])
         if (
             serving.selection.identity.deployment_record_id != original.record_id
             or serving.target_id.target_id != authority.compose_id
         ):
-            raise ValueError("Preserving continuation requires the current serving original.")
-        if issued_plan.plan_request.fishbowl_source is not None:
+            raise ValueError("Recorded preservation requires the current serving original.")
+        if authority.continuation and issued_plan.plan_request.fishbowl_source is not None:
             raise ValueError("Preserving continuation cannot import replacement data.")
     elif preview_matches:
         raise ValueError("Original-only preservation requires an unrecorded preview.")
@@ -305,7 +317,7 @@ def require_preview_preservation_admission(
     if report is not None and (
         report.usage == "in_use"
         or report.data == "only_copy"
-        and not authority.continuation
+        and not authority.serving_recipient
         or report.production_resources in {"shared", "separation_ready"}
     ):
         raise ValueError("Original preview preservation has a protected use or resource.")
@@ -430,7 +442,7 @@ def run_preview_preservation(
             original_reservation_id=original_reservation_id,
             operation_record_id=operation_record_id,
         )
-        if authority.continuation and (
+        if authority.serving_recipient and (
             operation is not None and operation.provider_effect_phase in PREVIEW_PRESERVATION_PHASES
         ):
             inspection = run_preview_preservation(
@@ -445,7 +457,7 @@ def run_preview_preservation(
                 check=check,
             )
             require_stopped_writers = inspection.get("writers_stopped") is True
-        if authority.continuation and not require_stopped_writers:
+        if authority.serving_recipient and not require_stopped_writers:
             from control_plane.odoo_preview_qualification import collect_odoo_preview_qualification
             from control_plane.workflows.launchplane import find_preview_record
 
@@ -456,12 +468,12 @@ def run_preview_preservation(
                 anchor_pr_number=authority.pull_request_number,
             )
             if preview is None:
-                raise ValueError("Preserving continuation preview disappeared.")
+                raise ValueError("Recorded preservation preview disappeared.")
             qualification = collect_odoo_preview_qualification(
                 store, preview=preview, root=control_plane_root
             )
             if qualification.usage.usage != "unused" or not qualification.usage.resources_qualified:
-                raise ValueError("Preserving continuation requires an unused isolated preview.")
+                raise ValueError("Recorded preservation requires an unused isolated preview.")
         if current_source is not None:
             with mutation_guard() if mutation_guard else nullcontext():
                 check()
@@ -533,7 +545,7 @@ def run_preview_preservation(
         program=PREVIEW_PRESERVATION_PROGRAM,
         payload={
             "mode": mode,
-            "continuation": authority.continuation,
+            "continuation": authority.serving_recipient,
             "continuation_applied": continuation_applied,
             "require_stopped_writers": require_stopped_writers,
             "provider_effect_phase": dispatch_phase,

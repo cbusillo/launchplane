@@ -298,6 +298,12 @@ route. Set `preserve_original_reservation_id` to its authentic completed serving
 original. Admission binds the recorded serving generation, original intent,
 provider recipient and execution server; an unrelated or superseded original
 cannot authorize continuation. It does not fill in the historical source.
+The same original-bound capture also supports a service-issued destroy plan
+for that recorded recipient. It preserves the database and complete data
+directory before guarded retirement, without refreshing its artifact. Retirement
+keeps stopped-writer and physical-volume verification until teardown; it never
+uses refresh's post-apply allowance for reopened writers or changed source.
+The retained archive remains verifiable after the provider recipient is absent.
 
 The preview-apply-inputs request accepts `preservation_storage_budget`, using
 the existing reviewed database, file-store, staging and reserve byte limits.
