@@ -12,6 +12,7 @@ from uuid import uuid4
 import logging
 from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -49,6 +50,14 @@ class ProductReviewStore(Protocol):
 
     def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord: ...
 
+    def list_preview_pr_feedback_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackRecord, ...]: ...
+
     def write_product_review_decision_record(
         self, record: ProductReviewDecisionRecord
     ) -> object: ...
@@ -68,6 +77,7 @@ _REQUIRED_STORE_METHODS = (
     "list_preview_records",
     "read_preview_generation_record",
     "write_product_review_decision_record",
+    "list_preview_pr_feedback_records",
     "list_product_review_decision_records",
 )
 
@@ -100,6 +110,10 @@ class ProductReviewPreviewChanged(ValueError):
 def source_control_pull_request_url(*, repository: str, pull_request_number: int) -> str:
     # GitHub is the current source-control adapter; this is the one place that knows it.
     return f"https://github.com/{repository}/pull/{pull_request_number}"
+
+
+def source_control_compare_url(*, repository: str, before: str, after: str) -> str:
+    return f"https://github.com/{repository}/compare/{before}...{after}"
 
 
 def product_profiles_for_repository(

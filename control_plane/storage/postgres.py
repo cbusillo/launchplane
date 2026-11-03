@@ -26085,11 +26085,14 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         *,
         context_name: str = "",
+        anchor_pr_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[PreviewPrFeedbackRecord, ...]:
         filters: list[object] = []
         if context_name:
             filters.append(LaunchplanePreviewPrFeedbackRow.context == context_name)
+        if anchor_pr_number is not None:
+            filters.append(LaunchplanePreviewPrFeedbackRow.anchor_pr_number == anchor_pr_number)
         return self._list_models(
             model_type=PreviewPrFeedbackRecord,
             orm_model=LaunchplanePreviewPrFeedbackRow,
