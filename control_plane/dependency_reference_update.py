@@ -176,6 +176,22 @@ def _image_reference_forward(
     )
 
 
+def dependency_digest_moves_forward(
+    update: dict[str, str], *, read: Callable[[str], object]
+) -> bool:
+    if not all(
+        re.fullmatch(r"[0-9a-f]{40}", update.get(key, "")) for key in ("currentDigest", "newDigest")
+    ):
+        return False
+    name = update.get("depName", "")
+    return _action_reference_forward(
+        f"{name}@{update.get('currentDigest', '')}",
+        f"{name}@{update.get('newDigest', '')}",
+        read=read,
+        declared_updates=(update,),
+    )
+
+
 def _action_reference_forward(
     old: str,
     new: str,

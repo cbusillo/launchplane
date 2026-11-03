@@ -598,7 +598,10 @@ and [`toJSON`/`toObject`](https://docs.renovatebot.com/templates/) helpers.
 Every update must have an allowed type and satisfy the same generic safety
 rule. Patch/minor metadata must agree with the version movement and stay within
 one major with an unchanged suffix; a `0.x` minor bump needs review. Digest
-updates need full old/new digests and identical nonempty branch/tag values.
+updates need identical nonempty tag values and upstream proof of forward
+movement for their exact old/new commits. Equal tags or well-formed hashes alone
+do not qualify, including in package manifests and lockfiles. Without a direction
+reader, the metadata classifier leaves digests for agent review.
 Majors, unknown types and incomplete evidence remain for agent review even
 when a bot is configured. Transitive lockfile changes are not classified;
 required checks still gate the PR.

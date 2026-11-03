@@ -4357,7 +4357,6 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         for login, message in (
             ("dependabot[bot]", INDIRECT_PATCH),
             ("renovate[bot]", renovate_message()),
-            ("renovate[bot]", renovate_message(updateType="digest")),
         ):
             for filename, fork, verified, expected in (
                 ("package.json", False, True, "patch_or_minor"),

@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from control_plane.dependency_reference_update import dependency_digest_moves_forward
 from control_plane.merge_train_dependency_updates import (
     classify_dependency_update as classify_update,
 )
@@ -189,13 +190,13 @@ class RenovateClassificationTests(unittest.TestCase):
         for changes, expected in (
             ({}, "patch_or_minor"),
             ({"updateType": "patch", "newVersion": "2.1.1"}, "patch_or_minor"),
-            ({"updateType": "digest"}, "patch_or_minor"),
+            ({"updateType": "digest"}, "needs_review"),
             ({"updateType": "major", "newVersion": "3.0.0"}, "needs_review"),
             ({"newVersion": "3.0.0"}, "needs_review"),
             ({"newVersion": "2.0.0"}, "needs_review"),
             ({"updateType": "patch", "newVersion": "2.1.0"}, "needs_review"),
             (
-                {"updateType": "patch", "currentVersion": "2.1.2", "newVersion": "2.1.1"},
+                {"updateType": "patch", "currentVersion": "8.0.2", "newVersion": "8.0.0"},
                 "needs_review",
             ),
             ({"updateType": "unknown"}, "needs_review"),
@@ -211,6 +212,39 @@ class RenovateClassificationTests(unittest.TestCase):
                     ),
                     expected,
                 )
+
+    def test_stale_tags_and_opaque_hashes_do_not_prove_digest_direction(self) -> None:
+        for old, new in (
+            (
+                "9000827ccba6bdab643e8b6fd33ac0654aef8333",
+                "70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3",
+            ),
+            ("a" * 40, "b" * 40),
+            ("sha256:" + "a" * 64, "sha256:" + "b" * 64),
+            ("v2.1", "v2.2"),
+        ):
+            message = renovate_message(
+                depName="actions/download-artifact",
+                updateType="digest",
+                currentValue="v8.0.0",
+                newValue="v8.0.0",
+                currentDigest=old,
+                newDigest=new,
+            )
+            for proof in (
+                None,
+                lambda update: dependency_digest_moves_forward(update, read=lambda _: None),
+            ):
+                with self.subTest(old=old, new=new, proof=proof):
+                    self.assertEqual(
+                        classify_update(
+                            [message],
+                            metadata_format="renovate_metadata",
+                            allowed_update_types=("digest",),
+                            digest_moves_forward=proof,
+                        ),
+                        "needs_review",
+                    )
 
     def test_all_updates_and_commits_need_complete_metadata(self) -> None:
         safe = renovate_message()

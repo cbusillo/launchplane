@@ -20,6 +20,7 @@ def classify_dependency_update(
     *,
     metadata_format: DependencyUpdateFormat,
     allowed_update_types: Sequence[DependencyUpdateType],
+    digest_moves_forward: Callable[[dict[str, str]], bool] | None = None,
 ) -> DependencyUpdateClass:
     read_updates = UPDATE_FORMAT_PARSERS.get(metadata_format)
     if not commit_messages or read_updates is None:
@@ -27,7 +28,8 @@ def classify_dependency_update(
     for message in commit_messages:
         updates = read_updates(message)
         if not updates or not all(
-            _update_qualifies(update, allowed_update_types) for update in updates
+            _update_qualifies(update, allowed_update_types, digest_moves_forward)
+            for update in updates
         ):
             return "needs_review"
     return "patch_or_minor"
@@ -76,11 +78,12 @@ UPDATE_FORMAT_PARSERS: dict[DependencyUpdateFormat, Callable[[str], list[dict[st
     "dependabot_trailer": _dependabot_updates,
     "renovate_metadata": _renovate_updates,
 }
-_DIGEST = re.compile(r"(?:[0-9a-f]{40}|(?:sha256:)?[0-9a-f]{64})")
 
 
 def _update_qualifies(
-    update: dict[str, str], allowed_update_types: Sequence[DependencyUpdateType]
+    update: dict[str, str],
+    allowed_update_types: Sequence[DependencyUpdateType],
+    digest_moves_forward: Callable[[dict[str, str]], bool] | None,
 ) -> bool:
     if not update.get("depName") or update.get("updateType") not in allowed_update_types:
         return False
@@ -89,8 +92,8 @@ def _update_qualifies(
         return bool(
             old_value
             and old_value == new_value
-            and _DIGEST.fullmatch(update.get("currentDigest", ""))
-            and _DIGEST.fullmatch(update.get("newDigest", ""))
+            and digest_moves_forward is not None
+            and digest_moves_forward(update)
         )
     old, new = update.get("currentVersion", ""), update.get("newVersion", "")
     return update.get("updateType") == dependency_version_update_type(old, new)
