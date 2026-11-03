@@ -711,7 +711,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
 
         self.assertEqual([item.operation_id for item in completed], [operation_id])
         self.assertEqual(record.status, "executed")
-        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         self.assertTrue(record.execution.changed)
         self.assertEqual(record.execution.previous_revision, 1)
@@ -798,10 +797,8 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
 
         self.assertEqual([item.operation_id for item in completed], [operation_id])
         self.assertEqual(record.status, "execution_failed")
-        self.assertIsInstance(record.request, ManagedAuthzPolicySetProposalInput)
         assert isinstance(record.request, ManagedAuthzPolicySetProposalInput)
         self.assertEqual(record.request.schema_migration, "migrate_v2_to_v3")
-        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         self.assertEqual(
             record.execution.failure_code,
@@ -837,7 +834,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 store.close()
 
         self.assertEqual(record.status, "execution_failed")
-        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         self.assertEqual(record.execution.failure_code, "authz_policy_applying_admin_removed")
         self.assertFalse(record.execution.reconciliation_required)
@@ -872,7 +868,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
 
         self.assertEqual([item.operation_id for item in completed], [operation_id])
         self.assertEqual(record.status, "executed")
-        self.assertIsInstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         assert isinstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         self.assertTrue(record.execution.changed)
         self.assertEqual(record.execution.previous_record_id, "merge-train-policy-active")
@@ -978,7 +973,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 store.close()
 
         self.assertEqual(operation.status, "execution_failed")
-        self.assertIsInstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         assert isinstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         self.assertEqual(
             operation.execution.failure_code,
@@ -1053,7 +1047,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 store.close()
 
         self.assertEqual(operation.status, "execution_failed")
-        self.assertIsInstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         assert isinstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         self.assertEqual(
             operation.execution.failure_code,
@@ -1061,7 +1054,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         )
         self.assertFalse(operation.execution.reconciliation_required)
         self.assertEqual(current, (active,))
-        self.assertIsNotNone(outer_lookup.record)
         assert outer_lookup.record is not None
         self.assertEqual(outer_lookup.record.state, "completed")
         self.assertEqual(outer_lookup.record.response_status_code, 409)
@@ -1132,11 +1124,9 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 store.close()
 
         self.assertEqual(operation.status, "execution_failed")
-        self.assertIsInstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         assert isinstance(operation.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         self.assertTrue(operation.execution.reconciliation_required)
         self.assertEqual(current, (active,))
-        self.assertIsNotNone(outer_lookup.record)
         assert outer_lookup.record is not None
         self.assertEqual(outer_lookup.record.state, "reconcile_required")
 
@@ -1225,7 +1215,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
 
         self.assertEqual([item.operation_id for item in completed], [operation_id])
         self.assertEqual(record.status, "executed")
-        self.assertIsInstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         assert isinstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         self.assertFalse(record.execution.changed)
         self.assertEqual(record.execution.resulting_record_id, active_record.record_id)
@@ -1265,7 +1254,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 store.close()
 
         self.assertEqual(record.status, "execution_failed")
-        self.assertIsInstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         assert isinstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         self.assertEqual(record.execution.failure_code, "approved_plan_drift")
         self.assertFalse(record.execution.reconciliation_required)
@@ -1302,7 +1290,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
 
         self.assertEqual([item.operation_id for item in completed], [operation_id])
         self.assertEqual(record.status, "executed")
-        self.assertIsInstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         assert isinstance(record.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         self.assertEqual(record.execution.superseded_record_id, "merge-train-policy-active")
 
@@ -1375,13 +1362,11 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 store.close()
 
         self.assertEqual(record.status, "execution_failed")
-        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         self.assertEqual(record.execution.failure_code, "authz_policy_readback_failed")
         self.assertTrue(record.execution.reconciliation_required)
         self.assertEqual(len(active_records), 1)
         self.assertEqual(active_records[0].revision, 2)
-        self.assertIsNotNone(outer_lookup.record)
         assert outer_lookup.record is not None
         self.assertEqual(outer_lookup.record.state, "reconcile_required")
 
@@ -1428,7 +1413,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
                 store.close()
 
         self.assertEqual(record.status, "execution_failed")
-        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         self.assertEqual(record.execution.failure_code, "approval_policy_admin_drift")
         self.assertFalse(record.execution.reconciliation_required)
@@ -1487,7 +1471,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
 
         self.assertEqual(write_result.status, "written")
         self.assertEqual(record.status, "execution_failed")
-        self.assertIsInstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         self.assertEqual(record.execution.failure_code, "approved_plan_drift")
         self.assertFalse(record.execution.reconciliation_required)
@@ -2209,7 +2192,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertEqual(executing.status, "executing")
         self.assertEqual([record.operation_id for record in recovered], [operation_id])
         self.assertEqual(current.status, "executed")
-        self.assertIsInstance(current.execution, ManagedAuthzPolicySetExecutionEvidence)
         assert isinstance(current.execution, ManagedAuthzPolicySetExecutionEvidence)
         self.assertFalse(current.execution.reconciliation_required)
         self.assertEqual(len(active_records), 1)
@@ -2282,7 +2264,6 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         self.assertEqual(executing.status, "executing")
         self.assertEqual([record.operation_id for record in recovered], [operation_id])
         self.assertEqual(current.status, "executed")
-        self.assertIsInstance(current.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         assert isinstance(current.execution, ManagedMergeTrainPolicyImportExecutionEvidence)
         self.assertFalse(current.execution.reconciliation_required)
         self.assertEqual(

@@ -2467,6 +2467,8 @@ def _execute_target_replacement_with_checkpoint(
     execution_checkpoint: Callable[[str], None] | None = None,
 ) -> bool:
     from control_plane.service_bootstrap import _bearer_identity_config_from_env
+    from control_plane.service_agent_identities import load_service_agent_identities
+    from control_plane.service_auth import BearerIdentityConfig
     from control_plane.testing_rebuild_authorization import (
         director_testing_rebuild_authorization_allows,
     )
@@ -2500,7 +2502,11 @@ def _execute_target_replacement_with_checkpoint(
                 authorization=authorization,
                 operation=operation,
                 store=record_store,
-                config=_bearer_identity_config_from_env(),
+                config=load_service_agent_identities(
+                    store=record_store, bootstrap=_bearer_identity_config_from_env()
+                )
+                if isinstance(record_store, PostgresRecordStore)
+                else BearerIdentityConfig(),
             )
         ),
     )

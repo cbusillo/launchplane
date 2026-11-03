@@ -1036,7 +1036,6 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         held = self.store.read_idempotency_record(
             scope="testing-private-fixture", route_path=ROUTE, idempotency_key="original-key"
         )
-        self.assertIsNotNone(held)
         assert held is not None
         self.assertEqual(held.state, "reconcile_required")
         self.assertEqual(self.dokploy_calls, [])

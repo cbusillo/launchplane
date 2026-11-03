@@ -396,7 +396,7 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
         await self._post(self._payload("dry-run", adopted))
         original_write = self.store.write_product_authority_bundle
 
-        def record_then_write(bundle: ProductAuthorityBundle) -> None:
+        def record_then_write(bundle: ProductAuthorityBundle, **write_options: Any) -> None:
             _, other_bundle = control_plane_product_config.plan_product_config_authority_bundle(
                 record_store=self.store,
                 payload={
@@ -410,7 +410,7 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
                 source_label="test",
             )
             original_write(other_bundle)
-            original_write(bundle)
+            original_write(bundle, **write_options)
 
         with patch.object(self.store, "write_product_authority_bundle", record_then_write):
             response = await self._post(self._payload("apply", adopted), key="raced")

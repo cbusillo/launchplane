@@ -36,6 +36,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.generic_web_cutover import WebDeploymentCutoverStore
+from control_plane.generic_web_source_qualification import GenericWebSourceSnapshot
 from control_plane.release_compatibility import classify_release_database_compatibility
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -1312,19 +1313,21 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
 
                     qualified = store.read_deployment_record("qualified-testing")
                     refuse_source = True
+                    read_source = store.read_generic_web_source_snapshot
 
-                    def fail_testing(_evidence: HealthcheckEvidence) -> HealthcheckEvidence:
-                        if not refuse_source:
-                            return _evidence
-                        record = store.read_deployment_record("qualified-testing")
-                        store.write_deployment_record(
-                            record.model_copy(
-                                update={
-                                    "deploy": record.deploy.model_copy(update={"status": "fail"})
-                                }
+                    def changed_after_snapshot(**kwargs: Any) -> GenericWebSourceSnapshot:
+                        snapshot = read_source(**kwargs)
+                        if refuse_source:
+                            store.write_deployment_record(
+                                snapshot.deployment.model_copy(
+                                    update={
+                                        "deploy": snapshot.deployment.deploy.model_copy(
+                                            update={"status": "fail"}
+                                        )
+                                    }
+                                )
                             )
-                        )
-                        return _evidence
+                        return snapshot
 
                     request = GenericWebProdPromotionRequest(
                         product="fixture",
@@ -1334,9 +1337,10 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                         backup_record_id="infrastructure-example",
                         verify_health=False,
                     )
-                    with patch(
-                        "control_plane.workflows.generic_web_promotion._verify_health_evidence",
-                        side_effect=fail_testing,
+                    with patch.object(
+                        store,
+                        "read_generic_web_source_snapshot",
+                        side_effect=changed_after_snapshot,
                     ):
                         if prior_dispatch:
                             result = execute_generic_web_prod_promotion(

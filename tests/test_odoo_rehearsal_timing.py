@@ -415,6 +415,7 @@ class HostTimingTests(unittest.TestCase):
         self.host["inspection"] = Mock(return_value=containers)
         self.host["validate_snapshots"] = Mock()
         self.host["rehearsal_storage_capacity"] = Mock(return_value=True)
+        self.host["migration_copy_supported"] = Mock(return_value=True)
         self.host["restore_preserved_snapshot"] = Mock()
         self.host["sql"] = Mock()
         self.host["docker"] = Mock()

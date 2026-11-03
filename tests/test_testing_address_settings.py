@@ -263,7 +263,6 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         result = self.run_address(False)
         self.assertEqual(result.status, "completed")
         evidence = result.response_payload["result"]
-        self.assertIsInstance(evidence, dict)
         assert isinstance(evidence, dict)
         self.assertTrue(evidence["canonical_settings_verified"])
         self.assertEqual(self.events, ["environment", "deployment", "gate"])
@@ -366,6 +365,27 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         self.assertFalse(pause.called)
         self.assertEqual(self.events, ["environment", "deployment"])
 
+    def test_deployment_observation_timeout_preserves_the_native_failure(self) -> None:
+        import uuid
+
+        failure = transport.NativeProgramFailed("fixture", failure_evidence_id=uuid.uuid4().hex)
+        original = settings.CanonicalAddressEffect.frame
+
+        def frame(effect: Any, *args: Any, **kwargs: Any) -> Any:
+            if effect.phase == "deployment":
+                raise failure
+            return original(effect, *args, **kwargs)
+
+        with (
+            patch.object(settings.CanonicalAddressEffect, "frame", frame),
+            patch.object(time, "monotonic", side_effect=itertools.count(0, 3600)),
+            patch.object(time, "sleep"),
+            self.assertRaises(NativeSourceUnavailable) as caught,
+        ):
+            self.run_address(False)
+        self.assertIs(caught.exception.__cause__, failure)
+        self.assertEqual(self.events, ["environment", "deployment"])
+
 
 class CanonicalAddressProgramTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -378,6 +398,8 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             TESTING_COPY_COMPLETION_PARAMETER: "fixture-copy",
         }
         self.websites = [(1, "dated.example.invalid")]
+        self.website_defaults = [("website", "website", 1)]
+        self.website_sequences: dict[int, int | None] = {}
         self.gate = self.native.root / "canonical-gate"
         self.integration_ok = True
         self.foreign_network_member = False
@@ -397,6 +419,8 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             "payload": "fixture-payload",
             "runtime_identity": self.identity,
             "canonical_url": "https://stable.example.invalid",
+            "before_url": "https://dated.example.invalid",
+            "primary_page_xmlid_set": False,
             "website_id": 1,
             "copy_witness_parameter": TESTING_COPY_COMPLETION_PARAMETER,
         }
@@ -431,11 +455,14 @@ class CanonicalAddressProgramTests(unittest.TestCase):
                 self.query = query
 
             def fetchall(self) -> list[Any]:
-                return (
-                    list(fixture.websites)
-                    if "FROM WEBSITE" in self.query.upper()
-                    else list(fixture.parameters.items())
-                )
+                if "FROM WEBSITE" in self.query.upper():
+                    return [
+                        (identity, domain, fixture.website_sequences.get(identity, 10))
+                        for identity, domain in sorted(fixture.websites)
+                    ]
+                if "FROM IR_MODEL_DATA" in self.query.upper():
+                    return list(fixture.website_defaults)
+                return list(fixture.parameters.items())
 
         return Cursor()
 
@@ -502,7 +529,7 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, stdout=output, stderr=b"")
         return self.native.command(command, **kwargs)
 
-    def run_program(self) -> tuple[int, dict[str, Any]]:
+    def run_program(self, *, packaged: bool = False) -> tuple[int, dict[str, Any]]:
         output = io.StringIO()
         status = 0
         with (
@@ -521,7 +548,22 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             redirect_stdout(output),
         ):
             try:
-                exec(compile(FRESH_TESTING_RESTORE_HOST_PROGRAM, "<canonical-host>", "exec"), {})
+                if packaged:
+                    from control_plane.host_package import host_package
+                    from control_plane.host_package_runtime import main
+
+                    encoded = base64.b64encode(json.dumps(self.native.spec).encode()).decode()
+                    with patch.object(
+                        sys,
+                        "argv",
+                        ["fixture.pyz", "restore", "--input", encoded, "--prefix", "fixture:"],
+                    ):
+                        main(host_package().content)
+                else:
+                    exec(
+                        compile(FRESH_TESTING_RESTORE_HOST_PROGRAM, "<canonical-host>", "exec"),
+                        {"spec": self.native.spec},
+                    )
             except SystemExit as error:
                 status = int(error.code or 0)
         frames = [
@@ -531,6 +573,153 @@ class CanonicalAddressProgramTests(unittest.TestCase):
         ]
         self.assertTrue(frames, output.getvalue())
         return status, frames[-1]
+
+    def test_failed_canonical_commands_retain_private_evidence(self) -> None:
+        from control_plane.copy_readback_diagnostics import (
+            COPY_FAILURE_EVIDENCE_MARKER,
+            COPY_FAILURE_STATE_DIRECTORY,
+            copy_failure_marker_is_safe,
+        )
+        from control_plane import http_error_evidence
+
+        original = self.command
+        parameters = dict(self.parameters)
+        directory = self.native.root / COPY_FAILURE_STATE_DIRECTORY
+        directory.mkdir(parents=True, mode=0o700)
+        for mode, capture_available in itertools.product(("inspect", "gate"), (True, False)):
+            with self.subTest(mode=mode, capture_available=capture_available):
+                directory.chmod(0o700 if capture_available else 0o755)
+                retained = set(directory.iterdir())
+                self.native.spec["inspection_only"] = mode == "inspect"
+                self.native.spec["canonical_settings"]["mode"] = mode
+                private = "private-canonical-database-failure-" + mode
+
+                def command(arguments: list[str], **kwargs: Any) -> Any:
+                    if CANONICAL_ADDRESS_DATABASE_READ in arguments:
+                        return subprocess.CompletedProcess(
+                            arguments, 1, stdout=b"", stderr=private.encode()
+                        )
+                    return original(arguments, **kwargs)
+
+                with patch.object(self, "command", side_effect=command):
+                    status, frame = self.run_program(packaged=True)
+                self.assertNotEqual(status, 0)
+                identity = frame.get(COPY_FAILURE_EVIDENCE_MARKER, "")
+                self.assertTrue(copy_failure_marker_is_safe(COPY_FAILURE_EVIDENCE_MARKER, identity))
+                if capture_available:
+                    path = directory / (identity + ".json")
+                    evidence = json.loads(path.read_text())
+                    self.assertEqual(base64.b64decode(evidence["stderr"]), private.encode())
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+                else:
+                    self.assertEqual(set(directory.iterdir()), retained)
+                with self.assertRaises(transport.NativeProgramFailed) as raised:
+                    transport._read_program(
+                        Connection(frame),
+                        program=FRESH_TESTING_RESTORE_HOST_PROGRAM,
+                        payload={},
+                        timeout_seconds=5,
+                        receive=lambda _frame: None,
+                    )
+                with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+                    http_error_evidence.log_handled_error_cause(raised.exception, "canonical-test")
+                text = logs.records[-1].getMessage()
+                native = json.loads(text)["native_programs"][0]
+                self.assertEqual(native[COPY_FAILURE_EVIDENCE_MARKER], identity)
+                baseline = transport.NativeProgramFailed(
+                    "baseline", predicate=frame.get("predicate", ""), kind=frame.get("kind", "")
+                )
+                self.assertEqual(raised.exception.evidence, baseline.evidence)
+                self.assertEqual(raised.exception.code, baseline.code)
+                self.assertNotIn(private, text + json.dumps(frame))
+                self.assertFalse(self.gate.exists())
+                self.assertEqual(self.parameters, parameters)
+
+    def test_unavailable_native_steps_keep_distinct_private_source_sites(self) -> None:
+        import ast
+
+        self.native.spec["inspection_only"] = True
+        self.native.spec["canonical_settings"]["mode"] = "inspect"
+        original = self.command
+        parameters = dict(self.parameters)
+        functions = {
+            node.name: node
+            for node in ast.walk(ast.parse(FRESH_TESTING_RESTORE_HOST_PROGRAM))
+            if isinstance(node, ast.FunctionDef)
+        }
+        private = "private-native-command-failure"
+
+        def observe(stage: str, function: str) -> tuple[int, ...]:
+            reached: list[str] = []
+
+            def command(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+                if (
+                    stage == "resource"
+                    and arguments[:3] == ["docker", "volume", "inspect"]
+                    or stage == "database"
+                    and CANONICAL_ADDRESS_DATABASE_READ in arguments
+                ):
+                    reached.append(stage)
+                    if stage == "resource":
+                        raise subprocess.TimeoutExpired(private, 1)
+                    return subprocess.CompletedProcess(
+                        arguments, 1, stdout=b"", stderr=private.encode()
+                    )
+                return original(arguments, **kwargs)
+
+            with patch.object(self, "command", side_effect=command):
+                status, frame = self.run_program()
+            self.assertTrue(reached)
+            self.assertNotEqual(status, 0)
+            failure = transport.NativeProgramFailed(
+                "fixture failure",
+                predicate=frame["predicate"],
+                kind=frame["kind"],
+                program=FRESH_TESTING_RESTORE_HOST_PROGRAM,
+                program_sites=frame.get("sites"),
+            )
+            self.assertTrue(failure.unavailable)
+            self.assertTrue(failure.program_sites)
+            node = functions[function]
+            end = node.end_lineno
+            assert end is not None
+            self.assertTrue(any(node.lineno <= line <= end for line in failure.program_sites))
+            if stage == "resource":
+                command_node = functions["command"]
+                command_end = command_node.end_lineno
+                assert command_end is not None
+                self.assertLessEqual(command_node.lineno, failure.program_sites[-1])
+                self.assertLessEqual(failure.program_sites[-1], command_end)
+            self.assertNotIn(private, json.dumps(frame))
+            self.assertFalse(self.gate.exists())
+            self.assertEqual(self.parameters, parameters)
+            return failure.program_sites
+
+        self.assertNotEqual(
+            observe("resource", "inspect_copy_runtime"),
+            observe("database", "canonical_address_settings"),
+        )
+
+    def test_native_source_sites_preserve_a_typed_refusal(self) -> None:
+        from control_plane.copy_readback_diagnostics import ReadbackPredicate
+
+        self.native.spec["inspection_only"] = True
+        self.native.spec["canonical_settings"]["mode"] = "inspect"
+        self.foreign_network_member = True
+        status, frame = self.run_program()
+        self.assertNotEqual(status, 0)
+        failure = transport.NativeProgramFailed(
+            "fixture refusal",
+            predicate=frame["predicate"],
+            kind=frame["kind"],
+            program=FRESH_TESTING_RESTORE_HOST_PROGRAM,
+            program_sites=frame.get("sites"),
+        )
+        self.assertFalse(failure.unavailable)
+        self.assertEqual(failure.predicate, ReadbackPredicate.NETWORK_MEMBERS)
+        self.assertTrue(failure.program_sites)
+        self.assertFalse(self.gate.exists())
 
     def test_gate_release_does_not_claim_unapplied_database_values(self) -> None:
         original = dict(self.parameters)
@@ -575,6 +764,114 @@ class CanonicalAddressProgramTests(unittest.TestCase):
         self.assertTrue(frame["canonical_gate_released"])
         self.assertFalse(frame["canonical_settings_verified"])
 
+    def test_unrelated_websites_preserve_the_reviewed_owner_and_digest(self) -> None:
+        for owner, defaults in (
+            (1, [("website", "website", 1)]),
+            (2, [("base", "website", 2), ("website", "website", 1)]),
+            (1, []),
+        ):
+            with self.subTest(owner=owner, defaults=defaults):
+                self.websites = [(owner, "dated.example.invalid")]
+                self.website_sequences = {}
+                self.website_defaults = defaults
+                self.parameters["web.base.url"] = "https://dated.example.invalid"
+                self.native.spec["canonical_settings"]["website_id"] = 0
+                original = self.database_read()["database_values_sha256"]
+                self.websites.append((3 if owner == 1 else 1, "unrelated.example.invalid"))
+                observed = self.database_read()
+                self.assertEqual(observed["website_id"], owner)
+                self.assertEqual(observed["database_values_sha256"], original)
+                self.native.spec["canonical_settings"]["website_id"] = observed["website_id"]
+                self.websites[0] = (owner, "stable.example.invalid")
+                self.parameters["web.base.url"] = "https://stable.example.invalid"
+                self.website_sequences[owner] = 0
+                self.assertTrue(self.database_read()["canonical_settings_verified"])
+
+    def test_dated_alias_retains_the_reviewed_routing_fallback(self) -> None:
+        self.websites = [(1, "unrelated.example.invalid"), (2, "dated.example.invalid")]
+        self.website_defaults = [("website", "website", 2)]
+        self.website_sequences = {1: 0, 2: 10}
+        self.native.spec["canonical_settings"]["website_id"] = 0
+        with self.assertRaises(RuntimeError):
+            self.database_read()
+        self.website_sequences[1] = 10
+        observed = self.database_read()
+        self.assertEqual(observed["website_id"], 2)
+        self.native.spec["canonical_settings"]["website_id"] = observed["website_id"]
+        self.websites[1] = (2, "stable.example.invalid")
+        self.parameters["web.base.url"] = "https://stable.example.invalid"
+        self.website_sequences[1] = 5
+        self.assertFalse(self.database_read()["canonical_settings_verified"])
+        self.website_sequences[2] = 0
+        self.assertTrue(self.database_read()["canonical_settings_verified"])
+        self.website_sequences[1] = -1
+        with self.assertRaises(RuntimeError):
+            self.database_read()
+        self.assertFalse(self.gate.exists())
+
+    def test_plural_selection_refuses_conflicts_and_a_different_bootstrap_writer(self) -> None:
+        for refusal in (
+            "empty",
+            "before",
+            "after",
+            "writer",
+            "page",
+            "reviewed-id",
+            "unowned",
+            "reference-model",
+            "scheme",
+            "case",
+            "port",
+            "international",
+        ):
+            with self.subTest(refusal=refusal):
+                self.native.spec["canonical_settings"]["canonical_url"] = (
+                    "https://stable.example.invalid"
+                )
+                self.websites = [(1, "dated.example.invalid"), (2, "unrelated.example.invalid")]
+                self.website_defaults = [
+                    (
+                        "website",
+                        "res.company" if refusal == "reference-model" else "website",
+                        2 if refusal == "writer" else 1,
+                    )
+                ]
+                self.native.spec["canonical_settings"]["primary_page_xmlid_set"] = refusal == "page"
+                self.native.spec["canonical_settings"]["website_id"] = (
+                    2 if refusal == "reviewed-id" else 0
+                )
+                if refusal == "empty":
+                    self.websites = []
+                elif refusal in {"before", "after"}:
+                    self.websites[1] = (
+                        2,
+                        "dated.example.invalid"
+                        if refusal == "before"
+                        else "https://stable.example.invalid/",
+                    )
+                elif refusal == "unowned":
+                    self.websites = [
+                        (1, "unrelated.example.invalid"),
+                        (2, "stable.example.invalid"),
+                    ]
+                elif refusal in {"scheme", "case", "port"}:
+                    self.websites[1] = (
+                        2,
+                        {
+                            "scheme": "http://stable.example.invalid",
+                            "case": "STABLE.EXAMPLE.INVALID",
+                            "port": "stable.example.invalid:443",
+                        }[refusal],
+                    )
+                elif refusal == "international":
+                    self.native.spec["canonical_settings"]["canonical_url"] = (
+                        "https://xn--bcher-kva.example.invalid"
+                    )
+                    self.websites[1] = (2, "https://bücher.example.invalid")
+                with self.assertRaises(RuntimeError):
+                    self.database_read()
+                self.assertFalse(self.gate.exists())
+
     def test_unqualified_copy_or_connections_never_release_the_gate(self) -> None:
         for refusal in ("network", "integration", "copy", "website", "read-route"):
             with self.subTest(refusal=refusal):
@@ -584,7 +881,7 @@ class CanonicalAddressProgramTests(unittest.TestCase):
                     "other" if refusal == "copy" else "fixture-copy"
                 )
                 self.websites = (
-                    [(1, "dated.example.invalid"), (2, "foreign.example.invalid")]
+                    [(1, "dated.example.invalid"), (2, "stable.example.invalid")]
                     if refusal == "website"
                     else [(1, "dated.example.invalid")]
                 )
@@ -615,6 +912,7 @@ class CanonicalAddressProgramTests(unittest.TestCase):
         self.assertFalse(self.gate.exists())
 
     def test_real_service_spec_reaches_the_qualified_native_gate(self) -> None:
+        self.websites.append((2, "unrelated.example.invalid"))
         identity = RuntimeIdentity(
             product=self.native.gen.product,
             context=self.native.gen.context,

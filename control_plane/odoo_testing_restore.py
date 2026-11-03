@@ -178,6 +178,8 @@ for key in tuple(os.environ):
 os.environ["ODOO_RESTORE_KEPT_INTEGRATIONS"] = ""
 os.environ["ENV_OVERRIDE_DISABLE_CRON"] = "true"
 os.environ["NO_SANITIZE"] = "false"
+if expected_copy_instance == "rehearsal":
+    os.environ["ODOO_COPY_PURPOSE"] = "migration"
 
 
 class CopyRunner(OdooDataWorkflowRunner):
@@ -238,6 +240,11 @@ class CopyRunner(OdooDataWorkflowRunner):
 if not callable(getattr(OdooDataWorkflowRunner, "prepare_credentials_before_registry", None)):
     raise SystemExit("Artifact lacks the pre-registry credential boundary")
 settings = LocalServerSettings()
+if expected_copy_instance == "rehearsal" and (
+    getattr(settings, "copy_purpose", None) != "migration"
+    or not callable(getattr(OdooDataWorkflowRunner, "verify_isolated_copy_before_registry", None))
+):
+    raise SystemExit("Artifact lacks migration-purpose copy safety; refresh the selected artifact from current odoo-devkit and qualify it before a new rehearsal")
 if settings.host != "database" or settings.db_name != sys.argv[2] or settings.platform_instance != expected_copy_instance:
     raise SystemExit("Testing copy settings no longer name the isolated database")
 runner = CopyRunner(settings, None, None)
@@ -802,11 +809,13 @@ def command(arguments, *, stdin=None, stdout=None, diagnose_failure=False):
     if result.returncode:
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
-        if diagnose_failure:
-            emit_copy_command_failure(result, spec)
+        identity = emit_copy_command_failure(result, spec) if diagnose_failure else ''
         if arguments[0]=='docker' and ('readback_failed_predicate='+ReadbackPredicate.ATTACHMENTS).encode() in (result.stdout or b'').splitlines():
-            raise CopyReadbackRefused(ReadbackPredicate.ATTACHMENTS)
-        raise RuntimeError("Fresh testing copy command did not pass")
+            error = CopyReadbackRefused(ReadbackPredicate.ATTACHMENTS)
+        else:
+            error = RuntimeError("Fresh testing copy command did not pass")
+        setattr(error, COPY_FAILURE_EVIDENCE_MARKER, identity)
+        raise error
     return result.stdout or b""
 
 
@@ -1264,7 +1273,9 @@ except TestingProviderDenied:
     sys.exit(1)
 except Exception as error:
     if len(sys.argv)>2:
-        frame = copy_readback_failure_frame(error, inspection_predicate) if inspection_only or isinstance(error, CopyReadbackRefused) else {'type':'failed'}
+        frame = copy_readback_failure_frame(error, inspection_predicate)
+        if not inspection_only and not isinstance(error, CopyReadbackRefused):
+            frame = {key:value for key,value in frame.items() if key in {'type',COPY_FAILURE_EVIDENCE_MARKER}}
         print(sys.argv[2]+json.dumps(frame),flush=True)
         sys.exit(1)
     if isinstance(error, CopyReadbackRefused):

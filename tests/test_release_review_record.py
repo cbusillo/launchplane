@@ -66,8 +66,11 @@ with store.release_review_publication_lock(record_id="interrupted-publication"):
 class FakeReleaseIssues:
     """Issue API with a controllable first lookup and a lost POST response."""
 
+    app_id = 77
+
     def __init__(self) -> None:
         self.issues: list[dict[str, object]] = []
+        self.comments: list[dict[str, object]] = []
         self.lookup_started = Event()
         self.continue_lookup = Event()
         self.continue_lookup.set()
@@ -77,16 +80,51 @@ class FakeReleaseIssues:
     def request(
         self, *, path: str, token: str, method: str = "GET", body: dict[str, str] | None = None
     ) -> object:
+        if method == "DELETE":
+            return None
+        if method == "PATCH":
+            assert body is not None
+            with self._lock:
+                issue = next(
+                    issue for issue in self.issues if issue["number"] == int(path.rsplit("/", 1)[1])
+                )
+                issue.update(body)
+                return issue.copy()
         if method == "GET":
             with self._lock:
-                snapshot = list(self.issues)
+                if "/comments?" in path:
+                    snapshot = list(self.comments)
+                elif path.rsplit("/", 1)[-1].isdigit():
+                    return next(
+                        issue.copy()
+                        for issue in self.issues
+                        if issue["number"] == int(path.rsplit("/", 1)[-1])
+                    )
+                else:
+                    snapshot = list(self.issues)
             self.lookup_started.set()
             if not self.continue_lookup.wait(timeout=10):
                 raise TimeoutError("Test did not release issue lookup")
             return snapshot
         assert body is not None
         with self._lock:
-            issue = {"number": 99 + len(self.issues), "body": body["body"]}
+            if path.endswith("/comments"):
+                comment = {
+                    "id": len(self.comments) + 1,
+                    "body": body["body"],
+                    "performed_via_github_app": {"id": self.app_id},
+                }
+                self.comments.append(comment)
+                if self.lose_response:
+                    self.lose_response = False
+                    raise ValueError("Comment created; response lost")
+                return comment
+            issue = {
+                "number": 99 + len(self.issues),
+                "state": "open",
+                "body": body["body"],
+                "performed_via_github_app": {"id": self.app_id},
+            }
             self.issues.append(issue)
         if self.lose_response:
             self.lose_response = False
@@ -118,6 +156,10 @@ def concurrent_publication(
         patch(
             "control_plane.release_review_record.resolve_launchplane_github_token",
             return_value="test-token",
+        ),
+        patch(
+            "control_plane.release_review_record.resolve_delivery_github_app_id",
+            return_value=FakeReleaseIssues.app_id,
         ),
         patch.object(stores[1], "release_review_publication_lock", contender_lock),
         ThreadPoolExecutor(max_workers=2) as workers,
@@ -163,6 +205,12 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         seed(store)
         self.decision = decision(store).model_copy(update={"release_issue_url": ""})
         store.create_release_review_decision_record_if_absent(self.decision)
+        self.enterContext(
+            patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=FakeReleaseIssues.app_id,
+            )
+        )
         token = patch(
             "control_plane.release_review_record.resolve_launchplane_github_token",
             return_value="test-token",
@@ -181,11 +229,11 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         self.assertEqual(stored.model_copy(update={"release_issue_url": ""}), self.decision)
 
     def test_lost_response_or_storage_acknowledgement_recovers_one_issue(self) -> None:
+        github = FakeReleaseIssues()
         for failure in ("response", "storage"):
             with self.subTest(failure=failure):
                 saved = self.decision.model_copy(update={"record_id": f"lost-{failure}"})
                 self.store.create_release_review_decision_record_if_absent(saved)
-                github = FakeReleaseIssues()
                 github.lose_response = failure == "response"
                 with patch(
                     "control_plane.release_review_record.github_api_request",

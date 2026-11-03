@@ -4,11 +4,11 @@ from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 
 from dataclasses import dataclass, field
 from contextlib import contextmanager
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple, cast
 import secrets as random_secrets
 import time
 import hashlib
@@ -22,6 +22,18 @@ from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_LOGIN_PREFIX,
     WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS,
     WALKTHROUGH_DISPATCH_SECONDS,
+    WALKTHROUGH_READONLY_FIXTURE,
+)
+from control_plane.contracts.preview_fixture import PreviewFixtureRequest
+from control_plane.preview_fixture import (
+    PreviewFixtureAdapter,
+    fixture_preview_slot,
+    require_fixture_target_ownership,
+)
+from control_plane.disposable_lanes import resolve_disposable_preview, DisposableLaneStore
+from control_plane.contracts.preview_execution import (
+    odoo_preview_target_key,
+    odoo_preview_reconciliation_key,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
@@ -35,6 +47,7 @@ from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.dokploy.odoo_walkthrough import (
     TestingRead,
     read_testing_connection_isolation,
+    read_testing_account_presence,
     read_testing_task_usage,
     testing_account_command,
     testing_account_dispatch_finished,
@@ -55,7 +68,10 @@ from control_plane.odoo_testing_drill_usage import (
     testing_drill_environment,
 )
 from control_plane.odoo_testing_restore import generation_binding, read_current_testing_generation
-from control_plane.odoo_walkthrough_browser import run_walkthrough_browser
+from control_plane.odoo_walkthrough_browser import (
+    run_walkthrough_browser,
+    ReadonlyBrowserCheckFailed,
+)
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderObservation,
@@ -70,6 +86,54 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
 
 WALKTHROUGH_SECRET_INTEGRATION = "odoo_walkthrough"
+
+
+def readonly_secret_prefix(task_id: str) -> str:
+    return "readonly-" + task_id + "-"
+
+
+def walkthrough_secret_name(request: OdooWalkthroughRequest, binding: str) -> str:
+    return (readonly_secret_prefix(request.task_id) if request.read_only else "task-") + binding
+
+
+def disable_walkthrough_credentials(
+    store: PostgresRecordStore,
+    request: OdooWalkthroughRequest,
+    actor: str,
+    *,
+    secret_id: str = "",
+    keep_secret_id: str = "",
+) -> None:
+    records = store.list_secret_records(
+        integration=WALKTHROUGH_SECRET_INTEGRATION,
+        context_name=request.context,
+        instance_name=request.instance,
+    )
+    bindings = store.list_secret_bindings(
+        integration=WALKTHROUGH_SECRET_INTEGRATION,
+        context_name=request.context,
+        instance_name=request.instance,
+    )
+    now = utc_now_timestamp()
+    for record in records:
+        selected = (
+            record.name.startswith(readonly_secret_prefix(request.task_id))
+            if request.read_only
+            else record.secret_id == secret_id
+        )
+        if not selected or record.secret_id == keep_secret_id:
+            continue
+        if record.status == "configured":
+            store.write_secret_record(
+                record.model_copy(
+                    update={"status": "disabled", "updated_at": now, "updated_by": actor}
+                )
+            )
+        for binding in bindings:
+            if binding.secret_id == record.secret_id:
+                store.write_secret_binding(
+                    binding.model_copy(update={"status": "disabled", "updated_at": now})
+                )
 
 
 class WalkthroughPrerequisite(StrEnum):
@@ -91,6 +155,7 @@ class WalkthroughPrerequisite(StrEnum):
     COPY_WITNESS_CHANGED = "testing_task_copy_witness_changed"
     ISOLATION_REFUSED = "testing_task_isolation_refused"
     PROTECTED_SIGNIN = "testing_task_protected_signin_observed"
+    ACCOUNT_CHANGED = "testing_task_account_changed"
     CREDENTIAL = "testing_task_credential_custody_unavailable"
 
 
@@ -118,6 +183,7 @@ _OBSERVED_READ_REFUSALS = {
     TestingRead.COPY_CHANGED: WalkthroughPrerequisite.COPY_WITNESS_CHANGED,
     TestingRead.ISOLATION_REFUSED: WalkthroughPrerequisite.ISOLATION_REFUSED,
     TestingRead.PROTECTED_SIGNIN: WalkthroughPrerequisite.PROTECTED_SIGNIN,
+    TestingRead.TASK_ACCOUNT_CHANGED: WalkthroughPrerequisite.ACCOUNT_CHANGED,
 }
 
 
@@ -158,11 +224,160 @@ class WalkthroughPlan:
 def plan_walkthrough(
     store: PostgresRecordStore, root: Path, request: OdooWalkthroughRequest, actor: str
 ) -> WalkthroughPlan:
+    if request.instance != "testing":
+        return _plan_preview_walkthrough(store, root, request, actor)
     plan = _walkthrough_preflight(
         store, root, request.product, request.context, request=request, actor=actor
     )
     assert plan is not None
     return plan
+
+
+def _plan_preview_walkthrough(
+    store: PostgresRecordStore, root: Path, request: OdooWalkthroughRequest, actor: str
+) -> WalkthroughPlan:
+    if (
+        not request.read_only
+        or request.instance.strip().lower() in {"prod", "production"}
+        or not request.preview_id
+        or not request.generation_id
+    ):
+        raise ValueError("Preview sign-in requires an exact read-only target.")
+    fixture = PreviewFixtureAdapter(
+        store=store,
+        root=root,
+        product=request.product,
+        trace_id="",
+        request=PreviewFixtureRequest(
+            action="preview-fixture",
+            intent="preview-fixture",
+            context=request.context,
+            instance=request.instance,
+            preview_id=request.preview_id,
+            generation_id=request.generation_id,
+            fixture=WALKTHROUGH_READONLY_FIXTURE,
+            reason="Qualify the product-owned read-only test identity.",
+        ),
+    )
+    connection = fixture.connect(mutation=request.operation == "provision")
+    if request.operation == "cleanup":
+        profile = store.read_product_profile_record(request.product)
+        preview = store.read_preview_record(request.preview_id)
+        slot = fixture_preview_slot(store, request.product, preview.anchor_pr_number)
+        owned = resolve_disposable_preview(
+            cast(DisposableLaneStore, store), profile, request.context, slot
+        )
+        if owned.preview_id != request.preview_id:
+            raise ValueError("The cleanup target is not this product's preview.")
+        safety = store.read_disposable_lane_safety(request.product, request.context, slot)
+        if safety is not None and safety.production_resources in {"shared", "separation_ready"}:
+            raise ValueError("Shared production resources forbid test-account cleanup.")
+        require_fixture_target_ownership(
+            store,
+            product=request.product,
+            context=request.context,
+            anchor_pr_number=preview.anchor_pr_number,
+            target_id=connection.evidence.target_id,
+            mutation=True,
+        )
+    parsed = urlsplit(connection.selection.base_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Preview sign-in requires its recorded HTTPS origin.")
+    if any(
+        (urlsplit(lane.base_url).hostname or "").rstrip(".") == (parsed.hostname or "").rstrip(".")
+        for profile in store.list_product_profile_records()
+        for lane in profile.lanes
+    ) or any(
+        preview.preview_id != request.preview_id
+        and preview.state != "destroyed"
+        and (urlsplit(preview.canonical_url).hostname or "").rstrip(".")
+        == (parsed.hostname or "").rstrip(".")
+        for preview in store.list_preview_records()
+    ):
+        raise ValueError("The preview origin aliases another lane.")
+    database = connection.credentials["ODOO_DB_NAME"]
+    copy_binding = canonical_json_sha256(
+        [
+            request.product,
+            request.context,
+            request.instance,
+            request.preview_id,
+            request.generation_id,
+            connection.evidence.target_id,
+            database,
+        ]
+    )
+    reader = (
+        read_testing_connection_isolation
+        if request.operation == "cleanup"
+        else read_testing_account_presence
+    )
+    _require_clear_read(
+        reader(
+            host=connection.host,
+            token=connection.token,
+            server_id=connection.server_id,
+            intent={
+                "project": connection.app_name,
+                "identity": connection.selection.identity.model_dump(mode="json"),
+                "identity_key": RUNTIME_IDENTITY_ENV_KEY,
+                "image": connection.selection.identity.image_reference,
+                "database": database,
+                "copy_binding": copy_binding,
+                "task_id": request.task_id,
+                "read_only": True,
+            },
+        )
+    )
+    account_binding = canonical_json_sha256(
+        [request.product, request.context, request.task_id, copy_binding]
+    )
+    secret_name = walkthrough_secret_name(request, account_binding)
+    secret = store.find_secret_record(
+        scope="context_instance",
+        integration=WALKTHROUGH_SECRET_INTEGRATION,
+        name=secret_name,
+        context=request.context,
+        instance=request.instance,
+    )
+    if request.operation == "run" and (secret is None or secret.status != "configured"):
+        raise ValueError("Provision this preview's read-only test identity first.")
+    digest = canonical_json_sha256(
+        [
+            actor,
+            request.operation_payload(exclude={"mode", "reviewed_plan_sha256"}),
+            connection.selection.identity.model_dump(mode="json", exclude={"deployed_at"}),
+            connection.selection.base_url,
+            connection.evidence.target_id,
+            connection.evidence.container_id,
+            connection.server_id,
+            connection.app_name,
+            database,
+        ]
+    )
+    return WalkthroughPlan(
+        digest,
+        account_binding,
+        database,
+        copy_binding,
+        "",
+        secret_name,
+        connection,
+    )
+
+
+class WalkthroughCheck(NamedTuple):
+    checkpoint: WalkthroughPrerequisite
+    code: WalkthroughPrerequisite | ReadbackPredicate
+    state: Literal["clear", "blocked", "unknown"]
 
 
 def read_walkthrough_prerequisites(
@@ -171,21 +386,8 @@ def read_walkthrough_prerequisites(
     product: str,
     context: str,
     request: OdooWalkthroughRequest | None = None,
-) -> tuple[
-    tuple[
-        WalkthroughPrerequisite,
-        WalkthroughPrerequisite | ReadbackPredicate,
-        Literal["clear", "blocked", "unknown"],
-    ],
-    ...,
-]:
-    checks: list[
-        tuple[
-            WalkthroughPrerequisite,
-            WalkthroughPrerequisite | ReadbackPredicate,
-            Literal["clear", "blocked", "unknown"],
-        ]
-    ] = []
+) -> tuple[WalkthroughCheck, ...]:
+    checks: list[WalkthroughCheck] = []
     _walkthrough_preflight(store, root, product, context, request=request, checks=checks)
     return tuple(checks)
 
@@ -198,14 +400,7 @@ def _walkthrough_preflight(
     *,
     request: OdooWalkthroughRequest | None = None,
     actor: str = "",
-    checks: list[
-        tuple[
-            WalkthroughPrerequisite,
-            WalkthroughPrerequisite | ReadbackPredicate,
-            Literal["clear", "blocked", "unknown"],
-        ]
-    ]
-    | None = None,
+    checks: list[WalkthroughCheck] | None = None,
 ) -> WalkthroughPlan | None:
     operation = request.operation if request is not None else "provision"
     passed: set[WalkthroughPrerequisite] = set()
@@ -222,35 +417,42 @@ def _walkthrough_preflight(
                 yield True
             return
         if any(item not in passed for item in requires):
-            checks.append((code, WalkthroughPrerequisite.NOT_REACHED, "unknown"))
+            checks.append(WalkthroughCheck(code, WalkthroughPrerequisite.NOT_REACHED, "unknown"))
             yield False
             return
         if task_required and request is None:
-            checks.append((code, code, "unknown"))
+            checks.append(WalkthroughCheck(code, code, "unknown"))
             yield False
             return
         try:
             yield True
         except WalkthroughPrerequisiteError as error:
-            checks.append((code, error.code, "blocked"))
+            checks.append(WalkthroughCheck(code, error.code, "blocked"))
         except NativeProgramFailed as error:
-            checks.append((code, error.predicate, "unknown" if error.unavailable else "blocked"))
+            checks.append(
+                WalkthroughCheck(
+                    code, error.predicate, "unknown" if error.unavailable else "blocked"
+                )
+            )
         except NativeSourceUnavailable:
-            checks.append((code, ReadbackPredicate.NATIVE_READ, "unknown"))
+            checks.append(WalkthroughCheck(code, ReadbackPredicate.NATIVE_READ, "unknown"))
         except OdooRuntimeReadError as error:
-            checks.append((code, code, "unknown" if error.status_code >= 500 else "blocked"))
+            checks.append(
+                WalkthroughCheck(code, code, "unknown" if error.status_code >= 500 else "blocked")
+            )
         except DrillUsageUnreadable:
-            checks.append((code, ReadbackPredicate.USAGE, "unknown"))
+            checks.append(WalkthroughCheck(code, ReadbackPredicate.USAGE, "unknown"))
         except DrillEvidenceUnavailable:
-            checks.append((code, code, "unknown"))
+            checks.append(WalkthroughCheck(code, code, "unknown"))
         except ValueError:
-            checks.append((code, code, "blocked"))
+            checks.append(WalkthroughCheck(code, code, "blocked"))
+        # noinspection PyBroadExceptionInspection
         except Exception:
             # Unreadable provider/storage evidence is not a known failed predicate.
-            checks.append((code, code, "unknown"))
+            checks.append(WalkthroughCheck(code, code, "unknown"))
         else:
             passed.add(code)
-            checks.append((code, code, "clear"))
+            checks.append(WalkthroughCheck(code, code, "clear"))
 
     selection = None
     generation = None
@@ -284,9 +486,9 @@ def _walkthrough_preflight(
             if any(
                 lane.instance != "testing"
                 and (urlsplit(lane.base_url).hostname or "").rstrip(".")
-                == parsed.hostname.rstrip(".")
-                for product in store.list_product_profile_records()
-                for lane in product.lanes
+                == (parsed.hostname or "").rstrip(".")
+                for other_profile in store.list_product_profile_records()
+                for lane in other_profile.lanes
             ):
                 raise ValueError("Testing origin aliases another lane.")
     with checkpoint(WalkthroughPrerequisite.GENERATION, ()) as run:
@@ -431,7 +633,7 @@ def _walkthrough_preflight(
     ) as run:
         if run:
             assert request is not None
-            secret_name = "task-" + binding
+            secret_name = walkthrough_secret_name(request, binding)
             secret = store.find_secret_record(
                 scope="context_instance",
                 integration=WALKTHROUGH_SECRET_INTEGRATION,
@@ -441,9 +643,14 @@ def _walkthrough_preflight(
             )
             if operation == "run" and secret is None:
                 raise ValueError("There is no task account for this testing copy.")
-            if secret is not None and secret.status != "configured" and operation != "cleanup":
+            if (
+                secret is not None
+                and secret.status != "configured"
+                and operation != "cleanup"
+                and not (request.read_only and operation == "provision")
+            ):
                 raise ValueError("The task account is closed.")
-            if secret is not None and operation != "cleanup":
+            if secret is not None and operation != "cleanup" and not request.read_only:
                 created = datetime.fromisoformat(secret.created_at.replace("Z", "+00:00"))
                 if created.tzinfo is None or datetime.now(timezone.utc) - created > timedelta(
                     seconds=WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS
@@ -456,7 +663,7 @@ def _walkthrough_preflight(
     digest = canonical_json_sha256(
         [
             actor,
-            request.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"}),
+            request.operation_payload(exclude={"mode", "reviewed_plan_sha256"}),
             selection.identity.model_dump(mode="json"),
             selection.base_url,
             copy_binding,
@@ -490,26 +697,36 @@ class WalkthroughAdapter:
         self.transient_screenshots: tuple[str, ...] = ()
         self.dispatch_deadline = int(time.time()) + WALKTHROUGH_DISPATCH_SECONDS
 
-    def provider_target_origin(self) -> ProviderTargetOrigin:
+    def provider_target_origin(self) -> ProviderTargetOrigin | None:
+        if self.request.instance != "testing":
+            return None
         return ProviderTargetOrigin(
             product=self.request.product,
             context=self.request.context,
-            instance="testing",
+            instance=self.request.instance,
             provider_id="dokploy",
             target_type="compose",
             target_id=self.plan.connection.evidence.target_id,
         )
 
     def target_key(self) -> str:
+        if self.request.instance != "testing":
+            return odoo_preview_target_key(
+                context=self.request.context, compose_name=self.request.instance
+            )
         return generic_web_provider_target_key(
             provider_id="dokploy",
             context=self.request.context,
-            instance="testing",
+            instance=self.request.instance,
             target_type="compose",
             target_id=self.plan.connection.evidence.target_id,
         )
 
     def reconciliation_key(self) -> str:
+        if self.request.instance != "testing":
+            return odoo_preview_reconciliation_key(
+                context=self.request.context, compose_name=self.request.instance
+            )
         return self.plan.digest
 
     def original_intent(self) -> dict[str, object]:
@@ -526,12 +743,17 @@ class WalkthroughAdapter:
             "task_id": self.request.task_id,
             "usage_since": self.plan.usage_since,
             "dispatch_deadline": self.dispatch_deadline,
+            "read_only": self.request.read_only,
+            "instance": self.request.instance,
+            "operation": self.request.operation,
+            "reviewed_plan_sha256": self.plan.digest,
         }
 
+    @staticmethod
     def observe(
-        self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
+        provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        # Only the evidence-only recovery adapter can settle a prior dispatch.
+        del provider_operation_key, provider_effect_phase, reconciliation_key
         return ProviderObservation("unknown")
 
     def response(self, result: OdooWalkthroughResult) -> dict[str, object]:
@@ -552,6 +774,7 @@ class WalkthroughAdapter:
             code="task_outcome_unknown",
             product=self.request.product,
             context=self.request.context,
+            instance=self.request.instance,
             deployment_record_id=self.plan.connection.selection.identity.deployment_record_id,
             artifact_id=self.plan.connection.selection.identity.artifact_id,
         )
@@ -571,9 +794,11 @@ class WalkthroughAdapter:
                 integration=WALKTHROUGH_SECRET_INTEGRATION,
                 name=self.plan.secret_name,
                 context=self.request.context,
-                instance="testing",
+                instance=self.request.instance,
             )
-            if secret is None and self.request.operation != "cleanup":
+            if (
+                secret is None or self.request.read_only and secret.status == "disabled"
+            ) and self.request.operation != "cleanup":
                 if self.request.operation != "provision":
                     raise ValueError("No task credential exists.")
                 write_secret_value(
@@ -584,7 +809,7 @@ class WalkthroughAdapter:
                     plaintext_value=random_secrets.token_urlsafe(48),
                     binding_key="TASK_PASSWORD",
                     context_name=self.request.context,
-                    instance_name="testing",
+                    instance_name=self.request.instance,
                     actor=self.actor,
                     source_label="service_testing_task",
                     value_origin="generated",
@@ -594,7 +819,7 @@ class WalkthroughAdapter:
                     integration=WALKTHROUGH_SECRET_INTEGRATION,
                     name=self.plan.secret_name,
                     context=self.request.context,
-                    instance="testing",
+                    instance=self.request.instance,
                 )
             password = ""
             if self.request.operation != "cleanup":
@@ -614,7 +839,7 @@ class WalkthroughAdapter:
                         for key, value in self.original_intent().items()
                         if key not in {"host", "server_id"}
                     },
-                    "instance": "testing",
+                    "instance": self.request.instance,
                     "dispatch_id": hashlib.sha256(provider_operation_key.encode()).hexdigest(),
                     "project": connection.app_name,
                     "identity": connection.selection.identity.model_dump(mode="json"),
@@ -636,49 +861,58 @@ class WalkthroughAdapter:
                 return ProviderMutationOutcome(
                     response_status_code=200, response_payload=self.response(result)
                 )
-            uid = int(str(account["account_id"]))
+            uid = account["account_id"]
+            if type(uid) is not int:
+                raise ValueError("The account receipt requires an integer identity.")
             if uid <= 2 and not (uid == 0 and self.request.operation == "cleanup"):
                 raise ValueError("Invalid testing account ID.")
             result.account_id = uid or None
-            if self.request.operation == "cleanup" and secret is not None:
-                # Revoke in Odoo before disabling the internal secret. Retain
-                # encrypted history and the marker for audit/retry, never reuse it.
-                now = utc_now_timestamp()
-                self.store.write_secret_record(
-                    secret.model_copy(
-                        update={
-                            "status": "disabled",
-                            "updated_at": now,
-                            "updated_by": self.actor,
-                        }
-                    )
+            if self.request.operation == "cleanup":
+                disable_walkthrough_credentials(
+                    self.store,
+                    self.request,
+                    self.actor,
+                    secret_id=secret.secret_id if secret is not None else "",
                 )
-                for binding in self.store.list_secret_bindings(
-                    integration=WALKTHROUGH_SECRET_INTEGRATION,
-                    context_name=self.request.context,
-                    instance_name="testing",
-                ):
-                    if binding.secret_id == secret.secret_id:
-                        self.store.write_secret_binding(
-                            binding.model_copy(
-                                update={
-                                    "status": "disabled",
-                                    "updated_at": now,
-                                }
-                            )
-                        )
+            elif self.request.operation == "provision" and self.request.read_only:
+                assert secret is not None
+                disable_walkthrough_credentials(
+                    self.store,
+                    self.request,
+                    self.actor,
+                    keep_secret_id=secret.secret_id,
+                )
             elif self.request.operation == "run":
                 lease.checkpoint_effect("browser_dispatch")
 
                 def checkpoint() -> None:
                     lease.assert_current()
                     assert_selection_current(self.store, connection.selection)
-                    require_drill_use_unprotected(
-                        self.store,
-                        self.request.product,
-                        self.request.context,
-                        allow_down_repair=False,
-                    )
+                    if self.request.instance != "testing":
+                        fixture = PreviewFixtureAdapter(
+                            self.store,
+                            self.root,
+                            self.request.product,
+                            PreviewFixtureRequest(
+                                action="preview-fixture",
+                                intent="preview-fixture",
+                                context=self.request.context,
+                                instance=self.request.instance,
+                                preview_id=self.request.preview_id,
+                                generation_id=self.request.generation_id,
+                                fixture=WALKTHROUGH_READONLY_FIXTURE,
+                                reason="Verify the current read-only preview target.",
+                            ),
+                            self.trace,
+                        )
+                        fixture.selection()
+                    else:
+                        require_drill_use_unprotected(
+                            self.store,
+                            self.request.product,
+                            self.request.context,
+                            allow_down_repair=False,
+                        )
                     if not testing_task_unused(
                         host=connection.host,
                         token=connection.token,
@@ -689,16 +923,27 @@ class WalkthroughAdapter:
                             "Testing task usage or account identity changed or is unreadable."
                         )
 
-                passed, screenshots = run_walkthrough_browser(
-                    origin=connection.selection.base_url.rstrip("/"),
-                    database=self.plan.database,
-                    login=WALKTHROUGH_LOGIN_PREFIX + self.request.task_id,
-                    password=password,
-                    account_id=uid,
-                    identity=connection.selection.identity,
-                    steps=self.request.steps,
-                    checkpoint=checkpoint,
-                )
+                try:
+                    passed, screenshots = run_walkthrough_browser(
+                        origin=connection.selection.base_url.rstrip("/"),
+                        database=self.plan.database,
+                        login=WALKTHROUGH_LOGIN_PREFIX + self.request.task_id,
+                        password=password,
+                        account_id=uid,
+                        identity=connection.selection.identity,
+                        steps=self.request.steps,
+                        checkpoint=checkpoint,
+                        read_only=self.request.read_only,
+                    )
+                except ReadonlyBrowserCheckFailed as error:
+                    if not self.request.read_only:
+                        raise
+                    lease.assert_current()
+                    assert_selection_current(self.store, connection.selection)
+                    result.status = "fail"
+                    result.code = "read_only_browser_check_failed"
+                    result.steps_passed = error.steps_passed
+                    return ProviderMutationOutcome(200, self.response(result))
                 result.signed_in = True
                 result.steps_passed = passed
                 self.transient_screenshots = screenshots
@@ -729,9 +974,11 @@ class InterruptedWalkthroughAdapter:
         trace: str,
         store: PostgresRecordStore,
         root: Path,
+        check: Callable[[], None] | None = None,
     ) -> None:
         self.original, self.request, self.trace = original, request, trace
         self.store, self.root = store, root
+        self.check = check
 
     def target_key(self) -> str:
         return self.original.provider_target_key
@@ -742,22 +989,29 @@ class InterruptedWalkthroughAdapter:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        if provider_effect_phase not in {"", "managed_secret"}:
-            try:
-                intent = self.store.read_original_mutation_intent(self.original)
-                host, token = source.read_dokploy_config(
-                    control_plane_root=self.root, database_url=self.store.database_url
-                )
-                if host != intent.get("host") or not testing_account_dispatch_finished(
-                    host=host,
-                    token=token,
-                    server_id=str(intent["server_id"]),
-                    dispatch_id=hashlib.sha256(provider_operation_key.encode()).hexdigest(),
-                    original_intent=intent,
-                ):
-                    return ProviderObservation("unknown")
-            except Exception:
-                return ProviderObservation("unknown")
+        if reconciliation_key != self.original.reconciliation_key:
+            return ProviderObservation("unknown")
+        try:
+            with _prerequisite(WalkthroughPrerequisite.RUNTIME):
+                if self.check is not None:
+                    self.check()
+                if provider_effect_phase not in {"", "managed_secret"}:
+                    intent = self.store.read_original_mutation_intent(self.original)
+                    host, token = source.read_dokploy_config(
+                        control_plane_root=self.root, database_url=self.store.database_url
+                    )
+                    if host != intent.get("host") or not testing_account_dispatch_finished(
+                        host=host,
+                        token=token,
+                        server_id=str(intent["server_id"]),
+                        dispatch_id=hashlib.sha256(provider_operation_key.encode()).hexdigest(),
+                        original_intent=intent,
+                    ):
+                        return ProviderObservation("unknown")
+                if self.check is not None:
+                    self.check()
+        except WalkthroughPrerequisiteError:
+            return ProviderObservation("unknown")
         return ProviderObservation(
             "present",
             response_status_code=200,
@@ -771,7 +1025,12 @@ class InterruptedWalkthroughAdapter:
                     plan_sha256=self.request.reviewed_plan_sha256,
                     product=self.request.product,
                     context=self.request.context,
-                    code="interrupted_task_requires_cleanup",
+                    instance=self.request.instance,
+                    code=(
+                        "interrupted_read_only_observation"
+                        if self.request.read_only and self.request.operation == "run"
+                        else "interrupted_task_requires_cleanup"
+                    ),
                 ).model_dump(mode="json"),
             },
         )

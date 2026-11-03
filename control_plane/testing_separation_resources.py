@@ -14,6 +14,7 @@ import click
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.idempotency_record import LaunchplaneMutationReservationState
 from control_plane.contracts.testing_application import TestingApplicationSpecification
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.disposable_lanes import disposable_lane_configuration
 from control_plane.dokploy import api, post_deploy, source
 from control_plane.dokploy.native_copy_stream import NATIVE_PROGRAM_SOURCE_SITE_LIMIT
@@ -186,7 +187,9 @@ class PreparationProgramEvidence(TypedDict):
 class SeparationResourcesRefusal(SeparationResourcesPlan, ProgramFailureEvidence):
     applied: Literal[False] = False
     resources_verified: Literal[False] = False
-    failure: Literal["retained_capability_refused"] = "retained_capability_refused"
+    failure: Literal["retained_capability_refused", "admission_changed_before_storage"] = (
+        "retained_capability_refused"
+    )
     storage_dispatched: Literal[False] = False
     qualification: Literal["not_evaluated"] = "not_evaluated"
     retained_target_id: str = Field(min_length=1)
@@ -212,6 +215,8 @@ def preparation_binding(
     actor: str,
     root: Path,
     application: TestingApplicationSpecification | None = None,
+    *,
+    profile_snapshot: LaunchplaneProductProfileRecord | None = None,
 ) -> tuple[str, str]:
     bindings = (
         bind_testing_recipient(store, product, context, "testing")
@@ -219,6 +224,8 @@ def preparation_binding(
         else _bind(store, product, context, "testing")
     )
     profile, target, target_id, provider = bindings
+    if profile_snapshot is not None and profile_snapshot.product != product:
+        raise SeparationResourcesRefused("Original preparation belongs to another product.")
     if application is not None and target.target_type != "application":
         raise SeparationResourcesRefused("Application preparation requires an application target.")
     if application is not None:
@@ -271,7 +278,10 @@ def preparation_binding(
         raise SeparationResourcesRefused("The retained provider placement is unavailable.")
     return canonical_json_sha256(
         {
-            "records": [record.model_dump(mode="json") for record in bindings],
+            "records": [
+                record.model_dump(mode="json")
+                for record in (profile_snapshot or profile, target, target_id, provider)
+            ],
             "configuration": [
                 row.model_dump(mode="json")
                 for row in disposable_lane_configuration(store, context, "testing")
@@ -307,6 +317,23 @@ class SeparationResourcesAdapter:
     request: SeparationResourcesRequest
     actor: str
     trace_id: str
+    settle_admission: bool = False
+    preparation_profile: LaunchplaneProductProfileRecord | None = None
+
+    def observation_binding(self) -> tuple[str, str]:
+        if not self.settle_admission:
+            return self.binding()
+        if self.preparation_profile is None:
+            raise ValueError("Original preparation inputs are unavailable.")
+        return preparation_binding(
+            self.store,
+            self.product,
+            self.request.context,
+            self.actor,
+            self.root,
+            self.request.application,
+            profile_snapshot=self.preparation_profile,
+        )
 
     def binding(self) -> tuple[str, str]:
         return preparation_binding(
@@ -359,7 +386,7 @@ class SeparationResourcesAdapter:
         }:
             return None
         observed = self.inspect_original(provider_operation_key)
-        if observed["inputs_match"] is not True:
+        if observed["inputs_match"] is not True and not self.settle_admission:
             return None
         programs = observed["programs"]
         if {program.kind for program in programs} != {
@@ -385,10 +412,19 @@ class SeparationResourcesAdapter:
             or capability.history_count != 1
             or capability.deployment_status not in {"done", "error"}
             or capability.log_read_status != ProgramLogReadStatus.AVAILABLE
-            or capability.resources_ok is not False
-            or capability.result_binding_matches is not None
             or not capability.schedule_id
             or not capability.deployment_id
+        ):
+            return None
+        admission_abandoned = (
+            self.settle_admission
+            and provider_effect_phase == APPLICATION_CAPABILITY_PHASE
+            and capability.deployment_status == "done"
+            and capability.resources_ok is True
+            and capability.result_binding_matches is True
+        )
+        if not admission_abandoned and not (
+            capability.resources_ok is False and capability.result_binding_matches is None
         ):
             return None
         return SeparationResourcesRefusal(
@@ -401,6 +437,9 @@ class SeparationResourcesAdapter:
             capability_deployment_id=capability.deployment_id,
             failure_program_sha256=capability.failure_program_sha256,
             failure_program_sites=capability.failure_program_sites,
+            failure="admission_changed_before_storage"
+            if admission_abandoned
+            else "retained_capability_refused",
         )
 
     def observe(
@@ -409,7 +448,7 @@ class SeparationResourcesAdapter:
         if reconciliation_key != self.request.reviewed_plan_sha256:
             return ProviderObservation(outcome="unknown")
         try:
-            binding, old_key = self.binding()
+            binding, old_key = self.observation_binding()
             if binding != reconciliation_key:
                 return ProviderObservation(outcome="unknown")
             with self.store.testing_replacement_execution_lock(
@@ -425,17 +464,27 @@ class SeparationResourcesAdapter:
                         check=check,
                     )
                 resources = self.resources(binding, provider_operation_key)
-                if (
-                    self.inspection_refusal(provider_operation_key, provider_effect_phase)
-                    is not None
-                ):
+                refusal = self.inspection_refusal(provider_operation_key, provider_effect_phase)
+                if refusal is not None:
                     with self.store.serialize_disposable_testing_resources():
                         check()
-                        if self.binding() != (binding, old_key):
+                        if self.observation_binding() != (binding, old_key):
                             return ProviderObservation(outcome="unknown")
+                        if self.settle_admission:
+                            return ProviderObservation(
+                                outcome="present",
+                                response_status_code=202,
+                                response_payload=provider_operation_response_payload(
+                                    trace_id=self.trace_id,
+                                    records={},
+                                    result=refusal.model_dump(mode="json"),
+                                ),
+                            )
                         return ProviderObservation(
                             outcome="absent", retry_safe=True, preserve_effect_checkpoint=True
                         )
+                if self.settle_admission and provider_effect_phase == APPLICATION_CAPABILITY_PHASE:
+                    return ProviderObservation(outcome="unknown")
                 evidence = run_preparation_schedule(
                     root=self.root,
                     resources=resources,
@@ -444,9 +493,10 @@ class SeparationResourcesAdapter:
                 )
                 with self.store.serialize_disposable_testing_resources():
                     check()
-                    if self.binding() != (binding, old_key) or not resource_readback_passes(
-                        evidence, resources
-                    ):
+                    if self.observation_binding() != (
+                        binding,
+                        old_key,
+                    ) or not resource_readback_passes(evidence, resources):
                         return ProviderObservation(outcome="unknown")
                     return ProviderObservation(
                         outcome="present",
@@ -516,6 +566,8 @@ class SeparationResourcesAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        if self.settle_admission:
+            raise ProviderMutationUnknownError("Original admission settlement is read-only.")
         evidence_lease = lease if isinstance(lease, ProviderEvidenceLease) else None
         started = bool(
             evidence_lease and evidence_lease.evidence_reservation().provider_effect_started_at

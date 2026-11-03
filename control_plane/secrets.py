@@ -422,36 +422,53 @@ def resolve_context_secret_value(
     if store is None:
         return ""
     try:
-        bindings = tuple(
-            binding
-            for binding in store.list_secret_bindings(
-                integration=integration, context_name=context_name, limit=None
-            )
-            if binding.integration == integration
-            and binding.context == context_name
-            and not binding.instance
-            and binding.binding_key == binding_key
-            and binding.status == SECRET_STATUS_CONFIGURED
+        return resolve_context_secret_value_from_store(
+            record_store=store,
+            integration=integration,
+            context_name=context_name,
+            binding_key=binding_key,
         )
-        if len(bindings) != 1:
-            return ""
-        record = store.read_secret_record(bindings[0].secret_id)
-        if (
-            record.secret_id != bindings[0].secret_id
-            or record.scope != "context"
-            or record.context != context_name
-            or record.instance
-            or record.integration != integration
-            or record.policy != "write_only"
-            or record.status != SECRET_STATUS_CONFIGURED
-        ):
-            return ""
-        version = store.read_secret_version(record.current_version_id)
-        if version.version_id != record.current_version_id or version.secret_id != record.secret_id:
-            return ""
-        return _decrypt_secret_value(version.ciphertext, version.key_id).strip()
     finally:
         store.close()
+
+
+def resolve_context_secret_value_from_store(
+    *,
+    record_store: SecretReadStore,
+    integration: str,
+    context_name: str,
+    binding_key: str,
+) -> str:
+    if not context_name.strip():
+        return ""
+    bindings = tuple(
+        binding
+        for binding in record_store.list_secret_bindings(
+            integration=integration, context_name=context_name
+        )
+        if binding.integration == integration
+        and binding.context == context_name
+        and not binding.instance
+        and binding.binding_key == binding_key
+        and binding.status == SECRET_STATUS_CONFIGURED
+    )
+    if len(bindings) != 1:
+        return ""
+    record = record_store.read_secret_record(bindings[0].secret_id)
+    if (
+        record.secret_id != bindings[0].secret_id
+        or record.scope != "context"
+        or record.context != context_name
+        or record.instance
+        or record.integration != integration
+        or record.policy != "write_only"
+        or record.status != SECRET_STATUS_CONFIGURED
+    ):
+        return ""
+    version = record_store.read_secret_version(record.current_version_id)
+    if version.version_id != record.current_version_id or version.secret_id != record.secret_id:
+        return ""
+    return _decrypt_secret_value(version.ciphertext, version.key_id).strip()
 
 
 def resolve_secret_values_for_integration(

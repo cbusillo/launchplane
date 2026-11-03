@@ -299,7 +299,6 @@ class ProductionBackupGateTests(unittest.TestCase):
         )
         self.assertEqual(persisted.product, "example-product")
         self.assertEqual(persisted.status, "pass")
-        self.assertIsNotNone(persisted.result)
         assert persisted.result is not None
         self.assertEqual(persisted.result.evidence, evidence)
         backup = self.store.read_backup_gate_record(operation.backup_record_id)

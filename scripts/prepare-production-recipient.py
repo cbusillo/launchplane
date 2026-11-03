@@ -55,6 +55,11 @@ from control_plane.production_recipient_inverse import (
     RecipientInverseRequest,
     RecipientInversePlan,
 )
+from control_plane.production_recipient_retirement import (
+    RETIREMENT_ROUTE,
+    RecipientRetirementRequest,
+    RecipientRetirementPlan,
+)
 
 
 def save(path: Path, payload: object) -> None:
@@ -87,6 +92,11 @@ def main() -> int:
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     operation = parser.add_mutually_exclusive_group()
+    operation.add_argument(
+        "--retirement",
+        action="store_true",
+        help="Retire only the exact old Compose and exclusive volumes after the rollback window.",
+    )
     operation.add_argument(
         "--continuation", action="store_true", help="Review retained same-key custody supersession."
     )
@@ -143,6 +153,7 @@ def main() -> int:
             | type[RecipientReleaseRecoveryRequest]
             | type[RecipientInverseRequest]
             | type[RecipientWriterFenceRequest]
+            | type[RecipientRetirementRequest]
         )
         result_type: (
             type[ProductionRecipientPlan]
@@ -153,8 +164,15 @@ def main() -> int:
             | type[RecipientReleaseRecoveryPlan]
             | type[RecipientInversePlan]
             | type[RecipientWriterFencePlan]
+            | type[RecipientRetirementPlan]
         )
-        if args.writer_fence:
+        if args.retirement:
+            request_type, result_type, route = (
+                RecipientRetirementRequest,
+                RecipientRetirementPlan,
+                RETIREMENT_ROUTE,
+            )
+        elif args.writer_fence:
             request_type, result_type, route = (
                 RecipientWriterFenceRequest,
                 RecipientWriterFencePlan,
@@ -222,13 +240,17 @@ def main() -> int:
                 raise ValueError("A writer fence names only its original operation.")
             args.idempotency_key = draft.operation_id
         path = route.format(product=args.product)
-        if args.mode == "apply":
+        if args.mode == "apply" or args.retirement and args.mode == "readback":
             evidence = json.loads(args.evidence_file.read_text())
             if args.release_recovery and not args.idempotency_key.strip():
                 args.idempotency_key = RecipientReleaseRecoveryPlan.model_validate(
                     evidence["result"], extra="ignore"
                 ).original_key
-            if not args.idempotency_key.strip() or not args.reviewed_dry_run:
+            if (
+                not args.idempotency_key.strip()
+                or args.mode == "apply"
+                and not args.reviewed_dry_run
+            ):
                 raise ValueError("Apply requires saved review and the original stable key.")
             if evidence["request"] != body or evidence["path"] != path:
                 raise ValueError("The review belongs to another preparation.")
@@ -254,6 +276,7 @@ def main() -> int:
                 or args.continuation
                 or args.release_recovery
                 or args.writer_control
+                or args.retirement
                 else {}
             ),
         )

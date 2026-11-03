@@ -1,3 +1,7 @@
+from control_plane.preview_namespaces import (
+    validate_preview_profile_writes,
+)
+
 import fcntl
 import hashlib
 import json
@@ -32,14 +36,6 @@ from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
-from control_plane.contracts.administrator_enrollment import (
-    AdministratorEnrollmentConflictError,
-    AdministratorEnrollmentRecord,
-    complete_administrator_enrollment,
-    expire_administrator_enrollment,
-    prove_administrator_enrollment_control,
-    withdraw_administrator_enrollment,
-)
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.retired_change_impact import (
@@ -398,6 +394,12 @@ class FilesystemRecordStore:
             return self._write_model_locked(record_type, record_id, model)
 
     def _write_model_locked(self, record_type: str, record_id: str, model: BaseModel) -> Path:
+        if isinstance(model, LaunchplaneProductProfileRecord):
+            validate_preview_profile_writes(
+                profiles=self._list_product_profile_records_locked(),
+                replacements=(model,),
+                previews=self._list_models_locked(PreviewRecord, "launchplane_previews"),
+            )
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_path = tempfile.mkstemp(
@@ -472,7 +474,12 @@ class FilesystemRecordStore:
     ) -> RecordModel:
         record_path = self._record_path(record_type, record_id)
         payload = json.loads(record_path.read_text(encoding="utf-8"))
-        return model_type.model_validate(payload)
+        return model_type.model_validate(
+            payload,
+            context={"stored_product_profile": True}
+            if model_type is ProductRetirementRecord
+            else None,
+        )
 
     def _record_dir(self, record_type: str) -> Path:
         return self.state_dir / record_type
@@ -493,7 +500,14 @@ class FilesystemRecordStore:
         records: list[RecordModel] = []
         for record_path in sorted(record_dir.glob("*.json")):
             payload = json.loads(record_path.read_text(encoding="utf-8"))
-            records.append(model_type.model_validate(payload))
+            records.append(
+                model_type.model_validate(
+                    payload,
+                    context={"stored_product_profile": True}
+                    if model_type is ProductRetirementRecord
+                    else None,
+                )
+            )
         return tuple(records)
 
     def _product_authority_bundle_stage_root(self) -> Path:
@@ -542,6 +556,11 @@ class FilesystemRecordStore:
             return
         with self._product_authority_bundle_lock():
             profiles = self._list_product_profile_records_locked()
+            validate_preview_profile_writes(
+                profiles=profiles,
+                replacements=bundle.product_profiles,
+                previews=self._list_models_locked(PreviewRecord, "launchplane_previews"),
+            )
             require_absent_products(bundle.absent_product_ids, profiles)
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
@@ -4615,6 +4634,7 @@ class FilesystemRecordStore:
         check_kind: str = "",
         status: str = "",
         limit: int | None = None,
+        before: tuple[str, str] | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]:
         records = [
             record
@@ -4632,6 +4652,7 @@ class FilesystemRecordStore:
             )
             and (not check_kind or record.check_kind == check_kind)
             and (not status or record.status == status)
+            and (before is None or (record.opened_at, record.incident_id) < before)
         ]
         records.sort(key=lambda record: (record.opened_at, record.incident_id), reverse=True)
         if limit is not None:
@@ -7389,6 +7410,11 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def read_preview_pr_feedback_record(self, feedback_id: str) -> PreviewPrFeedbackRecord:
+        return self._read_model(
+            PreviewPrFeedbackRecord, "launchplane_preview_pr_feedback", feedback_id
+        )
+
     def write_preview_pr_feedback_record(self, record: PreviewPrFeedbackRecord) -> Path:
         return self._write_model("launchplane_preview_pr_feedback", record.feedback_id, record)
 
@@ -7396,6 +7422,7 @@ class FilesystemRecordStore:
         self,
         *,
         context_name: str = "",
+        anchor_pr_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[PreviewPrFeedbackRecord, ...]:
         records = [
@@ -7403,7 +7430,8 @@ class FilesystemRecordStore:
             for record in self._list_models(
                 PreviewPrFeedbackRecord, "launchplane_preview_pr_feedback"
             )
-            if not context_name or record.context == context_name
+            if (not context_name or record.context == context_name)
+            and (anchor_pr_number is None or record.anchor_pr_number == anchor_pr_number)
         ]
         records.sort(key=lambda record: (record.requested_at, record.feedback_id), reverse=True)
         if limit is not None:
@@ -7641,113 +7669,6 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
-
-    def create_administrator_enrollment_if_absent(
-        self, record: AdministratorEnrollmentRecord
-    ) -> tuple[AdministratorEnrollmentRecord, bool]:
-        record_type = "launchplane_administrator_enrollments"
-        with self._exclusive_record_lock(
-            "launchplane_administrator_enrollment_challenge_digests", "global"
-        ):
-            record_path = self._record_path(record_type, record.enrollment_id)
-            if record_path.exists():
-                existing = self._read_model_locked(
-                    AdministratorEnrollmentRecord, record_type, record.enrollment_id
-                )
-                if existing != record:
-                    raise AdministratorEnrollmentConflictError(
-                        "administrator enrollment creation conflicts with persisted record"
-                    )
-                return existing, False
-            for existing in self._list_models_locked(AdministratorEnrollmentRecord, record_type):
-                if existing.challenge_sha256 == record.challenge_sha256:
-                    raise AdministratorEnrollmentConflictError(
-                        "administrator enrollment challenge digest is already reserved"
-                    )
-            self._write_model_locked(record_type, record.enrollment_id, record)
-            return record, True
-
-    def read_administrator_enrollment(self, enrollment_id: str) -> AdministratorEnrollmentRecord:
-        return self._read_model(
-            AdministratorEnrollmentRecord, "launchplane_administrator_enrollments", enrollment_id
-        )
-
-    def _transition_administrator_enrollment(
-        self,
-        enrollment_id: str,
-        transition: Callable[[AdministratorEnrollmentRecord], AdministratorEnrollmentRecord],
-    ) -> AdministratorEnrollmentRecord:
-        record_type = "launchplane_administrator_enrollments"
-        with self._exclusive_record_lock(record_type, enrollment_id):
-            current = self._read_model_locked(
-                AdministratorEnrollmentRecord, record_type, enrollment_id
-            )
-            updated = transition(current)
-            if updated != current:
-                self._write_model_locked(record_type, enrollment_id, updated)
-            return updated
-
-    def prove_administrator_enrollment_control(
-        self,
-        *,
-        enrollment_id: str,
-        challenge: str,
-        server_derived_candidate_github_id: int,
-        control_proven_at: str,
-    ) -> AdministratorEnrollmentRecord:
-        return self._transition_administrator_enrollment(
-            enrollment_id,
-            lambda record: prove_administrator_enrollment_control(
-                record,
-                challenge=challenge,
-                server_derived_candidate_github_id=server_derived_candidate_github_id,
-                control_proven_at=control_proven_at,
-            ),
-        )
-
-    def expire_administrator_enrollment(
-        self, *, enrollment_id: str, expired_at: str
-    ) -> AdministratorEnrollmentRecord:
-        return self._transition_administrator_enrollment(
-            enrollment_id,
-            lambda record: expire_administrator_enrollment(record, expired_at=expired_at),
-        )
-
-    def withdraw_administrator_enrollment(
-        self, *, enrollment_id: str, proposer_github_id: int, withdrawn_at: str
-    ) -> AdministratorEnrollmentRecord:
-        return self._transition_administrator_enrollment(
-            enrollment_id,
-            lambda record: withdraw_administrator_enrollment(
-                record, proposer_github_id=proposer_github_id, withdrawn_at=withdrawn_at
-            ),
-        )
-
-    def complete_administrator_enrollment(
-        self,
-        *,
-        enrollment_id: str,
-        server_derived_candidate_github_id: int,
-        enrolled_at: str,
-        enrolled_policy_record_id: str,
-        enrolled_policy_revision: int,
-        enrolled_policy_sha256: str,
-        reviewed_plan_sha256: str,
-        bridge_idempotency_key_sha256: str,
-    ) -> AdministratorEnrollmentRecord:
-        return self._transition_administrator_enrollment(
-            enrollment_id,
-            lambda record: complete_administrator_enrollment(
-                record,
-                server_derived_candidate_github_id=server_derived_candidate_github_id,
-                enrolled_at=enrolled_at,
-                enrolled_policy_record_id=enrolled_policy_record_id,
-                enrolled_policy_revision=enrolled_policy_revision,
-                enrolled_policy_sha256=enrolled_policy_sha256,
-                reviewed_plan_sha256=reviewed_plan_sha256,
-                bridge_idempotency_key_sha256=bridge_idempotency_key_sha256,
-            ),
-        )
 
 
 def _odoo_target_replacement_lane_reservation_id(

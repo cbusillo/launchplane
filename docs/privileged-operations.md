@@ -9,12 +9,10 @@ plane work that cannot safely be delegated through static administrator
 credentials. The boundary is separate from Client Acceptance, Agent Write
 Intents, workflow authorization, and ordinary admin mutations.
 
-The Access policy workbench includes closed candidate preparation for Agent
-delivery administration, administrator product-evidence reads, and agent
-product setup. Its add and remove controls derive the signed-in administrator,
+The Access policy workbench includes closed candidate preparation for
+administrator product-evidence reads and agent product setup. Its add and remove controls derive the signed-in administrator,
 principal, and policy inputs on the server and create a standard managed
 authorization plan for review. They do not approve or apply it. See
-[Preparing Agent Delivery Administration](authorization-authority.md#preparing-agent-delivery-administration),
 [Preparing Administrator Product Evidence Access](authorization-authority.md#preparing-administrator-product-evidence-access),
 and [Preparing Agent Product Setup](authorization-authority.md#preparing-agent-product-setup)
 for eligibility, collision, removal, and production-activation boundaries.
@@ -186,22 +184,6 @@ instead. Agents cannot cancel, approve, or revoke, including their own proposals
 After an uncertain response the reason stays locked for a retry with the same
 source event; refresh the plan to check its state. Retired operation types have
 no cancellation control.
-
-## Admin Confirmation Contract Seam
-
-`contracts/owner-control-contract.json` publishes canonical `owner-control`
-request and response bytes plus generic golden vectors for every registered
-descriptor. It is a cross-host conformance artifact only: it does not issue a
-challenge, consume an admin confirmation, alter browser approval, add a route,
-or authorize execution. See `docs/owner-control-channel.md`.
-
-The DB-backed shadow verifier remains independent from this lifecycle. No
-privileged-operation route, service, worker, transition, approval, or execution
-path imports it. Its unrouted storage API can retain test or future
-service-authored challenge state and return only `authorizes_execution: false`.
-Its service-only issuance derives a challenge from an already-locked planned
-record and active policy without mutating that record or its event ledger;
-browser approval remains the only active approval transport.
 
 ## Authorization
 

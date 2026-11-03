@@ -191,9 +191,9 @@ function OwnerPreviewReviewRoute({
         <p className="eyebrow">Product decision</p>
         <h1 data-route-heading tabIndex={-1}>Review this change</h1>
         <p>
-          Open the preview and look at the change. Then accept it, or say what
-          should change. Your decision does not publish the site.
-          Your decision and feedback are shared on the pull request for the agent to read.
+          Open the preview and look at the change. Write what should change on the
+          pull request, yourself or through your agent. Press Accept here when the
+          preview is right. Accept does not publish the site.
         </p>
       </div>
       {!lookup.valid ? (
@@ -242,6 +242,10 @@ function OwnerReviewState({
   );
 }
 
+function previewIdentity(review: ProductReviewResponse): string {
+  return `${review.repository}:${review.pull_request_number}:${review.head_sha}:${review.preview_url}:${review.preview_generation_id}`;
+}
+
 function ProductReviewCard({
   historical,
   fixtureMode,
@@ -257,6 +261,8 @@ function ProductReviewCard({
 }) {
   const previewUrl = safeExternalUrl(review.preview_url);
   const pullRequestUrl = safeExternalUrl(review.pull_request_url);
+  const previewKey = previewIdentity(review);
+  const [openedPreview, setOpenedPreview] = useState("");
   return (
     <article className="owner-review-card" data-product={review.product}>
       <header>
@@ -271,6 +277,8 @@ function ProductReviewCard({
             href={previewUrl.toString()}
             target="_blank"
             rel="noreferrer"
+            onClick={() => setOpenedPreview(previewKey)}
+            onAuxClick={(event) => { if (event.button === 1) setOpenedPreview(previewKey); }}
           >
             Open the preview <ExternalLink size={15} aria-hidden="true" />
           </a>
@@ -293,6 +301,15 @@ function ProductReviewCard({
         </p>
       ) : null}
       <ProductReviewNotes review={review} />
+      {review.latest_client_comment ? (
+        <section aria-label="Latest Client comment">
+          <h4>Latest Client feedback on the pull request</h4>
+          <blockquote>{review.latest_client_comment}</blockquote>
+          {safeExternalUrl(review.latest_client_comment_url || "") ? (
+            <a href={review.latest_client_comment_url} target="_blank" rel="noreferrer">View comment on GitHub</a>
+          ) : null}
+        </section>
+      ) : null}
       {review.latest_decision ? (
         <LatestDecision
           key={review.latest_decision.record_id}
@@ -307,9 +324,10 @@ function ProductReviewCard({
       ) : null}
       {!historical && review.can_decide && previewUrl ? (
         <ProductReviewDecisionForm
-          key={`${review.repository}:${review.pull_request_number}:${review.head_sha}:${review.preview_url}:${review.preview_generation_id}`}
+          key={previewKey}
           fixtureMode={fixtureMode}
           review={review}
+          previewOpened={openedPreview === previewKey}
           onDecided={onDecided}
           onRefresh={onRefresh}
         />
@@ -368,7 +386,17 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
             pull_request: review.pull_request_number,
             decision_id: decision.record_id,
           });
-      onDecided({ ...response, pull_request_title: review.pull_request_title, client_test_notes: review.client_test_notes, client_test_notes_error: review.client_test_notes_error });
+      const samePreview = previewIdentity(response) === previewIdentity(review);
+      onDecided({
+        ...response,
+        pull_request_title: review.pull_request_title,
+        client_test_notes: review.client_test_notes,
+        client_test_notes_error: review.client_test_notes_error,
+        latest_client_comment: review.latest_client_comment,
+        latest_client_comment_url: review.latest_client_comment_url,
+        preview_is_current: samePreview && review.preview_is_current,
+        cannot_accept_reason: samePreview ? review.cannot_accept_reason : response.cannot_accept_reason,
+      });
       if (!response.latest_decision?.feedback_url) {
         setFailure("Delivery is still pending. Your saved decision has not changed.");
       }
@@ -429,13 +457,15 @@ function ProductReviewDecisionForm({
   onDecided,
   onRefresh,
   review,
+  previewOpened,
 }: {
   fixtureMode: DevFixtureMode;
   onDecided: (review: ProductReviewResponse) => void;
   onRefresh: () => Promise<void>;
   review: ProductReviewResponse;
+  previewOpened: boolean;
 }) {
-  const [reason, setReason] = useState("");
+  const [previewConfirmed, setPreviewConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
   const [recorded, setRecorded] = useState(false);
@@ -446,17 +476,16 @@ function ProductReviewDecisionForm({
     setFailure("");
   }, [review]);
 
-  const record = async (decision: ProductReviewDecisionRecord["decision"]) => {
+  const record = async () => {
     setBusy(true);
     setFailure("");
     setRecorded(false);
-    const decisionReason = decision === "changes_requested" ? reason.trim() : "";
     try {
       const response = fixtureMode
         ? await loadDevFixtures().then((fixtures) =>
             fixtures.productReviewForFixture(
               fixtureMode,
-              fixtures.productReviewDecisionForFixture(decision, decisionReason),
+              fixtures.productReviewDecisionForFixture("accepted", ""),
             ),
           )
         : await writeProductReviewDecision({
@@ -465,12 +494,10 @@ function ProductReviewDecisionForm({
             reviewed_head_sha: review.head_sha,
             reviewed_preview_url: review.preview_url,
             reviewed_generation_id: review.preview_generation_id,
-            decision,
-            reason: decisionReason,
+            decision: "accepted",
           });
-      setReason(response.latest_decision?.feedback_url ? "" : decisionReason);
       setRecorded(true);
-      onDecided(response);
+      onDecided({ ...response, latest_client_comment: review.latest_client_comment, latest_client_comment_url: review.latest_client_comment_url });
     } catch (writeError) {
       const apiError = writeError as LaunchplaneApiError;
       if (apiError.code === "product_review_preview_changed" || apiError.code === "product_review_preview_unavailable") {
@@ -493,40 +520,35 @@ function ProductReviewDecisionForm({
       className="owner-review-action"
       aria-label={`Decision for ${review.display_name || review.product}`}
     >
-      <label>
-        <span>What should change? (needed only when you request changes)</span>
-        <textarea
-          maxLength={4000}
-          value={reason}
-          disabled={busy || stale}
-          onChange={(event) => {
-            setRecorded(false);
-            setReason(event.target.value);
-          }}
-        />
-      </label>
+      {review.preview_is_current ? (
+        <label className="owner-review-preview-confirmation">
+          <input
+            type="checkbox"
+            checked={previewConfirmed}
+            disabled={busy || stale || !previewOpened}
+            onChange={(event) => setPreviewConfirmed(event.target.checked)}
+          />
+          I looked at this preview and it is right.
+        </label>
+      ) : null}
       <div className="owner-review-action-buttons">
-        <button
-          className="button button-primary"
-          type="button"
-          disabled={busy || stale || Boolean(review.client_test_notes_error)}
-          onClick={() => void record("accepted")}
-        >
-          Accept
-        </button>
-        <button
-          className="button"
-          type="button"
-          disabled={busy || stale || !reason.trim()}
-          onClick={() => void record("changes_requested")}
-        >
-          Request changes
-        </button>
+        {review.preview_is_current ? (
+          <button
+            className="button button-primary"
+            type="button"
+            disabled={busy || stale || !previewOpened || !previewConfirmed || Boolean(review.client_test_notes_error)}
+            onClick={() => void record()}
+          >
+            Accept
+          </button>
+        ) : null}
       </div>
+      {review.preview_is_current && !previewOpened ? <p className="owner-review-state">Open the preview, check the notes above, then confirm that it is right.</p> : null}
+      {!review.preview_is_current ? <OwnerReviewState>{review.cannot_accept_reason}</OwnerReviewState> : null}
       {review.client_test_notes_error ? <p className="owner-review-alert" role="alert">{review.client_test_notes_error}</p> : null}
       {busy ? <p className="owner-review-state" role="status">Recording…</p> : null}
       {failure ? <p className="owner-review-alert" role="alert">{failure}</p> : null}
-      {stale ? <button className="button" type="button" disabled={busy} onClick={async () => {
+      {stale || !review.preview_is_current ? <button className="button" type="button" disabled={busy} onClick={async () => {
         setBusy(true);
         try { await onRefresh(); } finally { setBusy(false); }
       }}>Refresh review</button> : null}

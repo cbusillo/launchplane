@@ -461,7 +461,6 @@ class ProductOnboardingTests(unittest.TestCase):
     def test_deploy_launchplane_validates_manual_bootstrap_inputs(self) -> None:
         workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
         prep_step = workflow.step_named("deploy", "Resolve deploy inputs")
-        self.assertIsNotNone(prep_step)
         assert prep_step is not None
         image_reference = "ghcr.io/cbusillo/launchplane@sha256:" + ("a" * 64)
 
@@ -538,7 +537,6 @@ class ProductOnboardingTests(unittest.TestCase):
     def test_deploy_launchplane_renders_key_ring_install_preserve_and_remove(self) -> None:
         workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
         render_step = workflow.step_named("deploy", "Render Launchplane self deploy request")
-        self.assertIsNotNone(render_step)
         assert render_step is not None
         image_reference = "ghcr.io/cbusillo/launchplane@sha256:" + ("a" * 64)
         key_ring = {
@@ -681,7 +679,6 @@ class ProductOnboardingTests(unittest.TestCase):
     def test_deploy_launchplane_renders_exact_bootstrap_secret_rollback(self) -> None:
         workflow = load_workflow(".github/workflows/deploy-launchplane.yml")
         rollback_step = workflow.step_named("deploy", "Render Launchplane rollback request")
-        self.assertIsNotNone(rollback_step)
         assert rollback_step is not None
         image_reference = "ghcr.io/cbusillo/launchplane@sha256:" + ("a" * 64)
         key_ring = {

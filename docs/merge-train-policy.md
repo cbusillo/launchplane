@@ -189,7 +189,7 @@ The supported source is:
   not stored as runtime configuration. No Administration permission is used.
   Read resolutions use the same selected token permissions. Workflows write
   lets branch updates and merges include workflow files.
-  Issues write projects graph-derived planning labels after a landing, within
+  Issues write supports issue and comment operations after a landing, within
   the selected App's already-accepted installation grants. Missing installation
   grants refuse before minting; an issued token missing this capability is revoked.
   The event reconciler also mints narrower tokens from a product repository's
@@ -598,7 +598,9 @@ and [`toJSON`/`toObject`](https://docs.renovatebot.com/templates/) helpers.
 Every update must have an allowed type and satisfy the same generic safety
 rule. Patch/minor metadata must agree with the version movement and stay within
 one major with an unchanged suffix; a `0.x` minor bump needs review. Digest
-updates need full old/new digests and identical nonempty branch/tag values.
+updates need identical nonempty tag values and upstream proof of forward
+movement for their exact old/new commits. Equal tags or well-formed hashes alone
+do not qualify, including in package manifests and lockfiles.
 Majors, unknown types and incomplete evidence remain for agent review even
 when a bot is configured. Transitive lockfile changes are not classified;
 required checks still gate the PR.
@@ -610,8 +612,22 @@ remain readable, but a removed bot cannot supply a new inferred exemption.
 Both formats require a complete immutable same-repository dependency-only diff.
 `workspace.toml` qualifies only when complete immutable TOML documents differ
 solely in exact devkit/runtime ref pins; shared-addon and other changes keep
-review. Workflows, application code, renames from code and unavailable evidence
-withhold admission. Explicit Client-review overrides remain enforced.
+review. In the verified train-admission path, workflow/action YAML, Compose images and Dockerfile frontend/base-image
+references qualify only when complete immutable before/after documents prove
+that only supported dependency references changed from the PR's merge base.
+Every changed reference must match a named update's exact old/new values or
+digests from the verified commit metadata. Workflow commands,
+permissions, mapping/sequence changes, ambiguous YAML, file additions/renames,
+application code and unavailable evidence withhold this admission. Interpreter
+inputs and image tags must move forward within their current major with the
+same version suffix. Action SHA changes require a complete upstream comparison
+whose old SHA is the merge base and whose final commit is the proposed SHA;
+stale version comments cannot prove forward movement. Opaque container digest
+changes and branch-following workflow pins remain for agent review. The bot's
+declared update types, verified commit provenance, required checks and explicit
+Client-review overrides remain enforced.
+Other consumers retain the existing manifest/lockfile/workspace-only Client-review
+exemption; this admission proof does not change product review or release notes.
 
 Renovate automerge stays disabled; only the train lands changes. The empty table
 is omitted from policy serialization so it does not alter historical digests.
@@ -1438,6 +1454,20 @@ first half passes and lands, a remaining member that fails only with a newly
 landed member is blocked against that verified green base. The controller does
 not label both members as individually broken; feedback names the failing
 candidate checks and tests against the base used for that candidate.
+
+A controller-owned culprit hold has one bounded unchanged-head escape after
+the protected base moves. The controller reads the actual protected branch ref
+before proving the failed check identities green on that exact base and again
+after committing its reservation immediately before removing its original
+label event. A crash or lost removal response can replay that same reservation,
+but a later label event or failure cannot spend it again. This route uses the
+existing current-head Ready admission. Independent causal setup recovery stays
+available on every base and retains its fresh-Ready floor.
+The reservation binds this unchanged head to the original failed candidate
+record and its exact applied label event even when no removal occurs. While
+that exact original hold remains, an unused reservation may follow a later
+protected base; a new failure or label event and an unknown removal effect never
+reset its budget or create new recovery state.
 
 Before ordinary planning, failed-candidate reflow or a smaller isolation retest creates a candidate, the
 controller checks persisted failure history, including superseded records. The
@@ -2579,28 +2609,28 @@ reconciliation or grants metadata authority.
 For a merged PR on the default branch, completed feedback discovers its native
 closing references and explicit source references in its title, body and issue
 comments from the PR author, repository owner or numerically trusted automation,
-using the catalog's shared reference parser. It refreshes their direct
-blocking dependents and parents, including neighbors of non-plan or held sources.
-Timeline-only issue mentions are recorded for review without expanding their
-neighborhood or changing them. The deduplicated neighborhood is bounded
-to 100 records and is discovered before metadata writes; it is not recursive.
-Each planning target's status and labels derive from its current open native
-blockers and trusted structured wait through the same pinned pure package used
-by the catalog. The last blocker closing makes an otherwise clear open target
-active; remaining blockers and actual waits remain visible. Open stale/done
-scope holds and unread open waits preserve their labels for owning review.
-Closed lifecycle cleanup preserves actual waits and recorded waiting when the
-wait history is unread. No issue is closed or reopened, and no issue body,
+using the catalog's shared reference parser. Timeline-only issue mentions are
+recorded for review without changing them. Source discovery is bounded to 100
+records and completes before metadata writes. Completion reads each source's
+native state, blockers and trusted wait through the same pinned pure package
+used by the catalog. It does not visit dependents or parents to refresh status;
+the catalog displays their current status when read. Unread source waits require
+owning review. Labels carry routing, share and type decisions and are never
+changed by completion. No issue is closed or reopened, and no issue body,
 comment, wait record or native relationship is rewritten.
 
 Full source completion retains the stronger existing guards: a managed issue
 created by a numerically trusted automation identity, completed native closure,
 a reviewed clear wait, and closed native blockers and sub-issues. Reporter-owned
 sources and open finish lines require source acceptance review. A closed managed source
-with an actual or unread wait can receive only lifecycle label cleanup; its
-full completion remains unverified. An issue-specific Project membership gap
-also permits label cleanup while keeping full completion in review. Configured
+with an actual or unread wait keeps its full completion unverified. An
+issue-specific Project membership gap also keeps full completion in review. Configured
 Project mutations retain their existing capability and readback requirements.
+Read-only completion takes one source snapshot. Only a prepared Project write
+requires fresh pre-write and post-write snapshots; the post-write comparison
+preserves issue identity, content, native relationships, configuration and waits
+while allowing provider timestamp changes. Release-wait resolution verifies its
+authored wait record without a separate status-refresh call.
 Open non-closing sources receive `review_open_finish_line` in the saved receipt;
 their review is informational and does not prevent successful independent metadata
 repairs or delivery of the landing comment. Closing sources still require verified
@@ -2610,8 +2640,8 @@ with a named next actor. Landing reconciliation records unresolved judgment in i
 receipt. The existing stranded-work digest independently reports open linked issues;
 neither treats a reference as completion evidence.
 
-Every target uses its actual default branch's `.github/github.json`, or verified
-standard planning labels when that file is absent. Same-account foreign targets
+Every target uses its actual default branch's `.github/github.json`, with no
+Project sync when that file is absent. Same-account foreign targets
 require an existing authorized repository policy and their own exact repository
 token and trusted author IDs. HTTP delivery checks the current identity before
 target token resolution and again for the actual default-branch policy. The
@@ -2635,11 +2665,11 @@ prior results. Per-row success, verified evidence, coverage and full source
 completion are distinct. A known repository denial prevents that repository's
 writes while independent authorized repositories can continue. A global identity
 failure or unknown write outcome stops later writes. Discovery-time failures
-apply before any metadata write and retain already discovered neighbors. Failed
+apply before any metadata write and retain already discovered sources. Failed
 source evidence remains failed, with every verified prior result retained.
 A verified landing can publish terminal partial receipts through the existing
 incomplete-planning note while reconciliation remains failed. Incomplete source
-reference discovery or a neighborhood coverage overflow retains known targets
+reference discovery or a source reference coverage overflow retains known targets
 and explicitly partial coverage without metadata writes.
 Unknown writes, global identity failures, denial in the source repository and
 transient/quota failures still suppress publication. Existing retry classification

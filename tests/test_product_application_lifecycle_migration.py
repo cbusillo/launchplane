@@ -34,11 +34,15 @@ class ApplicationLifecycleMigrationTests(unittest.TestCase):
         payload = self.payload()
         original = deepcopy(payload)
         migrated = cast(dict[str, Any], migrate_product_application_lifecycle_payload(payload))
-        profile = LaunchplaneProductProfileRecord.model_validate(migrated)
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            migrated, context={"stored_product_profile": True}
+        )
         self.assertEqual(payload, original)
         self.assertEqual(
             profile.lanes[1].model_dump(mode="json"),
-            LaunchplaneProductProfileRecord.model_validate(payload)
+            LaunchplaneProductProfileRecord.model_validate(
+                payload, context={"stored_product_profile": True}
+            )
             .lanes[1]
             .model_dump(mode="json"),
         )
@@ -77,7 +81,8 @@ class ApplicationLifecycleMigrationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 LaunchplaneProductProfileRecord.model_validate(old).validate_write_contract()
         profile = LaunchplaneProductProfileRecord.model_validate(
-            migrate_product_application_lifecycle_payload(self.payload())
+            migrate_product_application_lifecycle_payload(self.payload()),
+            context={"stored_product_profile": True},
         )
         current = profile.model_copy(
             update={

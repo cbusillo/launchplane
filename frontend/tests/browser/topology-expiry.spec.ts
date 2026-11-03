@@ -5,6 +5,7 @@ import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 function setDeadlines(value: unknown, deadline: number) {
   if (!value || typeof value !== "object") return;
   const record = value as Record<string, unknown>;
+  if ("after" in record) record.after = new Date(deadline).toISOString();
   if ("stale_after" in record) record.stale_after = new Date(deadline).toISOString();
   Object.values(record).forEach(child => setDeadlines(child, deadline));
 }
@@ -31,7 +32,10 @@ for (const evidence of ["route", "tls"] as const) for (const environmentView of 
       lane.topology.warnings = [];
       for (const check of lane.health_monitoring.checks) check.incident_status = "";
       if (evidence === "route") setDeadlines(lane.topology.provider_recorded, start + 1000);
-      else setDeadlines(lane.topology.observed.tls_domains, start + 1000);
+      else {
+        setDeadlines(lane.topology.observed.tls_domains, start + 1000);
+        lane.lane_status!.transitions[0].after = new Date(start + 1000).toISOString();
+      }
     }
     let mode: "old" | "pending" | "fail" | "fresh" = "old";
     let releaseRead: (() => void) | undefined;

@@ -5,11 +5,12 @@ import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.contracts.product_lane_status import ProductLaneStatus, build_product_lane_status
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -493,6 +494,13 @@ class ProductEnvironmentDriverExtensions(BaseModel):
 class ProductEnvironmentSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    lane_status: ProductLaneStatus | None = None
+
+    @model_validator(mode="after")
+    def derive_lane_status(self) -> Self:
+        self.lane_status = build_product_lane_status(self)
+        return self
+
     environment: str
     context: str
     base_url: str = ""
@@ -569,6 +577,19 @@ class ProductSiteOverview(BaseModel):
 
 class ProductEnvironmentDetail(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    testing_rebuild_supported: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+    lane_status: ProductLaneStatus | None = None
+
+    @model_validator(mode="after")
+    def derive_lane_status(self) -> Self:
+        self.lane_status = build_product_lane_status(self)
+        return self
 
     schema_version: int = Field(default=1, ge=1)
     product: str
@@ -850,7 +871,7 @@ def _preview_refresh_warnings(
             f"PR #{request.pull_request_number}: {unavailable}"
             for request in product_preview_requests(record_store, product=profile.product)
             if request.pull_request_number is not None
-            and preview_refresh_failure(request)
+            and (failure := preview_refresh_failure(request, store=record_store))
             and (
                 unavailable := preview_review_unavailability(
                     store=cast(ProductReviewStore, record_store),
@@ -858,6 +879,7 @@ def _preview_refresh_warnings(
                     pull_request_number=request.pull_request_number,
                     head_sha=str(request.last_plan.get("head_sha") or ""),
                     request=request,
+                    refresh_failure=failure,
                 )
             )
         )
@@ -876,9 +898,9 @@ def build_product_environment_detail(
     action_allowed: ActionAllowed,
 ) -> ProductEnvironmentDetail:
     profile = record_store.read_product_profile_record(product)
-    lane = _find_lane(profile=profile, environment=environment)
+    declared_lane = _find_lane(profile=profile, environment=environment)
     lane = split_ingress_monitoring_lane(
-        profile, lane, read_split_ingress_binding(record_store, profile, lane)
+        profile, declared_lane, read_split_ingress_binding(record_store, profile, declared_lane)
     )
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
     lane_summary = _read_product_lane_summary(
@@ -916,12 +938,25 @@ def build_product_environment_detail(
         if warning
     )
     from control_plane.odoo_testing_drill import testing_drill_evidence
+    from control_plane.testing_rebuild_driver import (
+        resolve_testing_rebuild_driver,
+        TestingRebuildRefused,
+    )
+
+    try:
+        rebuild_supported = (
+            declared_lane.instance == "testing"
+            and resolve_testing_rebuild_driver(record_store, product).lane == declared_lane
+        )
+    except TestingRebuildRefused:
+        rebuild_supported = False
 
     return ProductEnvironmentDetail(
         product=profile.product,
         display_name=profile.display_name,
         repository=profile.repository,
         driver_id=profile.driver_id,
+        testing_rebuild_supported=rebuild_supported,
         base_driver_id=descriptor.base_driver_id if descriptor is not None else "",
         environment=lane.instance,
         testing_rebuild_drill=testing_drill_evidence(

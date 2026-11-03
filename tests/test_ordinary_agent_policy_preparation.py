@@ -101,7 +101,6 @@ class OrdinaryAgentPolicyPreparationTests(unittest.TestCase):
         )
 
         self.assertEqual(state, "planned")
-        self.assertIsNotNone(proposal)
         assert proposal is not None
         self.assertEqual(proposal.schema_migration, "migrate_v2_to_v3")
         self.assertEqual(proposal.desired_policy.schema_version, 3)
@@ -128,7 +127,6 @@ class OrdinaryAgentPolicyPreparationTests(unittest.TestCase):
         )
 
         self.assertEqual(state, "planned")
-        self.assertIsNotNone(proposal)
         assert proposal is not None
         self.assertEqual(proposal.schema_migration, "reject")
         self.assertEqual(proposal.desired_policy.schema_version, 3)

@@ -57,6 +57,9 @@ test("declared no website stays reviewable and a failed private check still turn
   await expect(page.locator(".diagnosis-callout")).toHaveCount(0);
   await page.screenshot({ path: smokeArtifact(`no-website-${test.info().project.name}.png`), fullPage: true });
   products[0].environments.find((lane: {environment: string}) => lane.environment === "testing")!.health_monitoring.checks[0].status = "fail";
+  const failed = products[0].environments.find((lane: { environment: string }) => lane.environment === "testing")!;
+  Object.assign(failed.lane_status!.current, { tone: "danger", sidebar_tone: "danger", attention_reasons: ["Private health check failed"] });
+  failed.lane_status!.transitions = [];
   await page.goto(`/ui/products/${detail.product}`);
   await expect(signal).toHaveAttribute("data-tone", "danger");
   // An old public failure stays available as history after the check is disabled.

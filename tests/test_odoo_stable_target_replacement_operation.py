@@ -96,7 +96,6 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
                         )
 
                     ready = claim("2026-05-17T00:00:02Z")
-                    self.assertIsNotNone(ready)
                     assert ready is not None
                     self.assertEqual(ready.operation_id, other.operation_id)
                     self.assertIsNone(claim("2026-05-17T00:00:29Z"))
@@ -760,7 +759,6 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
                 lease_expires_at="2026-05-17T00:14:00Z",
             )
 
-            self.assertIsNotNone(claimed)
             assert claimed is not None
             self.assertEqual(claimed.status, "running")
             self.assertEqual(claimed.phase, "running")

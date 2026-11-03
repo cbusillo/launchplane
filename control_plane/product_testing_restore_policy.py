@@ -16,12 +16,7 @@ def director_testing_storage_allowed(
     existing: LaunchplaneProductProfileRecord | None,
     replacement: LaunchplaneProductProfileRecord,
 ) -> bool:
-    if (
-        existing is None
-        or not existing.is_active
-        or existing.driver_id != "odoo"
-        or len(existing.lanes) != len(replacement.lanes)
-    ):
+    if existing is None or not existing.is_active or len(existing.lanes) != len(replacement.lanes):
         return False
     changed = [
         index
@@ -32,8 +27,19 @@ def director_testing_storage_allowed(
         return False
     index = changed[0]
     before = existing.lanes[index]
+    if before.instance != "testing":
+        return False
+    expected = existing.model_copy(deep=True)
+    if existing.driver_id == "generic-web":
+        state = replacement.lanes[index].generic_web_testing_state
+        if state is None or state.kind == "postgresql":
+            return False
+        expected.lanes[index].generic_web_testing_state = state
+        return replacement == expected
+    if existing.driver_id != "odoo":
+        return False
     budget = replacement.lanes[index].odoo_testing_drill_storage
-    if before.instance != "testing" or budget is None:
+    if budget is None:
         return False
     retained = (
         before.odoo_testing_drill_storage.retained_copy_bindings
@@ -42,7 +48,6 @@ def director_testing_storage_allowed(
     )
     if budget.retained_copy_bindings != retained:
         return False
-    expected = existing.model_copy(deep=True)
     expected.lanes[index].odoo_testing_drill_storage = budget
     return replacement == expected
 

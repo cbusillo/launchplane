@@ -20,7 +20,7 @@ from control_plane.contracts.idempotency_record import parse_launchplane_mutatio
 from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.product_reconcile import RECONCILE_SOURCE, reconcile_reservation_scope
-from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import (
     PostgresRecordStore,
     ExistingMutationReservationLookupResult,
@@ -146,6 +146,26 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             authorization="Bearer local-operator-token",
         )
 
+    def terminal_app(self) -> Any:
+        return _create_recovery_app(
+            root=self.root,
+            store=self.store,
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="director-terminal-token",
+                terminal_agent_subject="director-terminal-agent",
+                terminal_agent_token_label="director-terminal-read",
+            ),
+        )
+
+    def terminal_read(self, app: Any) -> tuple[int, dict[str, Any]]:
+        return _invoke_app(
+            app,
+            method="GET",
+            path=self.path,
+            authorization="Bearer director-terminal-token",
+        )
+
     def review(
         self,
         reference: str,
@@ -213,6 +233,62 @@ class EventDeployRecoveryReferenceTests(unittest.TestCase):
             "original_deploy",
         ):
             self.assertNotIn(sensitive, serialized)
+
+    def test_authenticated_director_terminal_agent_can_read_opaque_reference(self) -> None:
+        code, read = self.terminal_read(self.terminal_app())
+
+        self.assertEqual(code, 200, read)
+        self.assertEqual(read["product"], self.product)
+        self.assertEqual(read["context"], "sellyouroutboard-testing")
+        serialized = json.dumps(read)
+        for sensitive in (
+            self.reservation.idempotency_key,
+            self.reservation.reconciliation_key,
+            self.manifest.source_commit,
+            "original_deploy",
+        ):
+            self.assertNotIn(sensitive, serialized)
+
+    @scoped_agent_test
+    def test_ordinary_terminal_agent_cannot_read_opaque_reference(self) -> None:
+        code, refused = self.terminal_read(self.terminal_app())
+
+        self.assertEqual(code, 403, refused)
+        self.assertEqual(refused["error"]["code"], "authorization_denied")
+
+    def test_authenticated_director_terminal_agent_cannot_write_recovery(self) -> None:
+        app = self.terminal_app()
+        for route, payload in (
+            (
+                "/v1/admin/generic-web/deploy-recovery/dry-run",
+                {
+                    "product": self.product,
+                    "instance": "testing",
+                    "recovery_reference": "opaque-reference",
+                    "reason": "Inspect the held deployment.",
+                },
+            ),
+            (
+                "/v1/admin/generic-web/deploy-recovery/apply",
+                {
+                    "product": self.product,
+                    "instance": "testing",
+                    "recovery_reference": "opaque-reference",
+                    "reason": "Do not recover the held deployment.",
+                    "expected_recovery_digest": "a" * 64,
+                },
+            ),
+        ):
+            with self.subTest(route=route):
+                code, refused = _invoke_app(
+                    app,
+                    method="POST",
+                    path=route,
+                    authorization="Bearer director-terminal-token",
+                    payload=payload,
+                )
+                self.assertEqual(code, 403, refused)
+                self.assertEqual(refused["error"]["code"], "authorization_denied")
 
     def test_director_agent_without_write_grants_can_plan_exact_unknown_original(self) -> None:
         self.app = _create_recovery_app(

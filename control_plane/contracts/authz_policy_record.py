@@ -13,6 +13,10 @@ AuthzPolicyStatus = Literal["active", "superseded"]
 AUTHZ_POLICY_SCHEMA_V3_WRITE_NOT_ACTIVATED = "authz_policy_schema_v3_write_not_activated"
 
 
+class AuthzPolicyConflictError(ValueError):
+    pass
+
+
 class AuthzPolicySchemaWriteNotActivatedError(ValueError):
     """Raised while schema-v3 policy persistence remains mechanically disabled."""
 

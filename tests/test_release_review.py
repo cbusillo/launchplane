@@ -11,6 +11,9 @@ from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
 
 from control_plane.contracts.artifact_identity import (
     ArtifactAddonSource,
+    ArtifactBuildProvenance,
+    ArtifactBaseImageProvenance,
+    ArtifactBuildToolProvenance,
     ArtifactIdentityManifest,
     ArtifactImageReference,
 )
@@ -77,6 +80,26 @@ def seed(store: FilesystemRecordStore | PostgresRecordStore) -> None:
                 artifact_id=artifact_id,
                 source_commit=sha,
                 enterprise_base_digest="sha256:base",
+                build_provenance=ArtifactBuildProvenance(
+                    base_images=tuple(
+                        ArtifactBaseImageProvenance(
+                            role=role,
+                            image=ArtifactImageReference(
+                                repository=f"example/{role}", digest="sha256:base"
+                            ),
+                            source_repository=f"example/{role}",
+                            source_ref=BASE,
+                        )
+                        for role in ("runtime", "devtools")
+                    ),
+                    build_tools=(
+                        ArtifactBuildToolProvenance(
+                            name="builder",
+                            source_repository="example/builder",
+                            source_ref=BASE,
+                        ),
+                    ),
+                ),
                 image=ArtifactImageReference(
                     repository="ghcr.io/example/site", digest="sha256:" + sha
                 ),

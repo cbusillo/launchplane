@@ -4,6 +4,7 @@ import base64
 from contextlib import redirect_stdout
 from copy import deepcopy
 import io
+from itertools import product
 import json
 from pathlib import Path
 import subprocess
@@ -222,6 +223,14 @@ class RetainedTestingCopyTests(unittest.TestCase):
                 output = json.dumps(
                     [{"Driver": "local", "Options": {}, "Mountpoint": str(self.root / name)}]
                 ).encode()
+            elif command[1] == "rm":
+                self.assertNotIn("-f", command)
+                self.assertNotIn("-v", command)
+                self.assertTrue(set(command[2:]) <= {item["Id"] for item in self.containers})
+                self.containers[:] = [
+                    item for item in self.containers if item["Id"] not in command[2:]
+                ]
+                output = b""
             elif command[1] == "exec":
                 self.assertEqual(command[2], self.containers[0]["Id"])
                 spec = json.loads(base64.b64decode(command[-1]))
@@ -372,3 +381,175 @@ class RetainedTestingCopyTests(unittest.TestCase):
         self.assertEqual(read["availability"], "stopped")
         self.assertIsNone(read["identity"])
         self.assertFalse(any(command[1] == "exec" for command in commands))
+
+    def test_rebuild_removes_only_admitted_stopped_containers_and_keeps_volumes(self) -> None:
+        for item in self.containers:
+            item["State"]["Status"] = "exited"
+        expected = [item["Id"] for item in self.containers]
+        volumes = [Path(item["Mounts"][0]["Source"]) for item in self.containers]
+        frame, commands = self.run_host(
+            mode="remove", extra={"allow_unavailable": True, "container_ids": expected}
+        )
+        self.assertEqual(frame["type"], "complete")
+        self.assertEqual(self.containers, [])
+        self.assertTrue(all(volume.is_dir() for volume in volumes))
+        self.assertTrue(any(command[1] == "rm" for command in commands))
+        replay, commands = self.run_host(
+            mode="remove", extra={"allow_unavailable": True, "container_ids": expected}
+        )
+        self.assertEqual(replay["availability"], "absent")
+        self.assertFalse(any(command[1] == "rm" for command in commands))
+
+    def test_removal_distinguishes_changed_custody_from_unknown_inventory(self) -> None:
+        expected = [item["Id"] for item in self.containers]
+        for mode, change in product(
+            ("remove", "removal-readback"), ("running", "foreign", "incomplete", "unknown")
+        ):
+            with self.subTest(mode=mode, change=change):
+                for item in self.containers:
+                    item["State"]["Status"] = "exited"
+                extra = {"allow_unavailable": True, "container_ids": expected}
+                if change == "running":
+                    self.containers[0]["State"]["Status"] = "running"
+                if change == "foreign":
+                    extra["container_ids"] = ["another-copy"]
+                if change == "unknown":
+                    self.containers[0]["State"]["Status"] = "unrecognized"
+                frame, commands = self.run_host(
+                    mode=mode,
+                    extra=extra,
+                    inspect_result=[] if change == "incomplete" else None,
+                )
+                if change in {"running", "foreign"}:
+                    self.assertEqual(frame["availability"], "changed")
+                else:
+                    self.assertEqual(frame["type"], "failed")
+                    self.assertEqual(frame["predicate"], ReadbackPredicate.NATIVE_READ)
+                self.assertFalse(any(command[1] == "rm" for command in commands))
+
+    def test_interrupted_removal_finishes_only_the_qualified_leftovers(self) -> None:
+        original = deepcopy(self.containers)
+        for retired in (False, True):
+            with self.subTest(retired=retired):
+                self.containers = deepcopy(original)
+                for item in self.containers:
+                    item["State"]["Status"] = "exited"
+                qualified, _ = self.run_host(extra={"allow_unavailable": True})
+                expected = [item["Id"] for item in self.containers]
+                removed = self.containers.pop()
+                self.containers[0]["State"]["Status"] = "dead"
+                extra = {
+                    "allow_unavailable": True,
+                    "container_ids": expected,
+                    **(
+                        {
+                            "retiring": True,
+                            "resource_binding": qualified["resource_binding"],
+                            "physical_binding": qualified["physical_binding"],
+                        }
+                        if retired
+                        else {}
+                    ),
+                }
+                frame, commands = self.run_host(mode="removal-readback", extra=extra)
+                self.assertEqual(frame["availability"], "stopped")
+                self.assertFalse(any(command[1] == "rm" for command in commands))
+                frame, commands = self.run_host(mode="remove", extra=extra)
+                self.assertEqual(frame["availability"], "absent")
+                self.assertNotIn(["docker", "rm", removed["Id"]], commands)
+                self.assertEqual(self.containers, [])
+
+    def test_retiring_target_qualifies_later_process_without_inventing_old_identity(self) -> None:
+        self.containers[0]["Config"]["Env"] = ["PLATFORM_INSTANCE=testing", "ODOO_DB_HOST=database"]
+        self.containers[0]["Id"] = "later-web"
+        self.assertEqual(self.run_host(extra={"allow_unavailable": True})[0]["type"], "failed")
+        qualified, _ = self.run_host(
+            extra={"allow_unavailable": True, "retiring": True, "identity": None}
+        )
+        self.assertEqual(qualified["type"], "complete")
+        self.assertFalse(qualified["stopped"])
+        self.assertIsNone(qualified["identity"])
+        expected = [item["Id"] for item in self.containers]
+        for item in self.containers:
+            item["State"]["Status"] = "exited"
+        frame, commands = self.run_host(
+            mode="remove",
+            extra={
+                "allow_unavailable": True,
+                "retiring": True,
+                "identity": None,
+                "container_ids": expected,
+                "resource_binding": qualified["resource_binding"],
+                "physical_binding": qualified["physical_binding"],
+            },
+        )
+        self.assertEqual(frame["availability"], "absent")
+        self.assertTrue(any(command[1] == "rm" for command in commands))
+
+    def test_retirement_removal_rechecks_storage_and_production_isolation(self) -> None:
+        for item in self.containers:
+            item["State"]["Status"] = "exited"
+        qualified, _ = self.run_host(extra={"allow_unavailable": True, "retiring": True})
+        extra = {
+            "allow_unavailable": True,
+            "retiring": True,
+            "container_ids": [item["Id"] for item in self.containers],
+            "resource_binding": qualified["resource_binding"],
+            "physical_binding": qualified["physical_binding"],
+        }
+        for change in ("production", "consumer", "backing"):
+            with self.subTest(change=change):
+                original = deepcopy(self.containers)
+                payload = dict(extra)
+                if change == "production":
+                    self.containers[1]["Config"]["Env"] = ["PLATFORM_INSTANCE=prod"]
+                elif change == "consumer":
+                    foreign = deepcopy(self.containers[1])
+                    foreign["Id"] = "production-consumer"
+                    foreign["Config"]["Labels"] = {}
+                    self.containers.append(foreign)
+                else:
+                    payload["physical_binding"] = "changed"
+                frame, commands = self.run_host(mode="remove", extra=payload)
+                self.assertEqual(frame["type"], "failed")
+                self.assertFalse(any(command[1] == "rm" for command in commands))
+                self.containers = original
+
+    def test_retirement_settles_missing_original_ids_without_removing_replacements(self) -> None:
+        expected = [item["Id"] for item in self.containers]
+        for item in self.containers:
+            item["Id"] = "replacement-" + item["Id"]
+        for mode in ("remove", "removal-readback"):
+            frame, commands = self.run_host(
+                mode=mode,
+                extra={
+                    "allow_unavailable": True,
+                    "retiring": True,
+                    "container_ids": expected,
+                },
+            )
+            self.assertEqual(frame["availability"], "absent")
+            self.assertFalse(any(command[1] == "rm" for command in commands))
+
+    def test_retired_batch_qualifies_full_project_storage_but_removes_only_saved_ids(self) -> None:
+        for item in self.containers:
+            item["State"]["Status"] = "exited"
+        qualified, _ = self.run_host(extra={"allow_unavailable": True, "retiring": True})
+        expected = [item["Id"] for item in self.containers]
+        extra = deepcopy(self.containers[0])
+        extra["Id"] = "later-script-runner"
+        extra["Config"]["Labels"]["com.docker.compose.service"] = "script-runner"
+        self.containers.append(extra)
+        frame, commands = self.run_host(
+            mode="remove",
+            extra={
+                "allow_unavailable": True,
+                "retiring": True,
+                "container_ids": expected,
+                "resource_binding": qualified["resource_binding"],
+                "physical_binding": qualified["physical_binding"],
+            },
+        )
+        self.assertEqual(frame["availability"], "absent")
+        self.assertEqual([item["Id"] for item in self.containers], [extra["Id"]])
+        self.assertNotIn(["docker", "rm", extra["Id"]], commands)

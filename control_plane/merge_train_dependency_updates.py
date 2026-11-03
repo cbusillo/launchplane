@@ -20,6 +20,7 @@ def classify_dependency_update(
     *,
     metadata_format: DependencyUpdateFormat,
     allowed_update_types: Sequence[DependencyUpdateType],
+    digest_moves_forward: Callable[[dict[str, str]], bool] | None = None,
 ) -> DependencyUpdateClass:
     read_updates = UPDATE_FORMAT_PARSERS.get(metadata_format)
     if not commit_messages or read_updates is None:
@@ -27,7 +28,8 @@ def classify_dependency_update(
     for message in commit_messages:
         updates = read_updates(message)
         if not updates or not all(
-            _update_qualifies(update, allowed_update_types) for update in updates
+            _update_qualifies(update, allowed_update_types, digest_moves_forward)
+            for update in updates
         ):
             return "needs_review"
     return "patch_or_minor"
@@ -45,7 +47,7 @@ def _dependabot_updates(message: str) -> list[dict[str, str]]:
         updates.append(
             {
                 "depName": name,
-                "updateType": declared or _version_update_type(old, new),
+                "updateType": declared or dependency_version_update_type(old, new),
                 "currentVersion": old,
                 "newVersion": new,
             }
@@ -76,11 +78,12 @@ UPDATE_FORMAT_PARSERS: dict[DependencyUpdateFormat, Callable[[str], list[dict[st
     "dependabot_trailer": _dependabot_updates,
     "renovate_metadata": _renovate_updates,
 }
-_DIGEST = re.compile(r"(?:[0-9a-f]{40}|(?:sha256:)?[0-9a-f]{64})")
 
 
 def _update_qualifies(
-    update: dict[str, str], allowed_update_types: Sequence[DependencyUpdateType]
+    update: dict[str, str],
+    allowed_update_types: Sequence[DependencyUpdateType],
+    digest_moves_forward: Callable[[dict[str, str]], bool] | None,
 ) -> bool:
     if not update.get("depName") or update.get("updateType") not in allowed_update_types:
         return False
@@ -89,18 +92,22 @@ def _update_qualifies(
         return bool(
             old_value
             and old_value == new_value
-            and _DIGEST.fullmatch(update.get("currentDigest", ""))
-            and _DIGEST.fullmatch(update.get("newDigest", ""))
+            and digest_moves_forward is not None
+            and digest_moves_forward(update)
         )
     old, new = update.get("currentVersion", ""), update.get("newVersion", "")
-    return update.get("updateType") == _version_update_type(old, new)
+    return update.get("updateType") == dependency_version_update_type(old, new)
 
 
-def _version_update_type(old_version: str, new_version: str) -> str:
+def dependency_version_update_type(old_version: str, new_version: str) -> str:
     old, new = _VERSION.match(old_version), _VERSION.match(new_version)
     if old is None or new is None or old.group("suffix") != new.group("suffix"):
         return ""
     if old.group("major") != new.group("major"):
+        return ""
+    old_parts = tuple(int(old.group(part) or "0") for part in ("major", "minor", "patch"))
+    new_parts = tuple(int(new.group(part) or "0") for part in ("major", "minor", "patch"))
+    if new_parts <= old_parts:
         return ""
     if (old.group("minor") or "0") != (new.group("minor") or "0"):
         return "minor" if old.group("major") != "0" else ""

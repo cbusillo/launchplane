@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.preview_namespaces import POSTGRES_PREVIEW_TRANSPORTS
+
 from pathlib import Path
 from typing import cast
 
@@ -28,7 +30,7 @@ from control_plane.drivers.generic_web_preview_extensions import (
     apply_generic_web_preview_driver_destroy,
     apply_generic_web_preview_driver_refresh,
 )
-from control_plane.drivers.verireel_postgres_transport import _preview_refresh_serialization
+from control_plane.drivers.postgres_preview_transport import _preview_refresh_serialization
 from control_plane.launchplane_mutations import resolve_launchplane_preview_id
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.generic_web_preview import (
@@ -109,7 +111,7 @@ def resolve_generic_web_preview_desired_state_profile(
 
 
 def resolve_generic_web_preview_profile(
-    *, record_store: object, product: str
+    *, record_store: object, product: str, for_destroy: bool = False
 ) -> LaunchplaneProductProfileRecord:
     read_profile = getattr(record_store, "read_product_profile_record", None)
     if not callable(read_profile):
@@ -122,7 +124,12 @@ def resolve_generic_web_preview_profile(
         raise GenericWebPreviewRouteDependencyError from error
     if not isinstance(profile, LaunchplaneProductProfileRecord):
         profile = LaunchplaneProductProfileRecord.model_validate(profile)
-    if not profile.is_active:
+    cleanup = (
+        for_destroy
+        and profile.preview.transport_extension in POSTGRES_PREVIEW_TRANSPORTS
+        and profile.lifecycle_state in {"active", "retiring"}
+    )
+    if not profile.is_active and not cleanup:
         raise click.ClickException(
             f"Product {profile.product!r} is {profile.lifecycle_state} and cannot run previews."
         )
@@ -130,7 +137,7 @@ def resolve_generic_web_preview_profile(
         raise GenericWebPreviewProductMismatchError(
             "Product profile is not compatible with the requested driver route."
         )
-    if not profile.preview.enabled:
+    if not profile.preview.enabled and not cleanup:
         raise click.ClickException(
             f"Product {profile.product!r} does not have generic-web previews enabled."
         )

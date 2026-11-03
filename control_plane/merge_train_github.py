@@ -71,8 +71,9 @@ from control_plane.contracts.merge_train_structural_provenance import (
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
 from control_plane.contracts.text_fields import require_text
 from control_plane.dependency_update_review import dependency_update_policy, pure_dependency_update
+from control_plane.dependency_reference_update import dependency_digest_moves_forward
 from control_plane.contracts.merge_train_policy import MergeTrainEnqueuePolicy
-from control_plane.release_review_shared import repository_key
+from control_plane.artifact_release_inputs import repository_key
 from control_plane.client_release_repositories import (
     ClientReleaseRepositoryStore,
     client_release_profiles,
@@ -103,7 +104,10 @@ from control_plane.merge_train_codeowners import (
     carried_change_requires_individual_landing,
 )
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
-from control_plane.merge_train_dependency_updates import classify_dependency_update
+from control_plane.merge_train_dependency_updates import (
+    classify_dependency_update,
+    UPDATE_FORMAT_PARSERS,
+)
 from control_plane.merge_train_handoff import (
     MergeTrainReadyHandoff,
     handoff_actor_allowed,
@@ -1080,6 +1084,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             failed_check_names=failed_check_names,
             attribution_requirements=None,
         ).status
+
+    def read_base_branch_sha(self, *, repository: str, base_branch: str) -> str:
+        return _base_branch_sha(
+            transport=self.transport,
+            repository_path=_repository_path(repository),
+            base_branch=base_branch,
+        )
 
     def read_base_check_observation(
         self,
@@ -3037,6 +3048,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         mutate: bool,
         before_remove: Callable[[], None],
         setup_failure_evidence: Callable[[], MergeTrainSetupFailureRecovery | None] | None = None,
+        new_base_retest_evidence: Callable[[int], object | None] | None = None,
     ) -> bool:
         from control_plane.merge_train_github_block_recovery import recover_candidate_block
 
@@ -3050,6 +3062,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             mutate=mutate,
             before_remove=before_remove,
             setup_failure_evidence=setup_failure_evidence,
+            new_base_retest_evidence=new_base_retest_evidence,
         )
 
     def update_pull_request_branch(
@@ -4616,6 +4629,9 @@ class GitHubMergeTrainSnapshotReader:
             messages,
             metadata_format=bot.metadata_format,
             allowed_update_types=bot.allowed_update_types,
+            digest_moves_forward=lambda update: dependency_digest_moves_forward(
+                update, read=lambda path: self.transport.request(method="GET", path=path)
+            ),
         )
         if update_class != "patch_or_minor":
             return update_class
@@ -4630,6 +4646,11 @@ class GitHubMergeTrainSnapshotReader:
             read=lambda path: self.transport.request(method="GET", path=path),
             store=self._branch_refresh_store,
             repository_policy=self._repository_policy,
+            declared_updates=tuple(
+                update
+                for message in messages
+                for update in UPDATE_FORMAT_PARSERS[bot.metadata_format](message)
+            ),
         ):
             return "needs_review"
         return update_class

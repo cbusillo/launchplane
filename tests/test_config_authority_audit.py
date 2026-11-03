@@ -2846,23 +2846,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         for key, value in (
             ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
             ("fail-result-paths", '""'),
-            ("idempotency-key", "${{ steps.onboarding.outputs.idempotency_key }}"),
-            ("payload-file", "${{ steps.onboarding.outputs.request_file }}"),
-            ("response-output-file", "product-onboarding.json"),
-        ):
-            with self.subTest(product_onboarding_mechanic=key):
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/product-onboarding.yml",
-                        key=key,
-                        value=value,
-                    ),
-                    "thin_connector_input",
-                )
-
-        for key, value in (
-            ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
-            ("fail-result-paths", '""'),
             ("method", "GET"),
             ("response-output-file", "dokploy-target-inspect-response.json"),
             ("route-path", "${{ steps.request.outputs.route_path }}"),

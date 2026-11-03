@@ -7,7 +7,17 @@ import unittest
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.deployment_record import DeploymentRecord
-from control_plane.contracts.promotion_record import DeploymentEvidence, RecordFailure
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.product_profile_record import (
+    ProductLaneHealthCheck,
+    ProductLaneHealthMonitoringPolicy,
+    ProductLaneProfile,
+)
+from control_plane.contracts.promotion_record import (
+    DeploymentEvidence,
+    HealthcheckEvidence,
+    RecordFailure,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.ship import build_deployment_record
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
@@ -59,6 +69,13 @@ class MonitorDeployWindowTests(unittest.TestCase):
                 started_at=self.started.isoformat(),
             ),
         )
+        self.completed = self.deployment.model_copy(
+            update={
+                "deploy": self.deployment.deploy.model_copy(
+                    update={"status": "pass", "finished_at": self.started.isoformat()}
+                )
+            }
+        )
 
     def test_own_pending_deploy_retains_failed_probe_without_incident_or_alert(self) -> None:
         old = self.deployment.model_copy(
@@ -90,19 +107,13 @@ class MonitorDeployWindowTests(unittest.TestCase):
             self.assertEqual(observation.failure_code, "http_error")
         self.assertEqual(self.store.list_outbox_delivery_records(), ())
 
-    def test_failed_completed_expired_foreign_and_future_deploys_do_not_hide_failure(self) -> None:
+    def test_failed_expired_foreign_and_future_deploys_do_not_hide_failure(self) -> None:
         cases: tuple[tuple[str, dict[str, str], dict[str, object], timedelta], ...] = (
             ("failed", {"status": "fail"}, {}, timedelta(seconds=24)),
             (
                 "recorded failure",
                 {},
                 {"failure": RecordFailure(code="failed", description="Deployment failed.")},
-                timedelta(seconds=24),
-            ),
-            (
-                "completed",
-                {"status": "pass", "finished_at": self.started.isoformat()},
-                {},
                 timedelta(seconds=24),
             ),
             ("expired", {}, {}, DEPLOY_INCIDENT_DEFERRAL),
@@ -138,6 +149,158 @@ class MonitorDeployWindowTests(unittest.TestCase):
                     notify=False,
                 )
                 self.assertEqual(result.open_incident_count, 1)
+
+    def test_provider_completion_does_not_prove_replacement_readiness(self) -> None:
+        self.store.write_product_profile_record(
+            _profile(
+                lane=ProductLaneProfile(
+                    context="example-site",
+                    instance="prod",
+                    health_monitoring=ProductLaneHealthMonitoringPolicy(
+                        monitoring_intent="private",
+                        checks=(
+                            ProductLaneHealthCheck(
+                                name="runtime", kind="private_http", private_endpoint_key="runtime"
+                            ),
+                        ),
+                    ),
+                )
+            )
+        )
+        self.store.write_private_health_endpoint_record(
+            PrivateHealthEndpointRecord(
+                endpoint_key="runtime",
+                product="example-site",
+                context="example-site",
+                instance="prod",
+                url="http://10.0.0.1:8787/health",
+                updated_at=self.started.isoformat(),
+            )
+        )
+        self.store.write_deployment_record(self.completed)
+
+        def refused(_url: str, _timeout: int) -> HttpObservation:
+            raise ConnectionRefusedError(111, "Connection refused")
+
+        for second in (24, 75):
+            result = run_public_ingress_monitor_once(
+                record_store=self.store,
+                checked_at=(self.started + timedelta(seconds=second)).isoformat(),
+                http_get=refused,
+            )
+            self.assertEqual(result.fail_count, 1)
+            self.assertEqual(result.incidents, ())
+        self.assertEqual(self.store.list_outbox_delivery_records(), ())
+        expired = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + DEPLOY_INCIDENT_DEFERRAL).isoformat(),
+            http_get=refused,
+        )
+        self.assertEqual(expired.open_incident_count, 1)
+        self.assertTrue(self.store.list_outbox_delivery_records())
+
+    def test_ready_replacement_failure_alerts_inside_the_deploy_window(self) -> None:
+        self.store.write_deployment_record(self.completed)
+        replacing = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + timedelta(seconds=7)).isoformat(),
+            http_get=lambda url, timeout: HttpObservation(503, url, 0),
+        )
+        self.assertEqual(replacing.incidents, ())
+        ready = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + timedelta(seconds=10)).isoformat(),
+            http_get=lambda url, timeout: HttpObservation(
+                200, url, 0, payload={"runtime_identity": _identity().model_dump(mode="json")}
+            ),
+        )
+        self.assertEqual(ready.fail_count, 0)
+        failed = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + timedelta(seconds=24)).isoformat(),
+            http_get=lambda url, timeout: HttpObservation(503, url, 0),
+        )
+        self.assertEqual(failed.open_incident_count, 1)
+        self.assertTrue(self.store.list_outbox_delivery_records())
+
+    def test_old_or_missing_identity_does_not_end_replacement_deferral(self) -> None:
+        self.store.write_deployment_record(self.completed)
+        for second, payload in (
+            (10, {}),
+            (
+                12,
+                {
+                    "runtime_identity": _identity()
+                    .model_copy(update={"deployment_record_id": "old"})
+                    .model_dump(mode="json")
+                },
+            ),
+        ):
+            result = run_public_ingress_monitor_once(
+                record_store=self.store,
+                checked_at=(self.started + timedelta(seconds=second)).isoformat(),
+                http_get=lambda url, timeout: HttpObservation(200, url, 0, payload=payload),
+            )
+            self.assertEqual(result.incidents, ())
+        failed = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + timedelta(seconds=24)).isoformat(),
+            http_get=lambda url, timeout: HttpObservation(503, url, 0),
+        )
+        self.assertEqual(failed.incidents, ())
+
+    def test_failed_release_health_cannot_defer_an_outage(self) -> None:
+        self.store.write_deployment_record(
+            self.completed.model_copy(
+                update={
+                    "destination_health": HealthcheckEvidence(status="fail"),
+                }
+            )
+        )
+        result = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + timedelta(seconds=24)).isoformat(),
+            http_get=lambda url, timeout: HttpObservation(503, url, 0),
+        )
+        self.assertEqual(result.open_incident_count, 1)
+
+    def test_release_verified_readiness_also_ends_deferral(self) -> None:
+        self.store.write_deployment_record(
+            self.completed.model_copy(
+                update={
+                    "destination_health": HealthcheckEvidence(
+                        status="pass",
+                        verified=True,
+                        urls=("https://example.test/healthz",),
+                        timeout_seconds=10,
+                        runtime_identity_status="match",
+                    ),
+                }
+            )
+        )
+        result = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + timedelta(seconds=24)).isoformat(),
+            http_get=lambda url, timeout: HttpObservation(503, url, 0),
+        )
+        self.assertEqual(result.open_incident_count, 1)
+
+    def test_unorderable_observation_history_keeps_normal_alerting(self) -> None:
+        self.store.write_deployment_record(self.completed)
+        healthy = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + timedelta(seconds=10)).isoformat(),
+            http_get=lambda url, timeout: HttpObservation(200, url, 0),
+        )
+        self.store.write_public_ingress_observation_record(
+            healthy.records[0].model_copy(update={"record_id": "undated", "observed_at": "unknown"})
+        )
+        result = run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=(self.started + timedelta(seconds=24)).isoformat(),
+            http_get=lambda url, timeout: HttpObservation(503, url, 0),
+        )
+        self.assertEqual(result.open_incident_count, 1)
 
     def test_deploy_does_not_clear_or_quiet_an_existing_outage(self) -> None:
         failed = run_public_ingress_monitor_once(

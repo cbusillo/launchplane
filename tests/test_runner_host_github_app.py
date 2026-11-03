@@ -91,13 +91,16 @@ class RunnerHostGitHubAppScopeTests(unittest.TestCase):
         self.assertIn("page=2", calls[1])
 
     def test_scope_validation_returns_public_safe_evidence(self) -> None:
+        required_repositories = (
+            "example-owner/repo-one",
+            "example-owner/repo-two",
+        )
+        repositories = (*required_repositories, "example-owner/another-repo")
+
         def fetch_json(url: str, bearer_token: str) -> dict[str, object]:
             return {
-                "total_count": 2,
-                "repositories": [
-                    {"full_name": "example-owner/repo-one"},
-                    {"full_name": "example-owner/repo-two"},
-                ],
+                "total_count": len(repositories),
+                "repositories": [{"full_name": name} for name in repositories],
             }
 
         evidence = validate_github_app_installation_scope(
@@ -109,7 +112,7 @@ class RunnerHostGitHubAppScopeTests(unittest.TestCase):
             fetch_json=fetch_json,
         )
 
-        self.assertEqual(evidence.repository_count, 2)
+        self.assertEqual(evidence.repository_count, len(required_repositories))
         self.assertRegex(evidence.repository_sha256, r"^[0-9a-f]{16}$")
 
     def test_scope_mismatch_reports_only_counts_and_digests(self) -> None:

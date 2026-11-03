@@ -1353,7 +1353,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             candidate=candidate
         )
 
-        self.assertIsNotNone(built.structural_provenance)
         assert built.structural_provenance is not None
         first_step = built.structural_provenance.steps[0]
         self.assertEqual(first_step.kind, "no_op_already_contained")
@@ -4357,7 +4356,6 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         for login, message in (
             ("dependabot[bot]", INDIRECT_PATCH),
             ("renovate[bot]", renovate_message()),
-            ("renovate[bot]", renovate_message(updateType="digest")),
         ):
             for filename, fork, verified, expected in (
                 ("package.json", False, True, "patch_or_minor"),

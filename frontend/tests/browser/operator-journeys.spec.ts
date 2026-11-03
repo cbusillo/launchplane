@@ -139,6 +139,11 @@ test.describe("operator journeys", () => {
       "href",
       "https://github.com/example/control-plane/pull/308",
     );
+    await page.context().route("https://site.preview.example.invalid/", route => route.fulfill({ contentType: "text/html", body: "<h1>Preview</h1>" }));
+    const [previewPage] = await Promise.all([page.waitForEvent("popup"), preview.click()]);
+    await expect(previewPage.getByRole("heading", { name: "Preview" })).toBeVisible();
+    await previewPage.close();
+    await card.getByRole("checkbox", { name: "I looked at this preview and it is right." }).check();
     await card.getByRole("button", { name: "Accept" }).click();
     await expect(card.getByText("Decision recorded.")).toBeVisible();
     await expect(card.getByLabel("Recorded decision")).toContainText("Accepted by @example-owner");
@@ -146,27 +151,6 @@ test.describe("operator journeys", () => {
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/current-items");
     expect(requestedPaths).not.toContain("/v1/owner-acceptance/queue");
     await expect(page.getByRole("link", { name: "Engineering Ops" })).toHaveCount(0);
-    await assertDocumentBasics(page);
-    diagnostics.assertClean();
-  });
-
-  test("Owner must say what should change before requesting changes", async ({ page }) => {
-    const diagnostics = monitorBrowser(page);
-
-    await page.goto(
-      "/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308",
-    );
-
-    const card = page.locator('[data-product="example-site"]');
-    const requestChanges = card.getByRole("button", { name: "Request changes" });
-    await expect(requestChanges).toBeDisabled();
-    await card.getByRole("textbox").fill("Please adjust the checkout flow.");
-    await requestChanges.click();
-    await expect(card.getByLabel("Recorded decision")).toContainText("Changes requested");
-    await expect(card.getByLabel("Recorded decision")).toContainText(
-      "Please adjust the checkout flow.",
-    );
-    await expect(card.getByRole("textbox")).toHaveValue("");
     await assertDocumentBasics(page);
     diagnostics.assertClean();
   });

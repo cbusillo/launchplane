@@ -486,7 +486,6 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
                 route_path=TESTING_HOLD_APPLY_ROUTE,
                 idempotency_key="admin-lift",
             )
-            self.assertIsNotNone(receipt)
             assert receipt is not None
             self.assertTrue(receipt.recorded_at)
             self.assertEqual(receipt.response_trace_id, lifted.json()["trace_id"])
@@ -701,7 +700,14 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
                         profile.model_copy(update={"lanes": profile.lanes if retains_lane else ()})
                     )
                     store.write_product_profile_record(
-                        profile.model_copy(update={"product": "other-product"})
+                        profile.model_copy(
+                            update={
+                                "product": "other-product",
+                                "preview": profile.preview.model_copy(
+                                    update={"app_name_prefix": "other-product-preview"}
+                                ),
+                            }
+                        )
                     )
                     read = await self._get(app)
                     plan = await self._post(app, _payload())

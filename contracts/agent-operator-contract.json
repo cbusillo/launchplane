@@ -46,6 +46,63 @@
     },
     "operations": [
       {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply"
+        ],
+        "operation_id": "apply_product_generic_web_transition",
+        "path": "/v1/product-profiles/{product}/generic-web-transition",
+        "purpose": "Review shared-web declarations; Director agents may apply preview-only changes on an existing generic-web product, preserving every stable declaration and existing credential gates.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "b4bb7c2ac860584193497ed93cd85ecd6fa64cc2faa584f61a74d57626ef2f48",
+        "supported_surfaces": [
+          "service_api",
+          "browser"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_preview_snapshot_version",
+        "path": "/v1/products/{product}/preview-snapshot-version",
+        "purpose": "Read only recorded base-module version from an exact original-bound immutable snapshot without restore or database access.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "51efe119d112ccec7dfc354c088a72c4f788481f9c10b9b98eb0fc1ec27a825c",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_identity"
@@ -606,7 +663,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "1d7ac7b707cc89cc6a8a54b5f6efbc1a688bca9909f7168430e91250b5aee0b6",
+        "schema_fingerprint_sha256": "fdef05322468011a2ba9d1c204ab2b79937ca144ddb4487cbf89fc0bb2aafb86",
         "supported_surfaces": [
           "service_api"
         ]
@@ -636,7 +693,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "0830c5219a06f66073a4cc0c04e89f1a4dbaeb70e3e314fd633179f5079d1bf0",
+        "schema_fingerprint_sha256": "98599aecb7c5e9fd38fbf624927ef2f9e41bf354a63485060e05c43e33679586",
         "supported_surfaces": [
           "service_api"
         ]
@@ -830,6 +887,39 @@
         "supported_surfaces": [
           "bounded_admin_helper",
           "operator_ui",
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "sweep_retained_volumes",
+        "path": "/v1/retained-volume-sweep",
+        "purpose": "Inspect, apply, or read back one reviewed retained-volume retirement sweep without exposing provider bindings.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256",
+          "retirement_record_id",
+          "minimum_age_seconds"
+        ],
+        "schema_fingerprint_sha256": "97c57a4d12f191da974363dd089db8bc5baeb8826ac3edb59ac28d97c6ac9ca5",
+        "supported_surfaces": [
           "service_api"
         ]
       },
@@ -1249,8 +1339,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "409c83a5be18c5e7e4303b76772e9c764f429ba0"
+    "source_commit_sha": "d82c7781eefe8d7dc55d3166f2cb0747b84ade5c"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "167abd813bb8e27bfd5ea102aa14a3d5b9cf7d6e56361e69d3dbbf942923ef89"
+  "semantic_digest_sha256": "ac157b1bb730eea721e7e0ea04e8fb5b1bf5e3d7c26d1e69c463d4e57bcb3c84"
 }

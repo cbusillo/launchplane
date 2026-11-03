@@ -137,6 +137,24 @@ class TestingGenerationRetirementClientTests(unittest.TestCase):
             self.assertEqual(call("inspect")[0], 1)
             self.assertEqual(evidence.read_bytes(), saved)
             request.reset_mock()
+            inspection = inspection.model_copy(
+                update={
+                    "plan": None,
+                    "product": plan.product,
+                    "context": plan.context,
+                }
+            )
+            request.return_value = {**receipt(True), "result": inspection.model_dump(mode="json")}
+            self.assertEqual(call("inspect")[0], 0)
+            request.return_value = {
+                **receipt(True),
+                "result": inspection.model_copy(update={"product": "foreign"}).model_dump(
+                    mode="json"
+                ),
+            }
+            self.assertEqual(call("inspect")[0], 1)
+            self.assertEqual(evidence.read_bytes(), saved)
+            request.reset_mock()
             request.side_effect = http.client.IncompleteRead(b"", 1)
             status, outcome = call(
                 "apply", "--reviewed-dry-run", "--idempotency-key", "original-key"

@@ -2261,6 +2261,35 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             ["sellyouroutboard"],
         )
 
+    async def test_list_product_profiles_preserves_read_only_stored_transport(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            profile_payload = _product_profile_payload()
+            preview = cast(dict[str, object], profile_payload["preview"])
+            preview.update(
+                transport_extension="verireel-postgres",
+                data_transport_mode="driver",
+                app_name_prefix="preview-app",
+                transport_database_prefix="preview_db",
+            )
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                profile_payload, context={"stored_product_profile": True}
+            )
+            with self.assertRaises(ValueError):
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            store.write_product_profile_record(profile)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_read_policy(product="launchplane"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_product_profiles(app, driver_id=profile.driver_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["profiles"], [profile.model_dump(mode="json")])
+        self.assertEqual(response.json()["coverage"]["status"], "complete")
+
     async def test_show_product_profile_returns_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -3736,6 +3765,77 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_required")
 
+    async def test_settings_modes_reject_invalid_complete_candidates_without_writes(self) -> None:
+        for profile_factory, verifier_identity, policy, post, request_payload in (
+            (
+                _product_preview_tls_profile,
+                _product_preview_tls_identity,
+                _product_preview_tls_policy,
+                _post_product_preview_tls,
+                _product_preview_tls_payload,
+            ),
+            (
+                _product_prelaunch_rebuild_policy_profile,
+                _product_prelaunch_rebuild_policy_identity,
+                _product_prelaunch_rebuild_policy_policy,
+                _post_product_prelaunch_rebuild_policy,
+                _product_prelaunch_rebuild_policy_payload,
+            ),
+        ):
+            for conflict in ("missing_health_url", "preview_override"):
+                with self.subTest(route=post.__name__, conflict=conflict):
+                    payload = profile_factory().model_dump(mode="json")
+                    if conflict == "preview_override":
+                        payload["preview"]["override_env"] = {"LEGACY_SETTING": "private-value"}
+                    else:
+                        payload["lanes"][0].update(
+                            base_url="",
+                            health_url="",
+                            health_monitoring={
+                                "monitoring_intent": "prelaunch",
+                                "checks": [{"name": "public", "kind": "public_http"}],
+                            },
+                        )
+                    original = LaunchplaneProductProfileRecord.model_validate(
+                        payload, context={"stored_product_profile": True}
+                    )
+                    with TemporaryDirectory() as temporary_directory_name:
+                        store = PostgresRecordStore(
+                            database_url=_sqlite_database_url(
+                                Path(temporary_directory_name) / "launchplane.sqlite3"
+                            )
+                        )
+                        self.addCleanup(store.close)
+                        store.ensure_schema()
+                        store.write_product_profile_record(original)
+                        app = create_launchplane_fastapi_app(
+                            verifier=_StubVerifier(verifier_identity()),
+                            authz_policy=policy(),
+                            record_store_factory=lambda: store,
+                        )
+                        with patch.object(
+                            store, "compare_and_write_product_profile_record"
+                        ) as write:
+                            for mode in ("dry-run", "apply"):
+                                response = await post(
+                                    app,
+                                    {
+                                        **request_payload(),
+                                        "mode": mode,
+                                        "reviewed_plan_sha256": "a" * 64 if mode == "apply" else "",
+                                    },
+                                    idempotency_key="invalid-candidate" if mode == "apply" else "",
+                                )
+                                self.assertEqual(response.status_code, 400, response.json())
+                                self.assertEqual(
+                                    response.json()["error"]["code"], "invalid_product_profile"
+                                )
+                                self.assertNotIn("private-value", response.text)
+                            write.assert_not_called()
+                        self.assertEqual(
+                            store.read_product_profile_record(original.product), original
+                        )
+
     async def test_apply_product_prelaunch_rebuild_policy_dry_run_preserves_profile(
         self,
     ) -> None:
@@ -4085,7 +4185,10 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             original_profile = original_profile.model_copy(
                 update={
                     "preview": original_profile.preview.model_copy(
-                        update={"domain_certificate_type": "letsencrypt"}
+                        update={
+                            "domain_certificate_type": "letsencrypt",
+                            "override_env": {"LEGACY_SETTING": "private-value"},
+                        }
                     )
                 }
             )
@@ -4129,7 +4232,6 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replay_response.json()["replayed"])
         self.assertEqual(stored_profile.updated_at, original_profile.updated_at)
         self.assertEqual(stored_profile.source, original_profile.source)
-        self.assertIsNotNone(stored_reservation)
         assert stored_reservation is not None
         self.assertEqual(stored_reservation.state, "completed")
         self.assertEqual(stored_reservation.attempt, 1)
@@ -4243,7 +4345,6 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             store.close()
 
         self.assertEqual(response.status_code, 202)
-        self.assertIsNotNone(stored_record)
         assert stored_record is not None
         self.assertEqual(stored_record.state, "completed")
         self.assertEqual(stored_record.attempt, 1)

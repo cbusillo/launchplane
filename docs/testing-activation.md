@@ -226,7 +226,15 @@ For addressed lanes, the existing native route journal and writer fence retain
 the public host while switching only after private readiness. The first
 application cutover admits only the physically read, domain-bound Dokploy
 application file and its matching applied `@file` routers. Foreign file routers
-are not adopted. The legacy Compose wrapper retains its Docker route behavior. The exact
+are not adopted. Unset router TLS and rule syntax may match defaults inherited
+from the same physical configuration snapshot. Explicit router settings and
+unexplained applied differences retain their checks. Recovery from an unavailable
+declared predecessor materializes these defaults before publication, with one
+owned router per listener. A declared certificate resolver enables explicit TLS
+unless its TLS node is explicitly disabled. Listener middleware and unsupported
+TLS defaults refuse before publication; supported declarations use per-router
+settings and the existing independently owned redirect and connection policy.
+The legacy Compose wrapper retains its Docker route behavior. The exact
 retained file identity and later owned route template remain in original
 operation custody. A lost writer reply must settle that original native journal;
 it never permits a second blind route publication.
@@ -566,6 +574,29 @@ unclassified credentials and unqualified external `*_HOST`/`*_URL` environment
 endpoints refuse it. Application code remains responsible for the behavior of
 its declared read-only source integration.
 
+Compose volume inventory resolves flat braced expressions only under the standard
+provider command with present, unique, literal service inputs. That command's
+project argument determines unnamed volumes; unsupported expressions, sources
+and unreadable documents stay held. Production retirement keeps its reviewed
+sole-variable keys and every removal custody check.
+
+A raw target's existing root-file command can use the same inventory when its
+project, file and generated environment are equivalent to the provider command;
+other commands remain unqualified. Cached Git include wrappers are read through
+the registered server transport without executing Compose. The supported shape
+is one level of local regular source files, with named storage, no separate
+included-directory environment and no file inheritance. Source bytes stay in
+memory. Changed, linked, excessive or unsupported source observations stay held.
+
+For these cached files, volume expressions can use flat defaults only when every
+occurrence is defaulted, the input is not provider-injected, and its absence is
+proved both in the complete provider environment and the actual generated
+environment file. Present, empty, duplicated or uncertain inputs remain held.
+A null converted document is empty inventory only after complete unconfigured
+source, no scheduled or active deployment work, and absence of the entire
+canonical cached project are proved. Neither rule changes removal custody,
+physical reference checks, the original permit or recovery.
+
 Dokploy can add an unused `dokploy-network: {external: true}` root declaration
 to a domainless render. Qualification ignores only that exact provider-added
 declaration when the reviewed source did not declare it and no service joins
@@ -719,3 +750,143 @@ restores the original route without calling the original application healthy.
 
 Completed negative preparation receipts preserve the same optional source and
 location evidence, including stable replay; historical receipts remain unchanged.
+
+## One-action testing rebuild
+
+The testing rebuild control reads an explicit
+`lanes[].generic_web_testing_state` from the managed product profile.
+`kind: none` declares no persistent data. `kind: volume` also requires the
+application's safe `container_path`, using the activation state contract above.
+A missing declaration refuses admission. `postgresql` records the
+still-deferred independent PostgreSQL prerequisite and refuses before provider work.
+These declarations apply only to generic-web testing lanes.
+
+The signed-in control and native product rebuild routes admit application
+targets with either no persistent state or one fresh local volume. They preserve
+a public testing address or the single verified private HTTPS endpoint selected
+by the testing lane's private health policy. The existing Director-agent
+testing rebuild authority also covers these routes. Inspection verifies the
+immutable build, exclusive product/context ownership, target agreement, holds,
+use protections, independent credential bindings and actual mounted-state
+custody. A mounted predecessor requires its exact completed native application
+activation, original volume allocation and captured physical volume identity. It performs no writes. A passing inspection admits the operation; candidate
+verification remains pending until the worker completes it. Generic-web builds
+keep their verified immutable image reference, without an Odoo manifest.
+Static predecessor placement, preview and disabled-schedule requirements are
+checked before setting the operation's hold, and checked again before retirement.
+Runtime and retirement inventories use Docker's supported quiet service listing,
+then resolve every listed prefix to one distinct inspected full service ID.
+Incomplete or ambiguous inspection still refuses the operation.
+
+The existing rebuild worker creates an operation-owned staging hold, prepares
+independent resources and runs the native application activation. The old copy
+keeps serving until the candidate passes readiness and health at the unchanged
+address. Candidate failure retains the old copy. Retirement first disables the
+old application's automatic deploys and verifies its placement, exact captured mounts,
+absence of other lane references or provider previews, terminal deployments and
+quiescent jobs and schedules. An active or unobserved old job prevents retirement.
+Existing unresolved Launchplane reservations remain fenced;
+they are not cleared or adopted as successful deployments.
+
+The owned route carries its HTTPS redirect, so deleting the predecessor cannot
+remove a middleware it needs. Other predecessor-owned middleware or TLS options
+refuse before candidate effects. Later activations use the completed owned route
+and its current applied configuration, without requiring a retired predecessor's
+route file. Foreign or changed routers still refuse.
+
+Provider metadata deletion is followed by physical service/container absence
+verification. If provider cleanup leaves the original service behind, the same
+operation can remove only its captured service ID through the guarded host
+program, after observing metadata absence. That service removal preserves its
+volume. A separate durable child removes the original volume only after current
+candidate health and complete Launchplane, provider and local Docker inventories
+prove independent cleanup custody. The existing retained-volume host program
+checks the captured engine and backing identity, references, path aliases and
+same-boot monotonic permit before removal. That permit has its own bounded
+cleanup budget, independent of route-readiness freshness.
+
+New captures bind full volume metadata, engine, inode and nonzero `statvfs`
+filesystem ID, replacing boot-specific device numbers. The shared sweep and
+production-recipient comparator preserves historical hashes: anonymous-device
+renumbering matches only when the original hash agrees with every other input,
+searching minor numbers 1 through 65535. Other historical device changes remain
+held. Zero filesystem IDs prevent new captures but permit historical comparison;
+new-format filesystem mismatches remain held. Filesystems whose ID changes on
+remount, including some XFS placements, remain held. Plans reviewed before this
+change require a fresh dry-run. Completed retirement requires final
+health and independent service, container and volume absence checks. A lost
+reply resumes the original receipts; a later staff hold or deployment is retained.
+The host program waits for Docker's asynchronous container teardown within a
+bounded interval. Metadata already deleted outside this operation permits only
+read-only absence verification; it does not authorize removal of a surviving service.
+Interruption after deletion can finish with a failed candidate health result
+instead of stranding the hold. A verified candidate failure before retirement
+retains the predecessor and clears this hold so an ordinary deployment can repair
+testing. A later static refusal or external deletion without verified absence
+reports the original predecessor as not retired, without granting removal authority.
+The current candidate's health is reported separately. Once its current provider
+and route custody are verified, a known retirement refusal clears only this
+operation's hold so normal testing work can continue. Unknown own provider effects
+stay pending.
+
+While that copy is serving, the next rebuild checks its immediate predecessor and
+the unresolved copies recorded by the serving rebuild's finalization, with a separate durable child and
+delete checkpoint for each predecessor. Those records carry exact activation
+identities; already-retired copies are not carried forward, and ordinary activation
+history is not adopted. An older leftover's static refusal does not block a new
+independent testing copy. The same
+identity, captured-state, quiescence, health and absence requirements apply.
+Unverified health keeps the original operation pending.
+
+Known admission refusals before candidate dispatch clear only this operation's
+hold and finish as failed. An interrupted preparation first settles its original
+child through read-only observation. Its captured profile reconstructs the
+original preparation hash while current recipient, configuration, reservations
+and placement still have to agree. Current-input inspection remains separate.
+An exact, disabled, completed capability program with its bound log and no
+storage dispatch can finish as an admission refusal. Dispatched storage requires
+its original readback. This path never triggers new preparation; active,
+ambiguous or unavailable original evidence stays pending. Published or refused original operations can finalize
+under their captured caller and recipient custody even if desired configuration
+changes later. New work still uses current configuration. New application receipts
+seal the delivered environment digest; legacy receipts keep their original strict
+configuration verification without an invented digest. Recovery never restores
+old configuration or enables a changed binding.
+Direct provider changes outside Launchplane are
+not synchronized with this operation.
+
+A lost volume-removal reply reads back only the original host receipt and key;
+it never renews an expired removal permit. Known protected-volume refusals retain
+the exact predecessor for a later rebuild while allowing ordinary testing work.
+Unknown removal effects keep the original operation pending, including when a
+later service-absence observation is temporarily incomplete. A private-ingress
+record contradiction before candidate dispatch finishes as a known admission
+refusal and clears only this operation's hold. Recovery retains original route
+custody and uses actual candidate health instead of requiring an unchanged
+private-record timestamp. A missing endpoint, ingress receipt or edge record
+before dispatch is also a known refusal; unresolved ingress effects wait on the
+original key. Private recovery refuses health from a different origin, even if
+that origin serves the same candidate. Continuation waits for the original
+endpoint authority to be restored through the existing
+[private endpoint setup](private-testing-transport.md) and for original-origin
+health to verify; a new rebuild key cannot replace that custody.
+Expired cleanup permits retain the volume
+without renewing the original permit.
+Non-application lanes remain pending. Existing Odoo preflight and execution
+continue through the same control.
+
+Rebuild admission retains the completed current activation's application recipe,
+including its network and local and external credential intent. Current profile
+port, health path and declared state remain authoritative. A recipe from another
+recipient cannot supply that intent; lanes without a native application recipe
+keep the default recipe. An incomplete current application activation refuses.
+Capturing a recipe does not enable execution for a pending lane. External
+credential comparisons use fresh profiles internally under the original rebuild
+authority; they do not expose other products' settings to the caller.
+
+Stateless lanes have no saved data to restore. Generic-web production/upstream
+restore for volume lanes is not admitted by this slice. Its
+continuation must bind a supported sanitized source before any candidate runs.
+The generic-web one-action rebuild, restore and predecessor retirement finish
+line remains open on [#4023](https://github.com/cbusillo/launchplane/issues/4023),
+under the recorded Q1158 decision on [#5453](https://github.com/cbusillo/launchplane/issues/5453).

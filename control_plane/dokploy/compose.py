@@ -12,6 +12,7 @@ from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.preview_gateway import (
+    PREVIEW_EVENTED_PORT,
     PREVIEW_GATEWAY_PROGRAM,
     PREVIEW_GATEWAY_SERVICE,
     preview_backend_alias,
@@ -62,6 +63,7 @@ def discard_unused_dokploy_network(actual: dict[str, Any], *, expected: dict[str
         actual.pop("networks")
 
 
+ODOO_DEFAULT_WORKERS = 6
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
 ODOO_DATABASE_DATA_DIRECTORY = "/var/lib/postgresql/data"
 ODOO_DATABASE_IMAGE = "postgres:17"
@@ -85,6 +87,7 @@ def _render_odoo_web_traefik_labels(
     runtime_port: int,
     domain_certificate_type: Literal["none", "letsencrypt"],
     isolated_testing: bool = False,
+    evented_port: int | None = None,
 ) -> str:
     if not domain_hosts:
         return ""
@@ -109,34 +112,45 @@ def _render_odoo_web_traefik_labels(
             )
         seen_hosts.add(domain_host)
         route_name = _traefik_route_name(domain_host=domain_host)
-        lines.extend(
-            [
-                f'      - "traefik.http.routers.{route_name}-web.rule=Host(`{domain_host}`)"',
-                f'      - "traefik.http.routers.{route_name}-web.entrypoints=web"',
-                f'      - "traefik.http.routers.{route_name}-web.service={route_name}-web"',
-                f'      - "traefik.http.routers.{route_name}-web.middlewares=redirect-to-https@file"',
-                f'      - "traefik.http.services.{route_name}-web.loadbalancer.server.port={runtime_port}"',
-                f'      - "traefik.http.routers.{route_name}-websecure.rule=Host(`{domain_host}`)"',
-                f'      - "traefik.http.routers.{route_name}-websecure.entrypoints=websecure"',
-                f'      - "traefik.http.routers.{route_name}-websecure.service={route_name}-websecure"',
-                f'      - "traefik.http.routers.{route_name}-websecure.tls=true"',
-            ]
-        )
-        if isolated_testing:
-            middleware = route_name + "-copy-connections"
+        host_rule = f"Host(`{domain_host}`)"
+        routes = [(route_name, host_rule, runtime_port)]
+        if evented_port is not None:
+            routes.append(
+                (
+                    route_name + "-websocket",
+                    host_rule + " && (Path(`/websocket`) || PathPrefix(`/websocket/`))",
+                    evented_port,
+                )
+            )
+        for router_name, rule, port in routes:
             lines.extend(
                 [
-                    f'      - "traefik.http.middlewares.{middleware}.headers.contentsecuritypolicy={TESTING_CONNECTION_CSP}"',
-                    f'      - "traefik.http.routers.{route_name}-websecure.middlewares={middleware}"',
+                    f'      - "traefik.http.routers.{router_name}-web.rule={rule}"',
+                    f'      - "traefik.http.routers.{router_name}-web.entrypoints=web"',
+                    f'      - "traefik.http.routers.{router_name}-web.service={router_name}-web"',
+                    f'      - "traefik.http.routers.{router_name}-web.middlewares=redirect-to-https@file"',
+                    f'      - "traefik.http.services.{router_name}-web.loadbalancer.server.port={port}"',
+                    f'      - "traefik.http.routers.{router_name}-websecure.rule={rule}"',
+                    f'      - "traefik.http.routers.{router_name}-websecure.entrypoints=websecure"',
+                    f'      - "traefik.http.routers.{router_name}-websecure.service={router_name}-websecure"',
+                    f'      - "traefik.http.routers.{router_name}-websecure.tls=true"',
                 ]
             )
-        if domain_certificate_type == "letsencrypt":
+            if isolated_testing:
+                middleware = router_name + "-copy-connections"
+                lines.extend(
+                    [
+                        f'      - "traefik.http.middlewares.{middleware}.headers.contentsecuritypolicy={TESTING_CONNECTION_CSP}"',
+                        f'      - "traefik.http.routers.{router_name}-websecure.middlewares={middleware}"',
+                    ]
+                )
+            if domain_certificate_type == "letsencrypt":
+                lines.append(
+                    f'      - "traefik.http.routers.{router_name}-websecure.tls.certresolver=letsencrypt"'
+                )
             lines.append(
-                f'      - "traefik.http.routers.{route_name}-websecure.tls.certresolver=letsencrypt"'
+                f'      - "traefik.http.services.{router_name}-websecure.loadbalancer.server.port={port}"'
             )
-        lines.append(
-            f'      - "traefik.http.services.{route_name}-websecure.loadbalancer.server.port={runtime_port}"'
-        )
     return "\n".join(lines) + "\n"
 
 
@@ -177,9 +191,11 @@ def render_odoo_raw_compose_file(
     domain_certificate_type: Literal["none", "letsencrypt"] = "none",
     preview_filestore: dict[str, object] | None = None,
     preview_identity: RuntimeIdentity | None = None,
+    preview_workers: int | None = None,
 ) -> str:
     if preview_identity is not None and (
         publish_host_ports
+        or runtime_port == PREVIEW_EVENTED_PORT
         or mount_workflow_ssh
         or preview_identity.environment_kind != "preview"
         or not preview_identity.preview_generation_id
@@ -211,11 +227,18 @@ def render_odoo_raw_compose_file(
     )
     if hold_web_until_integration_readback:
         web_command = json.dumps(web_command)
+    if preview_workers is not None and preview_workers < 0:
+        raise click.ClickException("Preview Odoo workers cannot be negative.")
+    effective_preview_workers = ODOO_DEFAULT_WORKERS if preview_workers is None else preview_workers
+    evented_backend_port = runtime_port if effective_preview_workers == 0 else PREVIEW_EVENTED_PORT
     web_route_labels = _render_odoo_web_traefik_labels(
         domain_hosts=domain_hosts,
         runtime_port=runtime_port,
         domain_certificate_type=domain_certificate_type,
         isolated_testing=isolated_testing,
+        evented_port=PREVIEW_EVENTED_PORT
+        if preview_identity is not None or preview_workers
+        else None,
     )
     web_host_ports = ""
     if publish_host_ports:
@@ -251,6 +274,7 @@ def render_odoo_raw_compose_file(
         if isolated_testing or not publish_host_ports
         else '    extra_hosts:\n      - "host.docker.internal:host-gateway"\n'
     )
+    workers = f"${{ODOO_WORKERS:-{ODOO_DEFAULT_WORKERS}}}"
     cron_threads = '"0"' if isolated_testing else "${ODOO_MAX_CRON_THREADS:-2}"
     extra_secrets = (
         "" if isolated_testing else "secrets:\n  github_token:\n    environment: GITHUB_TOKEN\n"
@@ -281,7 +305,7 @@ x-odoo-env: &odoo-env
   ODOO_ADMIN_PASSWORD: ${{ODOO_ADMIN_PASSWORD:-}}
   ODOO_DB_MAXCONN: ${{ODOO_DB_MAXCONN:-44}}
   ODOO_MAX_CRON_THREADS: {cron_threads}
-  ODOO_WORKERS: ${{ODOO_WORKERS:-6}}
+  ODOO_WORKERS: {workers}
   ODOO_LIMIT_TIME_CPU: ${{ODOO_LIMIT_TIME_CPU:-600}}
   ODOO_LIMIT_TIME_REAL: ${{ODOO_LIMIT_TIME_REAL:-1800}}
   ODOO_LIMIT_TIME_REAL_CRON: ${{ODOO_LIMIT_TIME_REAL_CRON:-1800}}
@@ -448,7 +472,11 @@ networks:
             "pull_policy": "always",
             "restart": "unless-stopped",
             "entrypoint": ["/venv/bin/python3", "-I", "-S", "-c"],
-            "command": [PREVIEW_GATEWAY_PROGRAM.replace("$", "$$"), str(runtime_port)],
+            "command": [
+                PREVIEW_GATEWAY_PROGRAM.replace("$", "$$"),
+                str(runtime_port),
+                str(evented_backend_port),
+            ],
             "environment": {
                 "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": runtime_identity_env(preview_identity)[
                     "LAUNCHPLANE_RUNTIME_IDENTITY_JSON"

@@ -122,16 +122,6 @@ class PreviewIdleTests(unittest.TestCase):
         )
         self.assertFalse(gateway.get("volumes"))
         self.assertFalse(gateway.get("env_file"))
-        baseline = yaml.safe_load(
-            render_odoo_raw_compose_file(
-                image_reference=identity.image_reference,
-                hold_web_until_integration_readback=True,
-                domain_hosts=("preview.example.invalid",),
-                publish_host_ports=False,
-                mount_workflow_ssh=False,
-            )
-        )["services"]["web"]
-        self.assertEqual(gateway["labels"], baseline["labels"])
         web_labels = dict(label.split("=", 1) for label in services["web"]["labels"])
         self.assertEqual(web_labels.get("traefik.enable"), "false")
         self.assertEqual(set(gateway["networks"]), set(services["web"]["networks"]))

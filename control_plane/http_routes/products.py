@@ -43,6 +43,8 @@ from control_plane.contracts.product_incident_read_model import (
     ProductEnvironmentIncidentList,
     ProductIncidentDetail,
     ProductIncidentReadModelCapabilityError,
+    ProductIncidentOrder,
+    ProductIncidentQueryError,
     ProductIncidentReferenceUnavailableError,
     ProductIncidentStatusFilter,
     build_product_environment_incident_detail,
@@ -1404,6 +1406,8 @@ def register_product_environment_read_routes(
         status: Annotated[ProductIncidentStatusFilter, Query()] = "all",
         limit: Annotated[int, Query(ge=1, le=50)] = 20,
         historical_context: Annotated[str, Query(max_length=200)] = "",
+        order: Annotated[ProductIncidentOrder, Query()] = "attention",
+        cursor: Annotated[str | None, Query(max_length=4096)] = None,
     ) -> ProductEnvironmentIncidentsResponse:
         trace_id = common.next_trace_id()
         incident_scope = _build_product_incident_scope(
@@ -1424,7 +1428,16 @@ def register_product_environment_read_routes(
                 status=status,
                 limit=limit,
                 scope=incident_scope,
+                order=order,
+                cursor=cursor,
             )
+        except ProductIncidentQueryError as error:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
         except ProductIncidentReferenceUnavailableError as error:
             raise common.http_error(
                 status_code=503,
@@ -1611,11 +1624,12 @@ def register_product_environment_read_routes(
         normalized_driver_id = driver_id.strip()
         try:
             profile_store = require_product_profile_list_store(record_store)
-            product_profile_payload = (
-                control_plane_product_read_service.build_product_profile_list_service_payload(
-                    record_store=profile_store,
-                    driver_id=normalized_driver_id,
+            profiles = tuple(
+                profile
+                for profile in profile_store.list_product_profile_records(
+                    driver_id=normalized_driver_id
                 )
+                if profile.is_active
             )
         except TypeError as error:
             raise common.http_error(
@@ -1624,10 +1638,6 @@ def register_product_environment_read_routes(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        payload_profiles = cast(list[object], product_profile_payload["profiles"])
-        profiles = tuple(
-            LaunchplaneProductProfileRecord.model_validate(profile) for profile in payload_profiles
-        )
         if not service_reader and identity is not None:
             profiles = tuple(
                 profile
@@ -1641,7 +1651,7 @@ def register_product_environment_read_routes(
             )
         return ProductProfileListResponse(
             trace_id=trace_id,
-            driver_id=str(product_profile_payload["driver_id"]),
+            driver_id=normalized_driver_id,
             profiles=profiles,
             coverage=read_coverage(
                 profile_store,

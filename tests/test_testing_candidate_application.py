@@ -42,6 +42,7 @@ from tests import test_testing_candidate_allocation as allocation_tests
 from tests.support.stores import _write_runtime_key_safety_policy
 from tests.test_dokploy_compose_environment import (
     VALUES,
+    ROOT,
     consumer_commands_available,
     consume_compose_environment,
 )
@@ -472,6 +473,17 @@ class CandidateApplicationTests(unittest.TestCase):
         self.assertNotEqual(
             application.candidate_configuration_sha256({"env": legacy}),
             application.candidate_configuration_sha256({"env": encoded}),
+        )
+        saved = (ROOT / "tests/fixtures/dokploy-compose/legacy-literal.env").read_text()
+        with self.assertRaises(ValueError):
+            application.require_candidate_configuration(
+                self.allocation,
+                replace(self.compiled, runtime_environment=api.parse_dokploy_env_text(saved)),
+                {**self.provider_state, "env": saved},
+            )
+        self.assertNotEqual(
+            application.candidate_configuration_sha256({"env": saved}),
+            application.candidate_configuration_sha256({"env": "# provider comment\n" + saved}),
         )
         if consumer_commands_available():
             consumed, _ = consume_compose_environment(wire, tuple(VALUES))

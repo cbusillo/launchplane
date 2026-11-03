@@ -1,11 +1,13 @@
-"""Fixed read-only qualification of a fresh single-replica application runtime."""
-
 import hashlib
+import inspect
+import json
+import math
 import time
 from collections.abc import Callable
 from control_plane.contracts.promotion_record import HealthcheckEvidence
-from typing import Any
+from typing import Any, Literal, NamedTuple
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.retained_volume_capture import _batched_docker_inspect
 
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
@@ -14,6 +16,7 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.dokploy.native_copy_stream import _read_remote, NATIVE_PROGRAM_SOURCE_SITE_LIMIT
 from control_plane.testing_application_capabilities import runtime_capability_program_header
+from control_plane.testing_application_capabilities import single_local_swarm_node
 
 
 class VerifiedApplicationRuntimeFailure(ValueError):
@@ -22,6 +25,362 @@ class VerifiedApplicationRuntimeFailure(ValueError):
     def __init__(self, evidence: dict[str, Any]) -> None:
         super().__init__("The attributed original application failed private qualification.")
         self.evidence = evidence
+
+
+class ApplicationStateClock(NamedTuple):
+    boot_id: str
+    monotonic: float
+    received_at: float
+
+
+def application_service_inventory(
+    docker: Callable[..., str],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    services = docker("service", "ls", "-q").splitlines()
+
+    def load(*arguments: str) -> object:
+        return json.loads(docker(*arguments))
+
+    return services, list(_batched_docker_inspect("service", services, load).values())
+
+
+def require_application_runtime_absent(
+    docker: Callable[..., str], application: str, service_id: str
+) -> None:
+    nodes = single_local_swarm_node(docker)
+    services, rows = application_service_inventory(docker)
+    if (
+        not application
+        or not service_id
+        or any(
+            row.get("ID") == service_id or row.get("Spec", {}).get("Name") == application
+            for row in rows
+        )
+    ):
+        raise ValueError("The original application service is present or unobserved.")
+    containers = docker("ps", "-aq", "--no-trunc").splitlines()
+    rows = json.loads(docker("inspect", *containers)) if containers else []
+    if (
+        not isinstance(rows, list)
+        or any(not isinstance(row, dict) for row in rows)
+        or len(set(containers)) != len(containers)
+        or len(rows) != len(containers)
+        or {row.get("Id") for row in rows} != set(containers)
+    ):
+        raise ValueError("The original application container inventory is incomplete.")
+    for row in rows:
+        labels = row.get("Config", {}).get("Labels")
+        if labels is not None and not isinstance(labels, dict):
+            raise ValueError("Application container ownership is unobserved.")
+        labels = labels or {}
+        if (
+            labels.get("com.docker.swarm.service.id") == service_id
+            or labels.get("com.docker.swarm.service.name") == application
+        ):
+            raise ValueError("An original application container remains present.")
+    if (
+        docker("service", "ls", "-q").splitlines() != services
+        or docker("ps", "-aq", "--no-trunc").splitlines() != containers
+        or single_local_swarm_node(docker) != nodes
+    ):
+        raise ValueError("The original application absence inventory changed.")
+
+
+def application_service_mounts_match(mounts: object, volume_name: str, mount_path: str) -> bool:
+    if not volume_name:
+        return mounts in (None, [])
+    if not isinstance(mounts, list) or len(mounts) != 1 or not isinstance(mounts[0], dict):
+        return False
+    mount = mounts[0]
+    options = mount.get("VolumeOptions") or {}
+    if not isinstance(options, dict):
+        return False
+    driver = options.get("DriverConfig")
+    return (
+        mount.get("Type") == "volume"
+        and mount.get("Source") == volume_name
+        and mount.get("Target") == mount_path
+        and mount.get("ReadOnly") in (None, False)
+        and options.get("Subpath") in (None, "")
+        and (
+            driver is None
+            or isinstance(driver, dict)
+            and driver.get("Name") in (None, "", "local")
+            and driver.get("Options") in (None, {})
+        )
+    )
+
+
+def require_application_runtime_state(
+    docker: Callable[..., str],
+    application: str,
+    service_id: str,
+    volume_name: str = "",
+    mount_path: str = "",
+    volume_binding: str = "",
+) -> None:
+    if (
+        not application
+        or bool(volume_name) != bool(mount_path)
+        or bool(volume_name) != bool(volume_binding)
+    ):
+        raise ValueError("The original application identity is required.")
+    nodes = single_local_swarm_node(docker)
+    _, services = application_service_inventory(docker)
+    selected = [
+        row
+        for row in services
+        if row.get("ID") == service_id or row.get("Spec", {}).get("Name") == application
+    ]
+    volume = None
+    if volume_name:
+        volumes = json.loads(docker("volume", "inspect", volume_name))
+        if not isinstance(volumes, list) or len(volumes) != 1 or not isinstance(volumes[0], dict):
+            raise ValueError("The original state volume is unobserved.")
+        volume = volumes[0]
+        volume_labels = volume.get("Labels") or {}
+        if (
+            volume.get("Name") != volume_name
+            or volume.get("Driver") != "local"
+            or volume.get("Options") not in (None, {})
+            or not isinstance(volume_labels, dict)
+            or volume_labels.get("io.launchplane.testing-resources") != volume_binding
+            or not isinstance(volume.get("Mountpoint"), str)
+            or not volume["Mountpoint"]
+        ):
+            raise ValueError("The original state volume provenance changed.")
+
+    def volume_unchanged() -> bool:
+        return volume is None or json.loads(docker("volume", "inspect", volume_name)) == [volume]
+
+    if not selected and service_id:
+        require_application_runtime_absent(docker, application, service_id)
+        if not volume_unchanged():
+            raise ValueError("The original state volume changed during observation.")
+        return
+    if len(selected) != 1:
+        raise ValueError("The original stateless service is unavailable.")
+    service = selected[0]
+    if (
+        service.get("Spec", {}).get("Name") != application
+        or service_id
+        and service.get("ID") != service_id
+    ):
+        raise ValueError("The original stateless service identity changed.")
+    if not application_service_mounts_match(
+        service.get("Spec", {}).get("TaskTemplate", {}).get("ContainerSpec", {}).get("Mounts"),
+        volume_name,
+        mount_path,
+    ):
+        raise ValueError("The original service state differs from its captured declaration.")
+    tasks = docker("service", "ps", "--no-trunc", "-q", application).splitlines()
+    if len(set(tasks)) != len(tasks):
+        raise ValueError("The original task inventory is ambiguous.")
+    for identifier in tasks:
+        rows = json.loads(docker("inspect", "--type", "task", identifier))
+        if (
+            not isinstance(rows, list)
+            or len(rows) != 1
+            or rows[0].get("ID") != identifier
+            or rows[0].get("ServiceID") != service["ID"]
+            or not application_service_mounts_match(
+                rows[0].get("Spec", {}).get("ContainerSpec", {}).get("Mounts"),
+                volume_name,
+                mount_path,
+            )
+        ):
+            raise ValueError("The original task has mounts or unobserved custody.")
+    containers = docker("ps", "-aq", "--no-trunc").splitlines()
+    rows = json.loads(docker("inspect", *containers)) if containers else []
+    if (
+        not isinstance(rows, list)
+        or len(rows) != len(containers)
+        or any(not isinstance(row, dict) for row in rows)
+        or len(set(containers)) != len(containers)
+        or {row.get("Id") for row in rows} != set(containers)
+    ):
+        raise ValueError("The stateless application container inventory is incomplete.")
+    for row in rows:
+        labels = row.get("Config", {}).get("Labels")
+        if labels is not None and not isinstance(labels, dict):
+            raise ValueError("Container ownership is incomplete.")
+        labels = labels or {}
+        if (
+            labels.get("com.docker.swarm.service.id") == service["ID"]
+            or labels.get("com.docker.swarm.service.name") == application
+        ):
+            mounts = row.get("Mounts")
+            if volume is None:
+                if mounts != []:
+                    raise ValueError("An actual stateless container has persistent mounts.")
+            elif (
+                not isinstance(mounts, list)
+                or len(mounts) != 1
+                or not isinstance(mounts[0], dict)
+                or mounts[0].get("Type") != "volume"
+                or mounts[0].get("Name") != volume_name
+                or mounts[0].get("Destination") != mount_path
+                or mounts[0].get("RW") is not True
+                or mounts[0].get("Source") != volume["Mountpoint"]
+            ):
+                raise ValueError("An actual container's captured state changed.")
+    if (
+        json.loads(docker("service", "inspect", service["ID"])) != selected
+        or docker("service", "ps", "--no-trunc", "-q", application).splitlines() != tasks
+        or docker("ps", "-aq", "--no-trunc").splitlines() != containers
+        or single_local_swarm_node(docker) != nodes
+        or not volume_unchanged()
+    ):
+        raise ValueError("The original stateless runtime changed during observation.")
+
+
+def inspect_application_state(
+    *,
+    host: str,
+    token: str,
+    server_id: str,
+    application: str,
+    mode: Literal["absent", "stateless", "volume"],
+    service_id: str = "",
+    volume_name: str = "",
+    mount_path: str = "",
+    volume_binding: str = "",
+    include_clock: bool = False,
+) -> ApplicationStateClock | None:
+    frames: list[dict[str, object]] = []
+    payload: dict[str, object] = {
+        "application": application,
+        "service_id": service_id,
+        "mode": mode,
+    }
+    if volume_name:
+        payload.update(
+            volume_name=volume_name, mount_path=mount_path, volume_binding=volume_binding
+        )
+    if include_clock:
+        payload["include_clock"] = True
+    _read_remote(
+        host=host,
+        token=token,
+        server_id=server_id,
+        program=APPLICATION_STATE_PROGRAM,
+        payload=payload,
+        receive=frames.append,
+        timeout_seconds=120,
+    )
+    if include_clock and len(frames) == 1:
+        frame = dict(frames[0])
+        boot_id, monotonic = frame.pop("boot_id", None), frame.pop("monotonic", None)
+        if (
+            frame == {"type": "complete", **payload}
+            and isinstance(boot_id, str)
+            and boot_id
+            and isinstance(monotonic, int | float)
+            and not isinstance(monotonic, bool)
+            and math.isfinite(monotonic)
+            and monotonic > 0
+        ):
+            return ApplicationStateClock(boot_id, float(monotonic), time.time())
+    elif frames == [{"type": "complete", **payload}]:
+        return None
+    raise ValueError("Physical predecessor state is unobserved.")
+
+
+def wait_for_application_runtime_absence(
+    docker: Callable[..., str], application: str, service_id: str
+) -> None:
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            require_application_runtime_absent(docker, application, service_id)
+            return
+        except ValueError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(1)
+
+
+APPLICATION_STATE_PROGRAM_HEADER = (
+    "import base64,json,subprocess,sys,time\n"
+    "from collections.abc import Callable,Sequence\nfrom typing import Any\nfrom pathlib import Path\n"
+    + inspect.getsource(_batched_docker_inspect)
+    + inspect.getsource(single_local_swarm_node)
+    + inspect.getsource(application_service_inventory)
+    + inspect.getsource(require_application_runtime_absent)
+    + inspect.getsource(application_service_mounts_match)
+    + inspect.getsource(require_application_runtime_state)
+    + inspect.getsource(wait_for_application_runtime_absence)
+    + r"""
+def docker(*arguments):
+    result=subprocess.run(['docker',*arguments],capture_output=True,text=True,timeout=45,check=True)
+    if len(result.stdout)>4*1024*1024: raise ValueError('bounded inventory unavailable')
+    return result.stdout
+spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
+"""
+)
+
+APPLICATION_STATE_PROGRAM = (
+    APPLICATION_STATE_PROGRAM_HEADER
+    + r"""
+if (spec['mode']=='volume') != bool(spec.get('volume_name')): raise ValueError('state observation mode differs from its declaration')
+if spec['mode']=='absent': require_application_runtime_absent(docker,spec['application'],spec['service_id'])
+elif spec['mode'] in {'stateless','volume'}: require_application_runtime_state(docker,spec['application'],spec['service_id'],spec.get('volume_name',''),spec.get('mount_path',''),spec.get('volume_binding',''))
+else: raise ValueError('unsupported application state observation')
+frame={'type':'complete',**spec}
+if spec.get('include_clock') is True:
+    frame.update(boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),monotonic=time.monotonic())
+print(sys.argv[2]+json.dumps(frame))
+"""
+)
+
+APPLICATION_RETIREMENT_PROGRAM = (
+    APPLICATION_STATE_PROGRAM_HEADER
+    + r"""
+if spec['mode']!='retire' or not spec['service_id']: raise ValueError('original predecessor identity required')
+_,services=application_service_inventory(docker)
+if any(row.get('ID')==spec['service_id'] or row.get('Spec',{}).get('Name')==spec['application'] for row in services):
+    require_application_runtime_state(docker,spec['application'],spec['service_id'],spec.get('volume_name',''),spec.get('mount_path',''),spec.get('volume_binding',''))
+    docker('service','rm',spec['service_id'])
+wait_for_application_runtime_absence(docker,spec['application'],spec['service_id'])
+print(sys.argv[2]+json.dumps({'type':'complete',**spec}))
+"""
+)
+
+
+def retire_application_runtime(
+    *,
+    host: str,
+    token: str,
+    server_id: str,
+    application: str,
+    service_id: str,
+    dispatch_guard: Callable[[Callable[[], None]], None],
+    volume_name: str = "",
+    mount_path: str = "",
+    volume_binding: str = "",
+) -> None:
+    frames: list[dict[str, object]] = []
+    payload: dict[str, object] = {
+        "application": application,
+        "service_id": service_id,
+        "mode": "retire",
+    }
+    if volume_name:
+        payload.update(
+            volume_name=volume_name, mount_path=mount_path, volume_binding=volume_binding
+        )
+    _read_remote(
+        host=host,
+        token=token,
+        server_id=server_id,
+        program=APPLICATION_RETIREMENT_PROGRAM,
+        payload=payload,
+        receive=frames.append,
+        timeout_seconds=120,
+        dispatch_guard=dispatch_guard,
+    )
+    if frames != [{"type": "complete", **payload}]:
+        raise ValueError("The original predecessor retirement is unobserved.")
 
 
 def inspect_application_runtime(

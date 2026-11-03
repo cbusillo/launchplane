@@ -786,7 +786,6 @@ class GitHubHumanAuthTests(unittest.TestCase):
         ):
             config = load_github_oauth_config_from_env()
 
-        self.assertIsNotNone(config)
         assert config is not None
         self.assertFalse(config.cookie_secure)
         self.assertEqual(config.public_url, "https://launchplane.example")
@@ -1915,31 +1914,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertRegex(payload["semantic_digest_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(payload["provenance"]["source_commit_sha"], "a" * 40)
 
-    def test_service_export_owner_control_contract_writes_conformance_artifact(self) -> None:
-        runner = CliRunner()
-        with TemporaryDirectory() as temporary_directory_name:
-            output_path = Path(temporary_directory_name) / "owner-control-contract.json"
-
-            result = runner.invoke(
-                CLI_MAIN,
-                [
-                    "service",
-                    "export-owner-control-contract",
-                    "--output",
-                    str(output_path),
-                ],
-            )
-            payload = json.loads(output_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertEqual(result.output.strip(), str(output_path))
-        self.assertEqual(payload["schema_version"], 6)
-        self.assertTrue(payload["golden_vectors"])
-        self.assertTrue(payload["verification_state_vectors"])
-        self.assertTrue(payload["challenge_lifecycle_vectors"])
-        self.assertTrue(payload["provenance_vectors"])
-        self.assertTrue(payload["negative_provenance_vectors"])
-
     def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -2900,7 +2874,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(apply_payload["result"]["report"]["counts"], {"created": 1})
         self.assertEqual(audit_status, 202)
         self.assertEqual(audit_payload["result"]["report"]["counts"], {"complete": 1})
-        self.assertIsNotNone(provider_target)
         assert provider_target is not None
         self.assertEqual(provider_target.target_id, "app-verireel-testing")
 

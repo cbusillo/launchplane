@@ -9,7 +9,6 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-import click
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -35,7 +34,6 @@ from tests.test_merge_train_read_cost import _Provider
 from tests.test_merge_train_planning_completion import (
     PlanningProvider,
     _BOT,
-    _LABELS,
     _REPO,
     _receipt,
 )
@@ -173,7 +171,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
         assert isinstance(body, dict)
         self.assertEqual(body["repository_ids"], [self.source.github_app.repository_id])
 
-    def test_minted_native_token_can_complete_planning_label_projection(self) -> None:
+    def test_minted_native_token_can_complete_planning_status_read(self) -> None:
         self.repository = self.returned_repository = _REPO
         planning = PlanningProvider()
 
@@ -186,11 +184,6 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
             return self.provider(request, **kwargs)
 
         def planning_request(**kwargs: Any) -> object:
-            if kwargs.get("method", "GET") != "GET" and "/labels" in str(kwargs["path"]):
-                if self.token_permissions.get("issues") != "write":
-                    raise click.ClickException("Issue-label capability refused") from HTTPError(
-                        str(kwargs["path"]), 403, "Forbidden", Message(), None
-                    )
             self.assertEqual(kwargs["token"], issued)
             return planning.request(**kwargs)
 
@@ -223,10 +216,7 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
             )
         self.assertEqual(record.delivery_status, "delivered")
         self.assertTrue(_receipt(record)["ok"])
-        self.assertEqual(
-            {label["name"] for label in planning.issue["labels"]},
-            {_LABELS["plan"], _LABELS["done"], "bug"},
-        )
+        self.assertFalse(planning.writes)
 
     def test_cached_native_tokens_reuse_validators_until_key_rotation(
         self,
@@ -380,7 +370,6 @@ class MergeTrainGitHubTokenTests(unittest.TestCase):
                         control_plane_root=Path("/unused"),
                         include_permissions=True,
                     )
-                    self.assertIsInstance(credential, GitHubAppInstallationToken)
                     assert isinstance(credential, GitHubAppInstallationToken)
                     issued = credential.token
                     cached = resolve_merge_train_github_token(

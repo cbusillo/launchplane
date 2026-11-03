@@ -80,7 +80,11 @@ from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
     DurableOperationAuthorizationGuard,
 )
-from control_plane.merge_train_release_hold import MergeTrainReleaseHold, merge_train_release_hold
+from control_plane.merge_train_release_hold import (
+    MergeTrainReleaseHold,
+    MergeTrainReleaseHoldStore,
+    merge_train_release_hold,
+)
 from control_plane.release_review import build_release_review
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
@@ -2374,6 +2378,13 @@ class ClientReleaseTests(unittest.TestCase):
 
         self.assertEqual(merge_train_release_hold(self.store, "Example/Site"), held)
         self.assertEqual(merge_train_release_hold(self.store, "example/shared-addons"), held)
+        artifact = self.store.read_artifact_manifest(accepted.checklist.candidate.artifact_id)
+        repositories = {
+            image.source_repository for image in artifact.build_provenance.base_images
+        } | {tool.source_repository for tool in artifact.build_provenance.build_tools}
+        store = cast(MergeTrainReleaseHoldStore, cast(object, self.store))
+        for repository in repositories:
+            self.assertEqual(merge_train_release_hold(store, repository), held)
         self.assertIsNone(merge_train_release_hold(self.store, "example/launchplane"))
         (backup_id,) = self.advance()
         self.assertEqual(merge_train_release_hold(self.store, "example/site"), held)

@@ -23,6 +23,101 @@ The current Launchplane surface implements report-only evidence, local
 apply-boundary planning, durable audit evidence, and a constrained self-hosted
 ops executor for the approved first lane.
 
+## Record-backed adapter qualification
+
+The service has a source integration for the existing executor. This does not
+activate a live migration or retire the Actions workflow below. Keep its
+settings and credentials until supported service-only key adoption, binding
+readback, isolated behavior qualification and rollback proof are complete.
+
+The existing service runtime-setting review/apply path accepts
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_CONFIGURATION` in the exact `launchplane`
+context's `RuntimeEnvironmentRecord`. Its JSON value is validated by
+`RunnerHostHygieneConfiguration` and the existing executor contract. It has no
+file, process-environment or inherited-record fallback. The projection maps the
+existing settings as follows:
+
+| Existing hygiene setting suffix | Configuration field |
+| --- | --- |
+| `HOST` | `host_name` |
+| `EXECUTION_LANE` | `execution_lane` |
+| `SERVICE_USER` | `service_user` |
+| `RETAINED_WARM_BUILDERS` | `retained_warm_builders` |
+| `RUNNER_WORKDIR_ROOTS` | `runner_workdir_roots` |
+| `GENERATED_RUN_CACHE_ROOTS` | `generated_run_cache_roots` |
+| `GITHUB_IDLE_BINDINGS` | `github_idle_bindings` |
+| `BUILDKIT_CACHE_BUDGETS` | `buildkit_cache_budgets` |
+| `DEFAULT_CACHE_BUDGET_BYTES` | `default_cache_budget_bytes` |
+| `GITHUB_APP_CLIENT_ID` | `github_app_client_id` |
+
+The suffixes above share `LAUNCHPLANE_RUNNER_HOST_HYGIENE_`. The record also
+names the existing scheduling `repository_scope` and the existing, separately
+approved `allowed_buildkit_state_volumes`. Arrays use the executor's structured
+root and binding fields rather than comma-separated workflow strings. Store
+the complete host manifest; local service-unit discovery still rejects extra
+or omitted services. Named budgets still select the Sunday builder actions.
+Changing the budget list is therefore a scope change, not routine tuning.
+
+`POST /v1/service/runner-host-hygiene/dispatch` returns the normalized configuration
+digest, execution lane and validated executor requests. It accepts `report`,
+`maintenance` and `manual` intent. Scheduled intent accepts no manual overrides;
+scheduled audit keys use the service's UTC date, host and authenticated run ID.
+Manual intent selects existing targets without replacing stored roots,
+retained builders, budgets or allowlists. Both this route and
+`POST /v1/service/runner-host-hygiene/metadata` require the existing authorized
+hygiene workflow's `runner_host_hygiene_audit.write` identity, its signed run ID
+and the stored scheduling repository. These reads grant no cleanup authority.
+
+The metadata adapter uses the existing App through one exact, configured
+`launchplane_service` context SecretRecord/SecretBinding under
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY`. Global, instance and
+ambiguous key bindings fail closed. It verifies the App client ID, installation
+account, existing installation grants and coverage of every runtime-derived
+repository. Every issued token is limited to Actions/Administration/Metadata read;
+extra existing installation permissions require no grant change. Short-lived
+read tokens stay in the service and are revoked after each metadata request,
+including failed scope checks. One idle request reads the complete host sample
+with one token. The executor accepts that whole sample at its observation
+boundary and applies its existing per-binding provenance checks, including on
+unavailable samples. Legacy local binding readers remain supported. The new
+consumer retains no sample or token cache.
+Only bounded typed idle samples or generated-cache run states leave it. Each
+sample rechecks the configuration digest; local process, open-handle and
+service-unit evidence remain separate executor observations.
+
+The consumer entrypoint is
+`uv run python -m control_plane.workflows.runner_host_hygiene_service_executor`.
+It takes `--intent-file`, `--service-url`, `--execution-lane`,
+`--audit-spool-root` and `--artifact-directory`; intent is the dispatch request
+JSON, including the current runner name and a manual audit key when applicable.
+It authenticates with the existing workflow OIDC path and verifies the local host/user and scheduling
+repository before running any action. A minimal scheduler must still select
+the explicit execution lane **before** starting the job. Retain that bootstrap
+until a service scheduler selects it; a job-step lookup cannot set `runs-on`.
+
+The consumer attempts every dispatched action and preserves the existing durable
+audit envelopes and accepted terminal fields. Like the existing executor CLI,
+it fails for invocation exceptions, pending audit delivery or a mutation that
+does not complete. Run the existing `runner-host-hygiene-qualify` command on the
+per-action artifact files to assess report and maintenance qualification,
+including report-only and manual dry runs. No helper performs live import or
+settings deletion. Until qualified activation, rollback is the retained
+workflow with its existing settings; do not run both schedulers together.
+
+Use the job's temporary directory for `--artifact-directory`. Before attempting
+any action, the consumer writes `runner-host-hygiene-expected.txt` with every
+expected artifact basename. Pass every listed file to qualification, including
+missing files; a glob can silently omit a failed action. With
+`--artifact-directory "$RUNNER_TEMP"`, the existing qualification command is:
+
+```bash
+audit_args=()
+while IFS= read -r artifact; do
+  audit_args+=(--audit-file "$RUNNER_TEMP/$artifact")
+done < "$RUNNER_TEMP/runner-host-hygiene-expected.txt"
+uv run launchplane runner-host-hygiene-qualify "${audit_args[@]}" --require-qualified
+```
+
 ## Report Contract
 
 The typed contract in `control_plane.contracts.runner_host_hygiene` separates
@@ -299,7 +394,6 @@ The workflow requires these repository variables:
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_HOST`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SERVICE_USER`
-- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RUNNER_WORKDIR_ROOTS`, as comma-separated
   public-key/absolute-path pairs such as `legacy=/srv/runners`. The keys appear
   in evidence; absolute paths remain executor-local runtime input.
@@ -332,22 +426,23 @@ The workflow requires these repository variables:
   client ID for the dedicated runner-host hygiene GitHub App.
 
 `LAUNCHPLANE_RUNNER_HOST_HYGIENE_GITHUB_APP_PRIVATE_KEY` is the repository
-secret for the dedicated runner-host hygiene GitHub App. Install the App only on
-repositories named by the runtime host binding manifest or generated-cache
-roots, with read-only Actions and Administration permissions. Actions reads
+secret for the dedicated runner-host hygiene GitHub App, with read-only Actions
+and Administration permissions. Actions reads
 provide active workflow and job state, while Administration read is needed to
 list self-hosted runner registrations; GitHub adds Metadata read implicitly.
 The workflow derives the exact repository list from runtime inputs, rejects
 cross-repository-owner scopes that cannot be represented by one installation token, and
 mints a short-lived token through the commit-pinned official GitHub action. The
-App installation itself must contain exactly the runtime-derived repository
-set. The workflow validates that set through the installation API using only
-public-safe counts and digests; it does not pass repository names to the token
+App installation must cover every runtime-derived repository. Additional
+repositories under the same GitHub account are supported, including an
+installation on all repositories in that account. The workflow validates coverage through the
+installation API and reports only the required repository count and digest;
+it does not pass repository names to the token
 action because the action logs explicit repository inputs. The token requests
 only Actions read and Administration read, and the action revokes it at job
 completion. There is no PAT, default `GITHUB_TOKEN`, or runner-registration-token
-fallback. Missing App configuration, missing or extra installation coverage, or
-an API that cannot see a named runner fails closed.
+fallback. Missing App configuration, missing required coverage, or an API that
+cannot see a named runner fails closed.
 Organization or enterprise registrations require an equivalent reader before
 they can be listed in the manifest. Generated-cache run-state reads use only
 Actions read. Neither the App nor its installation token grants
@@ -581,7 +676,7 @@ Use this sequence when replacing `chris-testing` or standing up a parallel host:
    by [runner-lane-baseline.md](runner-lane-baseline.md), but keep the
    `chris-testing-ops-gate` label and any production-shared lane label off until
    the host passes readiness and hygiene evidence.
-3. Seed or rebuild the retained warm-builder images on the replacement host.
+3. Seed or rebuild any configured retained images on the replacement host.
    The hygiene executor must be able to observe every value configured in
    `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS` before the host can
    receive the ops-gate label.
@@ -593,7 +688,7 @@ Use this sequence when replacing `chris-testing` or standing up a parallel host:
 5. Run the runner-host hygiene workflow manually with `mutate=false`, no target
    volumes, and a replacement-specific audit key. The run must write an
    accepted planned audit, block only on `mutate_not_requested`, observe the
-   retained warm builders, and include image/volume inventory for the new host.
+   configured retained images, and include image/volume inventory for the new host.
 6. Update the repository variables that define the approved hygiene host,
    execution lane, service user, and retained warm builders only after the new
    host has passing baseline and hygiene dry-run evidence. Keep the old values
@@ -717,6 +812,16 @@ allowlist, target, budget, idle evidence, host lock and durable audit/replay
 path. The configuration projection uses the existing executor request contract;
 the record-backed migration can supply that same input without a new store.
 
+Retained warm-builder references are exact local image references, independent
+of BuildKit cache names. A producer that uses run-specific verification tags
+does not provide a stable image to retain. Remove obsolete image references
+from the existing `RETAINED_WARM_BUILDERS` setting rather than manufacturing
+tags or treating a live builder as proof that a requested image exists. An
+empty list is supported when named cache budgets are configured; their measured
+cache evidence remains required. The record-backed configuration still requires
+the `retained_warm_builders` field, with an explicit empty array in that case.
+Every image reference still configured must exist before and after cleanup.
+
 Reports measure each configured builder using its own container's read-only
 `buildctl du --format '{{json .}}'`. They retain only aggregate counters, never
 raw cache descriptions. The existing complete Docker container inventory also
@@ -790,7 +895,7 @@ own exact audit, without matching today's scheduler key to a prior run.
 For a correction, first run the existing report-only path and retain its accepted
 audit plus complete private service/registration and producer readbacks. Compare
 the complete host fleet with the existing GitHub idle bindings; include every
-service rather than weakening exact-set checks. Use the existing image-inspect
+service required by the complete host check. Use the existing image-inspect
 results to qualify retained references, preserving Docker's normal tag/digest
 resolution. A live builder container does not prove a warm image exists. If a
 producer emits run-specific verification tags, an arbitrary current tag is not a

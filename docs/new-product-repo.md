@@ -46,18 +46,20 @@ as Discord Blue's Every Code bridge port `8787`.
 
 ## Launchplane Records
 
-Onboarding still requires the [existing admin operation](operations.md#conventional-generic-web-onboarding) to create the product
-profile and target records. That is an existing compatibility operation, not a
-product-repository integration contract; no deployed service replacement is
-claimed here. Keep its inputs in admin-owned state, outside the product
-repository and git-tracked history when they contain site-specific runtime
-details.
+Create new generic-web products through the [native target allocation and
+product-record operations](operations.md#native-target-allocation). Resolve
+immutable repository and account IDs and the default branch through the configured
+GitHub helper before preparing the intent. The native service does not look
+these up. Save inputs and reviewed receipts in admin-owned state outside the
+product repository; the runbook includes the metadata lookup and recovery steps.
 
-The service's [native target allocation](operations.md#native-target-allocation)
-binds a new empty testing application to reviewed target and product-record
-plans, with original-actor/key recovery and custody retention. The compatibility
-workflow stays until that path and record apply have deployed qualification;
-local behavior tests alone do not establish operational replacement.
+The native path creates an empty testing application and the product/lane
+records without preview/testing caller grants. `Product Onboarding` now refuses
+new onboarding and remains only for existing workflow allocations' original
+actor/key recovery. Keep its worker pinned until old allocation custody is
+accounted for. Native canonical digests cannot replace old artifact byte digests.
+Target/record qualification does not prove working previews or real-repository
+artifact provenance; verify those through the ordinary event-driven path.
 
 Reapplying an advanced manifest updates its declared settings while preserving
 existing service-owned state, including the Client, live classification,

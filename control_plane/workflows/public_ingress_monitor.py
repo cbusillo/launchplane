@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -920,40 +921,11 @@ def run_public_ingress_monitor_once(
     def probe(target: PublicIngressMonitorTarget) -> PublicIngressObservationRecord:
         _check_monitor_cancelled(should_stop)
         target_http_get = private_get if target.check_kind == "private_http" else public_get
-        if (
-            target.check_kind == "private_http"
-            and target.instance == "testing"
-            and target.private_endpoint_key
-            and _public_url_error(target.health_url) is None
-            and private_http_get is None
-        ):
+        if target.check_kind == "private_http" and private_http_get is None:
 
-            def testing_edge_get(url: str, timeout: int) -> HttpObservation:
-                # Keep existing private DNS/scoped-CA transport. Only a refused
-                # address may continue through the separately verified edge.
-                try:
-                    return fetch_private_health_url(
-                        url, timeout, tls_ca_pem=target.private_tls_ca_pem
-                    )
-                except PublicHttpDestinationError as error:
-                    if error.code != "private_url" or target.private_tls_ca_pem:
-                        raise
-                # Import lazily: the route driver also uses deploy workflows.
-                from control_plane.launchplane_mutations import control_plane_root
-                from control_plane.storage.postgres import PostgresRecordStore
-                from control_plane.testing_private_health import fetch_testing_private_health
-
-                if (
-                    not isinstance(record_store, PostgresRecordStore)
-                    or not target.require_runtime_identity
-                ):
-                    raise PublicHttpDestinationError(
-                        "private_url",
-                        "Testing edge health requires database authority and runtime identity.",
-                    )
-                response = fetch_testing_private_health(
-                    root=control_plane_root(),
-                    store=record_store,
+            def scoped_private_get(url: str, timeout: int) -> HttpObservation:
+                return fetch_scoped_private_health(
+                    record_store=record_store,
                     product=target.product,
                     context=target.context,
                     instance=target.instance,
@@ -961,18 +933,9 @@ def run_public_ingress_monitor_once(
                     endpoint_sha256=target.private_endpoint_sha256,
                     url=url,
                     timeout_seconds=timeout,
+                    tls_ca_pem=target.private_tls_ca_pem,
+                    require_runtime_identity=target.require_runtime_identity,
                 )
-                return _private_health_observation(response)
-
-            target_http_get = testing_edge_get
-        elif (
-            target.check_kind == "private_http"
-            and target.private_tls_ca_pem
-            and private_http_get is None
-        ):
-
-            def scoped_private_get(url: str, timeout: int) -> HttpObservation:
-                return fetch_private_health_url(url, timeout, tls_ca_pem=target.private_tls_ca_pem)
 
             target_http_get = scoped_private_get
         return check_public_ingress_target(
@@ -2758,6 +2721,53 @@ def fetch_private_health_url(
     return _private_health_observation(response)
 
 
+def fetch_scoped_private_health(
+    *,
+    record_store: object,
+    product: str,
+    context: str,
+    instance: str,
+    endpoint_key: str,
+    endpoint_sha256: str,
+    url: str,
+    timeout_seconds: int,
+    tls_ca_pem: str = "",
+    require_runtime_identity: bool,
+    root: Path | None = None,
+) -> HttpObservation:
+    try:
+        return fetch_private_health_url(url, timeout_seconds, tls_ca_pem=tls_ca_pem)
+    except PublicHttpDestinationError as error:
+        if (
+            error.code != "private_url"
+            or instance != "testing"
+            or not endpoint_key
+            or _public_url_error(url) is not None
+            or tls_ca_pem
+        ):
+            raise
+    from control_plane.launchplane_mutations import control_plane_root
+    from control_plane.storage.postgres import PostgresRecordStore
+    from control_plane.testing_private_health import fetch_testing_private_health
+
+    if not isinstance(record_store, PostgresRecordStore) or not require_runtime_identity:
+        raise PublicHttpDestinationError(
+            "private_url", "Testing edge health requires database authority and runtime identity."
+        )
+    response = fetch_testing_private_health(
+        root=root if root is not None else control_plane_root(),
+        store=record_store,
+        product=product,
+        context=context,
+        instance=instance,
+        endpoint_key=endpoint_key,
+        endpoint_sha256=endpoint_sha256,
+        url=url,
+        timeout_seconds=timeout_seconds,
+    )
+    return _private_health_observation(response)
+
+
 def _private_health_observation(response: PublicHttpResponse) -> HttpObservation:
     payload: object = None
     if response.body and "json" in response.header("content-type").lower():
@@ -3283,9 +3293,15 @@ def _deployment_deferring_failure(
         )
     ]
     if (
-        deployment.deploy.status != "pending"
-        or deployment.deploy.finished_at
+        deployment.deploy.status not in {"pending", "pass"}
+        or deployment.deploy.status == "pending"
+        and deployment.deploy.finished_at
         or deployment.failure is not None
+        or deployment.post_deploy_update.status == "fail"
+        or deployment.destination_health.status == "fail"
+        or deployment.destination_health.status == "pass"
+        and deployment.destination_health.verified
+        and deployment.destination_health.runtime_identity_status == "match"
         or owners != [record.product]
         or identity is not None
         and (identity.product, identity.context, identity.instance, identity.deployment_record_id)
@@ -3300,6 +3316,13 @@ def _deployment_deferring_failure(
         return None
     if not started <= observed < started + DEPLOY_INCIDENT_DEFERRAL:
         return None
+    if deployment.deploy.status == "pass":
+        try:
+            finished = _parse_utc_timestamp(deployment.deploy.finished_at)
+        except ValueError:
+            return None
+        if not started <= finished <= observed:
+            return None
     previous = record_store.list_public_ingress_observation_records(
         product=record.product,
         context_name=record.context,
@@ -3308,6 +3331,25 @@ def _deployment_deferring_failure(
         check_kind=record.check_kind,
         limit=50,
     )
+    try:
+        observation_times = {
+            item.record_id: _parse_utc_timestamp(item.observed_at) for item in previous
+        }
+    except ValueError:
+        return None
+    if any(
+        item.purpose == "probe"
+        and item.status == "pass"
+        and started <= observation_times[item.record_id] <= observed
+        and any(
+            target.runtime_identity_status == "match"
+            and target.observed_runtime_identity is not None
+            and target.observed_runtime_identity.deployment_record_id == deployment.record_id
+            for target in item.targets
+        )
+        for item in previous
+    ):
+        return None
     preceding_probe = next(
         (item for item in previous if item.purpose == "probe" and item.status != "skipped"), None
     )
@@ -3316,7 +3358,7 @@ def _deployment_deferring_failure(
         and preceding_probe is None
         or preceding_probe is not None
         and preceding_probe.status == "fail"
-        and _parse_utc_timestamp(preceding_probe.observed_at) < started
+        and observation_times[preceding_probe.record_id] < started
     ):
         return None
     return deployment

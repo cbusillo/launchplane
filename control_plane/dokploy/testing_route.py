@@ -435,6 +435,23 @@ def redirects_to_https(
     return False
 
 
+def testing_route_middlewares_owned(template: dict[str, Any]) -> bool:
+    return not testing_route_external_middlewares(template) and all(
+        not router.get("tls", {}).get("options") for router in template["http"]["routers"].values()
+    )
+
+
+def testing_route_https_redirect(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"redirectScheme"}
+        and isinstance(value["redirectScheme"], dict)
+        and set(value["redirectScheme"]) <= {"scheme", "permanent"}
+        and value["redirectScheme"].get("scheme") == "https"
+        and type(value["redirectScheme"].get("permanent", False)) is bool
+    )
+
+
 def application_load_balancer_configuration(value: Any) -> Any:
     """Compare source and runtime with ordinary Traefik defaults materialized."""
     if not isinstance(value, dict):
@@ -445,6 +462,71 @@ def application_load_balancer_configuration(value: Any) -> Any:
     forwarding = configuration.get("responseForwarding", {})
     if isinstance(forwarding, dict):
         configuration["responseForwarding"] = {"flushInterval": "100ms", **forwarding}
+    return configuration
+
+
+def listener_http_configuration(static: Any, point: str) -> dict[str, Any]:
+    if (
+        not isinstance(static, dict)
+        or not isinstance(static.get("entryPoints"), dict)
+        or point not in static["entryPoints"]
+    ):
+        raise ValueError("The managed proxy's listener configuration is unavailable.")
+    listener = static["entryPoints"][point]
+    if listener is None:
+        return {}
+    if not isinstance(listener, dict):
+        raise ValueError("The managed proxy's listener configuration is unavailable.")
+    http = listener.get("http")
+    if http is None:
+        return {}
+    if not isinstance(http, dict):
+        raise ValueError("The managed proxy's listener configuration is unavailable.")
+    return http
+
+
+def require_independent_listener_middlewares(static: Any, points: tuple[str, ...]) -> None:
+    for point in points:
+        if listener_http_configuration(static, point).get("middlewares"):
+            raise ValueError("The testing listener uses unsupported middleware.")
+
+
+def router_with_listener_defaults(
+    router: dict[str, Any], static_configuration: str
+) -> dict[str, Any]:
+    configuration = router_configuration(router)
+    if not configuration.get("ruleSyntax"):
+        configuration.pop("ruleSyntax", None)
+    if not static_configuration:
+        return configuration
+    static = yaml.safe_load(static_configuration)
+    if not isinstance(static, dict):
+        raise ValueError("The application listener configuration is unavailable.")
+    core = static.get("core") or {}
+    if not isinstance(core, dict):
+        raise ValueError("The application rule syntax configuration is unavailable.")
+    syntax = core.get("defaultRuleSyntax", "")
+    if not isinstance(syntax, str) or syntax not in {"", "default", "v2", "v3"}:
+        raise ValueError("The application rule syntax configuration is unavailable.")
+    if not configuration.get("ruleSyntax") and syntax:
+        configuration["ruleSyntax"] = syntax
+    if configuration.get("tls") is not None:
+        return configuration
+    points = configuration.get("entryPoints")
+    if not isinstance(points, (list, tuple)) or len(points) != 1:
+        raise ValueError("The application listener TLS configuration is unavailable.")
+    http = listener_http_configuration(static, points[0])
+    if "tls" not in http:
+        configuration.pop("tls", None)
+    else:
+        tls = http["tls"]
+        if (
+            not isinstance(tls, dict)
+            or set(tls) - {"certResolver", "options"}
+            or any(not isinstance(value, str) for value in tls.values())
+        ):
+            raise ValueError("The application listener TLS configuration is unavailable.")
+        configuration["tls"] = {key: value for key, value in tls.items() if value}
     return configuration
 
 
@@ -464,7 +546,9 @@ def compile_testing_route(
     application_document: dict[str, Any] | None = None,
     application_file_name: str = "",
     application_file_sha256: str = "",
+    static_configuration: str = "",
     recorded_application_route: TestingLaneRoute | None = None,
+    require_owned_middlewares: bool = False,
 ) -> TestingLaneRoute:
     route = _compile_testing_route(
         product=product,
@@ -481,7 +565,9 @@ def compile_testing_route(
         application_document=application_document,
         application_file_name=application_file_name,
         application_file_sha256=application_file_sha256,
+        static_configuration=static_configuration,
         recorded_application_route=recorded_application_route,
+        require_owned_middlewares=require_owned_middlewares,
     )
     assert route is not None
     return route
@@ -508,7 +594,9 @@ def _compile_testing_route(
     application_document: dict[str, Any] | None = None,
     application_file_name: str = "",
     application_file_sha256: str = "",
+    static_configuration: str = "",
     recorded_application_route: TestingLaneRoute | None = None,
+    require_owned_middlewares: bool = False,
 ) -> TestingLaneRoute | None:
     """Bind actual predecessor authority; the caller proves backend physical custody.
 
@@ -539,6 +627,15 @@ def _compile_testing_route(
                 continue
             expected = router_configuration(http["routers"][name.removesuffix("@file")])
             observed = router_configuration(router)
+            if (
+                expected.get("tls") is None
+                and observed.get("tls") is not None
+                or not expected.get("ruleSyntax")
+                and observed.get("ruleSyntax") not in {None, "default", "v3"}
+            ):
+                expected = router_with_listener_defaults(
+                    http["routers"][name.removesuffix("@file")], static_configuration
+                )
             for configuration in (expected, observed):
                 configuration["service"] = (
                     str(configuration.get("service") or "").removesuffix("@file") + "@file"
@@ -549,7 +646,7 @@ def _compile_testing_route(
                 ]
                 if not configuration.get("priority", 0):
                     configuration["priority"] = len(str(configuration["rule"]).encode("utf-8"))
-                if configuration.get("ruleSyntax") in {None, "default", "v3"}:
+                if configuration.get("ruleSyntax") in {None, "", "default", "v3"}:
                     configuration.pop("ruleSyntax", None)
             service = str(expected["service"]).removesuffix("@file")
             configured = http.get("services", {}).get(service)
@@ -567,6 +664,20 @@ def _compile_testing_route(
             legacy[name] = router_configuration(router)
     elif application_file_name or application_file_sha256:
         raise ValueError("The retained application file is unavailable.")
+    if recorded_application_route is not None and owned_document is not None:
+        previous = recorded_application_route
+        if (previous.product, previous.context, previous.host, previous.template) != (
+            product,
+            context,
+            host,
+            recorded_template,
+        ) or observe_testing_route(previous, raw, owned_document) != old_backend:
+            raise ValueError("The completed application route authority changed.")
+        legacy = {
+            name: configuration
+            for name, configuration in previous.legacy_routers.items()
+            if name in matches
+        }
     legacy_backends = {
         applied_service_backend(
             raw, str(matches[name].get("service") or ""), name.rsplit("@", 1)[-1]
@@ -577,20 +688,26 @@ def _compile_testing_route(
     if recorded_application_route is not None:
         previous = recorded_application_route
         if (
-            previous.product,
-            previous.context,
-            previous.host,
-            previous.template,
-            previous.application_file_name,
-            previous.application_file_sha256,
-        ) != (
-            product,
-            context,
-            host,
-            recorded_template,
-            application_file_name,
-            application_file_sha256,
-        ) or legacy != previous.legacy_routers:
+            owned_document is None
+            and (
+                previous.product,
+                previous.context,
+                previous.host,
+                previous.template,
+                previous.application_file_name,
+                previous.application_file_sha256,
+            )
+            != (
+                product,
+                context,
+                host,
+                recorded_template,
+                application_file_name,
+                application_file_sha256,
+            )
+            or owned_document is None
+            and legacy != previous.legacy_routers
+        ):
             raise ValueError("The original application's retained route custody changed.")
         admitted_backends.add(previous.legacy_backend)
     if len(legacy_backends) > 1 or any(
@@ -599,6 +716,10 @@ def _compile_testing_route(
         raise ValueError("Docker predecessor differs from its physically verified copy.")
     legacy_backend = next(iter(legacy_backends), "")
     if owned_document is not None:
+        if require_owned_middlewares and (
+            recorded_template is None or not testing_route_middlewares_owned(recorded_template)
+        ):
+            raise ValueError("The testing route still depends on predecessor-owned configuration.")
         if new_backend is None:
             if (
                 recorded_application_route is None
@@ -636,6 +757,11 @@ def _compile_testing_route(
         return plan
     if recorded_template is not None or not matches or len(legacy) != len(matches):
         raise ValueError("Initial testing traffic must have only its observed Docker predecessor.")
+    if static_configuration:
+        require_independent_listener_middlewares(
+            yaml.safe_load(static_configuration),
+            tuple({point for router in matches.values() for point in router["entryPoints"]}),
+        )
     routers: dict[str, Any] = {}
     services: dict[str, Any] = {}
     connection_middleware = identifier + "-connections"
@@ -671,6 +797,28 @@ def _compile_testing_route(
                 raise ValueError("Testing predecessor middleware is malformed.")
             reference = reference if "@" in reference else reference + "@" + provider
             if reference.endswith("@file"):
+                current = raw.get("middlewares", {}).get(reference)
+                redirect_configuration = (
+                    {"redirectScheme": current["redirectScheme"]}
+                    if isinstance(current, dict) and "redirectScheme" in current
+                    else None
+                )
+                if (
+                    testing_route_https_redirect(redirect_configuration)
+                    and current.get("status") == "enabled"
+                    and not set(current)
+                    - {"redirectScheme", "status", "usedBy", "name", "provider", "type"}
+                ):
+                    redirect = identifier + "-https"
+                    assert redirect_configuration is not None
+                    if (
+                        redirect in owned_middlewares
+                        and owned_middlewares[redirect] != redirect_configuration
+                    ):
+                        raise ValueError("The testing HTTPS redirects disagree.")
+                    owned_middlewares[redirect] = redirect_configuration
+                    middlewares.append(redirect + "@file")
+                    continue
                 middlewares.append(reference)
                 continue
             current = raw.get("middlewares", {}).get(reference)
@@ -734,6 +882,10 @@ def _compile_testing_route(
         desired["priority"] = priority + 1
         routers[identifier + "-" + str(index)] = desired
         services = document["http"]["services"]
+    if require_owned_middlewares and not testing_route_middlewares_owned(
+        {"http": {"routers": routers, "middlewares": owned_middlewares}}
+    ):
+        raise ValueError("The testing route still depends on predecessor-owned configuration.")
     if new_backend is None:
         return None
     plan = TestingLaneRoute(
@@ -806,7 +958,7 @@ def compile_unavailable_testing_route(
         connections = identifier + "-connections"
         used_entrypoints: set[str] = set()
         equivalent_routers: dict[tuple[str, ...], dict[str, Any]] = {}
-        for index, (name, rule) in enumerate(sorted(declared.items())):
+        for name, rule in sorted(declared.items()):
             prefix = "traefik.http.routers." + name + "."
             fields = {
                 key.removeprefix(prefix): value
@@ -850,6 +1002,7 @@ def compile_unavailable_testing_route(
                 raise ValueError(
                     "The declared testing listeners are unavailable on the managed proxy."
                 )
+            require_independent_listener_middlewares(static, points)
             references = []
             for reference in filter(None, fields.get("middlewares", "").split(",")):
                 if reference.endswith("@file"):
@@ -882,10 +1035,10 @@ def compile_unavailable_testing_route(
                     raise ValueError(
                         "The declared testing middleware has no supported independent copy."
                     )
-            tls = fields.get("tls", "false").lower()
-            if tls not in {"true", "false"}:
+            tls = fields.get("tls", "").lower()
+            if tls not in {"", "true", "false"}:
                 raise ValueError("The declared testing TLS behavior is unavailable.")
-            resolver = fields.get("tls.certresolver", "")
+            resolver = fields.get("tls.certresolver", "") if tls != "false" else ""
             if resolver and resolver not in static.get("certificatesResolvers", {}):
                 raise ValueError("The declared testing certificate resolver is unavailable.")
             priority = int(fields.get("priority", str(len(rule.encode()))))
@@ -896,32 +1049,41 @@ def compile_unavailable_testing_route(
                 and connections + "@file" not in references
             ):
                 references.append(connections + "@file")
-            document = http_route_payload(
-                route_id=identifier,
-                host=host,
-                entrypoints=points,
-                backend=new_backend,
-                tls=tls == "true",
-                certificate_resolver=resolver,
-                middlewares=tuple(references),
-            )
-            router = document["http"]["routers"][identifier]
-            router["priority"] = priority + 1
-            if "rulesyntax" in fields:
-                router["ruleSyntax"] = fields["rulesyntax"]
-            if "tls.options" in fields:
+            if "tls.options" in fields and tls != "false":
                 raise ValueError(
                     "Declared TLS options require an original recorded testing template."
                 )
-            group = tuple(sorted(set(points)))
-            if used_entrypoints & set(points):
-                if equivalent_routers.get(group) != router:
-                    raise ValueError("Declared testing aliases have conflicting routing behavior.")
-                continue
-            equivalent_routers[group] = router
-            used_entrypoints.update(points)
-            template["http"]["routers"][identifier + "-" + str(index)] = router
-            template["http"]["services"] = document["http"]["services"]
+            for point in dict.fromkeys(points):
+                document = http_route_payload(
+                    route_id=identifier,
+                    host=host,
+                    entrypoints=(point,),
+                    backend=new_backend,
+                    tls="tls" in fields and tls != "false" or bool(resolver),
+                    certificate_resolver=resolver,
+                    middlewares=tuple(references),
+                )
+                router = document["http"]["routers"][identifier]
+                router["priority"] = priority + 1
+                if "rulesyntax" in fields:
+                    router["ruleSyntax"] = fields["rulesyntax"]
+                router = router_with_listener_defaults(router, static_configuration)
+                if router.get("tls", {}).get("options"):
+                    raise ValueError(
+                        "Declared TLS options require an original recorded testing template."
+                    )
+                group = (point,)
+                if point in used_entrypoints:
+                    if equivalent_routers.get(group) != router:
+                        raise ValueError(
+                            "Declared testing aliases have conflicting routing behavior."
+                        )
+                    continue
+                equivalent_routers[group] = router
+                used_entrypoints.add(point)
+                routers = template["http"]["routers"]
+                routers[identifier + "-" + str(len(routers))] = router
+                template["http"]["services"] = document["http"]["services"]
         template["http"]["middlewares"][connections] = {
             "headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP}
         }
@@ -968,6 +1130,22 @@ def compile_unavailable_testing_route(
             recorded_template=recorded_template,
             aliases=aliases,
         )
+    if recorded_template is not None:
+        require_independent_listener_middlewares(static, points)
+        projected_routers = []
+        for router in template["http"]["routers"].values():
+            for point in dict.fromkeys(router["entryPoints"]):
+                projected = {**router, "entryPoints": [point]}
+                if router_with_listener_defaults(
+                    projected, static_configuration
+                ) != router_configuration(projected):
+                    raise ValueError("The recorded testing route's listener defaults changed.")
+                projected_routers.append(projected)
+        if any(len(router["entryPoints"]) > 1 for router in template["http"]["routers"].values()):
+            template["http"]["routers"] = {
+                identifier + "-" + str(index): router
+                for index, router in enumerate(projected_routers)
+            }
     return TestingLaneRoute(
         product=product,
         context=context,
@@ -1006,12 +1184,19 @@ def testing_route_static_sha256(static_configuration: str, template: dict[str, A
     configured_resolvers = static.get("certificatesResolvers", {})
     if not isinstance(configured_resolvers, dict):
         raise ValueError("The managed proxy's certificate configuration is unavailable.")
+    core = static.get("core")
+    syntax = core.get("defaultRuleSyntax") if isinstance(core, dict) else None
     return canonical_json_sha256(
         {
             "entryPoints": {name: static["entryPoints"].get(name) for name in sorted(points)},
             "certificatesResolvers": {
                 name: configured_resolvers.get(name) for name in sorted(resolvers)
             },
+            **(
+                {"defaultRuleSyntax": syntax}
+                if syntax and any(not router.get("ruleSyntax") for router in routers)
+                else {}
+            ),
         }
     )
 
@@ -1142,7 +1327,7 @@ def observe_testing_route(
         if (
             not isinstance(applied, dict)
             or applied.get("status") != "enabled"
-            or applied.get("headers") != expected["headers"]
+            or any(applied.get(key) != value for key, value in expected.items())
         ):
             raise TestingRoutePending("Testing connection middleware has not been applied.")
     backend = applied_service_backend(raw, plan.route_id, "file")

@@ -364,6 +364,10 @@ class ProductContextOwnershipError(PermissionError):
     """The bundle's context no longer belongs to its product alone."""
 
 
+class ServiceIdentityAuthorityError(PermissionError):
+    pass
+
+
 def require_bundle_context_owner(
     bundle: ProductAuthorityBundle,
     profiles: Iterable[LaunchplaneProductProfileRecord],

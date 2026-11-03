@@ -73,6 +73,11 @@ def activation_hold_policy(product: str, context: str) -> Any:
 
 
 class ComposeQualificationTests(unittest.TestCase):
+    def test_nested_and_variable_bearing_defaults_remain_unqualified(self) -> None:
+        for expression in ("${FIRST:-${SECOND}}", "${FIRST:-$SECOND}"):
+            with self.subTest(expression=expression), self.assertRaises(TestingActivationRefusal):
+                interpolate({"environment": {"SETTING": expression}}, {"SECOND": "alternate"})
+
     def setUp(self) -> None:
         self.values = {
             "DOCKER_IMAGE_REFERENCE": "example@sha256:" + "a" * 64,

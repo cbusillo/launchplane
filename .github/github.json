@@ -27,10 +27,12 @@
     "driverDescriptors": "docs/driver-descriptors.md",
     "driverDevelopment": "docs/driver-development.md",
     "previewWorkflowContract": "docs/preview-workflow-contract.md",
+    "previewFixtures": "docs/preview-fixtures.md",
     "legacyPreviewReconciliation": "docs/legacy-preview-reconciliation.md",
     "productRepoContract": "docs/product-repo-contract.md",
     "newProductRepo": "docs/new-product-repo.md",
     "operatorExperience": "docs/operator-experience.md",
+    "requestAttention": "docs/request-attention.md",
     "postV2Audit": "docs/post-v2-audit.md",
     "uiStandards": "docs/ui-standards.md",
     "mergeTrainPolicy": "docs/merge-train-policy.md",
@@ -43,7 +45,6 @@
     "runnerLaneBaseline": "docs/runner-lane-baseline.md",
     "runnerHostHygiene": "docs/runner-host-hygiene.md",
     "ownerAcceptance": "docs/owner-acceptance.md",
-    "ownerControlChannel": "docs/owner-control-channel.md",
     "privilegedOperations": "docs/privileged-operations.md",
     "agentContextBoundary": "docs/agent-context-boundary.md",
     "agentOperatorContract": "docs/agent-operator-contract.md",
@@ -128,11 +129,6 @@
       "artifact": "contracts/agent-operator-contract.json",
       "export": "uv run launchplane service export-agent-contract --output contracts/agent-operator-contract.json",
       "drift": "(cd frontend && pnpm check:openapi-drift)"
-    },
-    "ownerControlContract": {
-      "artifact": "contracts/owner-control-contract.json",
-      "export": "uv run launchplane service export-owner-control-contract --output contracts/owner-control-contract.json",
-      "drift": "uv run --extra dev python -m unittest tests.test_owner_control_contract.OwnerControlArtifactTests.test_checked_artifact_matches_generated_contract"
     },
     "mergeTrainControllerReplyContract": {
       "artifact": "contracts/merge-train-controller-reply.schema.json",

@@ -17,6 +17,7 @@ import tarfile
 from tempfile import TemporaryDirectory, NamedTemporaryFile
 from typing import Any, cast
 import unittest
+import uuid
 from unittest.mock import Mock, patch
 from contextlib import redirect_stdout
 
@@ -30,7 +31,7 @@ from control_plane.contracts.odoo_testing_source import (
 )
 from control_plane.dokploy import native_copy_stream as transport
 from control_plane.dokploy import api
-from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.copy_readback_diagnostics import COPY_FAILURE_EVIDENCE_MARKER, ReadbackPredicate
 from control_plane.odoo_testing_native_source import (
     capture_native_testing_source,
     prepare_native_testing_delivery,
@@ -91,6 +92,45 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    def test_private_failure_reference_survives_without_changing_failure_authority(self) -> None:
+        from control_plane import http_error_evidence
+
+        identity = uuid.uuid4().hex
+        program = "fixture program"
+        private = "private-evidence-reference-sentinel"
+        baseline = transport.NativeProgramFailed("baseline")
+        for value, expected in (
+            (identity, identity),
+            ("../" + private, ""),
+            ({private: identity}, ""),
+            (42, ""),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(transport.NativeProgramFailed) as raised:
+                    transport._read_program(
+                        Connection({"type": "failed", COPY_FAILURE_EVIDENCE_MARKER: value}),
+                        program=program,
+                        payload={},
+                        timeout_seconds=5,
+                        receive=lambda _frame: None,
+                    )
+                error = raised.exception
+                self.assertEqual(error.copy_failure_evidence_id, expected)
+                self.assertEqual(error.evidence, baseline.evidence)
+                self.assertEqual(error.code, baseline.code)
+                self.assertEqual(error.unavailable, baseline.unavailable)
+                with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+                    http_error_evidence.log_handled_error_cause(error, "private-reference-test")
+                text = logs.records[-1].getMessage()
+                entry = json.loads(text)
+                if expected:
+                    native = entry["native_programs"][0]
+                    self.assertEqual(native[COPY_FAILURE_EVIDENCE_MARKER], expected)
+                    self.assertEqual(native["sha"], hashlib.sha256(program.encode()).hexdigest())
+                else:
+                    self.assertNotIn("native_programs", entry)
+                self.assertNotIn(private, text)
+
     def test_container_field_diagnostics_are_closed_and_never_change_failure_authority(
         self,
     ) -> None:

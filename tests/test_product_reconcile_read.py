@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock
 
+from control_plane.artifact_scan import artifact_scan_from_report
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     build_odoo_stable_target_replacement_operation_id,
@@ -60,6 +61,32 @@ def _write_request(store: PostgresRecordStore, *, product: str, number: int) -> 
             "action": "apply",
             "head_sha": _COMMIT,
             "desired_image_digest": _DIGEST,
+            "artifact_scan": artifact_scan_from_report(
+                f"ghcr.io/example/site@{_DIGEST}",
+                {
+                    "SchemaVersion": 2,
+                    "ArtifactName": f"ghcr.io/example/site@{_DIGEST}",
+                    "ArtifactType": "container_image",
+                    "Results": [
+                        {
+                            "Class": "os-pkgs",
+                            "Packages": [{"Name": "libssl3"}],
+                            "Vulnerabilities": [
+                                {
+                                    "VulnerabilityID": "CVE-2026-12345",
+                                    "PkgName": "libssl3",
+                                    "InstalledVersion": "3.0.1",
+                                    "FixedVersion": "3.0.2",
+                                    "Severity": "HIGH",
+                                    "Description": _SECRETS[0],
+                                    "PkgPath": "/private/customer/file",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                scanned_at="2026-10-30T12:00:00Z",
+            ).model_dump(mode="json"),
             "preview_plan_id": _PLAN_ID,
             "last_failed_operation_id": _OPERATION_ID,
             "token_id": _SECRETS[1],
@@ -181,6 +208,22 @@ class ProductReconcileRequestsRouteTests(unittest.IsolatedAsyncioTestCase):
         plan = request["last_plan"]
         self.assertEqual(plan["head_sha"], _COMMIT)
         self.assertEqual(plan["desired_image_digest"], _DIGEST)
+        self.assertEqual(plan["artifact_scan"]["status"], "fail")
+        self.assertEqual(plan["artifact_scan"]["high"], 1)
+        self.assertEqual(plan["artifact_scan"]["findings_omitted"], 0)
+        self.assertEqual(
+            plan["artifact_scan"]["findings"],
+            [
+                {
+                    "vulnerability_id": "CVE-2026-12345",
+                    "package_name": "libssl3",
+                    "installed_version": "3.0.1",
+                    "fixed_version": "3.0.2",
+                    "severity": "HIGH",
+                }
+            ],
+        )
+        self.assertNotIn("/private/customer/file", text)
         self.assertEqual(plan["preview_plan_id"], _PLAN_ID)
         self.assertEqual(plan["last_failed_operation_id"], _OPERATION_ID)
         self.assertEqual(plan["token_id"], "[redacted-token]")

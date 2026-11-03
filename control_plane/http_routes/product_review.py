@@ -1,14 +1,12 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, Never
+from typing import Annotated, Literal, Never
 
 from fastapi import Depends, Query
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import (
-    PRODUCT_REVIEW_REASON_MAX_LENGTH,
-    ProductReviewDecision,
     ProductReviewDecisionRecord,
 )
 from control_plane.http_routes.support import (
@@ -31,6 +29,7 @@ from control_plane.product_review import (
 from control_plane.release_review import UNREAD_PULL_REQUEST_NOTES, PullRequestNotes
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.product_review_feedback import validate_owner_feedback_decision
+from control_plane.client_test_notes import CLIENT_REVIEW_NOTES_PENDING
 
 
 PRODUCT_REVIEW_ROUTE = "/v1/product-review"
@@ -42,6 +41,26 @@ _NOT_OWNER_REASON = "You are not this product's Client."
 _NO_PREVIEW_REASON = "No preview is ready for this pull request yet."
 
 
+def _client_review_notes_error(notes: PullRequestNotes) -> str:
+    if not notes.client_test_notes_error:
+        return ""
+    if notes.client_test_notes_error == UNREAD_PULL_REQUEST_NOTES.client_test_notes_error:
+        return notes.client_test_notes_error
+    return CLIENT_REVIEW_NOTES_PENDING
+
+
+def _cannot_accept_preview_reason(preview: ProductReviewPreview, notes: PullRequestNotes) -> str:
+    if not preview.preview_url:
+        return _NO_PREVIEW_REASON
+    if notes.state == "closed":
+        return "This change is closed. You can still share feedback on the pull request."
+    if not notes.head_sha or notes.state != "open":
+        return "We could not check the latest version of this change. Refresh the review."
+    if preview.head_sha != notes.head_sha:
+        return "We are updating the preview for the latest change. We will let you know when it is ready to review."
+    return ""
+
+
 @dataclass(frozen=True, slots=True)
 class ProductReviewRouteDependencies:
     common: ReadRouteDependencies
@@ -50,7 +69,9 @@ class ProductReviewRouteDependencies:
     publish_owner_review_status: Callable[
         [ProductReviewStore, LaunchplaneProductProfileRecord, int], object
     ]
-    read_pull_request_notes: Callable[[LaunchplaneProductProfileRecord, int, str], PullRequestNotes]
+    read_pull_request_notes: Callable[
+        [LaunchplaneProductProfileRecord, int, str, bool], PullRequestNotes
+    ]
 
 
 class ProductReviewDecisionEnvelope(BaseModel):
@@ -61,15 +82,8 @@ class ProductReviewDecisionEnvelope(BaseModel):
     reviewed_head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     reviewed_preview_url: str = Field(min_length=1)
     reviewed_generation_id: str = Field(min_length=1)
-    decision: ProductReviewDecision
-    reason: str = Field(default="", max_length=PRODUCT_REVIEW_REASON_MAX_LENGTH)
-
-    @model_validator(mode="after")
-    def _validate_reason(self) -> "ProductReviewDecisionEnvelope":
-        self.reason = self.reason.strip()
-        if self.decision == "changes_requested" and not self.reason:
-            raise ValueError("Requesting changes requires a reason.")
-        return self
+    decision: Literal["accepted"]
+    reason: Literal[""] = ""
 
 
 class ProductReviewFeedbackRetryEnvelope(BaseModel):
@@ -101,6 +115,10 @@ class ProductReviewResponse(BaseModel):
     viewer_is_owner: bool
     can_decide: bool
     cannot_decide_reason: str
+    preview_is_current: bool
+    cannot_accept_reason: str
+    latest_client_comment: str = ""
+    latest_client_comment_url: str = ""
     latest_decision: ProductReviewDecisionRecord | None
 
 
@@ -183,6 +201,7 @@ def register_product_review_routes(
             store=store, profile=profile, pull_request_number=pull_request_number
         )
         viewer_is_owner = viewer_is_product_owner(profile=profile, identity=identity)
+        cannot_accept_reason = _cannot_accept_preview_reason(preview, notes)
         if not profile.owner.is_set:
             cannot_decide_reason = _NO_OWNER_REASON
         elif not viewer_is_owner:
@@ -202,7 +221,9 @@ def register_product_review_routes(
             ),
             pull_request_title=notes.title,
             client_test_notes=notes.client_test_notes,
-            client_test_notes_error=notes.client_test_notes_error,
+            client_test_notes_error=_client_review_notes_error(notes),
+            latest_client_comment=notes.latest_client_comment,
+            latest_client_comment_url=notes.latest_client_comment_url,
             preview_url=preview.preview_url,
             head_sha=preview.head_sha,
             preview_generation_id=preview.generation_id,
@@ -211,6 +232,8 @@ def register_product_review_routes(
             viewer_is_owner=viewer_is_owner,
             can_decide=not cannot_decide_reason,
             cannot_decide_reason=cannot_decide_reason,
+            preview_is_current=not cannot_accept_reason,
+            cannot_accept_reason=cannot_accept_reason,
             latest_decision=(
                 saved_decision(store, profile, pull_request_number, decision_id, trace_id)
                 if decision_id
@@ -242,7 +265,7 @@ def register_product_review_routes(
             pull_request_number=pull_request,
             trace_id=trace_id,
             decision_id=decision_id,
-            notes=dependencies.read_pull_request_notes(profile, pull_request, trace_id),
+            notes=dependencies.read_pull_request_notes(profile, pull_request, trace_id, True),
         )
 
     def retry_product_review_feedback(
@@ -322,27 +345,37 @@ def register_product_review_routes(
                 code="product_review_preview_unavailable",
                 message=_NO_PREVIEW_REASON,
             )
-        notes = dependencies.read_pull_request_notes(profile, envelope.pull_request, trace_id)
+        notes = dependencies.read_pull_request_notes(
+            profile, envelope.pull_request, trace_id, False
+        )
+        reviewed_preview = ProductReviewPreview(
+            head_sha=envelope.reviewed_head_sha,
+            preview_url=envelope.reviewed_preview_url,
+            generation_id=envelope.reviewed_generation_id,
+        )
         notes_error = notes.client_test_notes_error
-        if envelope.decision == "accepted" and notes_error:
+        if notes_error:
             raise common.http_error(
                 status_code=409,
                 trace_id=trace_id,
                 code="client_test_notes_required",
-                message=notes_error,
+                message=_client_review_notes_error(notes),
+            )
+        if cannot_accept_reason := _cannot_accept_preview_reason(reviewed_preview, notes):
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_review_preview_changed",
+                message=cannot_accept_reason,
             )
         try:
             record_product_review_decision(
                 store=store,
                 profile=profile,
                 pull_request_number=envelope.pull_request,
-                preview=ProductReviewPreview(
-                    head_sha=envelope.reviewed_head_sha,
-                    preview_url=envelope.reviewed_preview_url,
-                    generation_id=envelope.reviewed_generation_id,
-                ),
+                preview=reviewed_preview,
                 decision=envelope.decision,
-                reason=envelope.reason,
+                reason="",
                 identity=identity,
             )
         except ProductReviewPreviewChanged as error:
@@ -393,7 +426,7 @@ def register_product_review_routes(
         response_model=ProductReviewResponse,
         tags=["product-review"],
         operation_id="write_product_review_decision",
-        summary="Record the product Client's accept or request-changes decision",
+        summary="Record the product Client's acceptance",
         responses={
             status: {"model": common.error_response_model} for status in (401, 403, 409, 503)
         },

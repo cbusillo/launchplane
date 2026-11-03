@@ -48,6 +48,10 @@ def recover_release_step(
     record = custody(store, product, request.context)
     if record is None or record.plan_sha256 != request.preparation_plan_sha256:
         raise ValueError("Retain the original recipient generation.")
+    from control_plane.production_recipient_retirement import require_before_retirement
+
+    if request.mode == "apply":
+        require_before_retirement(record)
     if request.mode == "apply":
         covered = releases._covering_decision(
             store, product, decision_record_id=request.decision_record_id

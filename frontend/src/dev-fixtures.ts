@@ -240,6 +240,7 @@ export function environmentForFixture(
     available_actions: summary.available_actions,
     driver_extensions: summary.driver_extensions,
     health_monitoring: summary.health_monitoring,
+    lane_status: summary.lane_status,
     public_ingress: summary.public_ingress,
     topology: {
       ...summary.topology,
@@ -348,6 +349,8 @@ export function incidentsForFixture(
     incidents: [activeIncident, resolvedIncident].filter(
       (incident): incident is ProductIncidentSummary => incident !== null,
     ),
+    next_cursor: null,
+    has_more: false,
     trust_state:
       incidentMode === "stale" ? "stale" : "recorded",
     provenance: provenance(
@@ -2052,6 +2055,7 @@ function environmentFixture({
     context: `atlas-${environment}`,
     base_url: baseUrl,
     health_url: `${baseUrl}/health`,
+    lane_status: fixtureLaneStatus(warning ? "danger" : "verified"),
     trust_state: trustState,
     provenance: evidence,
     warnings: warning ? [ingressSummary] : [],
@@ -2320,6 +2324,7 @@ function missingEnvironmentFixture(
     context: `beacon-${environment}`,
     base_url: `https://${host}`,
     health_url: `https://${host}/health`,
+    lane_status: fixtureLaneStatus("missing"),
     trust_state: "missing",
     provenance: missing,
     warnings: ["Operational evidence is missing."],
@@ -2517,6 +2522,8 @@ export function productReviewForFixture(
     pull_request_number: 308,
     pull_request_url: "https://github.com/example/control-plane/pull/308",
     pull_request_title: scenario === "notes-unavailable" ? "" : "Show the repair price on each model",
+    latest_client_comment: "Please make sure the repair prices are visible.",
+    latest_client_comment_url: "https://github.com/example/control-plane/pull/308#issuecomment-7",
     client_test_notes: {
       "missing-notes": "",
       "notes-unavailable": "",
@@ -2525,9 +2532,9 @@ export function productReviewForFixture(
       "answered-questions": "Check the contact page.\n### Open questions for the Client\n",
     }[scenario] ?? "1. Open **iPhone 15** repairs.\n2. Confirm each repair shows its price.",
     client_test_notes_error: {
-      "missing-notes": "Client test notes are missing.",
-      "notes-unavailable": "Client test notes are missing.",
-      "open-questions": "Some Client facts are unanswered.",
+      "missing-notes": "We are updating the preview and its test notes. We will let you know when it is ready to review.",
+      "notes-unavailable": "The test notes could not be loaded. Refresh the review.",
+      "open-questions": "We are updating the preview and its test notes. We will let you know when it is ready to review.",
     }[scenario] ?? "",
     preview_url: previewUrl,
     head_sha: previewUrl ? "a".repeat(40) : "",
@@ -2537,6 +2544,10 @@ export function productReviewForFixture(
     viewer_is_owner: viewerIsOwner,
     can_decide: !cannotDecideReason,
     cannot_decide_reason: cannotDecideReason,
+    preview_is_current: Boolean(previewUrl) && !["stale-preview", "notes-unavailable"].includes(scenario),
+    cannot_accept_reason: !previewUrl ? "No preview is ready for this pull request yet."
+      : scenario === "notes-unavailable" ? "We could not check the latest version of this change. Refresh the review."
+      : scenario === "stale-preview" ? "We are updating the preview for the latest change. We will let you know when it is ready to review." : "",
     latest_decision:
       (latestDecision ? {
         ...latestDecision,
@@ -2987,5 +2998,24 @@ export async function applyProductProfileFieldForFixture(
       plan_sha256: "a".repeat(64), reason: payload.reason,
       lanes: field === "image" ? [{ instance: "prod", current_artifact_id: "ghcr.io/example/old-package@sha256:fixture" }] : [],
     },
+  };
+}
+
+export function fixtureLaneStatus(tone: "verified" | "danger" | "warning" | "stale" | "missing"): NonNullable<ProductEnvironmentSummary["lane_status"]> {
+  const reason = "Public ingress observation needs review";
+  return {
+    evaluated_at: OBSERVED_AT,
+    current: {
+      tone: tone === "stale" ? "warning" : tone, sidebar_tone: tone,
+      description: tone === "verified" ? "Healthy" : tone === "danger" ? `Alert; ${reason}` : tone === "warning" ? "Warning; Public DNS/TLS observation incomplete" : tone === "stale" ? "Stale evidence; awaiting current observations" : "Unknown (unverified)",
+      reasons: tone === "danger" ? [reason] : [],
+      attention_reasons: tone === "danger" ? [reason] : [], warning_reasons: [],
+      release_healthy: tone === "verified", public_observation_gap: null,
+    },
+    transitions: tone === "verified" ? [{ after: STALE_AFTER, signal: {
+      tone: "warning", sidebar_tone: "stale", description: "Stale evidence; awaiting current observations",
+      reasons: [], attention_reasons: [], warning_reasons: [], release_healthy: false,
+      public_observation_gap: "Public route observation incomplete",
+    } }] : [],
   };
 }

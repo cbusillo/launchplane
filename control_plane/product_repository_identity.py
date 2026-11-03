@@ -296,7 +296,7 @@ def build_product_repository_identity_plan(
         "reason": request.reason,
     }
     plan_sha256 = nonvalidating_compact_sorted_json_sha256(plan_evidence)
-    return ProductRepositoryIdentityPlan(
+    plan = ProductRepositoryIdentityPlan(
         mode=request.mode,
         product=profile.product,
         repository=repository,
@@ -312,6 +312,12 @@ def build_product_repository_identity_plan(
         profile_updated_at_before=profile.updated_at,
         plan_sha256=plan_sha256,
     )
+
+    if changed:
+        updated_product_repository_identity_profile(
+            profile=profile, plan=plan, updated_at=profile.updated_at
+        )
+    return plan
 
 
 def updated_product_repository_identity_profile(

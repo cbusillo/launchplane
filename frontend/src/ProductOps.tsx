@@ -30,7 +30,7 @@ import { ProductReleaseReviewLink } from "./ProductReleaseReviewLink";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, environmentReleaseHealthy, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, environmentReleaseHealthy, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireProductEvidence, type EnvironmentEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -300,7 +300,7 @@ export function ProductWorkspaceRoute({
   );
 }
 
-export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology">[], extraDeadlines: string[] = []) {
+export function useEvidenceExpiry(environments: EnvironmentEvidence[], extraDeadlines: string[] = []) {
   const [tick, setTick] = useState(0);
   const nextExpiry = Math.min(...[...environments.flatMap(environmentEvidenceDeadlines), ...extraDeadlines].map(value => Date.parse(value)).filter(value => Number.isFinite(value) && value >= Date.now()));
   useEffect(() => {
@@ -1079,7 +1079,7 @@ function NoProducts({ onRetry }: { onRetry: () => void }) {
         No products are owned by Launchplane yet
       </h1>
       <p>
-        Use Product Onboarding to record the product, its lanes and runtime targets.
+        Record the product, its lanes and runtime targets in Launchplane.
       </p>
       <ol className="onboarding-checklist">
         <li>Record the product profile and display name.</li>
@@ -1250,7 +1250,7 @@ function nextSafeInspection(
     return {
       title: "Complete stable lane evidence",
       detail:
-        "The product profile exists without stable environment summaries. Use Product Onboarding to record lane authority.",
+        "The product profile exists without stable environment summaries. Record its lanes and runtime targets in Launchplane.",
       targetId: "product-diagnostics",
     };
   }
@@ -1312,7 +1312,7 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
     return "Needs attention";
   }
   if (tone === "warning") {
-    return environment ? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
+    return environment ? publicObservationGap(environment) ?? "Review warning" : "Review warning";
   }
   if (!environment || tone === "missing") {
     return "Evidence missing";

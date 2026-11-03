@@ -1533,7 +1533,18 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
         )
 
     async def test_current_stored_sources_verify_without_a_refresh_write(self) -> None:
+        self.assert_current_stored_sources_verify_without_a_refresh_write(split=True)
+
+    async def test_managed_stored_sources_verify_without_a_refresh_write(self) -> None:
+        self.assert_current_stored_sources_verify_without_a_refresh_write(split=False)
+
+    def assert_current_stored_sources_verify_without_a_refresh_write(self, *, split: bool) -> None:
         payload = self.seed_split()
+        if not split:
+            payload.pop("external_ingress")
+            self.store.write_ingress_route_audit_record(
+                _ingress_audit_record(record_id="audit-managed", domains=self.target.domains)
+            )
         plan = plan_route_binding_reconcile(
             record_store=self.store,
             request=RouteBindingReconcileRequest.model_validate(
@@ -1546,12 +1557,15 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                     "evaluated_at": "2026-07-20T00:00:00Z",
                     "allow_authority_change": True,
                     "external_ingress": {
-                        **payload["external_ingress"],
+                        **payload.get("external_ingress", {}),
                         "attested_at": "2025-07-01T00:00:00Z",
-                    },
+                    }
+                    if split
+                    else None,
                 }
             ),
         )
+        self.assertEqual(plan.status, "ready", plan.findings)
         assert plan.record is not None
         current = plan.record
         self.store.write_route_binding_record(current)
@@ -1667,22 +1681,22 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
         )
         self.assertTrue(any(w.code == "stale_tls_observation" for w in topology().warnings))
         self.store.write_public_ingress_observation_record(original)
-        assert current.external_ingress is not None
-        changed_custody = current.model_copy(
-            update={
-                "external_ingress": current.external_ingress.model_copy(
-                    update={
-                        "custodian": "Successor, same timestamp",
-                        "attested_at": evaluated.isoformat(),
-                    }
-                )
-            }
-        )
-        self.store.write_route_binding_record(changed_custody)
-        self.assertEqual(
-            {w.domain_name for w in topology().warnings if w.code == "stale_route_authority"},
-            set(current.external_ingress.domains),
-        )
+        if current.external_ingress is not None:
+            changed_custody = current.model_copy(
+                update={
+                    "external_ingress": current.external_ingress.model_copy(
+                        update={
+                            "custodian": "Successor, same timestamp",
+                            "attested_at": evaluated.isoformat(),
+                        }
+                    )
+                }
+            )
+            self.store.write_route_binding_record(changed_custody)
+            self.assertEqual(
+                {w.domain_name for w in topology().warnings if w.code == "stale_route_authority"},
+                set(current.external_ingress.domains),
+            )
         self.store.write_route_binding_record(current)
         with patch.object(self.store, "read_provider_target_record", side_effect=FileNotFoundError):
             self.assertTrue(any(w.code == "stale_route_authority" for w in topology().warnings))

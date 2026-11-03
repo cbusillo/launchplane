@@ -273,6 +273,7 @@ class ComposeSourceSetupTests(unittest.TestCase):
         for field, value in (
             ("customGitUrl", "https://github.com/example/sample.git"),
             ("repository", "sample"),
+            ("bitbucketRepositorySlug", "existing-repository"),
             ("customGitSSHKeyId", "existing-key"),
             ("composeFile", "services: {}"),
             ("sourceType", "docker"),

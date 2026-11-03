@@ -1,16 +1,22 @@
 """The supported opaque testing account/browser API, using existing identities."""
 
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import Depends, Header
 from pydantic import BaseModel
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.preview_execution import (
+    odoo_preview_target_key,
+    preview_execution_lock_name,
+)
 from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_ROUTE,
+    WALKTHROUGH_PLAN_ACTION,
     WALKTHROUGH_RECONCILIATION_REQUIRED,
     OdooWalkthroughRequest,
     OdooWalkthroughResponse,
@@ -37,6 +43,7 @@ from control_plane.service_auth import (
     LaunchplaneIdentity,
     LocalAdminIdentity,
     LocalOperatorIdentity,
+    director_agent_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -61,7 +68,7 @@ def walkthrough_actor(identity: LaunchplaneIdentity) -> str:
 
 
 def walkthrough_fingerprint(actor: str, request: OdooWalkthroughRequest) -> str:
-    return canonical_json_sha256([actor, request.model_dump(mode="json")])
+    return canonical_json_sha256([actor, request.operation_payload()])
 
 
 def register_walkthrough_route(
@@ -83,7 +90,20 @@ def register_walkthrough_route(
         operator = isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity) or (
             isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         )
-        if payload.mode == "apply":
+        preview = payload.instance != "testing"
+        if preview:
+            allowed = director_agent_identity(identity) or dependencies.authorization_allows(
+                identity=identity,
+                action=(
+                    WALKTHROUGH_PLAN_ACTION
+                    if payload.mode == "dry-run"
+                    else "odoo_preview_apply.execute"
+                ),
+                product=payload.product,
+                context=payload.context,
+                target=AuthorizationTarget(scope="preview"),
+            )
+        elif payload.mode == "apply":
             allowed = native_routes.native_driver_route_authorization_allows(
                 endpoint=odoo_testing_walkthrough,
                 authorization_allows=dependencies.authorization_allows,
@@ -106,7 +126,7 @@ def register_walkthrough_route(
             refuse("authorization_denied", "Identity cannot operate this testing task.", 403)
         if not isinstance(record_store, PostgresRecordStore):
             refuse("database_required", "Testing tasks require shared database storage.", 503)
-        assert isinstance(record_store, PostgresRecordStore)
+        postgres_store = cast(PostgresRecordStore, record_store)
         actor = walkthrough_actor(identity)
         key = idempotency_key.strip()
         if payload.mode == "apply" and (not key or len(key) > 200):
@@ -116,7 +136,7 @@ def register_walkthrough_route(
 
         def execute() -> OdooWalkthroughResponse:
             if payload.mode == "apply":
-                original = record_store.read_idempotency_record(
+                original = postgres_store.read_idempotency_record(
                     scope=scope,
                     route_path=WALKTHROUGH_ROUTE,
                     idempotency_key=key,
@@ -130,7 +150,7 @@ def register_walkthrough_route(
                         return OdooWalkthroughResponse.model_validate(original.response_payload)
                     try:
                         recovery = run_durable_provider_operation(
-                            store=record_store,
+                            store=postgres_store,
                             scope=scope,
                             route_path=WALKTHROUGH_ROUTE,
                             idempotency_key=key,
@@ -141,7 +161,7 @@ def register_walkthrough_route(
                                 original,
                                 payload,
                                 trace,
-                                record_store,
+                                postgres_store,
                                 dependencies.control_plane_root,
                             ),
                             allow_mutation=False,
@@ -149,25 +169,43 @@ def register_walkthrough_route(
                     except ValueError:
                         refuse(
                             WALKTHROUGH_RECONCILIATION_REQUIRED,
-                            "The original dispatch evidence is unavailable; preserve its key and task account.",
+                            "The original dispatch evidence is unavailable; retry only this original key.",
                         )
                         raise AssertionError
                     if recovery.status in {"completed", "replayed", "adopted"}:
                         return OdooWalkthroughResponse.model_validate(recovery.response_payload)
                     refuse(
                         WALKTHROUGH_RECONCILIATION_REQUIRED,
-                        "The original dispatch is still active or unobservable; preserve its key and task account.",
+                        "The original dispatch is still active or unobservable; retry only this original key.",
                     )
-            with record_store.odoo_synchronous_lane_reservation(
-                product=payload.product,
-                context=payload.context,
-                instance="testing",
-            ) as owner:
-                if owner is not None:
-                    refuse("testing_lane_busy", "Another operation holds this testing lane.")
+            with ExitStack() as reservations:
+                if preview and payload.mode == "apply":
+                    check = reservations.enter_context(
+                        postgres_store.testing_replacement_execution_lock(
+                            preview_execution_lock_name(
+                                odoo_preview_target_key(
+                                    context=payload.context, compose_name=payload.instance
+                                )
+                            )
+                        )
+                    )
+                    if check is None:
+                        refuse("preview_busy", "Another operation holds this preview.")
+                    assert check is not None
+                    check()
+                elif not preview and payload.mode == "apply":
+                    owner = reservations.enter_context(
+                        postgres_store.odoo_synchronous_lane_reservation(
+                            product=payload.product,
+                            context=payload.context,
+                            instance=payload.instance,
+                        )
+                    )
+                    if owner is not None:
+                        refuse("testing_lane_busy", "Another operation holds this testing lane.")
                 try:
                     plan = plan_walkthrough(
-                        record_store, dependencies.control_plane_root, payload, actor
+                        postgres_store, dependencies.control_plane_root, payload, actor
                     )
                 except WalkthroughPrerequisiteError as error:
                     refuse(error.diagnostic_code, "The testing task prerequisite did not pass.")
@@ -188,6 +226,7 @@ def register_walkthrough_route(
                             plan_sha256=plan.digest,
                             product=payload.product,
                             context=payload.context,
+                            instance=payload.instance,
                             deployment_record_id=plan.connection.selection.identity.deployment_record_id,
                             artifact_id=plan.connection.selection.identity.artifact_id,
                         ),
@@ -197,7 +236,7 @@ def register_walkthrough_route(
                         "testing_task_plan_changed", "Review the current testing task plan again."
                     )
                 adapter = WalkthroughAdapter(
-                    store=record_store,
+                    store=postgres_store,
                     root=dependencies.control_plane_root,
                     request=payload,
                     actor=actor,
@@ -206,7 +245,7 @@ def register_walkthrough_route(
                 )
                 try:
                     result = run_durable_provider_operation(
-                        store=record_store,
+                        store=postgres_store,
                         scope=scope,
                         route_path=WALKTHROUGH_ROUTE,
                         idempotency_key=key,
@@ -228,7 +267,7 @@ def register_walkthrough_route(
                     return response
                 refuse(
                     WALKTHROUGH_RECONCILIATION_REQUIRED,
-                    "Retry only this original key; then clean up its task account.",
+                    "The original outcome is unverified; retry only this original key.",
                 )
                 raise AssertionError
 

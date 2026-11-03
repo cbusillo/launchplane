@@ -31,6 +31,10 @@ from control_plane.service_auth import (
     TokenVerifier,
     load_authz_policy,
 )
+from control_plane.service_agent_identities import (
+    AGENT_BEARER_ENVIRONMENT_KEYS,
+    load_service_agent_identities,
+)
 from control_plane.service_human_auth import (
     GitHubOAuthClient,
     HumanSessionManager,
@@ -62,30 +66,6 @@ def _engineering_review_worker_host_from_env() -> str:
     return os.environ.get("LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST", "").strip()
 
 
-def _terminal_agent_read_token_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN", "").strip()
-
-
-def _terminal_agent_subject_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_SUBJECT", "").strip()
-
-
-def _terminal_agent_token_label_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL", "").strip()
-
-
-def _local_operator_token_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN", "").strip()
-
-
-def _local_operator_subject_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT", "").strip()
-
-
-def _local_operator_token_label_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL", "").strip()
-
-
 def _local_admin_token_from_env() -> str:
     return os.environ.get("LAUNCHPLANE_LOCAL_ADMIN_TOKEN", "").strip()
 
@@ -106,12 +86,10 @@ def _bearer_identity_config_from_env() -> BearerIdentityConfig:
         local_admin_token=_local_admin_token_from_env(),
         local_admin_subject=_local_admin_subject_from_env(),
         local_admin_token_label=_local_admin_token_label_from_env(),
-        local_operator_token=_local_operator_token_from_env(),
-        local_operator_subject=_local_operator_subject_from_env(),
-        local_operator_token_label=_local_operator_token_label_from_env(),
-        terminal_agent_token=_terminal_agent_read_token_from_env(),
-        terminal_agent_subject=_terminal_agent_subject_from_env(),
-        terminal_agent_token_label=_terminal_agent_token_label_from_env(),
+        **{
+            field: os.environ.get(key, "").strip()
+            for field, key in AGENT_BEARER_ENVIRONMENT_KEYS.items()
+        },
     )
 
 
@@ -194,7 +172,9 @@ def create_launchplane_service_application(
         )
         if start_schedulers
         else None,
-        bearer_identity_config=_bearer_identity_config_from_env(),
+        bearer_identity_config=load_service_agent_identities(
+            store=service_record_store, bootstrap=_bearer_identity_config_from_env()
+        ),
         human_session_manager=human_session_manager,
         github_oauth_client=github_oauth_client,
         oauth_login_state_store=oauth_login_state_store,

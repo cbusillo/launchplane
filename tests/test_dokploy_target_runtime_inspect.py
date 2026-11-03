@@ -178,10 +178,8 @@ class DokployTargetRuntimeInspectTests(unittest.TestCase):
         )
 
         runtime_evidence = result["runtime_evidence"]
-        self.assertIsInstance(runtime_evidence, dict)
         assert isinstance(runtime_evidence, dict)
         structured_event = runtime_evidence["structured_event"]
-        self.assertIsInstance(structured_event, dict)
         assert isinstance(structured_event, dict)
         self.assertTrue(runtime_evidence["running"])
         self.assertTrue(runtime_evidence["image_reference_immutable"])

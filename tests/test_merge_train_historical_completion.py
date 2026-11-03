@@ -475,7 +475,6 @@ class HistoricalCompletionCoreTests(unittest.TestCase):
         self.assertTrue(result.evidence_eligible)
         self.assertEqual(result.reason_code, "exact_historical_completion")
         provider_evidence = result.provider_evidence
-        self.assertIsNotNone(provider_evidence)
         assert provider_evidence is not None
         self.assertEqual(provider_evidence.entries[1].observed_merge_commit_sha, "merge-2")
         self.assertEqual(before, after)

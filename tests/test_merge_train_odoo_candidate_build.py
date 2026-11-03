@@ -252,7 +252,7 @@ class OdooCandidateBuildTests(unittest.TestCase):
                         store=store,
                         root=Path(directory),
                         now=lambda: _time(seconds),
-                        reporter_factory=lambda **_: reporter,
+                        notifier_factory=lambda **_: reporter,
                     )
             self.assertNotIn(
                 "candidate_failed_after_passing_rerun",

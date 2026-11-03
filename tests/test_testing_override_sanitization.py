@@ -277,7 +277,6 @@ class TestingOverrideSanitizationTests(TestingOverrideSanitizationScenario):
         )
         self.assertEqual(outcome, "written")
         audit = read_sanitization_audit(self.store, self.profile.product, body)
-        self.assertIsNotNone(audit)
         assert audit is not None
         self.assertEqual(audit.before, self.original_overrides)
         self.assertFalse(audit.after.addon_settings)

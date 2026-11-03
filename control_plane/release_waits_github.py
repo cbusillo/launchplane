@@ -13,7 +13,6 @@ from control_plane.merge_train_planning_completion import (
     PlanningCompletionReview,
     _pages,
     _graphql,
-    reconcile_issue_status,
 )
 from control_plane.merge_train_planning_scope import PlanningRepositoryScope, PlanningScopeReview
 from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
@@ -156,10 +155,6 @@ def _resolve_issue_wait(
         record, product=product, contains_commit=contains_commit, evidence=evidence
     )
     if not actions:
-        if any(
-            evidence in str(comment.get("body", "")) and trusted(comment) for comment in comments
-        ):
-            reconcile_issue_status(scope=scope, number=number)
         return
     fresh_issue = github_api_request(path=path, token=scope.token)
     fresh_comments = _pages(scope.token, path + "/comments")
@@ -184,7 +179,6 @@ def _resolve_issue_wait(
     observed = wait_records.current(issue, _pages(scope.token, path + "/comments"), trusted)
     if observed != wait_records.snapshot(resolved):
         raise ValueError("Release wait readback changed; preserve the newer record.")
-    reconcile_issue_status(scope=scope, number=number)
 
 
 def resolve_repository_release_waits(

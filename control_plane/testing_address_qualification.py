@@ -10,7 +10,6 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_address import (
     TestingAddressPlan,
     address_binding,
-    retained_address_custody_sha256,
 )
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.dokploy import api, post_deploy, source
@@ -32,6 +31,7 @@ from control_plane.dokploy.native_copy_stream import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_publication_storage import read_snapshot
 from control_plane.testing_serving_copy import published_testing_copy
+from control_plane.testing_address_custody import address_custody
 
 
 class TestingAddressRecipientUnverified(ValueError):
@@ -320,9 +320,6 @@ def plan_testing_address(
     hostname: str,
     reason: str,
 ) -> TestingAddressPlan:
-    retained = store.read_retained_testing_generation(retirement_operation_id)
-    if retained is None or (retained.plan.product, retained.plan.context) != (product, context):
-        raise ValueError("The original retirement inspection is unavailable.")
     publication = published_testing_copy(store, product=product, context=context)
     if publication is None:
         raise ValueError("Canonical address amendment requires its published native testing copy.")
@@ -336,24 +333,21 @@ def plan_testing_address(
             for item in store._retained_disposable_hostname_reservations(session)
             if item.hostname == hostname
         )
-    if not reservations or any(
-        (item.product, item.context, item.operation_id)
-        != (product, context, reservation_operation_id)
-        or not item.target_id
-        for item in reservations
-    ):
-        raise ValueError("The hostname needs exact retained reservation custody in this lane.")
-    reservation = store.read_odoo_stable_target_replacement_operation_record(
-        reservation_operation_id
-    )
-    if reservation.status != "superseded":
-        raise ValueError("The hostname recipient's original operation has not been superseded.")
-    operations = {
-        key: retained_address_custody_sha256(
-            store.read_odoo_stable_target_replacement_operation_record(key)
+        if not reservations or any(
+            (item.product, item.context, item.operation_id)
+            != (product, context, reservation_operation_id)
+            or not item.target_id
+            for item in reservations
+        ):
+            raise ValueError("The hostname needs exact retained reservation custody in this lane.")
+        operations, retirement_digest = address_custody(
+            session,
+            product=product,
+            context=context,
+            retirement_operation_id=retirement_operation_id,
+            reservations=reservations,
+            for_update=False,
         )
-        for key in {retirement_operation_id, reservation_operation_id}
-    }
     with exclude_address_executors(store, tuple(operations)):
         require_available_address_recipients(
             store,
@@ -461,7 +455,7 @@ def plan_testing_address(
             recipient_sha256=frame["address_recipients_sha256"],
             domain_inventory_sha256=inventory,
             operation_sha256=operations,
-            retirement_sha256=retained_address_custody_sha256(retained),
+            retirement_sha256=retirement_digest,
             created_at=datetime.now(UTC),
         )
         from control_plane.testing_address_settings import plan_canonical_settings

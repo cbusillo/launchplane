@@ -3,7 +3,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 from click.testing import CliRunner
@@ -433,9 +433,9 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
         original_write = self.store.write_product_authority_bundle
         competing_record = _runtime_record(retired=("OTHER_LEGACY_KEY",))
 
-        def concurrent_write(bundle: ProductAuthorityBundle) -> None:
+        def concurrent_write(bundle: ProductAuthorityBundle, **write_options: Any) -> None:
             self.store.write_runtime_environment_record(competing_record)
-            original_write(bundle)
+            original_write(bundle, **write_options)
 
         with patch.object(
             self.store, "write_product_authority_bundle", side_effect=concurrent_write
@@ -461,11 +461,11 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(review.status_code, 202, review.text)
         original_write = self.store.write_product_authority_bundle
 
-        def concurrent_write(bundle: ProductAuthorityBundle) -> None:
+        def concurrent_write(bundle: ProductAuthorityBundle, **write_options: Any) -> None:
             self.store.write_product_profile_record(
                 _profile().model_copy(update={"display_name": "Changed profile"})
             )
-            original_write(bundle)
+            original_write(bundle, **write_options)
 
         with patch.object(
             self.store, "write_product_authority_bundle", side_effect=concurrent_write

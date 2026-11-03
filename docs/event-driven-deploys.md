@@ -15,7 +15,7 @@ Launchplane receives the webhook of the GitHub App its merge train already
 uses (the App is installed on every product repository). One receiver,
 `POST /v1/github/app-webhook`, takes `workflow_run` and `pull_request`
 deliveries for deploy reconciliation. Opted-in source checks also consume
-`push` and `merge_group` deliveries as described below. Other events are
+`push` and `merge_group` deliveries as described below. Message events also wake the existing [attention readers](request-attention.md#message-events). Other events are
 acknowledged and ignored.
 
 Events carry no instructions. An event only says which target to look at
@@ -257,6 +257,12 @@ reservation. The webhook request never waits on a deploy.
   - The manifest is not recorded in the artifact store. The preview's slug
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
+  - An Odoo `preview_provenance_refused` retains its specific
+    `preview_result_error_code` and `failure_trace_id`. The existing
+    `handled_error_cause` service log binds that trace and plan ID to bounded
+    source locations, without exception text or record contents. Follow the
+    [existing-preview source-history contract](disposable-lanes.md) for missing
+    origin evidence and its independent-recipient review route.
   - A snapshot Odoo preview without its Launchplane lifecycle record needs
     native restore custody before a refresh can supersede its original operation.
     The receipt, physical storage binding and database witness must prove an
@@ -269,6 +275,14 @@ reservation. The webhook request never waits on a deploy.
   - Read the PR state again after taking the preview's reservation and just
     before the provider apply; if it closed or moved its head, the reservation is released with no provider effect and the
     reconcile runs again.
+  - Automatic Odoo refresh uses the explicit apply path's disposable-preview
+    protection and resource qualification at each provider mutation boundary.
+    Recorded use, staff holds, only-needed copies and shared production resources
+    refuse refresh, including protection recorded after planning. An unchanged
+    serving build needs no mutation. Fresh creation and unprotected refresh keep
+    their existing UNKNOWN semantics without requiring a positive unused report.
+    After protection clears, the next normal reconciliation retries the retained
+    source intent through the same reservation and recovery rules.
   - A refused or failed destroy is attempted at most three times for the same
     preview lifecycle record, product-profile revision, context, and destroy
     reason. Busy operations, observation-only passes for unknown provider outcomes,
@@ -418,6 +432,15 @@ needs no workflow to report previews or testing deploys.
   build arrives removes its pending comment and records terminal cleared feedback;
   a closed PR without feedback history posts nothing. Other plans that change
   nothing, are deferred, or are held for another driver say nothing.
+  A completed failed Build for the exact head is recorded as a preview failure,
+  with its run ID, rather than an ordinary build wait. A retry waiting on another
+  build retains that failure in the existing feedback until a current-head
+  preview is ready. An unfinished run or a run from another repository does not
+  establish a failed build.
+  Retention reads the original feedback record, keeping its failed revision and
+  reason through temporary source-read errors, recovery holds and interrupted
+  cleanup. A successful cleanup is not a published preview. Failed delivery can
+  retry from that same record; unavailable or mismatched history stays failed.
 - **Testing:** one comment on the PR GitHub merged as the desired commit
   (`merge_commit_sha` equals it), marked `<!-- launchplane-reconcile-testing -->`:
   the deploy is queued, the testing lane runs it, it is waiting because the

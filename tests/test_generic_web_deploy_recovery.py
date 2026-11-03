@@ -77,6 +77,7 @@ def _create_recovery_app(
     actions: tuple[str, ...] = ("generic_web_deploy.execute",),
     contexts: tuple[str, ...] = ("sellyouroutboard-testing",),
     authz_policy: LaunchplaneAuthzPolicy | None = None,
+    bearer_identity_config: BearerIdentityConfig | None = None,
 ) -> Any:
     return create_launchplane_fastapi_test_app(
         local_record_store_for_tests=store,
@@ -89,7 +90,7 @@ def _create_recovery_app(
             contexts=contexts,
         ),
         control_plane_root_path=root,
-        bearer_identity_config=_recovery_bearer_config(),
+        bearer_identity_config=bearer_identity_config or _recovery_bearer_config(),
     )
 
 
@@ -1495,7 +1496,6 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(dry_status, 200)
         self.assertEqual(apply_status, 409)
         self.assertEqual(apply_payload["error"]["code"], "stale_recovery_digest")
-        self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.state, "reconcile_required")
 
@@ -1569,7 +1569,6 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(apply_status, 202)
         self.assertEqual(apply_payload["recovery_action"], "adopt_observed")
         self.assertFalse(apply_payload["retry_safe"])
-        self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.state, "completed")
         serialized = json.dumps(apply_payload, sort_keys=True)
@@ -1811,7 +1810,6 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
 
         self.assertEqual(status_code, 409)
         self.assertEqual(payload["error"]["code"], "stale_recovery_digest")
-        self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.state, "reconcile_required")
 
@@ -1897,7 +1895,6 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(apply_payload["recovery_action"], "adopt_observed")
         self.assertEqual(apply_payload["recovery_digest"], dry_payload["recovery_digest"])
         self.assertGreater(provider.observation_calls, 0)
-        self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.state, "completed")
         self.assertEqual(
@@ -1998,7 +1995,6 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(apply_payload["recovery_action"], "retry_original_operation")
         self.assertEqual(replay_payload["recovery_action"], "retry_original_operation")
         self.assertEqual(replay_payload["recovery_digest"], dry_payload["recovery_digest"])
-        self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.state, "completed")
         self.assertEqual(

@@ -1085,6 +1085,66 @@ idempotency records; both identity values are required whenever the bearer token
 is configured. Admission and authority follow each endpoint
 and the [standing permission](authorization-authority.md#standing-agent-read-plan-and-proven-projection-permission).
 
+### Record-backed Director-agent verification
+
+The service can load these two Director-agent identities from its own records
+at startup. This is separate from retired ordinary-agent enrollment, sessions
+and leases. The service context's `RuntimeEnvironmentRecord` must explicitly
+set `LAUNCHPLANE_AGENT_BEARER_SOURCE` to `records` to activate this reader.
+Without that setting, or with its value explicitly set to `bootstrap`, the
+existing bootstrap identities remain in use. An independent local admin can
+restore `bootstrap` through the same reviewed product-config path without
+depending on GitHub OAuth or the human setting-removal route.
+
+In record mode, that same context record supplies the existing
+`LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT`, `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`,
+`LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and `LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL`
+selectors. Each token comes from exactly one configured, write-only,
+context-scoped `launchplane_service` secret binding in context `launchplane`,
+using its existing token key. Other contexts, global secrets and lane secrets
+cannot supply it. Missing, ambiguous or unreadable token material, or incomplete
+selectors, disable the affected identity. Record mode never falls back to its
+environment token. An unavailable selector read, or an invalid
+source setting, disables both Director-agent identities.
+
+`LAUNCHPLANE_LOCAL_ADMIN_*` and engineering-review bootstrap credentials stay
+independent of this reader. Keeping the admin token available does not bypass
+the active-policy DB requirement or confer authority on a failed agent identity.
+Authentication still produces the same principal types, subjects and labels;
+existing endpoint and policy rules decide authority.
+
+All identity changes, including revocation, require a service restart to take
+effect; the durable testing-rebuild worker resolves current records again at
+each authority checkpoint. Even before record mode is activated, an unreadable
+service-context record disables Director-agent authentication for that service
+process. Independent admin verification is retained; active-policy DB access
+is still required by non-health routes.
+
+Product-config apply may change these authentication selectors, the source
+setting or the two authentication token bindings only for an authenticated
+administrator with current `authz_policy_grant.write` authority on Launchplane.
+The bundle transaction checks the stored and proposed authentication state,
+including displaced binding IDs and changes to referenced secret records or
+current versions. General writers, including product onboarding, cannot create,
+rebind, rotate or remove that authority, even before record mode is active.
+Unrelated settings and service credentials remain configurable. The supported
+write-only product-config input remains available to the administrator; its use
+still follows the Director's credential and access stop boundaries. No grant is
+added here.
+Authentication changes use a standalone product-config apply; record public-host
+changes in a separate request.
+
+This source capability does not transfer credentials or authorize activation.
+Before activation, qualify a supported write-only input from independent custody
+or a separately reviewed service-side transfer, exact principal equivalence,
+independent recovery and rollback in isolation. Do not extract or copy credentials
+or generate replacements. Keep the existing host and Actions inputs until live
+readback and rollback proof support their removal. Rolling back the source
+selection requires the preserved bootstrap inputs and an authorized record
+change followed by restart. No Actions input is removed by this reader.
+
+### Independent local-admin verification
+
 Rare `local_admin` operations use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` with configured
 `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT` and `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`.
 Both identity values are required whenever the bearer token is configured. Those
@@ -1930,6 +1990,15 @@ and preserve optional `Idempotency-Key` replay/conflict behavior.
 
 #### Testing storage requirements
 
+A Director agent may conditionally set or update
+`generic_web_testing_state` on one existing active generic-web testing lane to
+`none` or `volume` with its application data path. Preserve every other profile
+field and submit the reviewed replacement with the current strong `If-Match`
+and a stable `Idempotency-Key`. Removing the declaration, selecting deferred
+PostgreSQL, changing another lane or mixing another profile edit refuses.
+This records the state shape; it does not attest current isolation, allocate
+resources or rebuild the lane.
+
 A Director agent may use the same conditional profile POST to configure only
 `database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes` within
 one existing active Odoo testing lane's `odoo_testing_drill_storage`. Read the
@@ -2478,24 +2547,22 @@ origin, Fetch Metadata and rotating CSRF checks. The same plan digest,
 idempotency and atomic bundle rules apply. This path writes product records
 without creating preview/testing caller grants or reconciling policy.
 
-The current-source onboarding worker applies only target and product records.
-The wrapper still pins its earlier grant-bearing revision and retains the
-matching planner; source deletion does not change that execution. Native
-replacement must cover target creation, original-key recovery/readback and
-reviewed custody retention before the wrapper retires. Browser target setup
-currently permits reviewed domain repair only. Existing caller-rule retirement
-and independent absence readback remain available.
+New generic-web products use the native target and record operations described
+in [operations](operations.md#native-target-allocation), with repository identity
+resolved through the configured source-host helper. Those operations create no
+preview/testing caller grants. Empty target and record qualification is recorded
+in [#5263](https://github.com/cbusillo/launchplane/issues/5263#issuecomment-6490944855);
+working previews and real-repository provenance need independent verification.
 
-The manual `Product Onboarding` workflow is the supported conventional caller.
-It resolves numeric GitHub repository and repository owner ids with a narrowly scoped
-GitHub App token, plans `create-application` through
-`POST /v1/dokploy-targets/setup`, plans the product bundle, and requests a
-complete generic-web preview authz reconciliation plan from
-`POST /v1/authz-policies/managed-rule-sets/generic-web-preview/plan`. Apply is
-one protected review followed by provider setup, record apply, and the existing
-digest-bound managed authz reconcile endpoint. A target/record partial success
-is safe to replay with the same stable idempotency keys; a later authz failure
-leaves the product unauthorized rather than silently broadening access.
+`Product Onboarding` refuses normal new-product dispatches. It retains only the
+old byte-artifact renderer and unchanged pinned worker for existing allocations'
+original actor/key recovery and reviewed custody retention. The current-source
+worker is not that pinned revision. Keep the original pin and required recovery
+inputs until old custody is accounted for. No new repository token, record plan,
+authz plan or authz reconciliation is issued by the wrapper. Existing caller-rule
+retirement and independent absence readback remain available. An old target
+without product records follows the [retention and fresh-context path](operations.md#compatibility-workflow-recovery);
+native record apply cannot adopt that workflow allocation.
 
 The authz planning route requires `generic_web_preview_authz.plan`, reads the
 active DB-backed policy, retains unrelated managed rules, and returns a complete
@@ -2779,6 +2846,8 @@ summary only: target ids, names, project/environment/server identity, domain
 summaries, source metadata, and environment key names/counts. The tracked target's
 `env_keys` lists stored override names separately from the provider's observed
 environment keys, so source-setting precedence can be checked without values.
+The temporary [target-versus-instance comparison](reviewed-retirement.md#plain-stored-settings)
+uses the same route with the existing runtime-setting read permission.
 It must not return
 raw provider payloads or environment values. A tracked target's `public_hosts`
 returns its stored product-config hostname intent separately from origin `domains`
@@ -4211,8 +4280,9 @@ acceptance. See [pending request withdrawal](owner-acceptance.md#withdrawing-a-p
 for replay, readback and later-request behavior.
 
 `POST /v1/product-review/decisions` takes `{repository, pull_request, decision,
-reason, reviewed_head_sha, reviewed_preview_url, reviewed_generation_id}` with
-`decision` of `accepted` or `changes_requested` (reason required). The three
+reviewed_head_sha, reviewed_preview_url, reviewed_generation_id}` with
+`decision` of `accepted`. An optional empty `reason` is accepted for already-open
+Client tabs; nonempty feedback belongs on the pull request. The three
 `reviewed_*` fields are required evidence copied from the GET response. The
 service compares them with the currently serving preview before saving, under
 the decision lock. A mismatch returns `409 product_review_preview_changed`
@@ -4340,12 +4410,20 @@ Launchplane's fixed description, the kind of fix (`code`, `grant`,
 it read. `testing` checks the lane, the staff-testing hold and the last
 reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
 Testing reads its exact current reconcile target; preview history does not
-limit that lookup.
+limit that lookup. A terminal failed reconciliation without a deploy operation
+reports a blocked result with a fixed description and no invented operation id
+or exception text. It shares the delivery monitor's failure-code mapping:
+the saved error code, then post-deploy failure, deploy failure, qualification
+failure, or `testing_reconcile_failed`. The path check validates that code
+through its existing safe-code filter.
 A completed `already_deployed` no-op is clear when the recorded current and
 desired artifact ids, commit SHAs and immutable image digests all match and the
 plan is not held. It cites the artifact id without inventing a deploy operation.
 Missing or inconsistent provenance on a completed, unheld no-op stays unknown
-with `testing_provenance_incomplete`; a request that is not done stays unknown.
+with `testing_provenance_incomplete`. Pending or running requests stay unknown
+with `reconcile_not_done`, even when their saved plans contain a previous successful,
+queued or failed deploy. Historical operation ids are not cited as current evidence.
+A terminal failed request still reports its own recorded operation failure.
 This cites saved reconciliation evidence, not a fresh provider observation;
 a later manual deployment requires reconciliation before this evidence is current.
 For Odoo, select `intent=provision|generation|testing-replacement` on the testing

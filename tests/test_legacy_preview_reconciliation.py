@@ -41,6 +41,8 @@ from tests.support.profiles import _product_profile_payload
 
 
 class LegacyPreviewReconciliationFixture(unittest.IsolatedAsyncioTestCase):
+    driver_id = "generic-web"
+
     def database_url(self) -> str:
         return f"sqlite+pysqlite:///{self.root / 'state.db'}"
 
@@ -52,6 +54,7 @@ class LegacyPreviewReconciliationFixture(unittest.IsolatedAsyncioTestCase):
         self.store.ensure_schema()
         self.addCleanup(self.store.close)
         payload = _product_profile_payload(product="example-site")
+        payload["driver_id"] = self.driver_id
         payload["preview"] = {
             "enabled": True,
             "context": "example-site-preview",
@@ -1039,17 +1042,21 @@ class LegacyPreviewReconciliationTests(LegacyPreviewReconciliationFixture):
                         await asyncio.to_thread(started.wait, LIFESPAN_HANG_DEADLINE_SECONDS)
                     )
                     self.assertFalse(finished.is_set())
-                    self.store.write_product_profile_record(changed)
+                    profile_read = patch.object(
+                        self.store, "read_product_profile_record", return_value=changed
+                    )
+                    profile_read.start()
+                    self.addCleanup(profile_read.stop)
                 finally:
                     release.set()
                 response = await task
+                profile_read.stop()
                 self.assertEqual(response.status_code, 202, response.text)
                 self.assertEqual(response.json()["result"]["status"], "blocked")
                 provider.assert_not_called()
                 self.assertEqual(
                     self.store.read_preview_record(self.preview.preview_id), self.preview
                 )
-                self.store.write_product_profile_record(self.profile)
                 with patch(
                     "control_plane.workflows.preview_lifecycle_cleanup.discover_generic_web_preview_desired_state",
                     return_value=PreviewDesiredStateRecord(

@@ -240,7 +240,6 @@ class IntegrationAllowancesPlanTests(unittest.TestCase):
         self.assertFalse(unchanged.changed)
         change = unchanged.changes[0]
         self.assertEqual(change.action, "unchanged")
-        self.assertIsNotNone(change.after)
         assert change.after is not None
         self.assertEqual(change.after.recorded_by, "first-operator")
         self.assertEqual(
@@ -712,7 +711,14 @@ class IntegrationAllowancesRouteTests(unittest.IsolatedAsyncioTestCase):
             store = self._store(root)
             profile = store.read_product_profile_record(_PRODUCT)
             store.write_product_profile_record(
-                profile.model_copy(update={"product": "other-product"})
+                profile.model_copy(
+                    update={
+                        "product": "other-product",
+                        "preview": profile.preview.model_copy(
+                            update={"app_name_prefix": "other-product-preview"}
+                        ),
+                    }
+                )
             )
             app = self._app(store, root, "product_config.plan", "product_config.apply")
 

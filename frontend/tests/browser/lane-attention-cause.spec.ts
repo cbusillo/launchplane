@@ -29,6 +29,9 @@ test("a red lane states its cause in the directory and the workspace", { tag: "@
     const incident = structuredClone(product.environments.find(lane => lane.environment === "prod")!.health_monitoring.open_incidents[0]);
     Object.assign(incident, { environment: "testing", severity: "warning", failure_code: "testing_delivery_failed", check_kind: "provider" });
     lane.health_monitoring.open_incidents = [incident];
+    lane.lane_status = module.fixtureLaneStatus("danger");
+    lane.lane_status.transitions = [];
+    lane.lane_status.current.attention_reasons = ["Warning incident open: testing delivery failed"];
     return { product, identity: module.fixtureIdentity, now, passSummary: lane.public_ingress.summary };
   });
   await setClockTime(page, fixtures.now);
@@ -66,6 +69,9 @@ test("a red private lane never headlines a retained passing public observation",
     lane.public_ingress.summary = "Public ingress was reachable when last observed.";
     const check = lane.health_monitoring.checks[0];
     Object.assign(check, { probe_effective: true, kind: "private_http", status: "fail", summary: "Private health check failed: connection refused." });
+    lane.lane_status = module.fixtureLaneStatus("danger");
+    lane.lane_status.transitions = [];
+    lane.lane_status.current.attention_reasons = [check.summary];
     return { product, identity: module.fixtureIdentity, retained: lane.public_ingress.summary, cause: check.summary };
   });
   await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { status: "error", trace_id: "unused-read", error: { code: "authorization_denied", message: "Fixture read unavailable" } } }));

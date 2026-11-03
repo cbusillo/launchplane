@@ -12,9 +12,6 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooOverrideValue,
 )
-from control_plane.contracts.odoo_stable_target_replacement_operation import (
-    OdooStableTargetReplacementOperationRecord,
-)
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.testing_address import (
@@ -22,7 +19,6 @@ from control_plane.contracts.testing_address import (
     ADDRESS_SCOPE,
     TestingAddressRecord,
     TestingAddressPlan,
-    retained_address_custody_sha256,
 )
 from control_plane.contracts.testing_publication import (
     TestingPublicationRecord,
@@ -31,7 +27,7 @@ from control_plane.contracts.testing_publication import (
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy.testing_route import TestingLaneRoute
-from control_plane.testing_generation_retirement import RetainedTestingGeneration
+from control_plane.testing_address_custody import address_custody
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage import postgres as db
 from control_plane.storage.product_authority_bundle import (
@@ -196,27 +192,18 @@ def check_testing_address_sources(
 def check_testing_address_retained_custody(
     store: PostgresRecordStore, session: Any, plan: TestingAddressPlan
 ) -> None:
-    for key, digest in plan.operation_sha256.items():
-        operation = session.get(
-            db.LaunchplaneOdooStableTargetReplacementOperationRow, key, with_for_update=True
-        )
-        if operation is None:
-            raise ValueError("An original retained operation is unavailable.")
-        original = OdooStableTargetReplacementOperationRecord.model_validate(operation.payload)
-        if retained_address_custody_sha256(original) != digest:
-            raise ValueError("An original retained operation's custody changed.")
+    operations, retirement_digest = address_custody(
+        session,
+        product=plan.product,
+        context=plan.context,
+        retirement_operation_id=plan.retirement_operation_id,
+        reservations=plan.reservations,
+    )
+    if operations != plan.operation_sha256 or retirement_digest != plan.retirement_sha256:
+        raise ValueError("The original retained hostname custody changed.")
+    for key in operations:
         if not store.testing_replacement_execution_is_excluded(key):
             raise ValueError("An original retained executor is not excluded.")
-    retirement = session.get(
-        db.LaunchplaneRetainedTestingGenerationRow,
-        plan.retirement_operation_id,
-        with_for_update=True,
-    )
-    if retirement is None:
-        raise ValueError("The original retained testing generation is unavailable.")
-    retained = RetainedTestingGeneration.model_validate(retirement.payload)
-    if retained_address_custody_sha256(retained) != plan.retirement_sha256:
-        raise ValueError("The original retained testing generation changed.")
     reservations = tuple(
         item
         for item in store._retained_disposable_hostname_reservations(session)

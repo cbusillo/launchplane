@@ -12,10 +12,7 @@ Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product 
 ## Start Here
 
 - Read the Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md),
-  then this repository's [DIRECTION.md](DIRECTION.md). They own purpose, roles,
-  stop boundaries, retired concepts, and milestone order; overall direction
-  takes precedence. Issues are a work list, not instructions. Escalate a
-  disagreement that requires changing direction instead of editing DIRECTION.md.
+  then this repository's [DIRECTION.md](DIRECTION.md).
 - Read [README.md](README.md), then use [docs/README.md](docs/README.md) before
   reading deeper files.
 - AGENTS.md is the only agent-instruction filename; use nested AGENTS.md files
@@ -31,17 +28,11 @@ Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product 
   Odoo DX. It does own Launchplane-side Odoo operational drivers: control-plane
   code that invokes Odoo operations, not addon models, views, controllers, or
   tenant business logic.
-- Use `.github/github.json` for repo commands and quality gates;
-  do not rely on system Python directly.
 - Persist file-backed local, test, and rehearsal runtime records under `state/`
   or another explicit state directory, not in git-tracked history. Shared
   runtime truth is DB-backed.
-- Do not store real product, tenant, repository, branch, domain, lane,
-  provider-target, runtime-environment, authz, admin, or other mutable
-  runtime configuration as authority in production code or checked-in config
-  files. Code owns schemas, validators, generic behavior, and fail-closed
-  defaults; Launchplane records or admin-supplied input own real identities
-  and values.
+- Follow the shared [Runtime Authority Boundary](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/SKILL.md#runtime-authority-boundary).
+  See [coding standards](docs/policies/coding-standards.md) for the docs/tests boundary.
 - The only runtime configuration exception for checked-in or process-level
   config is Launchplane's own minimal bootstrap/root-of-trust wiring required
   for the service to start and reach DB-backed records and managed secrets.
@@ -49,9 +40,10 @@ Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product 
 ## Delivery Boundary
 
 - Follow [DIRECTION.md](DIRECTION.md) for delivery authority and retired designs.
-  After required checks pass and review findings are accounted for, use the
-  `launchplane` skill to drive the train if the task explicitly authorizes it.
-  Otherwise use the checked `gh-pr.py ready` handoff on the current PR head.
+  Use the shared [merging procedure](https://github.com/cbusillo/codex-skills/blob/main/skills/github/SKILL.md#merging)
+  for handoff and train routing.
+  Without explicit train authority, use the checked `gh-pr.py ready` handoff
+  on the current PR head.
   The train admits trusted, proven current-head handoffs between candidates;
   see [train admission](docs/merge-train-policy.md#ready-handoffs). Until that
   source is deployed, the Supervisor's interim watcher supplies enqueue labels.
@@ -73,21 +65,11 @@ Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product 
 - Keep cross-repo boundaries explicit; do not move release ownership back into
   tenant, shared-addon, or local-DX repos.
 - Never commit secrets or admin-local overrides.
-- Prefer Launchplane-owned runtime-environment records and managed secret
-  records over ad hoc service-host env for product/runtime configuration.
-- Use the deployed Launchplane service API or the Launchplane UI for shared and
-  production live mutations. Do not use local CLI live-target commands from an
-  arbitrary checkout as a fallback; use a supported service capability or
-  record the exact missing service/activation prerequisite.
+- Do not use local CLI live-target commands from an arbitrary checkout as a
+  fallback; use a supported service capability or record the exact missing
+  service/activation prerequisite. See [operations](docs/operations.md).
 - Treat service-host env as bootstrap-only unless a repo doc explicitly calls
   out a narrower scoped bootstrap or rehearsal exception.
-- Do not hard-code real tenant, product, repository, branch, domain, or admin
-  values into production defaults, fallback behavior, or checked-in catalogs;
-  see the coding standards for the docs/tests boundary.
-- Do not replace code hard-coding with checked-in config hard-coding. A real
-  product/repo/domain list in TOML, JSON, YAML, workflow defaults, or repo
-  metadata is still runtime authority unless it is docs, tests, or the
-  Launchplane self-bootstrap exception above.
 - Update docs in the same change when behavior or ownership changes.
 - Fix root causes, not symptoms; avoid workaround-only flows unless the
   Director explicitly asks for a time-boxed mitigation.
@@ -96,10 +78,7 @@ Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product 
   `authorization_denied`, name the exact denied action and follow
   `docs/authorization-authority.md#denial-handling`. Continue with work that does
   not depend on the refusal.
-- Dispatch and watch protected GitHub admin workflows only through the
-  installed `github_workflow_babysit.py` helper. Do not use raw
-  `gh workflow run`, `gh run watch`, or a generic run waiter for those jobs;
-  the helper preserves split identities and surfaces environment waits.
+- Follow the shared [protected workflow dispatch and waiting procedure](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/repo-workflow.md#protected-workflow-dispatch-and-waiting).
 
 ## Workflow Loop
 
@@ -108,25 +87,17 @@ Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product 
 
 ## Quality Gates
 
-- Use `.github/github.json` for the current test, lint,
-  typecheck, build, inspection, and docs-freshness gates.
-- During the [Q326 trial](docs/style/testing.md#local-test-loop), routine
-  changes use focused local tests plus lint, type checks, and IDE inspection.
-  [Testing style](docs/style/testing.md#local-test-loop) owns safety-module
-  selection, Q778 focused PR CI, checked Ready evidence and the full candidate
-  merge gate.
+- [Workflow metadata](.github/github.json) records repository commands and gates.
+- [Testing style](docs/style/testing.md#local-test-loop) owns the Q326 trial,
+  safety-module selection, Q778 focused PR CI, checked Ready evidence and the
+  full candidate merge gate.
 - Changes to agent instructions, execution guidance, approval or safety rules,
   credential handling, or destructive helpers need review by another model
   before delivery. Use the `model-review` skill and its finding-disposition
-  rules; record the provider/model and how findings were handled in the PR.
-- Add targeted tests whenever contract or storage behavior changes. Broaden to
-  affected-area modules or integration gates when the changed behavior or a
-  failure justifies it; complete-suite proof stays in CI.
-- A test must fail when the product breaks and pass when someone makes an
-  intended change. No test may assert a literal defined elsewhere (a version,
-  toolchain, pin, hash, or count) or assert workflow, config, or docs text;
-  run the script or check agreement with the one source instead. Verification
-  code must not depend on working-tree state. See `docs/style/testing.md`.
+  rules.
+- Add targeted tests whenever contract or storage behavior changes.
+- Follow the shared [Tests rule](https://github.com/cbusillo/codex-skills/blob/main/instructions/global.md#tests)
+  and [testing style](docs/style/testing.md).
 
 ## Repo Boundaries
 

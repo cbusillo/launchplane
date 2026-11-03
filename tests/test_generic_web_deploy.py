@@ -1593,10 +1593,8 @@ class GenericWebDeployTests(unittest.TestCase):
 
         self.assertEqual(result.deploy_status, "pass")
         artifact_identity = store.deployments[0].artifact_identity
-        self.assertIsNotNone(artifact_identity)
         assert artifact_identity is not None
         self.assertEqual(artifact_identity.artifact_id, artifact_id)
-        self.assertIsNotNone(store.deployments[0].runtime_identity)
         assert store.deployments[0].runtime_identity is not None
         self.assertEqual(store.deployments[0].runtime_identity.artifact_id, artifact_id)
         self.assertEqual(store.deployments[0].runtime_identity.image_reference, deploy_reference)
@@ -2012,8 +2010,6 @@ class GenericWebDeployTests(unittest.TestCase):
                 ),
                 deploy_provider=_FakeGenericWebDeployProvider(),
             )
-        self.assertEqual(store.deployments, [])
-
         self.assertEqual(store.deployments, [])
 
     def test_record_observed_generic_web_deploy_repairs_missing_records(self) -> None:

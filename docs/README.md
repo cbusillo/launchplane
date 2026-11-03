@@ -53,11 +53,13 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — existing preview compatibility, data-source safety, recovery, and Client-review contract.
 - [product-retirement.md](product-retirement.md) — reviewed product retirement,
   including owned previews, disposable-lane eligibility, and resumable execution.
+- [retained-volume-sweep.md](retained-volume-sweep.md) — private kept-volume custody and reviewed service cleanup after retirement.
 - [disposable-lanes.md](disposable-lanes.md) — usage/data/isolation facts, safe
   testing writes and replacement of stranded testing operations.
 - [odoo-shopify-identity.md](odoo-shopify-identity.md) — hash-only held-testing Shopify identity and applied-production comparison.
 - [odoo-testing-walkthrough.md](odoo-testing-walkthrough.md) — testing task
   accounts, opaque service-owned browser sign-in, receipts and cleanup.
+- [preview-fixtures.md](preview-fixtures.md) — image-owned, repeatable sample data through the existing audited preview maintenance operation.
 - [legacy-preview-reconciliation.md](legacy-preview-reconciliation.md) — reviewed
   reconciliation of provider-absent generic-web and Odoo preview history.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
@@ -73,6 +75,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   graph.
 - [discussion-topics.md](discussion-topics.md) — product-scoped neutral topics,
   supported add/close API, and separate page/reminder delivery slices.
+- [request-attention.md](request-attention.md) — original-source waiting requests,
+  Supervisor routing and explicit collection coverage.
 - [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
   train policy contract, enqueue authority, and smoke-target policy.
 - [merge-train-events.md](merge-train-events.md) — signed App events, worker wake hints,
@@ -110,8 +114,6 @@ not describe runtime authority until it is implemented, deployed, and activated.
   promotion, revision changes, and recorded admin overrides.
 - [mediaforce-releases.md](mediaforce-releases.md) — source-side macOS release
   adapter, host fencing/evidence contract, and separate activation prerequisites.
-- [`owner-control-channel.md`](owner-control-channel.md) — public canonical admin
-  challenge payloads, cross-host conformance artifact, and deferred runtime boundary.
 - [privileged-operations.md](privileged-operations.md) — typed human-governed
   planning, managed-rule authorization, redaction, and future execution boundary.
 - [change-impact-policy.md](change-impact-policy.md) — retired classifier history and the

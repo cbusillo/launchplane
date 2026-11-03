@@ -129,11 +129,17 @@ def validate_github_app_installation_scope(
         bearer_token=bearer_token,
         fetch_json=fetch_json,
     )
+    return validate_runner_host_github_repository_coverage(expected=expected, observed=observed)
+
+
+def validate_runner_host_github_repository_coverage(
+    *, expected: frozenset[str], observed: frozenset[str]
+) -> GitHubAppInstallationScopeEvidence:
     expected_digest = _repository_scope_digest(expected)
     observed_digest = _repository_scope_digest(observed)
-    if expected != observed:
+    if not expected <= observed:
         raise ValueError(
-            "GitHub App installation repositories do not match runtime evidence scope: "
+            "GitHub App installation repositories do not cover runtime evidence scope: "
             f"expected_count={len(expected)} observed_count={len(observed)} "
             f"expected_sha256={expected_digest} observed_sha256={observed_digest}."
         )

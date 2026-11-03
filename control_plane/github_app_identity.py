@@ -338,7 +338,6 @@ def _mint_repository_installation_token(
     permission_boundary_label: str,
     api_request: GitHubApiRequest,
     now: datetime | None,
-    before_token_mint: Callable[[int, int], None] | None = None,
     confirm_app_identity_endpoint: bool = True,
     validation_error_revoke_api_request: GitHubApiRequest | None = None,
     optional_read_permissions: tuple[str, ...] = (),
@@ -452,8 +451,6 @@ def _mint_repository_installation_token(
     }
     requested_permissions = {**requested_permissions, **optional_permissions}
     allowed_token_permissions = {**allowed_token_permissions, **optional_permissions}
-    if before_token_mint is not None:
-        before_token_mint(identity.app_id, installation_id)
     token_payload = json_object(
         _github_api_request(
             api_request,

@@ -12,6 +12,9 @@ validated key names, and a plan blocker can name dozens of keys.
 """
 
 import re
+import logging
+from sqlalchemy.exc import SQLAlchemyError
+from collections.abc import Mapping
 from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, JsonValue
@@ -23,6 +26,7 @@ from control_plane.contracts.product_reconcile import (
     ProductReconcileTargetKind,
     product_reconcile_target_key,
 )
+from control_plane.preview_retirement import verified_preview_retirement_digest
 
 _MAX_TEXT_LENGTH = 400
 _MAX_FAILURE_SUMMARY_LENGTH = 1500
@@ -45,6 +49,21 @@ class ProductReconcileRequestReader(Protocol):
     def list_product_reconcile_requests(
         self, *, product: str, limit: int | None
     ) -> tuple[ProductReconcileRequestRecord, ...]: ...
+
+
+def testing_reconcile_failure_code(plan: Mapping[str, object]) -> str:
+    code = plan.get("last_failed_error_code")
+    if isinstance(code, str) and code:
+        return code
+    return (
+        "post_deploy_failed"
+        if plan.get("post_deploy_status") == "fail"
+        else "deploy_failed"
+        if plan.get("deploy_status") == "fail"
+        else "testing_qualification_failed"
+        if plan.get("reason") == "testing_qualification_failed"
+        else "testing_reconcile_failed"
+    )
 
 
 def product_preview_request(
@@ -80,15 +99,53 @@ def product_preview_requests(
     )
 
 
-def preview_refresh_failure(request: ProductReconcileRequestRecord) -> str:
+def _request_retired(store: object, request: ProductReconcileRequestRecord) -> bool:
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if not isinstance(store, PostgresRecordStore) or request.pull_request_number is None:
+        return False
+    try:
+        return (
+            verified_preview_retirement_digest(
+                store,
+                profile=store.read_product_profile_record(request.product),
+                number=request.pull_request_number,
+            )
+            != ""
+        )
+    except (SQLAlchemyError, OSError, ValueError) as error:
+        logging.getLogger(__name__).warning(
+            "Preview retirement lookup is unavailable (%s).", type(error).__name__
+        )
+        return False
+
+
+def preview_refresh_failure(request: ProductReconcileRequestRecord, *, store: object = None) -> str:
     if request.last_plan.get("action") == "destroy" or (
         "action" not in request.last_plan and "destroy_retry_key" in request.last_plan
     ):
         return ""
-    summary = request.last_plan.get(_FAILURE_SUMMARY_KEY) or request.last_error
+    summary = (
+        request.last_error
+        or preview_current_failure(request.last_plan)
+        or request.last_plan.get(_FAILURE_SUMMARY_KEY)
+    )
     if not isinstance(summary, str) or not summary.strip():
         return ""
+    if _request_retired(store, request):
+        return ""
     return _safe_text(summary, maximum_length=140)
+
+
+def preview_current_failure(plan: Mapping[str, object]) -> str:
+    if plan.get("pull_request_state") == "closed":
+        return ""
+    if plan.get("action") == "wait" and plan.get("held") is True:
+        reason = plan.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return _safe_text(f"Preview is blocked: {reason.replace('_', ' ')}", maximum_length=140)
+        return "The preview is blocked; inspect the current reconcile evidence."
+    return ""
 
 
 class ProductReconcileRequestView(BaseModel):

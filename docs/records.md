@@ -294,30 +294,17 @@ expiry, retrying with the same controller key replans already-refreshed records
 as unchanged and continues remaining due bindings. The controller never creates
 a missing binding or selects production.
 
-The separate remaining-stable controller at
-`POST /v1/route-bindings/odoo-stable/controller/run-once` discovers active Odoo
-testing and production bindings outside that testing controller's service-owned
-slice. It uses the managed reconcile planner for managed authority and the
-external reconcile planner for external authority, with each planner's own
-half-life. Only unchanged or refresh operations are eligible: external authority
-replacement is reported as conflict, never applied automatically. The existing
-testing controller remains testing-only. Both controllers share the bounded
-batch, per-binding CAS, parent replay and partial-progress recovery implementation.
+The testing controller filters discovery by existing target authority before
+planning and the target limit, then reauthorizes included targets before writing.
+Excluded targets are absent from results and unchanged. Finding bindings but no
+authorized target returns 403; an authorized blocked target still requires
+attention. Replay reauthorizes all stored outcomes even if the caller has since
+lost part of its scope.
 
-The stable controller requires its own `route_binding.odoo_stable_refresh.plan`
-or `.apply` capability in the Launchplane service context plus the exact target's
-managed `route_binding.read` / `.apply` or external
-`route_binding.external.plan` / `.apply` authority. Both controllers filter
-discovery by that existing authority before planning and the target limit, then
-reauthorize included targets before writing. Excluded targets are absent from
-results and unchanged. Finding bindings but no authorized target returns 403;
-an authorized blocked target still requires attention. Replay reauthorizes all
-stored outcomes even if the caller has since lost part of its scope. Its request accepts only
-schema version, mode, reason and confirmation. Apply requires
-`APPLY ODOO STABLE ROUTE BINDING REFRESH` and an Idempotency-Key. The new route
-grants no access and starts no schedule. Q193 declines a standing renewal clock;
-stored attestation expiry is diagnostic for operational health, while managed
-route changes retain their independent authority checks.
+Stable bindings have no separate timed evidence-refresh controller. Reads
+recheck unchanged managed sources; stored attestation expiry is diagnostic for
+operational health. Real route changes retain their independent authority checks
+and exact-lane reconciliation.
 
 Product authority bundle writes are the same atomicity boundary for product
 runtime/config ownership. PostgreSQL storage exposes a single
@@ -1171,6 +1158,8 @@ The service exposes product profile records through `GET /v1/product-profiles`,
 `GET /v1/product-profiles/{product}`, and `POST /v1/product-profiles`. Writes
 require the `product_profile.write` action for the target product in the
 Launchplane service context; reads use `product_profile.read`.
+Stored profiles with retired preview settings remain readable in the catalog
+and declaration client; new writes still require the reviewed transition.
 An existing full-profile write preserves classification provenance when an
 older payload omits it, and refuses explicit classification or provenance
 changes. Use the reviewed production-use endpoint for those changes.
@@ -1330,6 +1319,13 @@ cannot change existing health-monitoring authority, and onboarding updates
 preserve it; admins use this bounded apply path instead. Concurrent profile
 edits fail stale instead of being overwritten.
 
+Preview TLS, prelaunch rebuild policy and repository identity planners validate
+each changed complete candidate with the same profile builder and write contract
+used by apply. Both modes return a redacted `invalid_product_profile` refusal
+before offering an invalid changed plan or writing it. Stored historical profiles
+remain readable, and unchanged requests do not rewrite or revalidate unrelated
+legacy fields.
+
 Odoo prelaunch rebuild policy changes use
 `POST /v1/product-profiles/prelaunch-rebuild/apply`. The request identifies one
 exact product/context/instance lane and can change only that lane's
@@ -1448,6 +1444,18 @@ that guarded path, preserving the last observed intent and probe. Delivery and
 deploy-fence incidents still require their own proved recovery.
 
 ### Lane health and identity history
+
+For complete retained incident enumeration, use the existing incident list
+with `status=all&order=opened&limit=50`, then follow `next_cursor` with the same
+product, context, instance, status and order until it is null. This order uses
+the stored opening stamp and incident id as descending string keys, so recovery between pages cannot
+move an occurrence past the cursor. `has_more` explicitly reports truncation.
+The default `order=attention` keeps critical/open incidents first for the UI;
+when truncated, restart in `opened` order to enumerate history. Pagination reads
+current retained records, not a transaction snapshot: newly opened incidents
+require a fresh traversal and statuses may change while reading. Exhaustion
+does not certify deleted records or historical product/check applicability.
+Confirm the deployed schema exposes these query fields before using them.
 
 `GET /v1/products/{product}/environments/{environment}/health-history` reads
 retained observations using the same lane-scoped `product_environment.read`
@@ -3457,84 +3465,9 @@ the privileged worker uses atomic expected-active-policy compare-and-write,
 operation-scoped idempotency, and exact active/superseded read-back before an
 operation reaches `executed`.
 
-Status: the `owner-control` trusted-host confirmation channel and
-second-administrator enrollment described below are retired designs. Their
-code is inert and its deletion is tracked in cbusillo/launchplane#2522; do not
-extend it.
-
-The checked schema-version-6 `contracts/owner-control-contract.json` artifact is
-not a record or runtime authority. It supplies deterministic cross-host
-serialization, synthetic wire/signature vectors, complete shadow-verifier
-outcome vectors, one reactive expiry-lifecycle vector, managed merge-train
-policy descriptor coverage, and exhaustive inert enrollment-provenance vectors.
-Its compatibility declaration pins the version-5 provenance sections and
-projects the additive activation descriptor out of version-4 schema/vector
-checks while retaining the exact version-2 section, descriptor-scoped vector, and filtered
-schema digests carried by version `4`, so provenance cannot silently rewrite
-existing wire, verification, lifecycle, or descriptor contracts.
-
-`owner-control` shadow-verifier state is persisted only in PostgreSQL through
-`PostgresRecordStore`: `launchplane_owner_control_channel_sessions` stores one
-enrolled canonical binding, inert authority marker, and revocation state;
-`launchplane_owner_control_enrollment_provenance` stores one immutable row keyed
-by the session ID with the exact canonical binding and caller-declared
-host-principal claim bytes and digests, the shared database enrollment time,
-`server_observed_corroboration = 'none'`, `provenance_tier = 'self_asserted'`,
-`authority_state = 'inert'`, and `authorizes_execution = false`;
-`launchplane_owner_control_issued_challenges` stores one canonical approval
-request and binding plus their SHA-256 digests, issued/terminal state, and a
-bounded verification-attempt count;
-`launchplane_owner_control_challenge_lifecycle_events` is append-only and stores
-one deterministic `issued -> expired` transition per challenge with exact
-challenge/session/operation identifiers, request and binding digests, challenge
-expiry, database occurrence time, `authorizes_execution = false`, and inert
-authority state but no envelope or verification-attempt sequence;
-and `launchplane_owner_control_shadow_verification_events` is append-only,
-retains only bounded digest/result fields with a unique per-challenge sequence,
-and is constrained to `verifier_mode = 'shadow'`, `authority_state = 'inert'`,
-and `authorizes_execution = false`. The stored canonical binding and
-approval-request bytes, rather than an envelope's self-asserted values, govern
-only the shadow verification comparison; they grant no execution authority.
-Unknown challenge nonces create no record or event.
-
-Session and provenance inserts are one transaction and the storage API returns
-them as one strict enrollment pair. Exact replay returns the pair; binding or
-claim drift conflicts. Challenge issuance fails closed when the provenance row
-is absent, and shadow verification refuses missing provenance before recording
-an attempt. The migration refuses to upgrade while any legacy session lacks
-provenance instead of synthesizing or silently backfilling trust, and downgrade
-refuses while provenance rows exist.
-
-Challenge issuance is service-only and provenance-bound: the store derives the
-canonical approval request from one locked planned operation, exactly one active
-policy, and the enrolled session holder. Its partial unique index permits at most
-one `issued` challenge per operation. When the active row has expired at or
-before the database clock, issuance terminalizes it and appends its lifecycle
-event before flushing and inserting the replacement in the same transaction.
-The challenge `terminal_event_id` prefix identifies whether the terminal record
-came from the lifecycle ledger or the envelope-bound shadow-verification ledger.
-Issuance never updates the privileged operation current projection or its
-append-only event ledger.
-
-`AdministratorEnrollmentRecord` is a separate, versioned, inert preparation
-record for a future second control-proven GitHub-human admin.
-PostgreSQL stores it in `launchplane_administrator_enrollments`; filesystem
-storage mirrors it only for local/test/rehearsal parity. It retains an immutable
-proposer GitHub ID, a server-derived candidate GitHub ID only after a successful
-control proof, reason/provenance SHA-256 digests, lifecycle timestamps, and only an
-opaque single-use challenge SHA-256 digest—never the plaintext challenge.
-Challenges last exactly 30 minutes. The typed lifecycle is
-`issued -> control_proven -> enrolled`, with proposer-only withdrawal before
-enrollment and expiry from either nonterminal state. Exact terminal replay is
-idempotent, while conflicting replay fails closed. Final enrollment requires the
-exact active policy record ID, revision, policy digest, reviewed-plan digest,
-and bridge idempotency-key digest produced by the separately reviewed policy
-apply and read-back flow.
-The record is constrained to `authority_state = 'inert'`,
-`authorizes_policy = false`, and a lifecycle-bound bridge state that is
-`not_applied` until exact enrollment evidence is recorded and `applied`
-afterward. It has no rule, action, selector, grant, managed set, or repository
-field and cannot itself be evaluated as authorization.
+The retired trusted-host confirmation and second-administrator enrollment
+APIs are removed. Their table declarations, schema checks, migration history,
+and migration tests remain until a separately approved data deletion.
 
 **Preserved history:** references to Phase 1 planning records describe the
 pre-worker lifecycle and do not constrain the current Phase 2 statuses.

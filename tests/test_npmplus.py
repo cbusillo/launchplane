@@ -350,7 +350,6 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
 
         api_payload = payload.to_api_payload()
         locations = api_payload["locations"]
-        self.assertIsInstance(locations, list)
         assert isinstance(locations, list)
         location = cast(dict[str, object], locations[0])
         self.assertNotIn("id", location)
@@ -571,7 +570,6 @@ class NpmplusClientTests(unittest.TestCase):
         method, url, request_payload = opener.requests[-1]
         self.assertEqual(method, "PUT")
         self.assertEqual(url, "https://npmplus.example.test/api/nginx/proxy-hosts/78")
-        self.assertIsInstance(request_payload, dict)
         assert isinstance(request_payload, dict)
         self.assertTrue(request_payload["npmplus_noindex"])
 

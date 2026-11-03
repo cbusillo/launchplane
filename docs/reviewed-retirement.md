@@ -11,6 +11,27 @@ Neither path calls a provider, syncs a runtime, deploys, or restarts a lane.
 
 ## Plain stored settings
 
+For the tracked-target environment fold, reuse the existing
+`GET /v1/dokploy-targets/inspect?context=<context>&instance=<instance>` read.
+Its `tracked_target.instance_setting_comparison` groups target key names by
+whether the exact instance runtime record has the same string value, a different
+value, or no value, and separately reports target keys retired by that record.
+It is null when the target has no environment overlay. Context/global settings,
+managed-secret values, provider values and retained operation snapshots are not
+compared. No values or value hashes are returned, and no secret versions are read.
+The existing target-inspection permissions and provider read still apply.
+The comparison also requires the existing exact-lane `secret.list` runtime-setting
+read permission; other inspectors receive null without reading runtime settings.
+
+This is temporary evidence for deleting the tracked-target layer, not another
+settings inventory or removal authorization. The target and runtime record are
+read separately; their timestamps identify an observation, not an atomic
+migration plan. A fold must recheck equality and retirement under its write
+locks, preserve generation-specific resource ownership and retained operations,
+and keep live delivery on accepted releases. Remove this comparison when the
+tracked-target layer is deleted. Existing lane declarations and values remain
+the destination; never overwrite a conflicting lane value to make a fold pass.
+
 `POST /v1/admin/runtime-settings/removal` accepts `mode: dry-run`, `apply`, or
 `readback`, an exact `product`, `scope` (`global`, `context`, `instance`),
 `context`, `instance`, `keys`, and `reason`. Global scope requires

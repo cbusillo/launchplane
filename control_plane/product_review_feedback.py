@@ -1,12 +1,14 @@
 """GitHub projection of immutable Client decisions, including their complete prose."""
 
 from collections.abc import Callable
+from datetime import datetime
 import json
 import re
 from urllib.parse import quote
 
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.github_payload import required_positive_int
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 
 
 def validate_owner_feedback_decision(decision: ProductReviewDecisionRecord) -> None:
@@ -58,11 +60,33 @@ def publish_owner_feedback(
     api_request: Callable[..., object],
 ) -> str:
     """Reconcile one comment while the caller holds the stored PR's review lock."""
+    body = owner_feedback_comment(decision, review_url=review_url)
+    return publish_review_comment(
+        repository=decision.repository,
+        pull_request_number=decision.pull_request_number,
+        body=body,
+        token=token,
+        actor_id=actor_id,
+        app_id=app_id,
+        api_request=api_request,
+    )
+
+
+def publish_review_comment(
+    *,
+    repository: str,
+    pull_request_number: int,
+    body: str,
+    token: str,
+    actor_id: int = 0,
+    app_id: int = 0,
+    legacy_receipt: tuple[str, datetime] | None = None,
+    api_request: Callable[..., object],
+) -> str:
     if app_id < 1 and actor_id < 1:
         raise ValueError("Client feedback requires a delivery identity.")
-    body = owner_feedback_comment(decision, review_url=review_url)
     marker = body.splitlines()[0]
-    path = f"/repos/{quote(decision.repository)}/issues/{decision.pull_request_number}/comments"
+    path = f"/repos/{quote(repository)}/issues/{pull_request_number}/comments"
     matches: list[dict[str, object]] = []
     for page in range(1, 11):
         comments = api_request(path=f"{path}?per_page=100&page={page}", token=token)
@@ -72,8 +96,22 @@ def publish_owner_feedback(
             if not isinstance(comment, dict):
                 raise ValueError("Client feedback comment lookup is incomplete.")
             text = comment.get("body")
-            if not isinstance(text, str) or not text.startswith(marker + "\n"):
+            if not isinstance(text, str):
                 continue
+            if not text.startswith(marker + "\n"):
+                if legacy_receipt is None or not text.startswith(legacy_receipt[0] + "\n"):
+                    continue
+                created_at = comment.get("created_at")
+                if not isinstance(created_at, str):
+                    continue
+                try:
+                    if (
+                        parse_launchplane_mutation_timestamp(created_at, field_name="Client notice")
+                        < legacy_receipt[1]
+                    ):
+                        continue
+                except ValueError:
+                    continue
             author = comment.get("user")
             app = comment.get("performed_via_github_app")
             matches_actor = (
@@ -106,14 +144,11 @@ def publish_owner_feedback(
         # changed public origin or an edited comment must not strand a decision
         # after a successful POST whose response/receipt write was lost.
         updated = api_request(
-            path=f"/repos/{quote(decision.repository)}/issues/comments/{comment_id}",
+            path=f"/repos/{quote(repository)}/issues/comments/{comment_id}",
             token=token,
             method="PATCH",
             body={"body": body},
         )
         if not isinstance(updated, dict) or updated.get("id") != comment_id:
             raise ValueError("Client feedback repair was not confirmed.")
-    return (
-        f"https://github.com/{decision.repository}/pull/{decision.pull_request_number}"
-        f"#issuecomment-{comment_id}"
-    )
+    return f"https://github.com/{repository}/pull/{pull_request_number}#issuecomment-{comment_id}"

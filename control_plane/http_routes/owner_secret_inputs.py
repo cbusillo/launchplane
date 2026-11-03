@@ -8,6 +8,7 @@ from fastapi import Depends, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from control_plane import secrets
+from control_plane.contracts.authz_policy_record import AuthzPolicyConflictError
 from control_plane.artifact_scan import GHCR_ARTIFACT_READ_INTEGRATION
 from control_plane.github_app_configuration import ONBOARDING_GITHUB_APP_INTEGRATION
 from control_plane.durable_operation_authorization import read_active_authz_policy_record
@@ -15,9 +16,6 @@ from control_plane.product_config import _plan_product_config_secret_write
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
-)
-from control_plane.contracts.owner_control_shadow_verifier import (
-    OwnerControlShadowVerifierConflictError,
 )
 from control_plane.http_routes.support import (
     ApiRouteRegistrar,
@@ -226,7 +224,7 @@ def register_owner_secret_input_routes(
                 ),
                 identity=identity,
             )
-        except (PermissionError, OwnerControlShadowVerifierConflictError) as error:
+        except (PermissionError, AuthzPolicyConflictError) as error:
             raise common.http_error(
                 status_code=403,
                 trace_id=trace_id,

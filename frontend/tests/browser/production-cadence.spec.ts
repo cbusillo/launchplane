@@ -1,6 +1,22 @@
 import { expect, setClockTime, test, waitForState } from "./state";
 import { DEADLINE_RETRY_INTERVAL_MS, READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
+import type { ProductEnvironmentSummary } from "../../src/generated/openapi";
 import { smokeArtifact } from "../../browser-smoke-paths.mjs";
+
+function statusAtDeadline(now: number, deadline: number, production: boolean): NonNullable<ProductEnvironmentSummary["lane_status"]> {
+  const expired = {
+    tone: production ? "danger" as const : "warning" as const,
+    sidebar_tone: production ? "danger" as const : "stale" as const,
+    description: production ? "Alert; Current production health is not verified" : "Stale evidence; awaiting current observations",
+    reasons: [], attention_reasons: production ? ["Current production health is not verified"] : [],
+    warning_reasons: [], release_healthy: false, public_observation_gap: "Public route observation incomplete",
+  };
+  return {
+    evaluated_at: new Date(now).toISOString(),
+    current: now > deadline ? expired : { tone: "verified", sidebar_tone: "verified", description: "Healthy", reasons: [], attention_reasons: [], warning_reasons: [], release_healthy: true, public_observation_gap: null },
+    transitions: now > deadline ? [] : [{ after: new Date(deadline).toISOString(), signal: expired }],
+  };
+}
 
 const fixtureBootstrapPath = "/ui/products?fixture=products";
 
@@ -65,6 +81,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
             record.freshness_status = serviceTime <= observed + cadence ? "verified" : "stale";
           }
           if ("trust_state" in record) record.trust_state = serviceTime <= observed + cadence ? "verified" : "stale";
+          if ("lane_status" in record) record.lane_status = statusAtDeadline(serviceTime, observed + cadence, true);
           Object.values(record).forEach(fresh);
         };
         fresh(copy);
@@ -225,6 +242,7 @@ for (const heldRead of [false, true]) {
           Object.values(record).forEach(stamp);
         };
         stamp(lane);
+        lane.lane_status = statusAtDeadline(now, expires, !testing);
       }
       return route.fulfill({ json: { status: "ok", products: [product] } });
     });

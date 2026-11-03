@@ -226,7 +226,6 @@ class EngineeringReviewWorkerTests(unittest.TestCase):
         self.assertEqual(
             captured_environment["LAUNCHPLANE_ENGINEERING_REVIEW_CREDENTIAL"], credential
         )
-        self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.state, "completed")
 

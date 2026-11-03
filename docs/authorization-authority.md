@@ -48,29 +48,6 @@ access to an invalid policy or silently starting with bootstrap authority.
   change, as [Denial Handling](#denial-handling) requires, is not such a
   workaround.
 
-`owner-control` channel-session, issued-challenge, and shadow-verification event
-records are inert verification evidence, not authorization policy or grants.
-They define no HTTP action, route, managed set, workflow, secret, or production
-access path; every result persists `authority_state = 'inert'` and
-`authorizes_execution = false`. Adding these records does not make a
-self-asserted key, binding, or challenge authoritative.
-Service-only challenge derivation may fail closed unless the enrolled admin's immutable
-GitHub ID has exactly one ID-only managed rule for the descriptor's
-existing approval action. That read does not define a new action, grant access,
-or authorize approval or execution; rules that also depend on mutable login,
-organization, team, or role selectors are intentionally insufficient without a
-live authenticated human identity.
-
-Administrator-enrollment records are likewise inert evidence only. They may
-record a Director-created, 30-minute opaque challenge and a later server-derived
-candidate GitHub identity that proved control, but they do not create an
-admin, grant a policy action, change a managed set, or make any route
-or workflow available. Every record is fixed to no authority. A future bridge
-may compile a final enrolled record into a Director-gated DB-native policy change
-only after separate design, review, apply, and read-back work, and installing it
-is a Director decision. Landing enrollment storage does not approve or
-implement that bridge.
-
 Repository inventory follows the same authority boundary. Its
 `repository_inventory.read` and `repository_inventory.write` actions use the
 Launchplane service scope (`product=launchplane`, `context=launchplane`), but
@@ -163,6 +140,13 @@ also has a bounded Director-agent path; that contract owns its safety and recove
 
 The [health alert drill](health-alert-drills.md) also has a bounded Director-agent
 send path; that contract owns its authorization and delivery rules.
+
+[Preview feedback remediation](operations.md#preview-feedback-remediation) admits
+the authenticated Director `local_operator` for an exact verified native Odoo
+retirement. This route-local standing path derives terminal `destroyed` feedback
+from the retained original and lifecycle evidence, bound to the reviewed dry run.
+It adds no grant to the general remediation action, other callers or statuses,
+and cannot change provider state, access, release or merge authority.
 
 Generic-web deploy recovery dry runs authorize the instance-scoped
 `generic_web_deploy_recovery.plan` action, with the existing execute grant as a
@@ -893,12 +877,6 @@ Production policy changes are a Director decision made through the supported
 DB-native administration route; total-lockout recovery remains explicitly
 deferred.
 
-The ordinary-agent delegated-delivery pilot is retired (see
-[DIRECTION.md](../DIRECTION.md#retired)); issue
-[#2437](https://github.com/cbusillo/launchplane/issues/2437) deletes its code.
-Do not stage or install its `operator.ordinary-agent-delivery-administration`
-managed set.
-
 After parity and administration gates pass, protected desired-set secrets and
 routine authorization workflows must be retired. GitHub may remain an identity
 provider and transport for already-authorized workloads. No total-lockout
@@ -1037,45 +1015,15 @@ schema-v3 seed and unbound replacement stay fenced. Historical
 `runtime_capability_at_setup` and `policy_v3_write_supported` values on stored
 records are history only, not authority.
 
-### Preparing Agent Delivery Administration
+### Retained Agent Delivery Administration Records
 
-The Access policy workbench can prepare the closed
-`ordinary-agent-delivery-administration` candidate with an add or remove intent.
-Preparation derives the immutable GitHub ID from the signed-in browser session
-and the schema from the single active policy record. It requires existing
-managed `authz_policy_operation.propose` authority and strict immutable-ID
-administrator authority; it cannot repair missing policy-administration access.
-The browser supplies no principal, policy fragment, managed IDs, scope, actions,
-quorum change, or routine reason.
-
-The candidate owns a separate managed set for one pilot administrator. Its rule
-contains exactly the five explicit Agent delivery activation lifecycle actions,
-the authenticated immutable ID, the admin role, and global Launchplane scope.
-An occupied set with a different identity or shape refuses preparation. Adding
-access also refuses conflicting explicit activation authority; overlapping
-authority does not prevent removing this isolated set. Legacy empty-action rules remain
-unchanged and do not count as explicit activation authority. The foundational
-policy-operation set and all unrelated policy content remain untouched.
-
-Both intents create ordinary `managed-authz-policy-set` plans through the
-existing planner. Preparation may persist a planned operation and event; it
-does not write policy, approve a plan, change schema or quorum, enroll an agent,
-start a worker, or call a provider. Existing approval, current-policy checks,
-worker execution, CAS, and read-back still govern any policy change. Already
-satisfied intents create no new plan. Removal proposes an empty desired fragment
-for only this set and refuses while an unstopped current activation could lose
-its stop controls. Revoking an operation approval before worker claim and
-removing an already-installed administration rule are different operations.
-If an activation starts after removal was prepared, the policy write refuses
-under the shared authorization lock. Stop that activation before preparing a
-fresh removal; re-planning alone does not clear this condition.
-
-The five lifecycle actions are prepared together because an approved activation
-setup still writes only a qualification-only intent. They do not authorize the
-separate ordinary-agent policy, provider, or worker changes. The pilot is
-retired, so do not install this set; only its removal remains supported. This
-composer is a constrained input path for an existing
-admin, not a replacement bootstrap or total-lockout recovery.
+The retired `ordinary-agent-delivery-administration` candidate and its replay
+are no longer accepted by authorization-candidate preparation. Stored records
+remain readable, and administration-rule removal stays guarded by activation
+history. Do not stage or install the retired
+`operator.ordinary-agent-delivery-administration` managed set; remove existing
+rules through a managed-policy-set plan or managed-rule-set reconcile. Schema-3
+parsing and retained request validation remain supported.
 
 ### Preparing Administrator Product Evidence Access
 
@@ -1332,8 +1280,8 @@ part of historical policy records.
 ## Existing-identity policy version compatibility
 
 Authorization policy readers support schemas 2 and 3 for existing human,
-workflow, and terminal-agent identities. `owner-control` challenge derivation,
-authorization diagnostics, and feedback actor/worker resolution preserve the
+workflow, and terminal-agent identities. Authorization diagnostics and feedback
+actor/worker resolution preserve the
 same immutable identity, scope, role, current policy, expiry, and revocation
 checks across these versions. This does not register an ordinary-agent identity
 or enable ordinary-agent execution.

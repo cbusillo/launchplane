@@ -5,9 +5,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import (
-    cast,
-)
+from typing import Any, cast
 from unittest.mock import patch
 
 from control_plane import secrets as control_plane_secrets
@@ -1790,14 +1788,15 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
                     original_write = app_store.write_product_authority_bundle
 
                     def commit_matching_request_before_attempt(
-                        bundle: ProductAuthorityBundle,
+                        bundle: ProductAuthorityBundle, **write_options: Any
                     ) -> None:
                         original_write(
                             bundle
                             if completed
-                            else bundle.model_copy(update={"idempotency_record": None})
+                            else bundle.model_copy(update={"idempotency_record": None}),
+                            **write_options,
                         )
-                        original_write(bundle)
+                        original_write(bundle, **write_options)
 
                     with patch.object(
                         app_store,
@@ -1891,9 +1890,11 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             )
             original_write = app_store.write_product_authority_bundle
 
-            def commit_intervening_update(bundle: ProductAuthorityBundle) -> None:
+            def commit_intervening_update(
+                bundle: ProductAuthorityBundle, **write_options: Any
+            ) -> None:
                 app_store.write_runtime_environment_record(competing_record)
-                original_write(bundle)
+                original_write(bundle, **write_options)
 
             with patch.object(
                 app_store,
@@ -2370,8 +2371,10 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
             }
             original_write = app_store.write_product_authority_bundle
 
-            def commit_then_report_conflict(bundle: ProductAuthorityBundle) -> None:
-                original_write(bundle)
+            def commit_then_report_conflict(
+                bundle: ProductAuthorityBundle, **write_options: Any
+            ) -> None:
+                original_write(bundle, **write_options)
                 raise RuntimeEnvironmentConflictError("simulated concurrent runtime conflict")
 
             with patch.object(
@@ -2716,7 +2719,6 @@ class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(apply_response.status_code, 202)
         self.assertNotIn(plaintext, json.dumps(dry_run_response.json(), sort_keys=True))
         self.assertNotIn(plaintext, json.dumps(apply_response.json(), sort_keys=True))
-        self.assertIsNotNone(apply_idempotency_record)
         assert apply_idempotency_record is not None
         self.assertTrue(apply_idempotency_record.request_fingerprint.startswith("hmac-sha256:"))
         self.assertNotIn(plaintext, apply_idempotency_record.request_fingerprint)

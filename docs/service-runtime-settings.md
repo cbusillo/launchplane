@@ -22,6 +22,13 @@ Its value must be a nonempty identifier of at most 128 ASCII letters, digits or
 underscores or dots. Recording it does not switch the current onboarding workflows away
 from their Actions inputs, prove an installation, or create any credential.
 
+The declared merge-train stall sender routing keys are
+`LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REPOSITORY` and
+`LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REF`. They select the existing workflow
+sender described in [merge-train events](merge-train-events.md); setting them
+does not dispatch it or prove Discord delivery. Activation and delivery checks
+remain post-deployment local supported operations.
+
 The request names `key`, `value` and `reason`. `mode: dry-run` returns
 `result.plan_digest` and writes nothing. `mode: apply` repeats the same request with
 `expected_plan_digest` and an `Idempotency-Key` header. Apply refuses when the

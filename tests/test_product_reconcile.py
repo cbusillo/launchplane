@@ -22,7 +22,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread, current_thread, main_thread
 from typing import Any, Literal, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 
 import click
@@ -97,7 +97,9 @@ from control_plane.odoo_preview_apply_http import (
     build_odoo_preview_apply_inputs_result,
     observe_odoo_preview_apply_result,
 )
-from control_plane.product_reconcile_read import product_reconcile_request_view
+from control_plane.product_reconcile_read import (
+    product_reconcile_request_view,
+)
 from control_plane.product_review_status import OwnerReviewStatus, owner_review_reference_url
 from control_plane.product_review import resolve_serving_preview
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy, MergeTrainPolicyRecord
@@ -400,6 +402,8 @@ class FakePreviewProvider:
 
     def __init__(self) -> None:
         self.applied: list[tuple[str, int]] = []
+        self.targets: dict[tuple[str, str], str] = {}
+        self.allocations = 0
         self.omitted_integration_credential_keys: tuple[str, ...] = ()
 
     def hooks(self) -> PreviewProviderHooks:
@@ -415,10 +419,25 @@ class FakePreviewProvider:
         *,
         profile: LaunchplaneProductProfileRecord,
         request: OdooPreviewApplyInputsRequest,
+        record_store: Any = None,
         **_kwargs: object,
     ) -> dict[str, object]:
         slug = f"pr-{request.pr_number}"
         url = f"https://{slug}.example.test"
+        compose_name = request.preview_slug or f"cm-odoo-preview-{slug}"
+        creating = False
+        if record_store is not None and request.operation == "refresh":
+            from control_plane.workflows.launchplane import find_preview_record
+
+            preview = find_preview_record(
+                record_store=record_store,
+                context_name=profile.preview.context,
+                anchor_repo=profile.repository.partition("/")[2],
+                anchor_pr_number=request.pr_number,
+            )
+            creating = (profile.preview.context, compose_name) not in self.targets and (
+                preview is None or preview.state == "destroyed"
+            )
         return OdooPreviewApplyInputsResult(
             status="ready",
             product=profile.product,
@@ -447,19 +466,35 @@ class FakePreviewProvider:
                 repository=profile.repository,
                 preview_slug=slug,
                 preview_url=url,
-                compose_ref=f"cm-odoo-preview-{slug}",
-                compose_name=f"cm-odoo-preview-{slug}",
+                compose_ref=f"${{created.composeId:{compose_name}}}"
+                if creating
+                else self.targets.get((profile.preview.context, compose_name), compose_name),
+                compose_name=compose_name,
                 summary="ready",
             ),
             omitted_integration_credential_keys=self.omitted_integration_credential_keys,
             source=request.source,
         ).model_dump(mode="json")
 
+    def allocate_target(self, issued_plan: OdooPreviewApplyInputsResult) -> str:
+        plan = issued_plan.dry_run_plan
+        target = plan.compose_ref
+        if target.startswith("${created."):
+            self.allocations += 1
+            target = f"{plan.compose_name}-allocation-{self.allocations}"
+        self.targets[(issued_plan.context, plan.compose_name)] = target
+        return target
+
     def execute_apply(
         self, *, issued_plan: OdooPreviewApplyInputsResult, **_kwargs: object
     ) -> dict[str, object]:
         self.applied.append((issued_plan.operation, issued_plan.plan_request.pr_number))
         dry_run_plan = issued_plan.dry_run_plan
+        key = (issued_plan.context, dry_run_plan.compose_name)
+        if issued_plan.operation == "refresh":
+            target = self.allocate_target(issued_plan)
+        else:
+            target = self.targets.pop(key, dry_run_plan.compose_ref)
         return {
             "status": "pass",
             "operation": issued_plan.operation,
@@ -469,6 +504,7 @@ class FakePreviewProvider:
             "preview_url": dry_run_plan.preview_url,
             "domain_host": dry_run_plan.preview_url.removeprefix("https://"),
             "compose_name": dry_run_plan.compose_name,
+            "compose_id": target,
         }
 
     def observe_apply(self, **_kwargs: object) -> tuple[str, None, bool]:
@@ -2275,6 +2311,30 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             self.request()
             repeated = self.run_once()
         self.assertEqual(first.last_plan["deploy_status"], "fail")
+        from control_plane.product_path_check import (
+            PathCheckInputs,
+            _testing_reconcile_plan,
+            build_product_path_check,
+        )
+
+        check = build_product_path_check(
+            product="site",
+            path="testing",
+            inputs=PathCheckInputs(
+                profile=_generic_web_profile(),
+                testing_reconcile_plan=_testing_reconcile_plan(self.store, _generic_web_profile()),
+            ),
+        )
+        self.assertEqual(check.steps[-1].state, "blocked")
+        self.assertEqual(check.steps[-1].code, "deploy_failed")
+        self.assertTrue(
+            any(
+                check.steps[-1].code in incident.summary
+                for incident in self.store.list_public_ingress_incident_records(
+                    product="site", instance_name="testing", status="open"
+                )
+            )
+        )
         self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
         self.assertEqual(len(triggered), 1)
         records = self.store.list_deployment_records(context_name="cm", instance_name="testing")
@@ -5715,6 +5775,190 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def _record_preview_protection(self, protection: str) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        target = DokployTargetRecord(
+            context="cm", instance="pr-5", updated_at="2026-09-30T09:00:00Z"
+        )
+        if protection == "staff_testing":
+            target = target.model_copy(
+                update={
+                    "policies": DokployTargetPolicies(
+                        staff_testing_hold=DokployTargetStaffTestingHold(
+                            reason="Staff use this preview.",
+                            recorded_by="fixture",
+                            recorded_at=target.updated_at,
+                        )
+                    )
+                }
+            )
+        self.store.write_dokploy_target_record(target)
+        record_safety(
+            self.store,
+            "site",
+            "cm",
+            "pr-5",
+            usage="in_use" if protection == "in_use" else "unknown",
+            data="only_copy" if protection == "only_copy" else "unknown",
+            production_resources=protection
+            if protection in {"shared", "separation_ready"}
+            else "unknown",
+        )
+        self.store.write_provider_target_record(
+            ProviderTargetRecord(
+                context="cm",
+                instance="prod",
+                display_name="Production",
+                provider_id="dokploy",
+                target_category="application",
+                provider_target_type="compose",
+                target_id=self.provider.targets[("cm", "cm-odoo-preview-pr-5")]
+                if protection == "alias"
+                else "production-target",
+                updated_at=target.updated_at,
+            )
+        )
+
+    def test_protected_automatic_refresh_resumes_same_intent_after_protection_clears(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+        for index, protection in enumerate(
+            ("in_use", "staff_testing", "only_copy", "shared", "separation_ready", "alias")
+        ):
+            with self.subTest(protection=protection):
+                self._record_preview_protection(protection)
+                self.request("preview", 5)
+                self.assertEqual(self.reconcile()["reason"], "already_serving")
+                pushed = f"{index + 1:040x}"
+                self.github.pull_request["head"] = {"sha": pushed}
+                self.github.add_run(51 + index, pushed, event="pull_request")
+                before = (
+                    self.store.list_preview_records(),
+                    self.store.list_preview_generation_records(),
+                )
+                effects = list(self.provider.applied)
+                self.request("preview", 5)
+                refused = self.run_once()
+                self.assertEqual(self.provider.applied, effects)
+                self.assertEqual(
+                    (
+                        self.store.list_preview_records(),
+                        self.store.list_preview_generation_records(),
+                    ),
+                    before,
+                )
+                self.assertEqual(refused.state, "failed")
+                self._record_preview_protection("clear")
+                self.request("preview", 5)
+                resumed = self.reconcile()
+                self.assertEqual(resumed["preview_plan_id"], refused.last_plan["preview_plan_id"])
+                self.assertEqual(resumed["preview_result_status"], "pass")
+                self.assertEqual(self.provider.applied, [*effects, ("refresh", 5)])
+
+    def test_pr_movement_after_first_preview_effect_does_not_interrupt_finalization(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        execute = self.provider.execute_apply
+        pushed = "b" * 40
+
+        def moved_after_effect(**kwargs: Any) -> dict[str, object]:
+            kwargs["provider_effect_checkpoint"]("compose_update")
+            self.github.pull_request["head"] = {"sha": pushed}
+            kwargs["provider_effect_checkpoint"]("compose_update")
+            return execute(**kwargs)
+
+        self.request("preview", 5)
+        with patch.object(self.provider, "execute_apply", side_effect=moved_after_effect):
+            completed = self.reconcile()
+        self.assertEqual(completed["preview_result_status"], "pass")
+        self.assertEqual(self.provider.applied, [("refresh", 5)])
+        self.github.add_run(51, pushed, event="pull_request")
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+        preview = self.store.list_preview_records()[0]
+        generation = self.store.read_preview_generation_record(preview.serving_generation_id)
+        self.assertEqual(generation.anchor_summary.head_sha, pushed)
+
+    def test_automatic_creation_keeps_recorded_protection_without_an_unused_witness(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        for protection in ("in_use", "staff_testing", "only_copy", "shared", "separation_ready"):
+            with self.subTest(protection=protection):
+                self._record_preview_protection(protection)
+                self.request("preview", 5)
+                refused = self.run_once()
+                self.assertEqual(refused.state, "failed")
+                self.assertEqual(self.provider.applied, [])
+                self.assertEqual(self.store.list_preview_records(), ())
+                self.assertEqual(self.store.list_preview_generation_records(), ())
+        self._record_preview_protection("clear")
+        target_binding = DokployTargetIdRecord(
+            context="cm",
+            instance="pr-5",
+            target_id="production-target",
+            updated_at="2026-09-30T09:00:00Z",
+        )
+        self.store.write_dokploy_target_id_record(target_binding)
+        self.request("preview", 5)
+        self.assertEqual(self.run_once().state, "failed")
+        self.assertEqual(self.provider.applied, [])
+        self.store.delete_dokploy_target_id_record(expected_record=target_binding)
+        self.request("preview", 5)
+        self.assertEqual(self.reconcile()["preview_result_status"], "pass")
+        self.assertEqual(self.provider.applied, [("refresh", 5)])
+
+    def test_automatic_refresh_rechecks_protection_after_planning_and_at_provider_effect(
+        self,
+    ) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        build = self.provider.build_inputs
+        execute = self.provider.execute_apply
+
+        def protect_after_plan(**kwargs: Any) -> dict[str, object]:
+            result = build(**kwargs)
+            self._record_preview_protection("in_use")
+            return result
+
+        def protect_before_effect(**kwargs: Any) -> dict[str, object]:
+            self._record_preview_protection("only_copy")
+            kwargs["provider_effect_checkpoint"]("compose_update")
+            return execute(**kwargs)
+
+        for stage, method, replacement in (
+            ("planned", "build_inputs", protect_after_plan),
+            ("effect", "execute_apply", protect_before_effect),
+        ):
+            with self.subTest(stage=stage):
+                self._record_preview_protection("clear")
+                pushed = ("b" if stage == "planned" else "c") * 40
+                self.github.pull_request["head"] = {"sha": pushed}
+                self.github.add_run(51 if stage == "planned" else 52, pushed, event="pull_request")
+                effects = list(self.provider.applied)
+                before = (
+                    self.store.list_preview_records(),
+                    self.store.list_preview_generation_records(),
+                )
+                self.request("preview", 5)
+                with patch.object(self.provider, method, side_effect=replacement):
+                    refused = self.run_once()
+                self.assertEqual(self.provider.applied, effects)
+                self.assertEqual(
+                    (
+                        self.store.list_preview_records(),
+                        self.store.list_preview_generation_records(),
+                    ),
+                    before,
+                )
+                self.assertEqual(refused.state, "failed")
+
+                self._record_preview_protection("clear")
+                self.request("preview", 5)
+                resumed = self.reconcile()
+                self.assertEqual(resumed["preview_plan_id"], refused.last_plan["preview_plan_id"])
+                self.assertEqual(resumed["preview_result_status"], "pass")
+
     def test_changed_preview_binding_keeps_its_original_plan_until_guarded_renewal(self) -> None:
         from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_PLAN_TTL_SECONDS
         from control_plane.workflows.odoo_preview_runtime import (
@@ -6422,7 +6666,52 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.reconcile()["preview_result_status"], "pass")
         self.assertEqual(self.provider.applied, [("destroy", 5)])
 
-    def test_reopened_pr_is_not_held_by_an_exhausted_destroy(self) -> None:
+    def test_legacy_preview_source_refusal_keeps_serving_evidence_and_logs_its_cause(self) -> None:
+        from control_plane import http_error_evidence, preview_source
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.reconcile()
+        before = self.snapshot()
+        applied = list(self.provider.applied)
+        read_original = self.store.read_original_mutation_intent
+        legacy_ids = {
+            original.record_id
+            for original in self.store.list_odoo_preview_originals(product="site", number=5)
+        }
+
+        def legacy_intent(reservation: Any) -> dict[str, Any]:
+            intent = read_original(reservation)
+            if reservation.record_id not in legacy_ids:
+                return intent
+            return {key: value for key, value in intent.items() if key != "effective_source"}
+
+        self.github.add_run(51, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with (
+            patch.object(self.store, "read_original_mutation_intent", side_effect=legacy_intent),
+            patch(
+                "control_plane.product_reconcile.log_handled_error_cause",
+                wraps=http_error_evidence.log_handled_error_cause,
+            ) as log_cause,
+            self.assertLogs(http_error_evidence.__name__, "WARNING") as captured,
+        ):
+            failed = self.run_once()
+
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(self.provider.applied, applied)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(
+            failed.last_plan["preview_result_error_code"], log_cause.call_args.args[0].code
+        )
+        evidence = json.loads(captured.records[0].getMessage())
+        self.assertIn(preview_source.__name__, {site["module"] for site in evidence["sites"]})
+        self.assertEqual(evidence["operation_id"], failed.last_plan["preview_plan_id"])
+        self.assertEqual(evidence["trace_id"], failed.last_plan["failure_trace_id"])
+
+    def test_reopened_pr_retains_unknown_source_fence_after_exhausted_destroy(self) -> None:
+        from control_plane.preview_source import require_source_free_preview_history
+
         self.write_preview()
         self.github.pull_request["state"] = "closed"
         with patch.object(self.provider, "build_inputs", side_effect=ValueError("refused")):
@@ -6435,10 +6724,15 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.github.pull_request["state"] = "open"
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)
-        # The legacy generation has no exact build proof; reopening refreshes it.
-        self.assertEqual(self.reconcile()["action"], "apply")
-        self.request("preview", 5)
-        self.assertEqual(self.reconcile()["reason"], "already_serving")
+        with patch(
+            "control_plane.odoo_preview_apply_execution.require_source_free_preview_history",
+            wraps=require_source_free_preview_history,
+        ) as source_guard:
+            refused = self.run_once()
+        source_guard.assert_called_once()
+        self.assertEqual(refused.state, "failed")
+        self.assertEqual(refused.last_plan["last_failed_error_code"], "preview_provenance_refused")
+        self.assertFalse(self.provider.applied)
 
     def test_busy_destroy_does_not_consume_a_failure_attempt(self) -> None:
         from tests.test_product_review_status import _GitHub, _publisher
@@ -7064,6 +7358,151 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.driver.changes, [("refresh", 5)])
 
         self.assertEqual(self.artifact_scanner.call_count, 1)
+
+    def test_failed_build_is_reported_until_the_current_head_preview_publishes(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.runs[50]["conclusion"] = "failure"
+        self.request("preview", 5)
+        failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.last_plan["last_failed_error_code"], "preview_build_failed")
+        self.assertEqual(failed.last_plan["build_run_id"], 50)
+        self.assertFalse(self.driver.changes)
+        self.github.pull_request["state"] = "closed"
+        self.request("preview", 5)
+        closed = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(closed, dict)
+        self.assertEqual(closed["status"], "cleared")
+        self.assertFalse(self.comments.on(5))
+        self.github.pull_request["state"] = "open"
+        self.request("preview", 5)
+        self.run_once()
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=OSError("Source unavailable")):
+            self.run_once()
+        self.request("preview", 5)
+        with patch(
+            "control_plane.product_reconcile.reconcile_product_request",
+            return_value=ReconcileOutcome(
+                {
+                    "action": "destroy",
+                    "reason": "interrupted_preview_restore",
+                    "pull_request_state": "open",
+                    "preview_result_status": "pass",
+                }
+            ),
+        ):
+            self.run_once()
+        self.assertEqual(self.store.list_preview_pr_feedback_records(limit=1)[0].status, "failed")
+        self.github.runs.clear()
+        next_head = "c" * 40
+        self.github.pull_request["head"] = {"sha": next_head}
+        self.request("preview", 5)
+        waiting = self.run_once()
+        feedback_record = self.store.list_preview_pr_feedback_records(limit=1)[0]
+        self.assertEqual(feedback_record.revision, PR_HEAD)
+        self.github.add_run(51, next_head, event="pull_request")
+        self.request("preview", 5)
+        published = self.run_once()
+        for completed, status in ((failed, "failed"), (waiting, "failed"), (published, "ready")):
+            feedback = completed.last_plan["pr_feedback"]
+            assert isinstance(feedback, dict)
+            self.assertEqual(feedback["status"], status)
+        self.assertNotIn("last_failed_error_code", published.last_plan)
+        self.request("preview", 5)
+        with patch.object(self.github, "get_json", side_effect=OSError("Source unavailable")):
+            self.run_once()
+        self.github.runs.clear()
+        self.github.pull_request["head"] = {"sha": "d" * 40}
+        self.request("preview", 5)
+        self.run_once()
+        unknown_origin = self.store.list_preview_pr_feedback_records(limit=1)[0]
+        self.assertEqual(unknown_origin.status, "pending")
+        self.assertEqual(unknown_origin.failure_summary, "")
+
+    def test_retained_failure_read_errors_preserve_identity_and_recover_delivery(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.github.runs[50]["conclusion"] = "failure"
+        self.request("preview", 5)
+        failed = self.run_once()
+        previous = failed.last_plan["pr_feedback"]
+        assert isinstance(previous, dict)
+        feedback_id = str(previous["feedback_id"])
+        original = self.store.read_preview_pr_feedback_record(feedback_id)
+        writes = list(self.comments.writes)
+        self.github.runs.clear()
+        for failure in (
+            {"side_effect": OSError("Feedback record unavailable")},
+            {"return_value": original.model_copy(update={"product": "other-product"})},
+        ):
+            with (
+                self.subTest(failure=failure),
+                patch.object(self.store, "read_preview_pr_feedback_record", **failure),
+            ):
+                self.request("preview", 5)
+                blocked = self.run_once().last_plan["pr_feedback"]
+                assert isinstance(blocked, dict)
+                self.assertEqual(blocked["status"], previous["status"])
+                self.assertEqual(blocked["feedback_id"], feedback_id)
+                self.assertEqual(self.comments.writes, writes)
+        self.request("preview", 5)
+        with patch.object(
+            self.store, "write_preview_pr_feedback_record", side_effect=OSError("Write unavailable")
+        ):
+            write_failed = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(write_failed, dict)
+        self.assertEqual(write_failed["feedback_id"], feedback_id)
+        self.request("preview", 5)
+        recovered = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(recovered, dict)
+        self.assertEqual(recovered["delivery_status"], "delivered")
+        self.assertEqual(recovered["status"], "failed")
+
+        new_head = "e" * 40
+        self.github.pull_request["head"] = {"sha": new_head}
+        self.github.add_run(51, new_head, event="pull_request")
+        self.github.runs[51]["conclusion"] = "failure"
+        self.request("preview", 5)
+        with patch.object(
+            self.store, "write_preview_pr_feedback_record", side_effect=OSError("Write unavailable")
+        ):
+            self.run_once()
+        self.request("preview", 5)
+        restored = self.run_once().last_plan["pr_feedback"]
+        assert isinstance(restored, dict)
+        saved = self.store.read_preview_pr_feedback_record(str(restored["feedback_id"]))
+        self.assertEqual(saved.revision, new_head)
+        self.assertEqual(saved.delivery_status, "delivered")
+
+    def test_successful_cleanup_replaces_its_failure_for_an_open_change(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        for result, error, status in (
+            ("fail", "Cleanup attempt failed", "cleanup_failed"),
+            ("pass", "", "destroyed"),
+        ):
+            with (
+                self.subTest(result=result),
+                patch(
+                    "control_plane.product_reconcile.reconcile_product_request",
+                    return_value=ReconcileOutcome(
+                        {
+                            "action": "destroy",
+                            "reason": "interrupted_preview_restore",
+                            "pull_request_state": "open",
+                            "preview_result_status": result,
+                            "head_sha": PR_HEAD,
+                        },
+                        error=error,
+                    ),
+                ),
+            ):
+                self.request("preview", 5)
+                feedback = self.run_once().last_plan["pr_feedback"]
+                assert isinstance(feedback, dict)
+                self.assertEqual(feedback["status"], status)
 
     def test_a_failed_refresh_keeps_driver_text_out_and_waits_for_a_new_build(self) -> None:
         self.driver.refresh_status = "fail"
@@ -7851,6 +8290,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
 
     def test_notes_without_label_invite_client_and_missing_notes_are_visible(self) -> None:
         from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+        from control_plane.client_test_notes import CLIENT_REVIEW_NOTES_PENDING
 
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
@@ -7870,7 +8310,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.request("preview", 5)
         result = self.reconcile()
         self.assertEqual(result["reason"], "client_test_notes_required")
-        self.assertIn("Client test notes are missing", self.comment_body())
+        self.assertIn(CLIENT_REVIEW_NOTES_PENDING, self.comment_body())
         self.assertEqual(
             tuple(self.owner_review_status_calls), calls_before_refusal + (("site", 5),)
         )
@@ -7987,7 +8427,23 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
                 self.store.list_held_odoo_preview_reservations(product="site"), held_before
             )
             self.assertEqual(self.owner_review_status_calls, [("site", 5)])
-            self.assertEqual(self.comments.writes, writes)
+            self.assertEqual(self.comments.writes, [*writes, ("PATCH", 5)])
+            feedback_id = cast(dict[str, object], held.last_plan["pr_feedback"])["feedback_id"]
+            assert isinstance(feedback_id, str)
+            feedback = self.store.read_preview_pr_feedback_record(feedback_id)
+            self.assertEqual(feedback.failure_summary, held.last_error)
+
+            self.github.runs[50]["conclusion"] = "failure"
+            self.request("preview", 5)
+            build_failed = self.run_once()
+            self.assertTrue(build_failed.last_plan["held"])
+            self.assertEqual(
+                build_failed.last_plan["last_failed_error_code"], "preview_build_failed"
+            )
+            self.assertEqual(
+                self.store.list_held_odoo_preview_reservations(product="site"), held_before
+            )
+            self.assertEqual(apply.call_count, 1)
 
     def test_review_publication_failure_preserves_preview_feedback(self) -> None:
         previous = self.reconcile_preview()["pr_feedback"]
@@ -8577,6 +9033,65 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
                 policy=MergeTrainPolicy.model_validate(policy),
             )
         )
+
+    def test_history_http_failure_retains_safe_evidence_before_any_deploy(self) -> None:
+        chain = [f"{index:040x}" for index in range(250, 0, -1)]
+        self.request()
+        self.github.add_run(7, chain[-1])
+        headers = Message()
+        headers["X-RateLimit-Remaining"] = "0"
+        headers["X-RateLimit-Reset"] = "1793502000"
+        headers["X-GitHub-Request-Id"] = "ABCD:1234:5678:90AB"
+        headers["Authorization"] = "private-token"
+        reads: list[str] = []
+        body = MagicMock()
+
+        def get_json(path: str) -> object:
+            if "/commits?" not in path:
+                return original_get(path)
+            reads.append(path)
+            page = int(path.rsplit("page=", 1)[1])
+            if page < 3:
+                return [
+                    {"sha": sha, "parents": [{"sha": chain[index + 1]}]}
+                    for index, sha in enumerate(chain)
+                    if (page - 1) * 100 <= index < page * 100
+                ]
+            transport = GitHubBuildProvenanceTransport(token="private-token")
+            failure = HTTPError(
+                "https://api.github.com/private?token=private-token",
+                403,
+                "private-response-message",
+                headers,
+                body,
+            )
+            self.addCleanup(failure.close)
+            with patch("control_plane.build_provenance.urlopen", side_effect=failure):
+                return transport.get_json(path)
+
+        original_get = self.github.get_json
+        with (
+            patch.object(self.github, "get_json", side_effect=get_json),
+            self.assertLogs("control_plane.product_reconcile", "WARNING") as logs,
+        ):
+            result = self.run_once()
+        self.assertEqual(result.state, "failed")
+        evidence = json.loads(result.last_error.split(": ", 1)[1])
+        self.assertEqual(evidence["status"], 403)
+        self.assertEqual(evidence["route"], "commit_history")
+        self.assertEqual(evidence["classification"], "rate_limited")
+        self.assertEqual(evidence["request_id"], headers["X-GitHub-Request-Id"])
+        self.assertEqual(evidence["rate_limit_remaining"], 0)
+        self.assertEqual(evidence["rate_limit_reset"], int(headers["X-RateLimit-Reset"]))
+        for unsafe in ("private-token", "private-response-message", "https://", REPOSITORY):
+            self.assertNotIn(unsafe, result.last_error)
+            self.assertNotIn(unsafe, " ".join(logs.output))
+        body.read.assert_not_called()
+        self.assertEqual(len(reads), 3)
+        self.assertEqual(result.last_plan["last_failed_error_code"], "github_read_failed")
+        self.assertTrue(result.last_plan["failure_trace_id"])
+        self.assertEqual(self.provider.applied, [])
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
 
     def test_missing_build_workflow_is_a_noop_only_with_complete_actions_inventory(self) -> None:
         scenarios: tuple[tuple[dict[str, object] | int, str, str], ...] = (
@@ -9243,7 +9758,15 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
         self.assertFalse(self.provider.applied)
 
     def test_unavailable_and_vulnerable_scans_hold_before_testing_or_preview_effects(self) -> None:
-        from control_plane.artifact_scan import ArtifactScanResult
+        from control_plane.artifact_scan import ArtifactScanFinding, ArtifactScanResult
+
+        finding = ArtifactScanFinding(
+            vulnerability_id="CVE-2026-12345",
+            package_name="libssl3",
+            installed_version="3.0.1",
+            fixed_version="3.0.2",
+            severity="HIGH",
+        )
 
         for target in ("testing", "preview"):
             for status in ("fail", "unavailable"):
@@ -9253,6 +9776,8 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
                         status=cast(Any, status),
                         reason="fixture",
                         scanned_at="2026-10-16T12:00:00Z",
+                        high=1 if status == "fail" else 0,
+                        findings=(finding,) if status == "fail" else (),
                     )
                     commit = PR_HEAD if target == "preview" else DEPLOYABLE
                     self.github.add_run(
@@ -9264,6 +9789,11 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
                     plan = self.reconcile()
                     self.assertTrue(plan["held"])
                     self.assertEqual(plan["action"], "wait")
+                    scan = cast(dict[str, object], plan["artifact_scan"])
+                    self.assertEqual(
+                        scan["findings"],
+                        [finding.model_dump(mode="json")] if status == "fail" else [],
+                    )
                     self.assertEqual(
                         self.artifact_scanner.call_args.args,
                         (f"{IMAGE_REPOSITORY}@{_digest(commit)}",),

@@ -13,6 +13,8 @@ from github_plan_status.client_test_notes import (
     owner_test_notes as owner_test_notes,
 )
 
+CLIENT_REVIEW_NOTES_PENDING = "We are updating the preview and its test notes. We will let you know when it is ready to review."
+
 
 class ClientTestNotesRequired(ValueError):
     """Readable notes explicitly failed validation, rather than a provider read."""

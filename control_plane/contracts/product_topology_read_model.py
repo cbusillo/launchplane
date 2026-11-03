@@ -678,8 +678,7 @@ def _provider_recorded_topology(
         )
     source = route_binding.source
     if (
-        route_binding.external_ingress
-        and _effective_freshness(source.freshness_status, stale_after=source.stale_after, now=now)
+        _effective_freshness(source.freshness_status, stale_after=source.stale_after, now=now)
         == "stale"
     ):
         source = (
@@ -1807,8 +1806,7 @@ def _tls_warnings(
             )
         )
         snapshot_current = (
-            external is not None
-            and not warnings
+            not warnings
             and authority_provenance.freshness_status in {"recorded", "verified"}
             and bool(tls.recorded.source_versions)
             and tls.recorded.source_versions == route_binding.source.source_versions

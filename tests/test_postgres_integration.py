@@ -34,6 +34,7 @@ from tests import test_testing_retry as testing_retry_tests
 from tests import test_browser_route_repair as browser_repair_tests
 from tests import test_release_review_http as release_review_http_tests
 from tests import test_production_recipient_release_settings as recipient_settings_tests
+from tests import test_production_recipient_retirement as recipient_retirement_tests
 from tests import test_accepted_recipient_delivery_recovery as recipient_delivery_tests
 from tests import test_generic_web_compose_refusal as compose_refusal_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
@@ -43,7 +44,6 @@ from uuid import uuid4
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import create_engine, delete, event, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
@@ -142,22 +142,6 @@ from control_plane.contracts.owner_acceptance import (
     OwnerAcceptancePreviewBinding,
     owner_acceptance_runtime_identity_binding,
 )
-from control_plane.contracts.owner_control import (
-    ApprovalRequest,
-    ChannelBindingRecord,
-    ChallengeResponse,
-    OwnerControlConfirmationEnvelope,
-    owner_control_approval_request_digest,
-    owner_control_channel_binding_sha256,
-    owner_control_signature_payload_bytes,
-)
-from control_plane.contracts.owner_control_shadow_verifier import (
-    OwnerControlChallengeIssueRequest,
-    OwnerControlIssuedChallengeRecord,
-)
-from control_plane.contracts.owner_control_enrollment_provenance import (
-    OwnerControlHostPrincipalClaim,
-)
 from control_plane.contracts.merge_train_controller_state import (
     MergeTrainControllerAdoptionRejectedError,
     MergeTrainControllerLeaseHeldError,
@@ -186,17 +170,6 @@ from control_plane.contracts.privileged_operation_identity import (
 )
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PrivilegedOperationWorkerHeartbeatRecord,
-)
-from control_plane.contracts.privileged_operation import (
-    ManagedSecretReencryptionHumanEvidence,
-    ManagedSecretReencryptionPlanInput,
-    PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
-    PrivilegedOperationActor,
-    PrivilegedOperationEventRecord,
-    PrivilegedOperationRecord,
-    privileged_operation_evidence_digest,
-    privileged_operation_record_digest,
-    privileged_operation_request_digest,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -255,7 +228,6 @@ from control_plane.service_auth import (
 from control_plane.storage.postgres import (
     LaunchplaneMergeTrainBatchLandingPlanRow,
     DbOnlyMutationRequest,
-    LaunchplaneOwnerControlIssuedChallengeRow,
     MutationReservationResult,
     OrdinaryAgentPersistenceError,
     OutboxWithIdempotencyRequest,
@@ -1279,8 +1251,9 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
 
         with _isolated_postgres_database() as database_url:
             url = database_url.replace("postgresql+psycopg://", "postgresql://")
-            spec = {
+            spec: dict[str, Any] = {
                 "mode": "quiescence",
+                "identity": {"environment_kind": "stable"},
                 "binding": "fixture-binding",
                 "copy_binding": "fixture-copy",
                 "task_id": "1" * 32,
@@ -2099,6 +2072,81 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_postgres_preview_transport_holds_product_lease_through_provider_execution(
+        self,
+    ) -> None:
+        from control_plane.drivers.postgres_preview_transport import (
+            PostgresPreviewDestroyEnvelope,
+            apply_postgres_preview_destroy_result,
+        )
+        from control_plane.workflows.postgres_preview import (
+            PostgresPreviewDestroyRequest,
+            PostgresPreviewDestroyResult,
+        )
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        with _store_for_fresh_head_database() as store:
+            profile = _driver_profile()
+            store.write_product_profile_record(profile)
+            renamed = profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"app_name_suffix": "-new"})}
+            )
+
+            def execute(**_: object) -> PostgresPreviewDestroyResult:
+                with self.assertRaises(ValueError):
+                    store.write_product_profile_record(renamed)
+                return PostgresPreviewDestroyResult(
+                    destroy_status="pass",
+                    destroy_started_at="2026-10-29T00:00:00Z",
+                    destroy_finished_at="2026-10-29T00:00:00Z",
+                    application_name="",
+                    application_id="",
+                    preview_url="",
+                )
+
+            with patch(
+                "control_plane.drivers.postgres_preview_transport.execute_postgres_preview_destroy",
+                side_effect=execute,
+            ):
+                apply_postgres_preview_destroy_result(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    execution_profile=profile,
+                    request=PostgresPreviewDestroyEnvelope(
+                        product=profile.product,
+                        destroy=PostgresPreviewDestroyRequest(
+                            context=profile.preview.context,
+                            anchor_repo=profile.repository.partition("/")[2],
+                            anchor_pr_number=1,
+                            preview_slug="pr-1",
+                            destroy_reason="closed",
+                        ),
+                    ),
+                )
+            store.write_product_profile_record(renamed)
+            self.assertEqual(store.read_product_profile_record(profile.product), renamed)
+
+    def test_preview_operation_excludes_resource_renaming_until_it_finishes(self) -> None:
+        from control_plane.preview_namespaces import preview_product_operation_key
+        from tests.test_generic_web_preview_extensions import _driver_profile
+
+        with _store_for_fresh_head_database() as store:
+            profile = _driver_profile()
+            store.write_product_profile_record(profile)
+            renamed = profile.model_copy(
+                update={"preview": profile.preview.model_copy(update={"app_name_suffix": "-new"})}
+            )
+            with store.serialize_preview_refresh(
+                preview_id=preview_product_operation_key(profile.product),
+                dedicated=True,
+                shared=True,
+            ):
+                with self.assertRaises(ValueError):
+                    store.write_product_profile_record(renamed)
+                self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            store.write_product_profile_record(renamed)
+            self.assertEqual(store.read_product_profile_record(profile.product), renamed)
+
     def test_schema_column_catalog_reads_do_not_grow_per_required_table(self) -> None:
         from control_plane.storage.postgres import Base
 
@@ -3234,7 +3282,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     decoded = validate_preview_scope(
                         restored_settings.env, context=restored_profile.preview.context
                     )
-                    self.assertIsNotNone(decoded)
                     assert decoded is not None
                     self.assertEqual(
                         len(decoded.addon_settings), len(encoded_payload["addon_settings"])
@@ -4090,7 +4137,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertTrue(reached_lock)
         self.assertEqual([record.operation_id for record in completed], [operation_id])
         self.assertEqual(operation.status, "execution_failed")
-        self.assertIsNotNone(operation.execution)
         assert operation.execution is not None
         self.assertEqual(
             operation.execution.failure_code,
@@ -4099,7 +4145,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         self.assertFalse(operation.execution.reconciliation_required)
         self.assertEqual(current_after_denial, (active_record,))
         self.assertEqual(inner_lookup.status, "missing")
-        self.assertIsNotNone(outer_lookup.record)
         assert outer_lookup.record is not None
         self.assertEqual(outer_lookup.record.state, "completed")
         self.assertEqual(outer_lookup.record.response_status_code, 409)
@@ -5314,7 +5359,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.schema_version, 1)
         self.assertEqual(loaded.state, "completed")
@@ -5396,7 +5440,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.provider_target_key, reconciliation_key)
         self.assertEqual(blocked.status, "target_busy")
@@ -5649,130 +5692,6 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     store.verify_schema()
             finally:
                 store.close()
-
-
-def _owner_control_shadow_base64url(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
-
-
-def _owner_control_shadow_binding(private_key: Ed25519PrivateKey) -> ChannelBindingRecord:
-    return ChannelBindingRecord(
-        channel_session_id="owner-control-postgres-session",
-        owner_github_id=100001,
-        signature_algorithm="ed25519",
-        owner_public_key=_owner_control_shadow_base64url(
-            private_key.public_key().public_bytes_raw()
-        ),
-        session_issued_at="2025-01-01T00:00:00+00:00",
-        session_expires_at="2035-01-01T00:00:00+00:00",
-    )
-
-
-def _owner_control_host_principal_claim() -> OwnerControlHostPrincipalClaim:
-    return OwnerControlHostPrincipalClaim(
-        host_instance_id="owner-control-postgres-host",
-        principal_id="owner-control-postgres-principal",
-        principal_separation="not_claimed",
-        key_custody="not_claimed",
-        gesture_source="not_claimed",
-    )
-
-
-def _seed_owner_control_shadow_issue_provenance(
-    store: PostgresRecordStore,
-) -> PrivilegedOperationRecord:
-    request = ManagedSecretReencryptionPlanInput(reason="Rotate retained keys", source_label="test")
-    evidence = ManagedSecretReencryptionHumanEvidence(
-        result_status="ok",
-        plan_digest="a" * 64,
-        configured_secret_count=3,
-        rotation_candidate_count=2,
-        unchanged_count=1,
-        unreadable_secret_count=0,
-        active_key_id="redacted-key",
-        retirement_blocked_key_ids=(),
-        retirement_ready_key_ids=(),
-        legacy_compatibility_key_loaded=False,
-    )
-    actor = PrivilegedOperationActor(identity_type="github_human", github_id=44, login="requester")
-    record = PrivilegedOperationRecord(
-        operation_id="privileged-operation-0123456789abcdef0123456789abcdef",
-        descriptor_id="managed-secret-reencryption",
-        descriptor_version=1,
-        safety_class="secret_backed",
-        status="planned",
-        source_event_id="owner-control-test",
-        requested_by=actor,
-        request=request,
-        request_digest=privileged_operation_request_digest(request),
-        evidence=evidence,
-        evidence_digest=privileged_operation_evidence_digest(evidence),
-        created_at="2026-08-28T00:00:00+00:00",
-        updated_at="2026-08-28T00:00:00+00:00",
-        expires_at="2030-01-01T00:00:00+00:00",
-    )
-    store.write_privileged_operation_plan(
-        record,
-        PrivilegedOperationEventRecord(
-            operation_id=record.operation_id,
-            sequence=1,
-            action="planned",
-            occurred_at=record.created_at,
-            source_kind="browser_api",
-            source_event_id=record.source_event_id,
-            actor=actor,
-            resulting_record_digest=privileged_operation_record_digest(record),
-        ),
-    )
-    policy = LaunchplaneAuthzPolicy(
-        schema_version=2,
-        github_humans=(
-            GitHubHumanPolicyRule(
-                managed_set_id="owner-control-tests",
-                managed_rule_id="approve",
-                github_ids=(100001,),
-                products=("launchplane",),
-                contexts=("launchplane",),
-                actions=(PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,),
-            ),
-        ),
-    )
-    digest = authz_policy_sha256(policy)
-    store.seed_authz_policy_if_absent(
-        LaunchplaneAuthzPolicyRecord(
-            record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
-            revision=1,
-            status="active",
-            source="owner-control-tests",
-            updated_at="2026-08-28T00:00:00Z",
-            policy_sha256=digest,
-            policy=policy,
-        )
-    )
-    return record
-
-
-def _owner_control_shadow_envelope(
-    private_key: Ed25519PrivateKey,
-    *,
-    binding: ChannelBindingRecord,
-    request: ApprovalRequest,
-) -> OwnerControlConfirmationEnvelope:
-    response = ChallengeResponse(
-        approval_request=request,
-        approval_request_digest=owner_control_approval_request_digest(request),
-        decision="approved",
-        channel_binding_sha256=owner_control_channel_binding_sha256(binding),
-        confirmed_at=request.issued_at,
-    )
-    return OwnerControlConfirmationEnvelope(
-        channel_binding=binding,
-        challenge_response=response,
-        signature_algorithm="ed25519",
-        signature=_owner_control_shadow_base64url(
-            private_key.sign(owner_control_signature_payload_bytes(response))
-        ),
-    )
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
@@ -6908,7 +6827,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         from tests.test_release_review import decision, profile, seed
         from tests.test_release_review_record import FakeReleaseIssues
 
-        for phase in ("read", "acknowledgement"):
+        for phase in ("lookup", "create"):
             with self.subTest(phase=phase), _head_postgres_database() as url:
                 engine = create_engine(url, pool_size=3, max_overflow=0, pool_timeout=0.2)
                 with patch("control_plane.storage.postgres._build_engine", return_value=engine):
@@ -6922,15 +6841,11 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     holder_ready, resume_holder = threading.Event(), threading.Event()
                     original_read = store.read_release_review_decision_record
 
-                    def read(**kwargs: Any) -> ReleaseReviewDecisionRecord:
-                        if phase == "read" and not holder_ready.is_set():
-                            holder_ready.set()
-                            if not resume_holder.wait(10):
-                                raise AssertionError("Lock holder was not resumed")
-                        return original_read(**kwargs)
-
                     def request(**kwargs: Any) -> object:
-                        if kwargs.get("method", "GET") == "GET" and phase == "acknowledgement":
+                        if (
+                            kwargs.get("method", "GET") == ("GET" if phase == "lookup" else "POST")
+                            and not holder_ready.is_set()
+                        ):
                             holder_ready.set()
                             if not resume_holder.wait(10):
                                 raise AssertionError("Lock holder was not resumed")
@@ -6945,9 +6860,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         )
 
                     with (
-                        patch.object(
-                            store, "read_release_review_decision_record", side_effect=read
-                        ),
                         patch(
                             "control_plane.release_review_record.github_api_request",
                             side_effect=request,
@@ -6955,6 +6867,10 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         patch(
                             "control_plane.release_review_record.resolve_launchplane_github_token",
                             return_value="test-token",
+                        ),
+                        patch(
+                            "control_plane.release_review_record.resolve_delivery_github_app_id",
+                            return_value=github.app_id,
                         ),
                         ThreadPoolExecutor(max_workers=3) as workers,
                     ):
@@ -7033,6 +6949,10 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                                 patch(
                                     "control_plane.release_review_record.resolve_launchplane_github_token",
                                     return_value="test-token",
+                                ),
+                                patch(
+                                    "control_plane.release_review_record.resolve_delivery_github_app_id",
+                                    return_value=github.app_id,
                                 ),
                             ):
                                 with self.assertRaises(ValueError):
@@ -7325,216 +7245,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 for store in stores:
                     store.close()
-
-    def test_owner_control_challenge_issuance_serializes_one_active_operation(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            private_key = Ed25519PrivateKey.generate()
-            binding = _owner_control_shadow_binding(private_key)
-            store.enroll_owner_control_channel_session(
-                binding,
-                host_principal_claim=_owner_control_host_principal_claim(),
-            )
-            operation = _seed_owner_control_shadow_issue_provenance(store)
-            issue_request = OwnerControlChallengeIssueRequest(
-                channel_session_id=binding.channel_session_id,
-                operation_id=operation.operation_id,
-                expires_in_seconds=300,
-            )
-            second_store = PostgresRecordStore(database_url=store.database_url)
-            barrier = threading.Barrier(2)
-
-            def issue_once(active_store: PostgresRecordStore) -> object:
-                barrier.wait(timeout=10)
-                return active_store.issue_owner_control_challenge(issue_request)
-
-            try:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    issued_records = tuple(executor.map(issue_once, (store, second_store)))
-                engine = create_engine(store.database_url)
-                try:
-                    with engine.connect() as connection:
-                        active_count = connection.scalar(
-                            text(
-                                "select count(*) from "
-                                "launchplane_owner_control_issued_challenges "
-                                "where operation_id = :operation_id and state = 'issued'"
-                            ),
-                            {"operation_id": operation.operation_id},
-                        )
-                finally:
-                    engine.dispose()
-            finally:
-                second_store.close()
-
-        self.assertEqual(issued_records[0], issued_records[1])
-        self.assertEqual(active_count, 1)
-
-    def test_owner_control_reissuance_terminalizes_expired_challenge_once(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            private_key = Ed25519PrivateKey.generate()
-            binding = _owner_control_shadow_binding(private_key)
-            store.enroll_owner_control_channel_session(
-                binding,
-                host_principal_claim=_owner_control_host_principal_claim(),
-            )
-            operation = _seed_owner_control_shadow_issue_provenance(store)
-            issue_request = OwnerControlChallengeIssueRequest(
-                channel_session_id=binding.channel_session_id,
-                operation_id=operation.operation_id,
-                expires_in_seconds=1,
-            )
-            with patch.object(
-                store,
-                "_owner_control_shadow_timestamp",
-                return_value="2026-08-28T12:00:00+00:00",
-            ):
-                expired_candidate = store.issue_owner_control_challenge(issue_request)
-            second_store = PostgresRecordStore(database_url=store.database_url)
-            barrier = threading.Barrier(2)
-
-            def reissue_once(
-                active_store: PostgresRecordStore,
-            ) -> OwnerControlIssuedChallengeRecord:
-                with patch.object(
-                    active_store,
-                    "_owner_control_shadow_timestamp",
-                    return_value="2026-08-28T12:00:02+00:00",
-                ):
-                    barrier.wait(timeout=10)
-                    return active_store.issue_owner_control_challenge(issue_request)
-
-            try:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    issued_records = tuple(executor.map(reissue_once, (store, second_store)))
-                engine = create_engine(store.database_url)
-                try:
-                    with engine.connect() as connection:
-                        active_count = connection.scalar(
-                            text(
-                                "select count(*) from "
-                                "launchplane_owner_control_issued_challenges "
-                                "where operation_id = :operation_id and state = 'issued'"
-                            ),
-                            {"operation_id": operation.operation_id},
-                        )
-                        lifecycle_count = connection.scalar(
-                            text(
-                                "select count(*) from "
-                                "launchplane_owner_control_challenge_lifecycle_events "
-                                "where challenge_id = :challenge_id"
-                            ),
-                            {"challenge_id": expired_candidate.challenge_id},
-                        )
-                        shadow_count = connection.scalar(
-                            text(
-                                "select count(*) from "
-                                "launchplane_owner_control_shadow_verification_events "
-                                "where challenge_id = :challenge_id"
-                            ),
-                            {"challenge_id": expired_candidate.challenge_id},
-                        )
-                finally:
-                    engine.dispose()
-            finally:
-                second_store.close()
-
-            expired = store.read_owner_control_issued_challenge(
-                challenge_nonce=expired_candidate.challenge_nonce
-            )
-
-        self.assertEqual(issued_records[0], issued_records[1])
-        self.assertNotEqual(issued_records[0].challenge_id, expired_candidate.challenge_id)
-        self.assertEqual(expired.state, "expired")
-        self.assertEqual(expired.attempt_count, 0)
-        self.assertEqual(active_count, 1)
-        self.assertEqual(lifecycle_count, 1)
-        self.assertEqual(shadow_count, 0)
-
-    def test_owner_control_shadow_verification_consumes_one_challenge_once(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            private_key = Ed25519PrivateKey.generate()
-            binding = _owner_control_shadow_binding(private_key)
-            store.enroll_owner_control_channel_session(
-                binding,
-                host_principal_claim=_owner_control_host_principal_claim(),
-            )
-            operation = _seed_owner_control_shadow_issue_provenance(store)
-            issued = store.issue_owner_control_challenge(
-                OwnerControlChallengeIssueRequest(
-                    channel_session_id=binding.channel_session_id,
-                    operation_id=operation.operation_id,
-                    expires_in_seconds=300,
-                )
-            )
-            envelope = _owner_control_shadow_envelope(
-                private_key,
-                binding=binding,
-                request=issued.approval_request(),
-            )
-            second_store = PostgresRecordStore(database_url=store.database_url)
-            loser_prelock_read_complete = threading.Event()
-            allow_loser_locking_read = threading.Event()
-            original_challenge_read = second_store._owner_control_issued_challenge_row
-
-            def controlled_challenge_read(
-                session: Any,
-                *,
-                challenge_nonce: str,
-                for_update: bool = False,
-            ) -> LaunchplaneOwnerControlIssuedChallengeRow | None:
-                row = original_challenge_read(
-                    session,
-                    challenge_nonce=challenge_nonce,
-                    for_update=for_update,
-                )
-                if not for_update:
-                    loser_prelock_read_complete.set()
-                    if not allow_loser_locking_read.wait(timeout=10):
-                        raise TimeoutError("Timed out waiting to release the losing verification.")
-                return row
-
-            executor = ThreadPoolExecutor(max_workers=1)
-            try:
-                with patch.object(
-                    second_store,
-                    "_owner_control_issued_challenge_row",
-                    side_effect=controlled_challenge_read,
-                ):
-                    losing_future = executor.submit(
-                        second_store.verify_owner_control_confirmation_shadow,
-                        envelope,
-                    )
-                    self.assertTrue(loser_prelock_read_complete.wait(timeout=10))
-                    winning_status = store.verify_owner_control_confirmation_shadow(
-                        envelope
-                    ).verification_status
-                    allow_loser_locking_read.set()
-                    losing_status = losing_future.result(timeout=10).verification_status
-                stored_challenge = store.read_owner_control_issued_challenge(
-                    challenge_nonce=issued.challenge_nonce
-                )
-                events = store.list_owner_control_shadow_verification_events(
-                    challenge_nonce=issued.challenge_nonce
-                )
-            finally:
-                allow_loser_locking_read.set()
-                executor.shutdown(wait=True)
-                second_store.close()
-
-        self.assertEqual([winning_status, losing_status], ["verified", "rejected"])
-        self.assertEqual(stored_challenge.state, "consumed")
-        self.assertEqual(stored_challenge.attempt_count, 2)
-        self.assertIsNotNone(stored_challenge.consumed_at)
-        self.assertEqual(
-            sorted(
-                (event.sequence, event.verification_status, event.rejection_reason)
-                for event in events
-            ),
-            [(1, "verified", None), (2, "rejected", "challenge_replayed")],
-        )
-        self.assertTrue(all(event.verifier_mode == "shadow" for event in events))
-        self.assertTrue(all(event.authorizes_execution is False for event in events))
-        self.assertTrue(all(event.authority_state == "inert" for event in events))
 
     def test_concurrent_detached_application_retirement_plans_reuse_one_reservation(
         self,
@@ -8314,7 +8024,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         {"delivery_id": failure.delivery_id},
                     )
                     claimed = store.claim_next_outbox_delivery_record(lease_owner="worker-b")
-                    self.assertIsNotNone(claimed.record)
                     assert claimed.record is not None
                     self.assertEqual(claimed.record.delivery_id, unrelated.delivery_id)
                     waiting = store.read_outbox_delivery_record(recovery.delivery_id)
@@ -8399,13 +8108,11 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 second_store.close()
 
-        self.assertIsNotNone(first_claim)
         assert first_claim is not None
         self.assertEqual(first_claim.lease_owner, "worker-a")
         self.assertIsNone(second_claim)
         self.assertFalse(stale_owner_heartbeat)
         self.assertEqual(recovered_ids, (first_claim.operation_id,))
-        self.assertIsNotNone(recovered_claim)
         assert recovered_claim is not None
         self.assertEqual(recovered_claim.lease_owner, "worker-b")
         self.assertEqual(recovered_claim.attempt, 2)
@@ -8761,7 +8468,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         self.assertFalse(worker.is_alive())
                         self.assertEqual(len(stale_owner_result), 1)
                         lock_error = stale_owner_result[0]
-                        self.assertIsInstance(lock_error, OperationalError)
                         assert isinstance(lock_error, OperationalError)
                         self.assertEqual(getattr(lock_error.orig, "sqlstate", ""), "55P03")
                     finally:
@@ -8805,7 +8511,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 second_store.close()
 
-        self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(loaded.request_fingerprint, "fingerprint-first")
 
@@ -8851,7 +8556,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(sorted(statuses), ["acquired", "in_progress"])
         self.assertEqual(conflict.status, "conflict")
-        self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.state, "running")
         self.assertEqual(stored.attempt, 1)
@@ -8989,7 +8693,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(sorted(statuses), ["replayed", "written"])
         self.assertEqual(stored_profile, profile)
-        self.assertIsNotNone(stored_reservation)
         assert stored_reservation is not None
         self.assertEqual(stored_reservation.state, "completed")
         self.assertEqual(stored_reservation.attempt, 1)
@@ -9028,7 +8731,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(acquired.status, "acquired")
         self.assertEqual(result.status, "written")
-        self.assertIsNotNone(stored_reservation)
         assert stored_reservation is not None
         self.assertEqual(stored_reservation.state, "completed")
         self.assertEqual(stored_reservation.attempt, 2)
@@ -11472,7 +11174,6 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             self.addCleanup(first.close)
             self.addCleanup(second.close)
             with first.testing_replacement_execution_lock("operation-a") as check:
-                self.assertIsNotNone(check)
                 assert check is not None
                 check()
                 with second.testing_replacement_execution_lock("operation-a") as competing:
@@ -12896,6 +12597,59 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
 
     def test_committed_receipt_survives_later_provider_drift(self) -> None:
         self.fixture.test_committed_receipt_survives_later_provider_drift()
+
+
+@unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
+class RealPostgresRecipientRetirementTests(recipient_retirement_tests.RecipientRetirementTests):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
+
+    def test_waiting_creation_rechecks_committed_retirement_reservation(self) -> None:
+        from control_plane.production_recipient_retirement_names import provider_name_guard
+
+        record, manifest, _, _ = self.adapter.current()
+
+        def create() -> None:
+            with provider_name_guard(self.store, manifest["project"]):
+                self.fail("Creation reused the retired project")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with provider_name_guard(self.store, manifest["project"]):
+                waiting = pool.submit(create)
+                blocked = False
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with self.store._engine.connect() as connection:
+                        blocked = bool(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+                                )
+                            )
+                        )
+                    if blocked:
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(blocked, "Creation did not wait for retirement admission")
+                retiring = record.model_copy(
+                    update={
+                        "phase": "retiring_old",
+                        "execution": {
+                            **record.execution,
+                            "retirement_started_at": datetime.now(timezone.utc).isoformat(),
+                            "retirement_manifest": manifest,
+                        },
+                    }
+                )
+                self.store.write_production_recipient(
+                    expected=record.model_dump(mode="json"),
+                    replacement=retiring.model_dump(mode="json"),
+                )
+            with self.assertRaises(ValueError):
+                waiting.result(timeout=5)
+        with provider_name_guard(self.store, "an-independent-new-project"):
+            pass
 
 
 class RealPostgresPublishedRecipientRecoveryTests(unittest.TestCase):
@@ -16396,6 +16150,10 @@ class RealPostgresReleaseReviewHttpTests(release_review_http_tests._ReleaseRevie
                 return_value="test-token",
             ),
             patch(
+                "control_plane.release_review_record.resolve_delivery_github_app_id",
+                return_value=github.app_id,
+            ),
+            patch(
                 "control_plane.http_app.publish_release_decision",
                 wraps=publish_release_decision,
             ),
@@ -16590,7 +16348,7 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
         await self.closed_preview(completed_at=(now - timedelta(seconds=3)).isoformat())
         self.reads.clear()
         fake = FakePreviewProvider()
-        operation = self.prepared_operation(fake, "actual-custom-executor", now)
+        operation = self.prepared_operation(fake, "actual-custom-executor", now, creating=True)
         entered = threading.Event()
         release = threading.Event()
         execute = fake.execute_apply

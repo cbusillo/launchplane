@@ -1097,6 +1097,7 @@ def build_generic_web_write_route_handlers(
             profile = resolve_generic_web_preview_profile(
                 record_store=record_store,
                 product=destroy_request.product,
+                for_destroy=True,
             )
         except GenericWebPreviewRouteDependencyError:
             return dependencies.driver_dependency_response(

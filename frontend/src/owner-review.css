@@ -92,6 +92,11 @@
   gap: 0.9rem;
 }
 
+.owner-review-action .owner-review-preview-confirmation {
+  display: flex;
+  align-items: center;
+}
+
 .owner-review-intro {
   display: grid;
   gap: 0.75rem;

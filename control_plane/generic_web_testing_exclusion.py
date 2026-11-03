@@ -262,8 +262,6 @@ def require_retained_application_custody(
         ) and _recorded_native_application_custody(store, row, product=product, context=context)
         if not event_original and not direct_original:
             raise TestingExclusionRefused("execution_ownership_unproved")
-    if not current:
-        raise TestingExclusionRefused("reservation_fence_absent")
     check()
     return tuple(current)
 
@@ -306,6 +304,11 @@ def _target_reservations(
                     )
                 )
         if matches:
+            if row.provider_target_key != target_key:
+                from control_plane.testing_activation import retained_fence_is_separated
+
+                if retained_fence_is_separated(store, row):
+                    continue
             selected.append(row)
     if require_complete and not selected and unattributed:
         raise TestingExclusionRefused("execution_ownership_unproved")

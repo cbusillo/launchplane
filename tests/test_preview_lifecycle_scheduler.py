@@ -132,7 +132,6 @@ class PreviewLifecycleSchedulerTests(unittest.TestCase):
         record = self.store.read_idempotency_record(
             scope=inventory.scope, route_path=inventory.route, idempotency_key=str(inventory.slot())
         )
-        self.assertIsNotNone(record)
         assert record is not None
         self.assertEqual(record.response_payload["status"], "error")
         self.assertFalse(inventory.run_once())

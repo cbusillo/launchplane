@@ -31,7 +31,7 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.dokploy import api, source
 from control_plane.dokploy.application_endpoint import application_endpoint_spec
 from control_plane.dokploy.fresh_application import (
-    match_application_volume_mount,
+    application_volume_mount_matches,
     require_fresh_application_runtime,
 )
 from control_plane.dokploy_inventory import MAX_PROJECTS, read_dokploy_inventory
@@ -59,6 +59,7 @@ from control_plane.testing_activation import (
     activation_record,
     configuration_digest,
     preparation_resources,
+    target_without_hold,
     verified_product_image,
 )
 from control_plane.workflows.ship import utc_now_timestamp
@@ -295,6 +296,15 @@ def restored_application_route(store: Any, record: TestingActivationRecord) -> A
     if len(equivalents) > 1:
         raise TestingActivationRefusal("The restored original route custody is ambiguous.")
     return next(iter(equivalents.values()), None)
+
+
+def application_registry_sha256(values: api.JsonObject) -> str:
+    return canonical_json_sha256(
+        {
+            key: "" if values.get(key) is None else values[key]
+            for key in ("username", "password", "registryUrl")
+        }
+    )
 
 
 @dataclass
@@ -749,9 +759,18 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     body["serverId"] = str(old["serverId"])
             checkpoint(phase)
             record = self.save(record, phase=phase)
-            result = api.dokploy_request(
-                host=host, token=token, path=path, method="POST", payload=cast(api.JsonObject, body)
-            )
+            from control_plane.production_recipient_retirement_names import provider_name_guard
+
+            with provider_name_guard(
+                self.store, record.namespace if phase == "create_application" else ""
+            ):
+                result = api.dokploy_request(
+                    host=host,
+                    token=token,
+                    path=path,
+                    method="POST",
+                    payload=cast(api.JsonObject, body),
+                )
             if isinstance(result, dict) and isinstance(result.get("project"), dict):
                 result = result["project"]
             identity = {
@@ -975,32 +994,124 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         specification = record.request.application
         assert specification is not None
         live = self.live(record)
-        registry = self.registry_values(record)
+        self.verify_registry(record, live)
         if (
             live.get("sourceType") != "docker"
             or live.get("dockerImage") != record.image_reference
             or live.get("autoDeploy") is not False
             or api.parse_dokploy_env_text(str(live.get("env") or ""))
             != self.application_values(record)
-            or any(
-                live.get(key) not in (value, "" if value is None else value)
-                for key, value in registry.items()
-                if key != "registryId"
-            )
-            or canonical_json_sha256(registry) != record.state_recipient.get("registry_sha256")
         ):
             raise TestingActivationRefusal(
                 "The fresh application source, credentials or managed inputs changed."
             )
-        mounts = live.get("mounts")
+        self.require_application_mount(record, live)
+        self.verify_provider_options(record, live)
+
+    def require_application_mount(
+        self, record: TestingActivationRecord, live: api.JsonObject
+    ) -> None:
+        specification = record.request.application
+        assert specification is not None
         if specification.state.kind == "volume":
             resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
             assert isinstance(resources, ApplicationTestingResources)
             if not self.mount_matches(record, live, resources):
                 raise TestingActivationRefusal("The independent application mount changed.")
-        elif mounts != []:
+        elif live.get("mounts") != []:
             raise TestingActivationRefusal("The application has an unrequested state mount.")
+
+    def require_recovery_custody(self, record: TestingActivationRecord) -> None:
+        target = self.require_recipient_custody(record, recovery=True)
+        if record.published and target_without_hold(target) != target_without_hold(
+            record.published_target
+        ):
+            raise TestingActivationRefusal("The original published target changed.")
+        if record.published:
+            from control_plane.testing_publication_storage import (
+                testing_binding_matches_retained_publication,
+            )
+
+            try:
+                binding = self.store.read_route_binding_record(
+                    product=record.product, context_name=record.context, instance_name="testing"
+                )
+            except FileNotFoundError:
+                binding = None
+            if not testing_binding_matches_retained_publication(
+                self.store, binding, record.published_route_binding
+            ):
+                raise TestingActivationRefusal("The original published route authority changed.")
+        self.require_recovery_unused(record)
+
+    def verify_recovery_provider(self, record: TestingActivationRecord) -> None:
+        specification = record.request.application
+        if not record.published or specification is None:
+            raise TestingActivationRefusal(
+                "Original finalization requires its published recipient."
+            )
+        if not record.state_recipient.get("application_environment_sha256"):
+            ApplicationActivationAdapter.require_unchanged(self, record)
+            ApplicationActivationAdapter.verify_provider(self, record)
+            return
+        live = self.live(record)
+        self.verify_registry(record, live)
+        if (
+            live.get("sourceType") != "docker"
+            or live.get("dockerImage") != record.image_reference
+            or live.get("autoDeploy") is not False
+            or canonical_json_sha256(api.parse_dokploy_env_text(str(live.get("env") or "")))
+            != record.state_recipient.get("application_environment_sha256")
+        ):
+            raise TestingActivationRefusal("The original application configuration changed.")
+        self.require_application_mount(record, live)
         self.verify_provider_options(record, live)
+        if specification.state.kind == "volume":
+            from control_plane.testing_application_runtime import inspect_application_runtime
+
+            readiness = record.application_readiness
+            if readiness is None:
+                raise TestingActivationRefusal("The original volume runtime is unavailable.")
+            resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
+            host, token = source.read_dokploy_config(control_plane_root=self.root)
+            observed = inspect_application_runtime(
+                host=host,
+                token=token,
+                server_id=str(live.get("serverId") or ""),
+                application=record.app_name,
+                runtime_port=specification.runtime_port,
+                network=specification.network_name,
+                image=record.image_reference,
+                identity=readiness.runtime_identity,
+                values=api.parse_dokploy_env_text(str(live.get("env") or "")),
+                volume=resources.volumes["state"],
+                volume_binding=resources.binding_sha256,
+                mount_path=specification.state.container_path,
+                health_path=specification.health_path,
+            )
+            if observed.get("service_id") != readiness.service_id:
+                raise TestingActivationRefusal("The original volume service changed.")
+
+    def verify_registry(self, record: TestingActivationRecord, live: api.JsonObject) -> None:
+        expected = record.state_recipient.get("application_registry_sha256")
+        if expected is not None:
+            if (
+                live.get("registryId") not in (None, "")
+                or application_registry_sha256(live) != expected
+                or not record.published
+                and application_registry_sha256(self.registry_values(record)) != expected
+            ):
+                raise TestingActivationRefusal(
+                    "The original application pull configuration changed."
+                )
+            return
+        registry = self.registry_values(record)
+        if any(
+            live.get(key) not in (value, "" if value is None else value)
+            for key, value in registry.items()
+            if key != "registryId"
+        ) or canonical_json_sha256(registry) != record.state_recipient.get("registry_sha256"):
+            raise TestingActivationRefusal("The original application pull configuration changed.")
 
     def verify_provider_options(
         self, record: TestingActivationRecord, live: api.JsonObject
@@ -1080,13 +1191,12 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
     ) -> bool:
         specification = record.request.application
         assert specification is not None
-        mount = match_application_volume_mount(
+        return application_volume_mount_matches(
             live,
             application_id=record.target_id,
             volume_name=resources.volumes["state"],
             mount_path=specification.state.container_path,
         )
-        return mount is not None and mount.get("serviceType") == "application"
 
     def configure_application(
         self,
@@ -1110,9 +1220,14 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             record = self.save(
                 record, application_readiness=TestingApplicationReadiness(runtime_identity=identity)
             )
-        if "registry_sha256" not in record.state_recipient:
+        if not {"registry_sha256", "application_registry_sha256"}.intersection(
+            record.state_recipient
+        ):
             record = self.save_state(
-                record, registry_sha256=canonical_json_sha256(self.registry_values(record))
+                record,
+                application_registry_sha256=application_registry_sha256(
+                    self.registry_values(record)
+                ),
             )
         if specification.state.kind == "volume" and "mount_verified" not in record.state_recipient:
             live = self.live(record)
@@ -1190,7 +1305,13 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 env_text=api.serialize_dokploy_env_text(self.application_values(record)),
             )
             self.verify_provider(record)
-            record = self.save_state(record, application_configured="true")
+            record = self.save_state(
+                record,
+                application_configured="true",
+                application_environment_sha256=canonical_json_sha256(
+                    self.application_values(record)
+                ),
+            )
         record = self.configure_original_undeployed_endpoint(record, checkpoint)
         self.verify_provider(record)
         return record
@@ -1448,7 +1569,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             previous_route = restored_application_route(self.store, record)
             restored_history = previous_route is not None
         fresh_restored_history = restored_history and not (readiness and readiness.route)
-        original_route = (readiness.route if readiness else None) or previous_route
+        original_route = readiness.route if readiness else None
         if original_route is not None and original_route.application_file_name:
             old_spec["route_file_name"] = original_route.application_file_name
         host, token = source.read_dokploy_config(control_plane_root=self.root)
@@ -1509,7 +1630,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 if frame["application_file"] is not None
                 else None
             )
-            if not isinstance(document, dict):
+            if not isinstance(document, dict) and not (
+                document is None and previous_route is not None and frame["owned_file"] is not None
+            ):
                 raise ValueError("The actual retained application route file is unavailable.")
             points = testing_ingress_entrypoints(frame["raw"], hostname)
             arguments = dict(
@@ -1527,6 +1650,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 application_document=document,
                 application_file_name=frame["application_file_name"],
                 application_file_sha256=frame["application_file_sha256"],
+                static_configuration=frame["static_configuration"],
                 recorded_application_route=previous_route,
             )
             admit_testing_route_predecessor(**arguments)
@@ -1542,6 +1666,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         prospective: bool = False,
         expected: RuntimeIdentity | None = None,
     ) -> Any:
+        from urllib.parse import urlsplit
+
         from control_plane.contracts.promotion_record import HealthcheckEvidence
         from control_plane.contracts.runtime_identity import health_payload_runtime_identity_status
         from control_plane.testing_rebuild_service import read_public_testing_health
@@ -1561,6 +1687,13 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             record.retained_private_ingress["endpoint_key"]
         )
         try:
+            current, frozen = urlsplit(endpoint.url), urlsplit(address)
+            if (current.scheme, current.hostname, current.port or 443) != (
+                frozen.scheme,
+                frozen.hostname,
+                frozen.port or 443,
+            ):
+                raise ValueError("Private health no longer observes the original testing address.")
             response = fetch_testing_private_health(
                 root=self.root,
                 store=self.store,

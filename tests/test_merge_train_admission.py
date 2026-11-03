@@ -1038,7 +1038,6 @@ class MergeTrainAdmissionTests(unittest.TestCase):
             generated_at="2026-05-09T02:10:00Z",
         )
 
-        self.assertIsNotNone(read_model.latest_dry_run)
         assert read_model.latest_dry_run is not None
         self.assertEqual(read_model.latest_dry_run.intended_next_action, "idle")
         self.assertEqual(read_model.latest_dry_run.queue_count, 1)
@@ -1120,7 +1119,6 @@ class MergeTrainAdmissionTests(unittest.TestCase):
             generated_at="2026-05-09T02:12:00Z",
         )
 
-        self.assertIsNotNone(read_model.controller_state)
         assert read_model.controller_state is not None
         self.assertEqual(read_model.controller_state.active_phase, "cleanup_candidate_ref")
         self.assertEqual(read_model.controller_state.reconciliation_status, "required")
@@ -1157,7 +1155,6 @@ class MergeTrainAdmissionTests(unittest.TestCase):
             generated_at="2026-05-09T02:12:00Z",
         )
 
-        self.assertIsNotNone(read_model.controller_diagnostics)
         assert read_model.controller_diagnostics is not None
         self.assertEqual(read_model.controller_diagnostics.owner, "controller-a")
         self.assertEqual(read_model.controller_diagnostics.active_phase, "merge_pull_request")

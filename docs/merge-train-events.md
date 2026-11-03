@@ -125,8 +125,11 @@ controller leases and heartbeat updates; restarting the worker preserves them.
 An unchanged controller phase with work for at least thirty minutes, or an
 eligible change with no progress for that interval, raises an incident. A new
 queue arrival does not reset an older change's wait. Progress by a candidate
-resets its participating changes' waits. An expired held lease has no live lease
-heartbeat and is reported after a second consecutive observation; the monitor does not
+resets its participating changes' waits. Idle observations clear the controller
+clock; a held lease alone is not work. New work starts a fresh thirty-minute
+clock even when the completed controller state is unchanged. An expired held
+lease with queued, blocked or candidate work has no live lease heartbeat and
+is reported after a second consecutive observation; the monitor does not
 inspect a process on another host. A failed candidate whose exact-head checks
 have passed on rerun is similarly confirmed on the next pass if recovery has
 not yet cleared it. This gives normal lease renewal/recovery a pass to settle.
@@ -145,18 +148,16 @@ too. The incident also names a persistent check-retry wait, unavailable retry,
 conflicting checks or admin check hold from the controller's existing last result.
 This observation changes no block or recovery authority.
 
-The existing delivery App creates or updates one bot-owned `Merge train stalled`
-issue in each affected repository. It stays open while any monitored base has a
-stall, closes when complete fresh evidence shows none, and reopens for a later
-incident. Missing evidence cannot resolve it. Create reconciliation and a
-repository-scoped database lock prevent routine duplicate issues. This is the
-Supervisor's durable attention record; the monitor never merges, resets a lease,
-reruns checks, grants access or changes readiness labels.
+Stall observations and notification transitions stay in Launchplane's existing
+repository-scoped stall record. The monitor never creates, edits, closes or
+reopens product-repository issues. It never merges, resets a lease, reruns
+checks, grants access or changes readiness labels. The repository-scoped
+database lock serializes observations and delivery transitions.
 Disabling or disarming a target suspends monitoring and preserves an unresolved
 incident; it does not claim progress. Re-enabling it resumes fresh observation.
-If an issue loses its bot marker or ownership, delivery records the conflict
-instead of overwriting another actor's issue. Missing/deleted issue identities
-are reconciled on the next pass before a replacement is created.
+Legacy issue identity fields remain readable for stored-record compatibility;
+they no longer control delivery. Stall state is the `stall` field in the existing
+`GET /v1/work-graph/merge-train/controller/status` response.
 
 Discord stays with the existing Launchplane sender. Put
 `LAUNCHPLANE_MERGE_TRAIN_STALL_ALERT_REPOSITORY` and
@@ -165,13 +166,15 @@ for its `launchplane` context, through the existing runtime-environment record
 admin path. They select the repository and ref containing
 `merge-train-stall-alert.yml`. They are notification routing, independent of
 train policy and candidate digests; changing them never retires train work.
+The selected ref must contain the current alert workflow. Its optional ignored
+`issue_number` input accepts dispatches from the previous service image during
+rollout or rollback; the current monitor never sends it.
 
 The workflow uses the existing `DISCORD_LAUNCHPLANE_WEBHOOK`; no webhook is copied
 to service records and no new credential or grant is created. Existing delivery
-App purposes `release_record` and `workflow_dispatch` deliver the issue and
-dispatch respectively. A missing route or refused dispatch remains recorded in
+App purpose `workflow_dispatch` dispatches the alert. A missing route or refused dispatch remains recorded in
 `delivery_error`, with notification pending for a later pass. Discord reports
-opening, changes in stall reasons, and resolution with the issue link, never provider payloads,
+opening, changes in stall reasons, and resolution with the repository identity and a pointer to Launchplane, never provider payloads,
 token values or error messages. Confirmed dispatch proves dispatch, not Discord
 receipt; workflow failure stays visible in Actions. An uncertain dispatch can
 repeat a notification with the same transition identity.
