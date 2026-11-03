@@ -7422,6 +7422,7 @@ class FilesystemRecordStore:
         self,
         *,
         context_name: str = "",
+        anchor_pr_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[PreviewPrFeedbackRecord, ...]:
         records = [
@@ -7429,7 +7430,8 @@ class FilesystemRecordStore:
             for record in self._list_models(
                 PreviewPrFeedbackRecord, "launchplane_preview_pr_feedback"
             )
-            if not context_name or record.context == context_name
+            if (not context_name or record.context == context_name)
+            and (anchor_pr_number is None or record.anchor_pr_number == anchor_pr_number)
         ]
         records.sort(key=lambda record: (record.requested_at, record.feedback_id), reverse=True)
         if limit is not None:

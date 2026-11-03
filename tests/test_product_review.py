@@ -252,6 +252,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             head_sha=_preview_generation_read_record().anchor_summary.head_sha,
             state="open",
         )
+        self.notes_reader = Mock(side_effect=lambda *_: self.pull_request_notes)
         self.session_manager = HumanSessionManager(
             config=_github_oauth_config(),
             session_store=InMemoryHumanSessionStore(),
@@ -272,7 +273,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: self.store,
             human_session_manager=self.session_manager,
             owner_review_status_publisher=self.publisher,
-            product_review_notes_reader=lambda *_: self.pull_request_notes,
+            product_review_notes_reader=self.notes_reader,
         )
 
     async def _get(self, app: FastAPI, human: GitHubHumanIdentity) -> Response:
@@ -500,6 +501,9 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         before = await self._get(app, owner)
         written = await self._post(app, owner, decision="accepted", reason="")
         after = await self._get(app, owner)
+        self.assertEqual(
+            [call.args[3] for call in self.notes_reader.call_args_list], [True, False, True]
+        )
 
         self.assertEqual(before.status_code, 200)
         self.assertTrue(before.json()["can_decide"])

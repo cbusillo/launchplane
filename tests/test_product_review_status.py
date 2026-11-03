@@ -24,6 +24,7 @@ from control_plane.product_review import (
     ProductReviewPreview,
     record_product_review_decision,
     require_product_review_store,
+    source_control_compare_url,
 )
 from control_plane.product_review_status import (
     OwnerReviewStatusPublisher,
@@ -272,7 +273,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.store.write_preview_record(_preview_read_record())
         self.store.write_preview_generation_record(_preview_generation_read_record())
 
-    def test_changed_accepted_head_mentions_client_once_when_preview_is_ready(self) -> None:
+    def test_client_re_review_is_once_per_head_and_preserves_acceptance_and_checks(self) -> None:
         github = _GitHub()
         self._publish(github)
         self.assertEqual(github.comments, [])
@@ -313,7 +314,12 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertIn(f"@{_profile().owner.github_login}", notification)
         self.assertIn(github.head_sha, notification)
         self.assertIn(accepted.head_sha, notification)
-        self.assertIn(f"/compare/{accepted.head_sha}...{github.head_sha}", notification)
+        self.assertIn(
+            source_control_compare_url(
+                repository=_REPOSITORY, before=accepted.head_sha, after=github.head_sha
+            ),
+            notification,
+        )
         self.assertEqual(github.statuses[0]["state"], "pending")
         self.assertEqual(
             self.store.list_product_review_decision_records(
@@ -369,6 +375,20 @@ class OwnerReviewStatusTests(unittest.TestCase):
                 delivery_status="delivered",
             )
         )
+        failure = self.store.list_preview_pr_feedback_records(
+            context_name=_profile().preview.context
+        )[0]
+        for index, timestamp in enumerate(
+            ("not-a-time", "2026-10-24T17:00:00", "2026-10-24T18:30:00+03:00")
+        ):
+            self.store.write_preview_pr_feedback_record(
+                failure.model_copy(
+                    update={
+                        "feedback_id": f"legacy-failure-{index}",
+                        "requested_at": timestamp,
+                    }
+                )
+            )
         github.head_sha = repaired_head
         repaired_generation = generation.model_copy(
             update={

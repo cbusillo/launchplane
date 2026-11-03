@@ -54,6 +54,7 @@ class ProductReviewStore(Protocol):
         self,
         *,
         context_name: str = "",
+        anchor_pr_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[PreviewPrFeedbackRecord, ...]: ...
 

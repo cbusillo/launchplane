@@ -58,7 +58,7 @@ class ClientTestNotesTests(unittest.TestCase):
                             {"body": "Unrelated comment", "user": {"id": 9}},
                         ],
                     ],
-                ),
+                ) as read_source,
             ):
                 notes = read_pull_request_notes(
                     control_plane_root=Path("unused"),
@@ -77,6 +77,26 @@ class ClientTestNotesTests(unittest.TestCase):
                         body=body, labels=labels, review_label=profile.owner.review_label
                     ).error,
                 )
+                read_source.side_effect = None
+                read_source.return_value = {
+                    "title": notes.title,
+                    "body": body,
+                    "labels": [{"name": label} for label in labels],
+                    "head": {"sha": notes.head_sha},
+                    "state": notes.state,
+                }
+                read_source.reset_mock()
+                without_comment = read_pull_request_notes(
+                    control_plane_root=Path("unused"),
+                    profile=profile,
+                    pull_request_number=42,
+                    trace_id="fixture",
+                    include_client_comment=False,
+                )
+                expected = notes._asdict()
+                expected.update(latest_client_comment="", latest_client_comment_url="")
+                self.assertEqual(without_comment._asdict(), expected)
+                read_source.assert_called_once()
 
     def test_unknown_pull_request_identity_never_becomes_current_review_evidence(self) -> None:
         from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord

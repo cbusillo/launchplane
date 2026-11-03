@@ -69,7 +69,9 @@ class ProductReviewRouteDependencies:
     publish_owner_review_status: Callable[
         [ProductReviewStore, LaunchplaneProductProfileRecord, int], object
     ]
-    read_pull_request_notes: Callable[[LaunchplaneProductProfileRecord, int, str], PullRequestNotes]
+    read_pull_request_notes: Callable[
+        [LaunchplaneProductProfileRecord, int, str, bool], PullRequestNotes
+    ]
 
 
 class ProductReviewDecisionEnvelope(BaseModel):
@@ -263,7 +265,7 @@ def register_product_review_routes(
             pull_request_number=pull_request,
             trace_id=trace_id,
             decision_id=decision_id,
-            notes=dependencies.read_pull_request_notes(profile, pull_request, trace_id),
+            notes=dependencies.read_pull_request_notes(profile, pull_request, trace_id, True),
         )
 
     def retry_product_review_feedback(
@@ -343,7 +345,9 @@ def register_product_review_routes(
                 code="product_review_preview_unavailable",
                 message=_NO_PREVIEW_REASON,
             )
-        notes = dependencies.read_pull_request_notes(profile, envelope.pull_request, trace_id)
+        notes = dependencies.read_pull_request_notes(
+            profile, envelope.pull_request, trace_id, False
+        )
         reviewed_preview = ProductReviewPreview(
             head_sha=envelope.reviewed_head_sha,
             preview_url=envelope.reviewed_preview_url,

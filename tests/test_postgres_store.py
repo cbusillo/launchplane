@@ -6131,6 +6131,39 @@ private_key_context = "example_context"
                 filesystem.read_preview_pr_feedback_record(feedback.feedback_id), feedback
             )
             self.assertEqual(store.read_preview_pr_feedback_record(feedback.feedback_id), feedback)
+            for record_store in (store, filesystem):
+                other_pr = feedback.model_copy(
+                    update={
+                        "feedback_id": "other-preview-pr",
+                        "anchor_pr_number": 124,
+                        "requested_at": "2026-04-20T11:00:00Z",
+                    }
+                )
+                other_context = feedback.model_copy(
+                    update={
+                        "feedback_id": "other-preview-context",
+                        "context": "another-context",
+                        "requested_at": "2026-04-20T12:00:00Z",
+                    }
+                )
+                record_store.write_preview_pr_feedback_record(other_pr)
+                record_store.write_preview_pr_feedback_record(other_context)
+                self.assertEqual(
+                    record_store.list_preview_pr_feedback_records(
+                        context_name=feedback.context,
+                        anchor_pr_number=feedback.anchor_pr_number,
+                        limit=1,
+                    ),
+                    (feedback,),
+                )
+                self.assertEqual(
+                    record_store.list_preview_pr_feedback_records(
+                        context_name=feedback.context,
+                        anchor_pr_number=other_pr.anchor_pr_number,
+                        limit=1,
+                    ),
+                    (other_pr,),
+                )
             store.close()
 
         self.assertEqual(len(listed_records), 1)

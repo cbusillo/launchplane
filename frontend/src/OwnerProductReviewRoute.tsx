@@ -497,7 +497,7 @@ function ProductReviewDecisionForm({
             decision: "accepted",
           });
       setRecorded(true);
-      onDecided(response);
+      onDecided({ ...response, latest_client_comment: review.latest_client_comment, latest_client_comment_url: review.latest_client_comment_url });
     } catch (writeError) {
       const apiError = writeError as LaunchplaneApiError;
       if (apiError.code === "product_review_preview_changed" || apiError.code === "product_review_preview_unavailable") {

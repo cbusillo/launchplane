@@ -4156,7 +4156,7 @@ def create_launchplane_fastapi_app(
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
     product_review_notes_reader: (
-        Callable[[LaunchplaneProductProfileRecord, int, str], PullRequestNotes] | None
+        Callable[[LaunchplaneProductProfileRecord, int, str, bool], PullRequestNotes] | None
     ) = None,
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
     testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
@@ -28771,11 +28771,14 @@ def create_launchplane_fastapi_app(
             ),
             read_pull_request_notes=product_review_notes_reader
             or (
-                lambda profile, pull_request_number, trace_id: read_pull_request_notes(
-                    control_plane_root=resolved_control_plane_root,
-                    profile=profile,
-                    pull_request_number=pull_request_number,
-                    trace_id=trace_id,
+                lambda profile, pull_request_number, trace_id, include_client_comment: (
+                    read_pull_request_notes(
+                        control_plane_root=resolved_control_plane_root,
+                        profile=profile,
+                        pull_request_number=pull_request_number,
+                        trace_id=trace_id,
+                        include_client_comment=include_client_comment,
+                    )
                 )
             ),
         ),

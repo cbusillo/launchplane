@@ -7,7 +7,6 @@ accepting the owner-review check run.
 from contextlib import ExitStack
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 import logging
 import hashlib
 from pathlib import Path
@@ -28,6 +27,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.github_app_identity import (
     GitHubAppInstallationToken,
     mint_repository_installation_token,
@@ -578,17 +578,12 @@ class OwnerReviewStatusPublisher:
             and (
                 latest.head_sha != facts.head_sha
                 or open_client_questions(facts.body)
-                or any(
-                    feedback.product == profile.product
-                    and feedback.repository.casefold() == profile.repository.casefold()
-                    and feedback.anchor_pr_number == pull_request_number
-                    and feedback.revision == facts.head_sha
-                    and feedback.status == "failed"
-                    and datetime.fromisoformat(feedback.requested_at)
-                    > datetime.fromisoformat(latest.decided_at)
-                    for feedback in store.list_preview_pr_feedback_records(
-                        context_name=profile.preview.context
-                    )
+                or self._preview_failed_after_acceptance(
+                    store=store,
+                    profile=profile,
+                    pull_request_number=pull_request_number,
+                    decision=latest,
+                    head_sha=facts.head_sha,
                 )
             )
             and not preview_review_unavailability(
@@ -633,6 +628,42 @@ class OwnerReviewStatusPublisher:
                 app_id=self.github_feedback_app_id(control_plane_root=self.control_plane_root),
                 api_request=self.api_request,
             )
+
+    @staticmethod
+    def _preview_failed_after_acceptance(
+        *,
+        store: ProductReviewStore,
+        profile: LaunchplaneProductProfileRecord,
+        pull_request_number: int,
+        decision: ProductReviewDecisionRecord,
+        head_sha: str,
+    ) -> bool:
+        try:
+            accepted_at = parse_launchplane_mutation_timestamp(
+                decision.decided_at, field_name="Client acceptance"
+            )
+        except ValueError:
+            return False
+        for feedback in store.list_preview_pr_feedback_records(
+            context_name=profile.preview.context,
+            anchor_pr_number=pull_request_number,
+        ):
+            if not (
+                feedback.product == profile.product
+                and feedback.repository.casefold() == profile.repository.casefold()
+                and feedback.revision == head_sha
+                and feedback.status == "failed"
+            ):
+                continue
+            try:
+                failed_at = parse_launchplane_mutation_timestamp(
+                    feedback.requested_at, field_name="preview failure"
+                )
+            except ValueError:
+                continue
+            if failed_at > accepted_at:
+                return True
+        return False
 
     def _advisory_token(self, repository: str, repository_id: str) -> GitHubAppInstallationToken:
         if self.github_app_token is not None:

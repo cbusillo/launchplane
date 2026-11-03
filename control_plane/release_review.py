@@ -191,6 +191,7 @@ def read_pull_request_notes(
     profile: LaunchplaneProductProfileRecord,
     pull_request_number: int,
     trace_id: str,
+    include_client_comment: bool = True,
 ) -> PullRequestNotes:
     path = f"/repos/{quote(profile.repository)}/pulls/{pull_request_number}"
     try:
@@ -210,7 +211,7 @@ def read_pull_request_notes(
                 if token
                 else None
             )
-            if token and profile.owner.is_set:
+            if include_client_comment and token and profile.owner.is_set:
                 try:
                     for page in range(1, 11):
                         comments = _read_release_github(

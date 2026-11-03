@@ -211,6 +211,7 @@ test("the Client sees the change title and what to check before deciding", { tag
   await page.getByRole("button", { name: "Accept", exact: true }).click();
   await expect(page.getByLabel("Recorded decision")).toContainText("Accepted");
   await expect(card.locator(".release-review-notes li")).toHaveCount(2);
+  await expect(card.getByRole("region", { name: "Latest Client comment" })).toContainText(feedback.latest_client_comment);
 });
 
 for (const [scenario, message] of [
