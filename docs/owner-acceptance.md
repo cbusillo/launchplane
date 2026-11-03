@@ -224,12 +224,20 @@ The agent incorporates the answers and removes resolved question items before
 asking the Client to review again. An acknowledgement does not resolve the request.
 After a saved acceptance, a changed head or new open Client questions sends one
 new comment mentioning the Client when the current-head preview is ready.
+The receipt names the acceptance and version: a later acceptance can receive
+one new notice for that version, while retries within the same pair stay quiet.
+Carrying acceptance through the train does not start a new notification cycle.
 It names the accepted and current revisions, links their comparison, and includes
-the current test notes. Further reconciles of that head update the same receipt
+the current test notes. Further reconciles of that acceptance and head update the same receipt
 without another notification, including after a lost POST response. An older or
 failed preview waits until its replacement is ready. A recorded failure after
-acceptance also requests another look once that same version is ready again. Existing acceptance stays
+acceptance also reports once that same version is ready again. The saved
+acceptance still applies; that notice adds no second approval gate. Existing acceptance stays
 bound to its recorded head unless the normal carry proof succeeds.
+Remove the head-only receipt matcher, its shared publisher parameter and its
+legacy fixture when [VeriReel PR 573](https://github.com/cbusillo/verireel/pull/573)
+closes or merges; its [existing notice](https://github.com/cbusillo/verireel/pull/573#issuecomment-6607147415)
+is the compatibility case.
 
 The separate release invitation is described in [release-review.md](release-review.md).
 

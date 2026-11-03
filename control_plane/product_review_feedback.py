@@ -1,12 +1,14 @@
 """GitHub projection of immutable Client decisions, including their complete prose."""
 
 from collections.abc import Callable
+from datetime import datetime
 import json
 import re
 from urllib.parse import quote
 
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.github_payload import required_positive_int
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 
 
 def validate_owner_feedback_decision(decision: ProductReviewDecisionRecord) -> None:
@@ -78,6 +80,7 @@ def publish_review_comment(
     token: str,
     actor_id: int = 0,
     app_id: int = 0,
+    legacy_receipt: tuple[str, datetime] | None = None,
     api_request: Callable[..., object],
 ) -> str:
     if app_id < 1 and actor_id < 1:
@@ -93,8 +96,22 @@ def publish_review_comment(
             if not isinstance(comment, dict):
                 raise ValueError("Client feedback comment lookup is incomplete.")
             text = comment.get("body")
-            if not isinstance(text, str) or not text.startswith(marker + "\n"):
+            if not isinstance(text, str):
                 continue
+            if not text.startswith(marker + "\n"):
+                if legacy_receipt is None or not text.startswith(legacy_receipt[0] + "\n"):
+                    continue
+                created_at = comment.get("created_at")
+                if not isinstance(created_at, str):
+                    continue
+                try:
+                    if (
+                        parse_launchplane_mutation_timestamp(created_at, field_name="Client notice")
+                        < legacy_receipt[1]
+                    ):
+                        continue
+                except ValueError:
+                    continue
             author = comment.get("user")
             app = comment.get("performed_via_github_app")
             matches_actor = (
