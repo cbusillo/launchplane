@@ -9021,6 +9021,34 @@ class ProductReconcileGrantTests(ProductReconcileTestCase):
 
 
 class ProductReconcileFailureTests(ProductReconcileTestCase):
+    def test_quota_during_forward_order_proof_remains_retryable(self) -> None:
+        self._running_release(1, OLDER)
+        self.request()
+        self.github.add_run(7, DEPLOYABLE)
+        original = self.github.get_json
+        headers = Message()
+        headers["X-RateLimit-Remaining"] = "0"
+        headers["Retry-After"] = "60"
+        failure = HTTPError("https://api.github.com", 403, "Limited", headers, None)
+        self.addCleanup(failure.close)
+        comparison_reads: list[str] = []
+
+        def get_json(path: str) -> object:
+            if "/compare/" in path:
+                comparison_reads.append(path)
+                with patch("control_plane.build_provenance.urlopen", side_effect=failure):
+                    return GitHubBuildProvenanceTransport(token="read").get_json(path)
+            return original(path)
+
+        with patch.object(self.github, "get_json", side_effect=get_json):
+            result = self.run_once()
+        self.assertEqual(len(comparison_reads), 1)
+        self.assertEqual(result.state, "pending")
+        self.assertTrue(result.last_plan["retry_at"])
+        self.assertIsNone(self.store.claim_next_product_reconcile_request("early", 600))
+        self.assertEqual(self.store.list_public_ingress_incident_records(), ())
+        self.assertEqual(self.provider.applied, [])
+
     def test_testing_build_quota_defers_instead_of_rejecting_candidate(self) -> None:
         self.github.add_run(7, DEPLOYABLE)
         original_get = self.github.get_json
@@ -9279,7 +9307,23 @@ class ProductReconcileFailureTests(ProductReconcileTestCase):
                 return_value=token,
             ) as mint,
         ):
-            resolve_build_provenance_transport(self.store, profile)
+            first = MagicMock()
+            first.__enter__.return_value.read.return_value = b"[]"
+            first.__enter__.return_value.headers = {"ETag": '"same-history"'}
+            unchanged = HTTPError("https://api.github.com", 304, "Not Modified", Message(), None)
+            self.addCleanup(unchanged.close)
+            mint.side_effect = [token, replace(token, token="renewed")]
+            with patch(
+                "control_plane.build_provenance.urlopen", side_effect=[first, unchanged]
+            ) as read:
+                path = f"/repos/{REPOSITORY}/commits?sha=main"
+                resolve_build_provenance_transport(self.store, profile).get_json(path)
+                self.assertEqual(
+                    resolve_build_provenance_transport(self.store, profile).get_json(path), []
+                )
+            second = read.call_args_list[1].args[0]
+            self.assertEqual(second.get_header("If-none-match"), '"same-history"')
+            self.assertEqual(second.get_header("Authorization"), "Bearer renewed")
 
         self.assertEqual(mint.call_args.kwargs["repository_id"], REPOSITORY_ID)
         self.assertEqual(mint.call_args.kwargs["repository"], REPOSITORY)

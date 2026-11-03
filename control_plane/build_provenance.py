@@ -7,9 +7,9 @@ are never evidence. See docs/artifact-provenance.md.
 """
 
 import io
-from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from hashlib import sha256
+from math import ceil
 from http.client import HTTPException
 import json
 import re
@@ -30,6 +30,12 @@ from control_plane.contracts.artifact_identity import (
 
 from control_plane.github_response_headers import normalized_github_quota_response_headers
 from control_plane.github_read_cache import GitHubReadCache
+from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
+from control_plane.merge_train_provider_failure import (
+    ProviderFailure,
+    provider_failure,
+    provider_retry_deadline,
+)
 
 BUILD_WORKFLOW_PATH = ".github/workflows/build.yml"
 MANIFEST_ARTIFACT_PREFIX = "artifact-manifest-"
@@ -97,14 +103,27 @@ class GitHubBuildProvenanceTransport:
     def __init__(
         self,
         *,
-        token: str,
+        token: str | GitHubAppInstallationToken,
         timeout_seconds: float = 30,
         read_cache: GitHubReadCache | None = None,
     ) -> None:
-        self._token = token
+        self._token = token.token if isinstance(token, GitHubAppInstallationToken) else token
         self._timeout_seconds = timeout_seconds
         self._read_cache = read_cache if read_cache is not None else _BUILD_READ_CACHE
-        self._cache_namespace = sha256(f"{_GITHUB_API}\0{token}".encode()).hexdigest()
+        scope = (
+            json.dumps(
+                (
+                    token.app_id,
+                    token.installation_id,
+                    token.repository_id,
+                    token.permissions,
+                    token.repository_private,
+                )
+            )
+            if isinstance(token, GitHubAppInstallationToken)
+            else token
+        )
+        self._cache_namespace = sha256(f"{_GITHUB_API}\0{scope}".encode()).hexdigest()
 
     def get_json(self, path: str) -> object:
         cached = self._read_cache.get(self._cache_namespace, path)
@@ -206,7 +225,13 @@ def _github_read_failure(
             evidence["request_id"] = request_id
         if error.code == 429 or (
             error.code == 403
-            and (evidence.get("rate_limit_remaining") == 0 or "retry-after" in headers)
+            and (
+                evidence.get("rate_limit_remaining") == 0
+                or "retry-after" in headers
+                or (
+                    stage == "api" and error.fp is not None and provider_failure(error).rate_limited
+                )
+            )
         ):
             evidence["classification"] = "rate_limited"
         elif error.code == 401:
@@ -219,35 +244,22 @@ def _github_read_failure(
             evidence["classification"] = "http_error"
     retry_at = ""
     if evidence["classification"] == "rate_limited" and stage == "api":
-        retry_at = _github_retry_at(headers)
+        deadline = provider_retry_deadline(
+            ProviderFailure(
+                remaining=headers.get("x-ratelimit-remaining", ""),
+                reset=headers.get("x-ratelimit-reset", ""),
+                retry_after=headers.get("retry-after", ""),
+            ),
+            now=datetime.now(timezone.utc),
+        )
+        retry_at = datetime.fromtimestamp(ceil(deadline.timestamp()), tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
     return BuildProvenanceError(
         f"GitHub read failed: {json.dumps(evidence, sort_keys=True)}",
         code="github_read_failed",
         retry_at=retry_at,
     )
-
-
-def _github_retry_at(headers: dict[str, str]) -> str:
-    now = datetime.now(timezone.utc)
-    deadlines = [now + timedelta(seconds=60)]
-    reset = headers.get("x-ratelimit-reset", "")
-    if headers.get("x-ratelimit-remaining") == "0" and re.fullmatch(r"[0-9]{1,12}", reset):
-        try:
-            reset_at = datetime.fromtimestamp(int(reset), tz=timezone.utc)
-        except (ValueError, OverflowError, OSError):
-            reset_at = now
-        deadlines.append(reset_at)
-    retry_after = headers.get("retry-after", "")
-    if re.fullmatch(r"[0-9]{1,8}", retry_after):
-        deadlines.append(now + timedelta(seconds=int(retry_after)))
-    elif retry_after:
-        try:
-            parsed = parsedate_to_datetime(retry_after)
-        except (ValueError, TypeError, OverflowError):
-            parsed = None
-        if parsed is not None and parsed.tzinfo is not None:
-            deadlines.append(parsed)
-    return max(deadlines).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _bounded_read(response: object, path: str) -> bytes:

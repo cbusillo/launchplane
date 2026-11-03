@@ -122,7 +122,12 @@ class BuildProvenanceTests(unittest.TestCase):
         now = datetime.now(timezone.utc).replace(microsecond=0)
         reset = now + timedelta(minutes=10)
         later = now + timedelta(minutes=20)
-        for retry_after in ("1200", format_datetime(later)):
+        for retry_after, expected in (
+            ("1200", later),
+            (format_datetime(later), later),
+            ("60", reset),
+            ("", reset),
+        ):
             headers = Message()
             headers["X-RateLimit-Remaining"] = "0"
             headers["X-RateLimit-Reset"] = str(int(reset.timestamp()))
@@ -139,7 +144,21 @@ class BuildProvenanceTests(unittest.TestCase):
                 GitHubBuildProvenanceTransport(token="deadline").get_json(
                     "/repos/example/site/commits"
                 )
-            self.assertEqual(datetime.fromisoformat(caught.exception.retry_at), later)
+            self.assertEqual(datetime.fromisoformat(caught.exception.retry_at), expected)
+
+    def test_secondary_quota_body_defers_without_exposing_provider_text(self) -> None:
+        body = io.BytesIO(
+            b'{"message":"You have exceeded a secondary rate limit. private-response"}'
+        )
+        failure = HTTPError("https://api.github.com", 403, "Forbidden", Message(), body)
+        self.addCleanup(failure.close)
+        with (
+            patch("control_plane.build_provenance.urlopen", side_effect=failure),
+            self.assertRaises(BuildProvenanceError) as caught,
+        ):
+            GitHubBuildProvenanceTransport(token="private").get_json("/repos/example/site/commits")
+        self.assertTrue(caught.exception.retry_at)
+        self.assertNotIn("private-response", str(caught.exception))
 
     def test_cached_history_never_substitutes_for_forbidden_or_unvalidated_responses(self) -> None:
         path = "/repos/example/site/commits"

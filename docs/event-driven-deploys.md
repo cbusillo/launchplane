@@ -70,6 +70,8 @@ reservation. The webhook request never waits on a deploy.
 Testing source reads use conditional GitHub requests with the existing bounded,
 credential-scoped process cache. An unchanged history still needs GitHub's 304
 confirmation; cached history never substitutes for a refused or failed read.
+Renewed tokens reuse validators only for the same verified App, installation,
+repository and permission scope; every read uses the current token.
 A classified GitHub rate limit leaves testing reconciliation pending until the
 reset or Retry-After deadline, with a one-minute minimum backoff. The saved
 deadline survives worker restarts and new webhook requests. This pre-deployment

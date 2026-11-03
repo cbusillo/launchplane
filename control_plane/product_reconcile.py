@@ -423,7 +423,7 @@ def resolve_build_provenance_transport(
         raise ProductReconcileError(
             f"No build-provenance token: minting failed ({type(error).__name__}: {error})."
         ) from error
-    return GitHubBuildProvenanceTransport(token=token.token)
+    return GitHubBuildProvenanceTransport(token=token)
 
 
 def resolve_pull_request_feedback_token(
@@ -1802,6 +1802,8 @@ def _plan_testing_target(
                 ),
             )
         except LaneMovementRefused as error:
+            if isinstance(error.__cause__, BuildProvenanceError) and error.__cause__.retry_at:
+                raise error.__cause__
             plan.update(action="none", reason=error.code, held=True)
             return plan, None
         plan.update(action="deploy")
@@ -3188,23 +3190,43 @@ def run_product_reconcile_once(
             and isinstance(error, BuildProvenanceError)
             and error.retry_at
         ):
-            return _defer_rate_limited_reconcile(record_store, request, lease_owner, error)
-        _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
-        failed_plan: dict[str, object] = {"target": request.target_kind}
-        if request.target_kind == "testing":
-            trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
-            failed_plan.update(
-                last_failed_error_code=getattr(error, "code", "") or "testing_reconcile_failed",
-                failure_trace_id=trace_id,
+            _LOGGER.warning("Product reconcile of %s deferred: %s", request.target_key, error)
+            quota_plan: dict[str, object] = {
+                key: request.last_plan[key]
+                for key in (
+                    "context",
+                    "desired_artifact_id",
+                    "desired_commit",
+                    "queued_operation_id",
+                    "last_failed_operation_id",
+                )
+                if key in request.last_plan
+            }
+            quota_plan.update(
+                target=request.target_kind,
+                action="wait",
+                reason="github_rate_limited",
+                deferred=True,
+                retry_at=error.retry_at,
+                quota_error=str(error),
             )
-            _LOGGER.warning("Testing reconcile failure trace: %s", trace_id)
-        if request.target_kind == "preview":
-            # A failed read or lost lease must not re-arm a previously exhausted destroy.
-            for key in ("destroy_retry_key", "destroy_failed_attempts"):
-                if key in request.last_plan:
-                    failed_plan[key] = request.last_plan[key]
-            failed_plan["last_failed_error_code"] = getattr(error, "code", "")
-        outcome = ReconcileOutcome(failed_plan, error=_error_text(error))
+            outcome = ReconcileOutcome(quota_plan, deferred=True)
+        else:
+            _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
+            failed_plan: dict[str, object] = {"target": request.target_kind}
+            if request.target_kind == "testing":
+                trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
+                failed_plan.update(
+                    last_failed_error_code=getattr(error, "code", "") or "testing_reconcile_failed",
+                    failure_trace_id=trace_id,
+                )
+                _LOGGER.warning("Testing reconcile failure trace: %s", trace_id)
+            if request.target_kind == "preview":
+                for key in ("destroy_retry_key", "destroy_failed_attempts"):
+                    if key in request.last_plan:
+                        failed_plan[key] = request.last_plan[key]
+                failed_plan["last_failed_error_code"] = getattr(error, "code", "")
+            outcome = ReconcileOutcome(failed_plan, error=_error_text(error))
     else:
         if outcome.error:
             _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, outcome.error)
@@ -3355,35 +3377,6 @@ def run_product_reconcile_once(
 
         record_testing_delivery_attention(record_store, completed)
     return completed
-
-
-def _defer_rate_limited_reconcile(
-    record_store: ProductReconcileStore,
-    request: ProductReconcileRequestRecord,
-    lease_owner: str,
-    error: BuildProvenanceError,
-) -> ProductReconcileRequestRecord:
-    _LOGGER.warning("Product reconcile of %s deferred: %s", request.target_key, error)
-    plan: dict[str, object] = dict(request.last_plan)
-    plan.update(
-        target=request.target_kind,
-        action="wait",
-        held=True,
-        reason="github_rate_limited",
-        retry_at=error.retry_at,
-        quota_error=str(error),
-    )
-    record_store.request_product_reconcile(
-        ProductReconcileTarget(
-            product=request.product,
-            target_kind=request.target_kind,
-            pull_request_number=request.pull_request_number,
-        ),
-        _utc_now(),
-    )
-    return record_store.complete_product_reconcile_request(
-        request.target_key, lease_owner, "done", plan
-    )
 
 
 def _owner_review_status_writer(
@@ -3747,11 +3740,7 @@ def _testing_build_read[Result](read: Callable[[str], Result], path: str) -> Res
         if isinstance(failure, HTTPError) and failure.code in {401, 403}:
             # The shared selector may skip an invalid build. An identity refusal
             # is not an invalid build and must stop before another candidate read.
-            rate_limited = failure.code == 403 and (
-                failure.headers.get("Retry-After") is not None
-                or failure.headers.get("X-RateLimit-Remaining") == "0"
-            )
-            if urlsplit(failure.geturl()).hostname == "api.github.com" and not rate_limited:
+            if urlsplit(failure.geturl()).hostname == "api.github.com":
                 raise NativeSourceAuthorizationDenied(
                     "The existing build reader refused access."
                 ) from error

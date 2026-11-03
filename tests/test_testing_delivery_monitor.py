@@ -212,7 +212,12 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
             error_message="password=private-provider-detail",
         )
         self.store.write_odoo_stable_target_replacement_operation_record(operation)
-        self.reconcile(error="", queued_operation_id=operation.operation_id)
+        self.reconcile(
+            error="",
+            queued_operation_id=operation.operation_id,
+            reason="github_rate_limited",
+            deferred=True,
+        )
         self.monitor()
         incident = self.store.list_public_ingress_incident_records(status="open")[0]
         self.assertIn(operation.error_code, incident.summary)
