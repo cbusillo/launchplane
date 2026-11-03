@@ -707,7 +707,6 @@ class FastApiAuthSessionReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
         self.assertIn("Max-Age=1209600", response.headers["Set-Cookie"])
         renewed_session = session_store.read_session("expiring-session")
-        self.assertIsNotNone(renewed_session)
         assert renewed_session is not None
         self.assertGreater(renewed_session.expires_at, expiring_session.expires_at)
 

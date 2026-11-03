@@ -511,7 +511,6 @@ class AuthzPolicySchemaV3CompatibilityTests(unittest.TestCase):
         self.assertEqual(replayed.write_status, "replayed")
         self.assertEqual(replayed.record, persisted)
         self.assertEqual(persisted.status, "planned")
-        self.assertIsInstance(persisted.request, ManagedAuthzPolicySetProposalInput)
         assert isinstance(persisted.request, ManagedAuthzPolicySetProposalInput)
         self.assertEqual(persisted.request.schema_migration, "migrate_v2_to_v3")
         self.assertEqual(persisted.request.reconcile_request().schema_migration, "migrate_v2_to_v3")

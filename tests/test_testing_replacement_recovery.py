@@ -492,7 +492,6 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             self.assertEqual(replaced.request, fenced.request)
             self.assertIsNone(replaced.cancellation)
             self.assertIsNone(replaced.recovery_journal)
-            self.assertIsNotNone(replaced.disposable_supersession)
             assert replaced.disposable_supersession is not None
             self.assertEqual(replaced.disposable_supersession.retained_target_id, retained_target)
             self.assertEqual(

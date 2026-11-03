@@ -224,7 +224,6 @@ class StoredAuthzPolicyStartupTests(unittest.TestCase):
                     audience="launchplane-service",
                     database_url=database_url,
                 )
-            self.assertIsNotNone(captured_runtime)
             assert captured_runtime is not None
             policy_available = not corruption or request_refresh
             for action in (

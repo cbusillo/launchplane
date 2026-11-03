@@ -66,7 +66,6 @@ class ProtectedArtifactTests(TestCase):
             entry for entry in protected.entries if entry.artifact_id == manifest.artifact_id
         )
         provenance = entry.manifest_provenance
-        self.assertIsNotNone(provenance)
         assert provenance is not None
         self.assertEqual(provenance.source_commit, manifest.source_commit)
         self.assertEqual(provenance.build_provenance, manifest.build_provenance)

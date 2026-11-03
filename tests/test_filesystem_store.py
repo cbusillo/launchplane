@@ -1748,7 +1748,6 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             )[0]
 
         self.assertEqual(loaded.check_kind, "tls")
-        self.assertIsNotNone(loaded.targets[0].tls)
         assert loaded.targets[0].tls is not None
         self.assertEqual(loaded.targets[0].tls.status, "expiring")
         self.assertEqual(loaded.targets[0].tls.recorded.owner, "launchplane")
@@ -3494,7 +3493,6 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 loaded_record.addon_settings[0].value.secret_binding_id,
                 "secret-binding-shopify-token",
             )
-            self.assertIsNotNone(loaded_record.website_bootstrap)
             assert loaded_record.website_bootstrap is not None
             self.assertEqual(loaded_record.website_bootstrap.name, "OPW")
             self.assertEqual(loaded_record.website_bootstrap.routes[0].url, "/")

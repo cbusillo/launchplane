@@ -498,7 +498,6 @@ class OdooStableBootstrapTests(unittest.TestCase):
 
         def post_deploy_side_effect(**_: object) -> OdooPostDeployResult:
             record = store.odoo_instance_override_records[-1]
-            self.assertIsNotNone(record.website_bootstrap)
             assert record.website_bootstrap is not None
             self.assertEqual(
                 record.website_bootstrap.canonical_url,
@@ -552,7 +551,6 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertEqual(result.bootstrap_status, "pass")
         self.assertEqual(len(store.odoo_instance_override_records), 2)
         updated_record = store.odoo_instance_override_records[-1]
-        self.assertIsNotNone(updated_record.website_bootstrap)
         assert updated_record.website_bootstrap is not None
         self.assertEqual(
             updated_record.website_bootstrap.canonical_url,

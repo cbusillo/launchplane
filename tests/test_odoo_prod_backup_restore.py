@@ -1047,7 +1047,6 @@ class OdooProdBackupRestoreApplyTests(unittest.TestCase):
         passed_deployment = store.read_deployment_record(failed_result.deployment_record_id)
         self.assertEqual(passed_deployment.deploy.status, "pass")
         self.assertNotIn("restore_error", passed_deployment.runtime_source)
-        self.assertIsNotNone(passed_deployment.runtime_identity)
         assert passed_deployment.runtime_identity is not None
         assert failed_deployment.runtime_identity is not None
         self.assertEqual(

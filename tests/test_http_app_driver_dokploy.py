@@ -235,7 +235,6 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
         self.assertIn("Max-Age=1209600", response.headers["Set-Cookie"])
         renewed_session = session_store.read_session("expiring-session")
-        self.assertIsNotNone(renewed_session)
         assert renewed_session is not None
         self.assertGreater(renewed_session.expires_at, session.expires_at)
 
@@ -272,7 +271,6 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
         renewed_session = session_store.read_session("expiring-session")
-        self.assertIsNotNone(renewed_session)
         assert renewed_session is not None
         self.assertGreater(renewed_session.expires_at, session.expires_at)
 
@@ -310,7 +308,6 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "invalid_request")
         self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
         renewed_session = session_store.read_session("expiring-session")
-        self.assertIsNotNone(renewed_session)
         assert renewed_session is not None
         self.assertGreater(renewed_session.expires_at, session.expires_at)
 
@@ -882,7 +879,6 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                 trace_id=response.json()["trace_id"],
                 observed_at=datetime.now(timezone.utc).isoformat(),
             )
-            self.assertIsNotNone(denial)
             assert denial is not None
             self.assertEqual(denial.action, "dokploy_target.inspect")
 

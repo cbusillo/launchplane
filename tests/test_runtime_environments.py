@@ -499,7 +499,6 @@ class RuntimeEnvironmentTests(unittest.TestCase):
             )
         )
 
-        self.assertIsNotNone(definition)
         assert definition is not None
         self.assertEqual(definition.shared_env["SHARED_MODE"], "db")
         self.assertEqual(definition.contexts["verireel"].shared_env["VERIREEL_CONTEXT"], "prod")
@@ -976,7 +975,6 @@ class RuntimeEnvironmentTests(unittest.TestCase):
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Direct local DB mutation is restricted", result.output)
-        self.assertIn("--allow-direct-db-mutation", result.output)
         self.assertIn("--allow-direct-db-mutation", result.output)
 
     def test_environments_put_writes_db_record_without_echoing_values(self) -> None:

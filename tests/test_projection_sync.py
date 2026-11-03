@@ -307,7 +307,6 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
             denial = store.read_authz_denial_record(
                 trace_id=payload["trace_id"], observed_at=datetime.now(timezone.utc).isoformat()
             )
-            self.assertIsNotNone(denial)
             assert denial is not None
             self.assertEqual(denial.action, "ingress_route.apply")
 

@@ -4232,7 +4232,6 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replay_response.json()["replayed"])
         self.assertEqual(stored_profile.updated_at, original_profile.updated_at)
         self.assertEqual(stored_profile.source, original_profile.source)
-        self.assertIsNotNone(stored_reservation)
         assert stored_reservation is not None
         self.assertEqual(stored_reservation.state, "completed")
         self.assertEqual(stored_reservation.attempt, 1)
@@ -4346,7 +4345,6 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
             store.close()
 
         self.assertEqual(response.status_code, 202)
-        self.assertIsNotNone(stored_record)
         assert stored_record is not None
         self.assertEqual(stored_record.state, "completed")
         self.assertEqual(stored_record.attempt, 1)

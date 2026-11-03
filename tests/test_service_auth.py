@@ -1091,7 +1091,6 @@ class HumanSessionBoundaryTests(unittest.TestCase):
         self.assertIn("HttpOnly", cookie)
         self.assertNotIn("Secure", cookie)
         loaded_session = manager.read_cookie(cookie)
-        self.assertIsNotNone(loaded_session)
         assert loaded_session is not None
         self.assertEqual(loaded_session.session_id, session.session_id)
 

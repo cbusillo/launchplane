@@ -3909,7 +3909,6 @@ class FastApiOdooStableBootstrapTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_operation.deployment_record_id, "")
             self.assertIsNone(stored_operation.result)
             self.assertEqual(stored_operation.schema_version, 2)
-            self.assertIsNotNone(stored_operation.authorization)
             assert stored_operation.authorization is not None
             self.assertEqual(
                 stored_operation.authorization.managed_rule_id,
@@ -4800,7 +4799,6 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_operation.deployment_record_id, "")
             self.assertIsNone(stored_operation.result)
             self.assertEqual(stored_operation.schema_version, 2)
-            self.assertIsNotNone(stored_operation.authorization)
             assert stored_operation.authorization is not None
             self.assertEqual(
                 stored_operation.authorization.managed_rule_id,
@@ -7326,7 +7324,6 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.json()["result"]["website_bootstrap"], True)
             self.assertEqual(stored_record.apply_on, ("manual", "deploy", "promotion"))
             self.assertEqual(stored_record.config_parameters[0].key, "web.base.url")
-            self.assertIsNotNone(stored_record.website_bootstrap)
             assert stored_record.website_bootstrap is not None
             self.assertEqual(stored_record.website_bootstrap.name, "Cell Mechanic")
             self.assertEqual(

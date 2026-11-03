@@ -673,11 +673,9 @@ class MergeTrainPolicyTests(unittest.TestCase):
 
         payload = _first_driver_payload(view, driver_id="verireel")
 
-        self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload["driver_id"], "verireel")
         descriptor = payload["descriptor"]
-        self.assertIsInstance(descriptor, dict)
         assert isinstance(descriptor, dict)
         self.assertEqual(descriptor["driver_id"], "verireel")
         self.assertEqual(descriptor["label"], "Verireel")

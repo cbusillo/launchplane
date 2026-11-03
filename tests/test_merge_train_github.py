@@ -1353,7 +1353,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             candidate=candidate
         )
 
-        self.assertIsNotNone(built.structural_provenance)
         assert built.structural_provenance is not None
         first_step = built.structural_provenance.steps[0]
         self.assertEqual(first_step.kind, "no_op_already_contained")

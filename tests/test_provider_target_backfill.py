@@ -102,7 +102,6 @@ class ProviderTargetBackfillTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertFalse(result.applied)
         self.assertEqual(result.counts, {"would-create": 1})
-        self.assertIsNotNone(result.items[0].projected_record)
         assert result.items[0].projected_record is not None
         self.assertEqual(result.items[0].projected_record.target_id, "app-syo-prod")
         self.assertEqual(physical_records, ())

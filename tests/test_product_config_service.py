@@ -118,7 +118,6 @@ class ProductConfigServiceTests(unittest.TestCase):
         )
 
         self.assertIsNone(driver_result)
-        self.assertIsNotNone(error)
         assert error is not None
         self.assertEqual(error.status_code, 400)
         self.assertEqual(error.code, "invalid_request")

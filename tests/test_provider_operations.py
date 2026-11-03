@@ -669,7 +669,6 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             self.assertEqual(marked.status, "updated")
             self.assertEqual(result.status, "completed")
             self.assertEqual(adapter.apply_calls, 1)
-            self.assertIsNotNone(stored_stale)
             assert stored_stale is not None
             self.assertEqual(stored_stale.state, "completed")
             self.assertEqual(stored_stale.response_status_code, 409)

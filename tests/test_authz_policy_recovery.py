@@ -410,7 +410,6 @@ class AuthzPolicyRecoveryHttpTests(unittest.IsolatedAsyncioTestCase):
         current_session = manager.read_cookie_without_renewal(
             manager.session_cookie_header(original_session)
         )
-        self.assertIsNotNone(current_session)
         assert current_session is not None
         return current_session
 

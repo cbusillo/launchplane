@@ -203,7 +203,6 @@ class ExternalRouteBindingPlannerTests(unittest.TestCase):
 
         self.assertEqual(plan.status, "ready")
         self.assertEqual(plan.operation, "create")
-        self.assertIsNotNone(plan.record)
         assert plan.record is not None
         self.assertEqual(plan.record.ingress.provider, "external")
         self.assertEqual(plan.record.ingress.termination_kind, "edge")
@@ -256,7 +255,6 @@ class ExternalRouteBindingPlannerTests(unittest.TestCase):
         self.assertEqual(plan.status, "ready")
         self.assertEqual(plan.operation, "replace")
         self.assertEqual(plan.findings[0].code, "external_route_authority_change")
-        self.assertIsNotNone(plan.record)
         assert plan.record is not None
         self.assertEqual(plan.record.domains[0].domain_name, "app.example.test")
 
@@ -270,7 +268,6 @@ class ExternalRouteBindingPlannerTests(unittest.TestCase):
         self.assertEqual(plan.status, "ready")
         self.assertEqual(plan.operation, "relinquish")
         self.assertEqual(plan.findings[0].code, "external_route_authority_relinquish")
-        self.assertIsNotNone(plan.record)
         assert plan.record is not None
         self.assertEqual(plan.record.status, "disabled")
 

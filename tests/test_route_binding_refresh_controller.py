@@ -721,7 +721,6 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         self.assertEqual(testing_after, testing_before)
         self.assertIsNone(stored_idempotency)
-        self.assertIsNotNone(denial)
         assert denial is not None
         self.assertEqual(
             (denial.product, denial.context), (testing_before.product, testing_before.context)
@@ -791,7 +790,6 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(testing_after, testing_before)
         self.assertEqual(replay.status_code, 202)
         self.assertEqual(replay.json()["result"], payload["result"])
-        self.assertIsNotNone(parent_idempotency)
         assert parent_idempotency is not None
         self.assertEqual(parent_idempotency.state, "completed")
 

@@ -486,7 +486,6 @@ class OdooStableBootstrapOperationRecordTests(unittest.TestCase):
                 lease_expires_at="2026-05-17T00:14:00Z",
             )
 
-            self.assertIsNotNone(claimed)
             assert claimed is not None
             self.assertEqual(claimed.status, "running")
             self.assertEqual(claimed.phase, "running")

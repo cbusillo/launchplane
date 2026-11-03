@@ -179,7 +179,6 @@ class PreviewResourceDestroyTests(unittest.TestCase):
         self.assertEqual(result.status, "pass")
         self.assertEqual(result.domain_ids, ("domain-keep",))
         compose_delete_payload = requests[-1]["payload"]
-        self.assertIsInstance(compose_delete_payload, dict)
         assert isinstance(compose_delete_payload, dict)
         self.assertEqual(compose_delete_payload["composeId"], "compose-one")
         self.assertTrue(compose_delete_payload["deleteVolumes"])

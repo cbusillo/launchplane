@@ -697,7 +697,6 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             preview_url="https://pr-70.cm-preview.example.test/",
         )
 
-        self.assertIsNotNone(environment)
         assert environment is not None
         decoded_payload = json.loads(
             base64.b64decode(
@@ -1093,7 +1092,6 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         self.assertEqual(put_config_result.exit_code, 0, msg=put_config_result.output)
         self.assertEqual(put_bootstrap_result.exit_code, 0, msg=put_bootstrap_result.output)
         self.assertEqual(stored_record.config_parameters[0].key, "web.base.url")
-        self.assertIsNotNone(stored_record.website_bootstrap)
         assert stored_record.website_bootstrap is not None
         self.assertEqual(stored_record.website_bootstrap.name, "OPW")
         self.assertEqual(stored_record.website_bootstrap.routes[0].url, "/shop")

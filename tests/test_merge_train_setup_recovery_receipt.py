@@ -56,7 +56,6 @@ def assert_committed_reservation_survives_unknown_delete(
         saved = read_setup_recovery_receipt(
             store, fixture.target.repository, fixture.current.number, fixture.current.head_sha
         )
-        case.assertIsNotNone(saved)
         assert saved is not None
         # A later block on another base cannot overwrite this head's budget.
         with case.assertRaises(ValueError):

@@ -2071,7 +2071,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         fetch_targets = [call.kwargs["target_id"] for call in fetch_target_payload.call_args_list]
         self.assertEqual(fetch_targets, ["compose-template", "compose-cm-pr-45"])
         create_payload = requests[2]["payload"]
-        self.assertIsInstance(create_payload, dict)
         assert isinstance(create_payload, dict)
         self.assertEqual(create_payload["environmentId"], "env-cm-preview")
         self.assertEqual(create_payload["serverId"], "server-nonprod")
@@ -3074,7 +3073,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         delete_payload = next(
             item["payload"] for item in requests if item["path"] == "/api/compose.delete"
         )
-        self.assertIsInstance(delete_payload, dict)
         assert isinstance(delete_payload, dict)
         self.assertEqual(delete_payload["composeId"], "compose-cm-pr-45")
         self.assertTrue(delete_payload["deleteVolumes"])

@@ -84,7 +84,6 @@ class ReviewedWorkflowRuleRetirementTests(unittest.TestCase):
             candidate.model_dump(exclude={"github_actions"}),
             policy.model_dump(exclude={"github_actions"}),
         )
-        self.assertIsNotNone(proposal.workflow_rule_retirement)
         assert proposal.workflow_rule_retirement is not None
         self.assertEqual(diff.removed_rule_count, len(proposal.workflow_rule_retirement.selection))
         self.assertEqual(
