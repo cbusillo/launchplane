@@ -16,6 +16,10 @@ from control_plane.discussion_reminders import (
     SETTINGS_KEY as DISCUSSION_REMINDERS_SETTING,
     DiscussionReminderSettings,
 )
+from control_plane.github_app_configuration import (
+    ONBOARDING_GITHUB_APP_CLIENT_ID_ENV_KEY,
+    validate_onboarding_app_client_id,
+)
 from control_plane.dokploy.memory_capacity import (
     PREVIEW_MEMORY_FLOORS_SETTING,
     parse_preview_memory_floors,
@@ -40,6 +44,7 @@ DECLARED_SERVICE_SETTINGS: Mapping[str, Callable[[str], object]] = MappingProxyT
         PREVIEW_MEMORY_FLOORS_SETTING: parse_preview_memory_floors,
         RUNNER_HOST_HYGIENE_SETTING: RunnerHostHygieneConfiguration.model_validate_json,
         DISCUSSION_REMINDERS_SETTING: DiscussionReminderSettings.model_validate_json,
+        ONBOARDING_GITHUB_APP_CLIENT_ID_ENV_KEY: validate_onboarding_app_client_id,
         STALL_WORKFLOW_REPOSITORY_KEY: parse_merge_train_stall_repository,
         STALL_WORKFLOW_REF_KEY: parse_merge_train_stall_ref,
     }

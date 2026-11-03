@@ -3,12 +3,28 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from control_plane.runtime_environments import RuntimeEnvironmentDefinition
 
 ADVISORY_GITHUB_APP_ID_ENV_KEY = "LAUNCHPLANE_ADVISORY_GITHUB_APP_ID"
+ONBOARDING_GITHUB_APP_CLIENT_ID_ENV_KEY = "LAUNCHPLANE_ONBOARDING_GITHUB_APP_CLIENT_ID"
+ONBOARDING_GITHUB_APP_INTEGRATION = "onboarding_github_app"
+
+
+def validate_onboarding_app_client_id(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_.]{1,128}", value) is None:
+        raise ValueError("Onboarding App client id must be a nonempty identifier.")
+    return value
+
+
+def validate_delivery_key_integration(value: str) -> str:
+    integration = value.strip()
+    if not integration or integration == ONBOARDING_GITHUB_APP_INTEGRATION:
+        raise ValueError("Delivery App requires its own key integration.")
+    return integration
 
 
 def service_github_app_values(definition: RuntimeEnvironmentDefinition) -> dict[str, str]:
