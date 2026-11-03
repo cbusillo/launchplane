@@ -1,5 +1,3 @@
-"""Verify committed action content and retirement wrapper/worker input agreement."""
-
 from __future__ import annotations
 
 import argparse
@@ -335,7 +333,9 @@ REAL_TOPOLOGY_PATTERNS = (
 )
 
 
-def workflow_violations(text: str, *, path: Path) -> list[ActionPinViolation]:
+def workflow_violations(
+    text: str, *, path: Path, playwright_version: str | None = None
+) -> list[ActionPinViolation]:
     data = yaml.load(text, Loader=WorkflowLoader)
     if not isinstance(data, dict):
         raise ValueError(f"Workflow {path} must be a mapping.")
@@ -408,6 +408,13 @@ def workflow_violations(text: str, *, path: Path) -> list[ActionPinViolation]:
             reject("container_digest_missing", "Container images require a sha256 manifest digest.")
         if CONTAINER_TAG_PATTERN.fullmatch(match["tag"]) is None:
             reject("container_tag_invalid", "Container image tags must name a reviewable release.")
+        if match["source"] == "mcr.microsoft.com/playwright":
+            image_version = match["tag"].removeprefix("v").split("-", 1)[0]
+            if playwright_version is None or image_version != playwright_version:
+                reject(
+                    "browser_image_version_mismatch",
+                    "Browser images must match the committed frontend Playwright dependency.",
+                )
 
     def check_values(value: object) -> None:
         if isinstance(value, dict):
@@ -451,10 +458,23 @@ def workflow_violations(text: str, *, path: Path) -> list[ActionPinViolation]:
             for index, step in enumerate(steps)
             if str(step.get("uses", "")).startswith("actions/checkout@")
         ]
-        if "pull_request_target" in events:
-            for _, checkout in checkouts:
-                inputs = _mapping(checkout.get("with", {}))
-                ref = inputs.get("ref", "")
+        for _, checkout in checkouts:
+            inputs = _mapping(checkout.get("with", {}))
+            ref = inputs.get("ref", "")
+            checkout_context = re.sub(
+                r"\[\s*'(\w+)'\s*]",
+                r".\1",
+                f"{ref} {inputs.get('repository', '')}",
+            )
+            checkout_context = re.sub(r"\s*\.\s*", ".", checkout_context).lower()
+            inherited_untrusted_ref = "workflow_call" in events and (
+                "github.event.pull_request.head" in checkout_context
+                or "github.head_ref" in checkout_context
+            )
+            excludes_target = _requires_conjunct(
+                str(job.get("if", "")), "github.event_name != 'pull_request_target'"
+            ) or _requires_conjunct(str(job.get("if", "")), "github.event_name == 'pull_request'")
+            if ("pull_request_target" in events or inherited_untrusted_ref) and not excludes_target:
                 trusted_ref = (
                     ref
                     in (
@@ -544,6 +564,20 @@ def verify_workflow_pins(root: Path, revision: str) -> list[ActionPinViolation]:
         check=True,
         timeout=10,
     )
+    package = subprocess.run(
+        ("git", "show", f"{revision}:frontend/package.json"),
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    playwright_version = None
+    if package.returncode == 0:
+        dependencies = _mapping(_mapping(json.loads(package.stdout)).get("devDependencies", {}))
+        version = dependencies.get("@playwright/test")
+        if isinstance(version, str):
+            playwright_version = version
     violations: list[ActionPinViolation] = []
     for name in result.stdout.splitlines():
         path = Path(name)
@@ -559,12 +593,16 @@ def verify_workflow_pins(root: Path, revision: str) -> list[ActionPinViolation]:
             check=True,
             timeout=10,
         ).stdout
-        violations.extend(workflow_violations(text, path=path))
+        violations.extend(
+            workflow_violations(text, path=path, playwright_version=playwright_version)
+        )
     return violations
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description="Verify committed workflow safety, action content and retirement worker interfaces."
+    )
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--repository", required=True)

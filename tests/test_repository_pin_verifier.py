@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -25,14 +26,23 @@ class RepositoryPinVerifierTests(unittest.TestCase):
             _git(root, "config", "user.email", "fixture@example.invalid")
             workflow = root / ".github/workflows/arbitrary.yaml"
             action = root / ".github/actions/arbitrary/action.yml"
+            package = root / "frontend/package.json"
             workflow.parent.mkdir(parents=True)
             action.parent.mkdir(parents=True)
+            package.parent.mkdir()
             reference = f"actions/checkout@{'a' * 40} # v1.0.0"
-            workflow.write_text(f"jobs:\n  arbitrary:\n    steps:\n      - uses: {reference}\n")
+            version = "9.8.7"
+            workflow.write_text(
+                "jobs:\n  arbitrary:\n"
+                f"    container: mcr.microsoft.com/playwright:v{version}-noble@sha256:{'b' * 64}\n"
+                f"    steps:\n      - uses: {reference}\n"
+            )
+            package.write_text(json.dumps({"devDependencies": {"@playwright/test": version}}))
             action.write_text(f"runs:\n  using: composite\n  steps:\n    - uses: {reference}\n")
             revision = _commit(root, "safe fixture")
             workflow.write_text(workflow.read_text().replace("a" * 40, "main"))
             action.write_text(action.read_text().replace("a" * 40, "v1"))
+            package.write_text(json.dumps({"devDependencies": {"@playwright/test": "0.0.1"}}))
             self.assertEqual(verify_workflow_pins(root, revision), [])
             _commit(root, "mutable fixture references")
             violations = verify_workflow_pins(root, "HEAD")
@@ -40,7 +50,10 @@ class RepositoryPinVerifierTests(unittest.TestCase):
                 {item.path for item in violations},
                 {workflow.relative_to(root), action.relative_to(root)},
             )
-            self.assertEqual({item.code for item in violations}, {"action_reference_not_immutable"})
+            self.assertEqual(
+                {item.code for item in violations},
+                {"action_reference_not_immutable", "browser_image_version_mismatch"},
+            )
             self.assertEqual(verify_workflow_pins(root, revision), [])
 
     def setUp(self) -> None:

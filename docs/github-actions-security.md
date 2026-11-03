@@ -101,8 +101,10 @@ installation to run against current security repositories on every scan.
 
 The required CI `repository_pins` job enforces this policy on committed workflows
 and composite actions for both same-repository and fork pull requests. Security
-CI also runs actionlint. The linter rejects untrusted checkout refs in
-`pull_request_target` jobs, untrusted expressions pasted into shell scripts,
+CI also runs actionlint. The linter also requires Playwright images to match the frontend dependency at
+the same committed revision. It rejects untrusted checkout refs in
+`pull_request_target` jobs and explicit pull-request head refs in reusable jobs
+that do not exclude that event, untrusted expressions pasted into shell scripts,
 unsafe local request-action checkouts, embedded product topology, and fork
 access to self-hosted runners. Self-hosted pull-request jobs need a necessary
 same-repository condition on the job; a statically provable runner expression

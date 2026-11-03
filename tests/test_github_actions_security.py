@@ -14,7 +14,7 @@ from scripts.verify_repository_pins import (
 )
 from tests.support.workflows import load_workflow
 
-SAME_REPO_PULL_REQUEST_IF = (
+_SAME_REPO_CONDITION = (
     "github.event_name != 'pull_request' || "
     "github.event.pull_request.head.repo.full_name == github.repository"
 )
@@ -25,7 +25,7 @@ def _safe_workflow() -> str:
         '"on": [pull_request, pull_request_target]\n'
         "jobs:\n  arbitrary_job:\n"
         "    runs-on: [self-hosted, fixture]\n"
-        f"    if: {SAME_REPO_PULL_REQUEST_IF}\n"
+        f"    if: {_SAME_REPO_CONDITION}\n"
         f"    container: postgres:17@sha256:{'b' * 64}\n"
         "    steps:\n"
         f"      - uses: actions/checkout@{'a' * 40} # v1.0.0\n"
@@ -62,21 +62,21 @@ class GitHubActionsSecurityTests(TestCase):
             ("missing digest", safe.replace("@sha256:" + "b" * 64, ""), "container_digest_missing"),
             (
                 "fork runner",
-                safe.replace(f"    if: {SAME_REPO_PULL_REQUEST_IF}\n", ""),
+                safe.replace(f"    if: {_SAME_REPO_CONDITION}\n", ""),
                 "runner_fork_isolation_missing",
             ),
             (
                 "fork guard bypass",
                 safe.replace(
-                    f"if: {SAME_REPO_PULL_REQUEST_IF}",
-                    f"if: ({SAME_REPO_PULL_REQUEST_IF}) || always()",
+                    f"if: {_SAME_REPO_CONDITION}",
+                    f"if: ({_SAME_REPO_CONDITION}) || always()",
                 ),
                 "runner_fork_isolation_missing",
             ),
             (
                 "unproven dynamic runner",
                 safe.replace("[self-hosted, fixture]", "${{ matrix.runner }}").replace(
-                    f"    if: {SAME_REPO_PULL_REQUEST_IF}\n", ""
+                    f"    if: {_SAME_REPO_CONDITION}\n", ""
                 ),
                 "runner_fork_isolation_missing",
             ),
@@ -154,7 +154,7 @@ class GitHubActionsSecurityTests(TestCase):
     def test_guard_text_inside_a_string_does_not_isolate_forks(self) -> None:
         text = "'x && github.event.pull_request.head.repo.full_name == github.repository && y'"
         workflow = _safe_workflow().replace(
-            f"if: {SAME_REPO_PULL_REQUEST_IF}", f'if: "{text} == {text}"'
+            f"if: {_SAME_REPO_CONDITION}", f'if: "{text} == {text}"'
         )
         self.assertIn(
             "runner_fork_isolation_missing",
@@ -181,8 +181,57 @@ class GitHubActionsSecurityTests(TestCase):
                     workflow_violations(workflow, path=Path(".github/workflows/unrelated.yml")), []
                 )
 
+    def test_reusable_checkout_of_pr_head_requires_excluding_target_event(self) -> None:
+        for checkout in (
+            "ref: ${{ github.event.pull_request.head.sha }}",
+            "ref: ${{ github['event']['pull_request']['head']['sha'] }}",
+            "ref: ${{ github . event . pull_request . head . sha }}",
+            "ref: ${{ github.head_ref }}",
+            "repository: ${{ github.event.pull_request.head.repo.full_name }}",
+        ):
+            workflow = (
+                _safe_workflow()
+                .replace("pull_request, pull_request_target", "workflow_call")
+                .replace(" # v1.0.0", f" # v1.0.0\n        with:\n          {checkout}")
+            )
+            with self.subTest(checkout=checkout):
+                self.assertIn(
+                    "pull_request_target_checkout_untrusted",
+                    {item.code for item in workflow_violations(workflow, path=Path("fixture.yml"))},
+                )
+                ordinary_only = workflow.replace(
+                    f"if: {_SAME_REPO_CONDITION}",
+                    "if: github.event_name != 'pull_request_target'",
+                )
+                self.assertEqual(workflow_violations(ordinary_only, path=Path("fixture.yml")), [])
+
+    def test_browser_images_match_the_supplied_dependency_version(self) -> None:
+        for version in ("9.8.7", "8.7.6"):
+            workflow = _safe_workflow().replace(
+                "postgres:17", f"mcr.microsoft.com/playwright:v{version}-noble"
+            )
+            with self.subTest(version=version):
+                self.assertEqual(
+                    workflow_violations(
+                        workflow, path=Path("fixture.yml"), playwright_version=version
+                    ),
+                    [],
+                )
+                for dependency_version in (None, "0.0.1"):
+                    self.assertIn(
+                        "browser_image_version_mismatch",
+                        {
+                            item.code
+                            for item in workflow_violations(
+                                workflow,
+                                path=Path("fixture.yml"),
+                                playwright_version=dependency_version,
+                            )
+                        },
+                    )
+
     def test_static_runner_choice_requires_trust_before_self_hosted_selection(self) -> None:
-        guard = f"({SAME_REPO_PULL_REQUEST_IF})"
+        guard = f"({_SAME_REPO_CONDITION})"
         for condition, fallback, safe in (
             (f"{guard} && startsWith(github.head_ref, 'candidate/')", '["ubuntu-latest"]', True),
             ("startsWith(github.head_ref, 'candidate/')", '["ubuntu-latest"]', False),
@@ -200,7 +249,7 @@ class GitHubActionsSecurityTests(TestCase):
                 self.assertEqual(_runner_expression_excludes_forks(expression), safe)
 
     def test_same_repository_guard_must_hold_for_the_whole_condition(self) -> None:
-        guard = f"({SAME_REPO_PULL_REQUEST_IF})"
+        guard = f"({_SAME_REPO_CONDITION})"
         for expression, required in (
             (f"needs.a.outputs.verified != 'true' && {guard}", True),
             (f"{guard} && always()", True),
