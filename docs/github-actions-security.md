@@ -59,16 +59,13 @@ written to the workflow log by the upstream implementation.
 ## Policy
 
 - A remote action source must be listed in
-  `tests/test_github_actions_security.py` with its trust and privilege class.
+  `scripts/verify_repository_pins.py` in its approved source set.
 - A remote action must use a full 40-character lowercase commit SHA; tags,
   branches, short SHAs, and expressions are rejected.
 - Every remote pin must retain its provenance comment: an exact release tag for
   public actions, `launchplane-request` for that first-party composite action,
   or `main` for approved pinned reusable-workflow trust anchors.
-- The mutable remote-reference allowlist is explicitly represented by
-  `MUTABLE_REFERENCE_ALLOWLIST` and is currently empty. Any temporary exception
-  must be scoped to one workflow path and one literal reference, with a
-  corresponding test and security review.
+- Mutable remote action references are rejected without exceptions.
 - Same-repository reusable workflows must use relative paths rather than a
   repository-qualified reference, except narrowly approved privileged workers
   whose full-SHA `job_workflow_ref` is itself part of the active policy trust
@@ -85,7 +82,7 @@ written to the workflow log by the upstream implementation.
   and Odoo production backup verification, backup restore, and retained-volume
   backup import workers; their dispatch wrappers and service actions remain
   separately authorized. `PINNED_SELF_REUSABLE_WORKFLOWS` in
-  `tests/test_github_actions_security.py` is the exact list.
+  `scripts/verify_repository_pins.py` is the exact list.
 - Changes to an approved privileged worker's `workflow_call` interface require
   two landings. First land the worker contract without changing caller pins,
   then pin each caller to that landed commit and start passing the new input or
@@ -93,7 +90,7 @@ written to the workflow log by the upstream implementation.
   revision before starting any job, so forwarding a value that only exists in
   the caller's current revision causes a workflow startup failure rather than a
   safe skipped job.
-- Every static container image source must be classified in the policy test and
+- Every static container image source must be classified in the linter and
   use a release tag plus a 64-character `sha256` manifest digest. Mutable tags
   without a digest are rejected.
 
@@ -102,9 +99,23 @@ only the named `runtime` build stage. This preserves cache for the frontend and
 GitHub CLI build stages while forcing runtime OS package upgrades and dependency
 installation to run against current security repositories on every scan.
 
-The security workflow runs this policy for both same-repository and fork pull
-requests before actionlint. The unit-test suite runs it as well, so a mutable
-reference cannot pass the required CI path.
+The required CI `repository_pins` job enforces this policy on committed workflows
+and composite actions for both same-repository and fork pull requests. Security
+CI also runs actionlint. The linter also requires Playwright images to match the frontend dependency at
+the same committed revision. It rejects untrusted checkout refs in
+`pull_request_target` jobs and explicit pull-request head refs in reusable jobs and composite actions
+that do not exclude that event, untrusted expressions pasted into shell scripts,
+unsafe local request-action checkouts, embedded product topology, and fork
+access to self-hosted runners. Self-hosted pull-request jobs need a necessary
+same-repository condition on the job; a statically provable runner expression
+may instead select a hosted runner for forks. A dynamic runner selector is not
+itself proof of isolation.
+
+Linter tests supply arbitrary fixture workflows, including a workflow satisfying
+all properties and fixtures violating each property. They do not assert the
+text or structure of tracked workflows. Tests that execute workflow scripts
+retain their behavior coverage. The unused test-only invariant checker and its
+self-test are removed.
 
 ## First-Party Action Content Currency
 
@@ -166,7 +177,7 @@ no release tag. Launchplane maintains those pins through the required content ch
 Renovate does not update container references embedded in workflow scripts.
 For those images, resolve the reviewed release manifest with
 `docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'`,
-update the tag and digest together, and let the policy test reject omissions or
+update the tag and digest together, and let the linter reject omissions or
 unclassified sources.
 
 Review each update PR as a supply-chain change: verify the repository, release
@@ -180,5 +191,6 @@ repository name; it does not infer authority from a fork remote or local edits.
 revision. Only `update` reads and rewrites local workflows. CI runs
 `uv run --extra dev python scripts/verify_repository_pins.py --repo-root .
 --revision "$REVISION" --repository "$REPOSITORY"` in its full-history pin-verification
-job to verify action content and retirement wrapper/pinned-worker input agreement.
+job to verify workflow safety properties, action content and retirement
+wrapper/pinned-worker input agreement.
 Unit tests use temporary repositories; unittest jobs use shallow checkouts.
