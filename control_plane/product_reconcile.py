@@ -15,6 +15,7 @@ from control_plane.workflows.generic_web_post_deploy import declares_verireel_te
 from control_plane.timestamps import utc_now_timestamp as _utc_now
 from control_plane.contracts.product_reconcile import preview_failure_observed_at
 from control_plane.http_error_evidence import log_handled_error_cause
+from control_plane.merge_train_provider_failure import provider_failure
 
 from control_plane.event_testing_deploy import event_testing_deploy_request
 from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
@@ -3734,13 +3735,15 @@ def _testing_build_read[Result](read: Callable[[str], Result], path: str) -> Res
     try:
         return read(path)
     except BuildProvenanceError as error:
-        if error.retry_at:
-            raise
         failure = error.__cause__
         if isinstance(failure, HTTPError) and failure.code in {401, 403}:
             # The shared selector may skip an invalid build. An identity refusal
             # is not an invalid build and must stop before another candidate read.
-            if urlsplit(failure.url).hostname == "api.github.com":
+            if (
+                urlsplit(failure.url).hostname == "api.github.com"
+                and not error.retry_at
+                and not provider_failure(failure).rate_limited
+            ):
                 raise NativeSourceAuthorizationDenied(
                     "The existing build reader refused access."
                 ) from error

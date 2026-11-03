@@ -1065,10 +1065,20 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         from control_plane.build_provenance import BuildProvenanceError
         from unittest.mock import Mock
 
-        for url, headers in (
-            ("https://api.github.com/repos/example/actions", {"X-RateLimit-Remaining": "0"}),
-            ("https://api.github.com/repos/example/actions", {"Retry-After": "60"}),
-            ("https://artifacts.example.invalid/archive", {}),
+        for url, headers, retry_at in (
+            ("https://api.github.com/repos/example/actions", {"X-RateLimit-Remaining": "0"}, ""),
+            ("https://api.github.com/repos/example/actions", {"Retry-After": "60"}, ""),
+            ("https://artifacts.example.invalid/archive", {}, ""),
+            (
+                "https://api.github.com/repos/example/actions",
+                {"X-RateLimit-Remaining": "0"},
+                "2026-11-03T21:11:49Z",
+            ),
+            (
+                "https://api.github.com/repos/example/actions",
+                {"Retry-After": ""},
+                "2026-11-03T21:11:49Z",
+            ),
         ):
             calls: list[str] = []
             values = Message()
@@ -1078,12 +1088,12 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             def unavailable(path: str) -> object:
                 calls.append(path)
                 raise BuildProvenanceError(
-                    "fixture temporary read failure", code="github_read_failed"
+                    "fixture temporary read failure", code="github_read_failed", retry_at=retry_at
                 ) from HTTPError(url, 403, "Forbidden", values, None)
 
             reader = product_reconcile._TestingRebuildBuildReads(Mock(get_json=unavailable))
             with (
-                self.subTest(url=url, headers=headers),
+                self.subTest(url=url, headers=headers, retry_at=retry_at),
                 self.assertRaises(product_reconcile.ProductReconcileError),
             ):
                 try:
