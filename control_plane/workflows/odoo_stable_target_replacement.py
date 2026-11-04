@@ -85,6 +85,7 @@ from control_plane.contracts.runtime_identity import (
     COMPOSE_IMAGE_REFERENCE_ENV_KEYS,
     RuntimeIdentity,
     runtime_identity_env,
+    parse_runtime_identity_payload,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.testing_publication import TestingPublicationRecord
@@ -1303,6 +1304,24 @@ def _override_environment_keys(
     return keys
 
 
+def _provider_compose_matches_generated(
+    target_payload: JsonObject, rendered_compose: str
+) -> bool | None:
+    if (
+        target_payload.get("sourceType") != "raw"
+        or target_payload.get("composePath") != "docker-compose.yml"
+    ):
+        return None
+    from control_plane.production_recipient import read_provider_compose
+
+    try:
+        return read_provider_compose(str(target_payload.get("composeFile") or "")) == (
+            read_provider_compose(rendered_compose)
+        )
+    except ValueError:
+        return None
+
+
 def _render_replacement_compose(
     *,
     image_reference: str,
@@ -1337,7 +1356,7 @@ def _snapshot_current_target(
     target_record: DokployTargetRecord,
     target_id_record: DokployTargetIdRecord,
     request: DokployRequest,
-) -> tuple[OdooStableTargetRuntimeSnapshot, dict[str, str]]:
+) -> tuple[OdooStableTargetRuntimeSnapshot, dict[str, str], JsonObject]:
     target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
@@ -1398,7 +1417,7 @@ def _snapshot_current_target(
         runtime_identity_deployment_record_id=runtime_identity.get("deployment_record_id", ""),
     )
 
-    return snapshot, env_map
+    return snapshot, env_map, target_payload
 
 
 def _build_steps(
@@ -1655,7 +1674,7 @@ def build_odoo_stable_target_replacement_plan(
                 "Launchplane could not resolve DB-backed Odoo volume authority for this lane.",
             )
         host, token = resolved_dokploy_config_reader(control_plane_root=control_plane_root)
-        current_target, live_runtime_values = _snapshot_current_target(
+        current_target, live_runtime_values, live_target_payload = _snapshot_current_target(
             host=host,
             token=token,
             target_record=target_record,
@@ -1772,15 +1791,16 @@ def build_odoo_stable_target_replacement_plan(
                 )
             )
             # Rendering checks the image, domains and port before any provider write.
-            rendered_compose = _render_replacement_compose(
-                image_reference=_artifact_image_reference(artifact_manifest)
-                if artifact_manifest is not None and artifact_matches_profile
-                else profile.image.repository,
+            _render_replacement_compose(
+                image_reference=profile.image.repository,
                 instance=lane.instance,
                 domain_hosts=current_target.domain_hosts,
                 runtime_port=profile.runtime_port,
                 published_copy=published_copy,
-                generation=generation,
+                generation=None,
+            )
+            provider_identity = parse_runtime_identity_payload(
+                live_runtime_values.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON")
             )
             if (
                 artifact_manifest is not None
@@ -1789,15 +1809,28 @@ def build_odoo_stable_target_replacement_plan(
                 and expected_source_git_ref
                 == current_source_git_ref
                 == artifact_manifest.source_commit
-                and _runtime_identity_map(live_runtime_values).get("artifact_id")
-                == expected_artifact_id
-                and current_target.compose_file_sha256
+                and provider_identity is not None
+                and provider_identity.product == profile.product
+                and (provider_identity.context, provider_identity.instance)
+                == (lane.context, lane.instance)
+                and provider_identity.artifact_id == expected_artifact_id
+                and provider_identity.source_git_ref == expected_source_git_ref
                 and "fresh_testing_authority_unverified" not in blocker_codes
             ):
-                current_target.compose_matches_generated = (
-                    current_target.compose_file_sha256
-                    == dokploy_compose.compose_file_sha256(rendered_compose)
-                )
+                try:
+                    rendered_compose = _render_replacement_compose(
+                        image_reference=_artifact_image_reference(artifact_manifest),
+                        instance=lane.instance,
+                        domain_hosts=current_target.domain_hosts,
+                        runtime_port=profile.runtime_port,
+                        published_copy=published_copy,
+                        generation=generation,
+                    )
+                    current_target.compose_matches_generated = _provider_compose_matches_generated(
+                        live_target_payload, rendered_compose
+                    )
+                except click.ClickException:
+                    current_target.compose_matches_generated = None
             if request.data_source_mode == "upstream_restore" and not (
                 generation is not None and generation.source_mode == "container-export"
             ):
