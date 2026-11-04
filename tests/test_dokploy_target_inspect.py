@@ -15,6 +15,7 @@ from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy_target_inspect import (
     DokployTargetInspectRequest,
     DokployTargetInspectStore,
+    _instance_setting_comparison,
     inspect_dokploy_target,
     summarize_dokploy_target_payload,
 )
@@ -56,6 +57,24 @@ def _fake_target_payload(
 
 
 class DokployTargetInspectTests(unittest.TestCase):
+    def test_empty_target_overlay_still_reports_unavailable_generation_custody(self) -> None:
+        store = Mock(spec=PostgresRecordStore)
+        store.list_runtime_environment_records.return_value = ()
+        store.list_product_profile_records.return_value = ()
+        store.read_secret_version.side_effect = AssertionError
+        target = DokployTargetRecord(
+            context="cm", instance="prod", updated_at="2026-11-04T00:00:00Z"
+        )
+        with patch(
+            "control_plane.dokploy_target_inspect.published_generation_resources",
+            side_effect=ValueError,
+        ):
+            comparison = _require_mapping(_instance_setting_comparison(store, target))
+        self.assertEqual(
+            _require_mapping(comparison["generation_resources"])["status"], "unavailable"
+        )
+        store.read_secret_version.assert_not_called()
+
     def test_application_endpoint_summary_distinguishes_default_custom_and_unknown(self) -> None:
         cases: tuple[tuple[dict[str, object], str, int | None], ...] = (
             ({"endpointSpecSwarm": None, "ports": []}, "provider_default", 0),
