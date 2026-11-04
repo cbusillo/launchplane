@@ -37,6 +37,8 @@ from control_plane.storage.migrations.versions import (
     f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
     c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
     d1a5b7c9d2e4_join_attestations_compatibility as attestations_compatibility_join,
+    e2b6c8d0a4f7_monitoring_authority_history as monitoring_history,
+    f3c7d9e1b5a8_join_monitoring_history as monitoring_history_join,
 )
 from control_plane.storage.schema_adoption import schema_stamp_revision_for_engine
 from control_plane.storage.schema_invariants import (
@@ -76,6 +78,8 @@ _RECOGNIZED_SOURCE_REVISIONS = (
     idle_hostnames_join.revision,
     idle_compatibility_join.revision,
     attestations_compatibility_join.revision,
+    monitoring_history.revision,
+    monitoring_history_join.revision,
 )
 _ARCHIVE_JOIN_BY_SOURCE = {
     retired_delivery.revision: archive_retirement_join.revision,
@@ -151,9 +155,12 @@ def schema_migration_target(*, current_revision: str, target_revision: str) -> s
         preview_hostnames_join.revision,
         idle_hostnames_join.revision,
         integration_attestations.revision,
+        monitoring_history.revision,
     }:
         return (
-            attestations_compatibility_join.revision
+            monitoring_history_join.revision
+            if current_revision == monitoring_history.revision
+            else attestations_compatibility_join.revision
             if current_revision == integration_attestations.revision
             else idle_compatibility_join.revision
         )
