@@ -17,8 +17,6 @@ class MergeTrainReadyHandoff(BaseModel):
     actor_id: int | None = None
     actor_role: str = "unknown"
     comment_id: int | None = None
-    # A Client wait clears once Launchplane holds that Client's acceptance of
-    # exactly this head, including an acceptance carried to it.
     client_accepted: bool = False
 
 
@@ -28,8 +26,6 @@ def handoff_kind(body: str) -> Literal["ready", "client_wait", "waiting"] | None
         first = first[2:-2].removesuffix(".")
     if first == "Ready for the merge train":
         return "ready"
-    # The checked handoff's Client wait; any other wait names a hold the
-    # Client's acceptance cannot clear.
     if first == "Engineering ready; waiting for the Client's acceptance":
         return "client_wait"
     if first.startswith("Engineering ready; waiting for"):

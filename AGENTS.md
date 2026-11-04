@@ -45,8 +45,9 @@ Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product 
   Without explicit train authority, use the checked `gh-pr.py ready` handoff
   on the current PR head.
   The train admits trusted, proven current-head handoffs between candidates;
-  see [train admission](docs/merge-train-policy.md#ready-handoffs). An executing agent does not merge by hand or operate the train without
-  explicit authority for that task.
+  see [train admission](docs/merge-train-policy.md#ready-handoffs). An
+  executing agent does not merge by hand or operate the train without explicit
+  authority for that task.
 - Use [event-driven deploys](docs/event-driven-deploys.md) and
   [artifact provenance](docs/artifact-provenance.md) for the product build handoff,
   and [Client review](docs/owner-acceptance.md) and

@@ -4946,7 +4946,6 @@ class GitHubMergeTrainSnapshotReader:
     def client_accepted(
         self, *, repository: str, pull_request_number: int, head_sha: str, base_branch: str
     ) -> bool:
-        """Whether every Client of the repository accepted exactly `head_sha`."""
         from control_plane.product_review_status import owner_review_status
 
         clients = self._client_decisions(
