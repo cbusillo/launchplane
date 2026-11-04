@@ -26,6 +26,13 @@ no supported generation record selects the lane; `unavailable` means its recorde
 custody could not be evaluated. Neither qualifies deletion. `compared` reports
 equality with the saved serving snapshot, including a retained snapshot after
 an inverse; it does not attest a publication phase or change delivery.
+`generation_snapshots` reports the number of saved recipient/activation target
+snapshots, including production prior attempts and publication history, and the
+union of their resource and other key names. It reads no secret versions and
+returns no values. It covers these recipient/activation records only; Odoo
+rebuild runtime snapshots are not read. Missing custody is distinct from a
+complete empty key set. History and serving comparisons fail independently;
+an unavailable history is not deletion qualification.
 Retained target rows and publication snapshots remain unchanged; inverse
 production publication selects the retained generation's resource values.
 The existing target-inspection permissions and provider read still apply.

@@ -18,6 +18,7 @@ from control_plane.published_generation_resources import (
     published_generation_resources,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.dokploy_target_inspect import _generation_snapshot_keys
 from control_plane.production_recipient_publication import (
     RecipientPublication,
     commit_publication,
@@ -84,6 +85,39 @@ class RecipientPublicationTests(unittest.TestCase):
         self.assertEqual(
             retained, {key: value for key, value in before_values.items() if key in keys}
         )
+        archive = {
+            **record.publication,
+            "before": {
+                **before,
+                "target": record.retained_target.model_copy(
+                    update={"env": {"HISTORY_ONLY": "history-value-not-for-output"}}
+                ).model_dump(mode="json"),
+            },
+        }
+        prior = record.model_copy(
+            update={
+                "publication": {},
+                "retained_target": record.retained_target.model_copy(
+                    update={"env": {"PRIOR_ONLY": "prior-value-not-for-output"}}
+                ),
+            }
+        )
+        record.publication["history"] = [archive]
+        record.prior_attempts = [prior.model_dump(mode="json", exclude={"prior_attempts"})]
+        store.read_production_recipient.return_value = record.model_dump(mode="json")
+        snapshot_keys = _generation_snapshot_keys(store, self.publication.target)
+        self.assertEqual(snapshot_keys["resource_keys"], sorted(keys))
+        self.assertEqual(
+            snapshot_keys["other_keys"],
+            sorted((self.fixture.values.keys() - keys) | {"HISTORY_ONLY", "PRIOR_ONLY"}),
+        )
+        snapshot_count = snapshot_keys["snapshot_count"]
+        assert isinstance(snapshot_count, int)
+        self.assertEqual(snapshot_count, 6)
+        for value in (*generation_values.values(), *before_values.values()):
+            self.assertNotIn(value, str(snapshot_keys))
+        self.assertNotIn("history-value-not-for-output", str(snapshot_keys))
+        self.assertNotIn("prior-value-not-for-output", str(snapshot_keys))
 
     def setUp(self) -> None:
         self.fixture = preparation_tests.ProductionRecipientTests()
