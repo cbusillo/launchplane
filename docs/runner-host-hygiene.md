@@ -471,7 +471,10 @@ instead require two idle observations for the configured owning user plus two
 zero-handle observations for every exact target; unrelated users and lanes do
 not block that isolated cache class. The default evidence age limit is five
 minutes and is configurable through `--idle-max-age-seconds` without permitting
-zero-second observation intervals.
+zero-second observation intervals. A failed GitHub sample retains its failure
+reason when combined with a successful sample; mixed availability is incomplete
+evidence, not a contradiction. Actual contradictory evidence remains distinct.
+GitHub jobs in `requested` state count as active, including before queue admission.
 Cache and image maintenance may proceed when the report has unrelated attention
 findings so cleanup can remediate pressure; host identity, warm-image retention,
 audit durability, exact builder allowlists, and the idle gate remain mandatory.

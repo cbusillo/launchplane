@@ -86,7 +86,7 @@ _GITHUB_ACTIVE_WORKFLOW_RUN_STATUSES = (
     "pending",
     "requested",
 )
-_GITHUB_ACTIVE_JOB_STATUSES = frozenset(("queued", "in_progress", "waiting", "pending"))
+_GITHUB_ACTIVE_JOB_STATUSES = frozenset(_GITHUB_ACTIVE_WORKFLOW_RUN_STATUSES)
 _GITHUB_KNOWN_JOB_STATUSES = _GITHUB_ACTIVE_JOB_STATUSES | {"completed"}
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
 _BUILDCTL_STORAGE_MB_BYTES = 1_000_000
@@ -1981,9 +1981,7 @@ def _aggregate_github_idle_samples(
             reason_codes = {
                 observation.reason_code for observation in source_samples if observation.reason_code
             }
-            if len(reason_codes) > 1 or any(
-                observation.availability == "available" for observation in source_samples
-            ):
+            if "source_contradictory" in reason_codes:
                 reason_code = "source_contradictory"
             elif "source_unauthorized" in reason_codes:
                 reason_code = "source_unauthorized"
@@ -1992,7 +1990,7 @@ def _aggregate_github_idle_samples(
             elif any(observation.truncated for observation in source_samples):
                 reason_code = "source_truncated"
             else:
-                reason_code = next(iter(reason_codes), "source_unavailable")
+                reason_code = next(iter(sorted(reason_codes)), "source_unavailable")
             if reason_code == "source_truncated":
                 observations.append(
                     _partial_idle_observation(
