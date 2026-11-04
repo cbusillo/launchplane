@@ -91,7 +91,6 @@ class MergeTrainEventTests(TestCase):
             ("check_suite", {"action": "completed", "check_suite": {"head_branch": "main"}}),
             # A commit status names no PR, so a PR head branch may be queued.
             ("status", {"state": "success", "branches": [{"name": "feature"}]}),
-            # A handoff comment admits without a label; it names no base.
             (
                 "issue_comment",
                 {
@@ -144,7 +143,6 @@ class MergeTrainEventTests(TestCase):
             ),
             ("check_run", {"action": "completed"}),
             ("status", {"state": "success", "branches": []}),
-            # Other comments, edited handoffs and issue (not PR) handoffs admit nothing.
             (
                 "issue_comment",
                 {
