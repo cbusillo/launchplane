@@ -309,6 +309,9 @@ def verify_preservation_source(receipt: dict, source: dict, *, inspect_only: boo
         source['preview_volumes'], spec['authority'])
     if binding != receipt['volume_binding']:
         raise RuntimeError('Preview preservation physical storage changed')
+    logs = Path(binding['volume_backings']['logs']['path'])
+    if spec.get('retirement', False) and any(logs.iterdir()):
+        raise RuntimeError('Preview preservation has additional log custody')
     database = containers['database']
     if database.get('ExecIDs', 'unknown') not in (None, []):
         raise RuntimeError('Preview preservation database execution is active')
@@ -499,7 +502,7 @@ def preserve(path: Path, source: dict, *, preflight_only: bool = False) -> dict:
     if not continuation and (addons.is_symlink() or addons.exists() and any(
         entry.is_symlink() or not entry.is_dir() for entry in addons.rglob('*'))):
         raise RuntimeError('Preview preservation has additional addon custody')
-    if not continuation and any(paths['logs'].iterdir()):
+    if (not continuation or spec.get('retirement', False)) and any(paths['logs'].iterdir()):
         raise RuntimeError('Preview preservation has additional log custody')
     filestore = paths['data'] if continuation else paths['data'] / 'filestore'
     initial_manifest = tree_manifest(filestore, hash_files=False)

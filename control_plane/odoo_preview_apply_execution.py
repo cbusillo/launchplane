@@ -311,7 +311,7 @@ class OdooPreviewProviderMutationAdapter:
         from control_plane.storage.postgres import PostgresRecordStore
 
         try:
-            require_preview_preservation_admission(
+            authority = require_preview_preservation_admission(
                 store=cast(PostgresRecordStore, self._record_store),
                 profile=self._profile,
                 issued_plan=self._issued_plan,
@@ -319,7 +319,7 @@ class OdooPreviewProviderMutationAdapter:
                 operation_record_id=self._deployment_record_id,
                 captured_schedule_binding=self.schedule_binding,
             )
-            if self._issued_plan.operation == "refresh":
+            if authority.serving_recipient:
                 run_preview_preservation(
                     store=cast(PostgresRecordStore, self._record_store),
                     profile=self._profile,
