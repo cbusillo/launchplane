@@ -1143,8 +1143,8 @@ The set deliberately leaves out:
 
 - `product_onboarding.apply`. It is checked on product `launchplane` with no
   product or lane scope, so it would reach every product. Adding the lane record
-  uses Launchplane's onboarding record route, through the compatibility workflow
-  or a signed-in admin session. Browser generic-web apply requires the recorded
+  uses Launchplane's onboarding record route through the Advanced manifest
+  workflow or a signed-in admin session. Browser generic-web apply requires the recorded
   testing application from target setup.
   The Director agent's bounded new-product path follows the
   [native onboarding contract](operations.md#native-target-allocation).

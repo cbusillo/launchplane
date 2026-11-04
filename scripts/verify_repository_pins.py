@@ -126,9 +126,6 @@ FIRST_PARTY_CROSS_REPOSITORY_ACTION_PREFIX = "cbusillo/launchplane/.github/actio
 
 
 PINNED_SELF_REUSABLE_WORKFLOWS: Mapping[Path, frozenset[str]] = {
-    Path(".github/workflows/product-onboarding.yml"): frozenset(
-        {"cbusillo/launchplane/.github/workflows/reusable-generic-web-onboarding-apply.yml"}
-    ),
     Path(".github/workflows/generic-web-preview-authorization.yml"): frozenset(
         {"cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-authz-apply.yml"}
     ),

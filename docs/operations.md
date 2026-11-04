@@ -2996,31 +2996,19 @@ Verify those independently through [event-driven delivery](event-driven-deploys.
 
 #### Compatibility workflow recovery
 
-`Product Onboarding` refuses new-product dry runs and applies before any API
-request. New products use the native operations above. Its remaining dispatch
-surface renders only the original target request and calls the unchanged
-immutable recovery worker. No repository token, product-record plan, caller-grant
-plan or authz reconciliation is requested.
+The retired `Product Onboarding` wrapper and current-source reusable worker
+are removed. New products and native allocation recovery use the native
+operations above. The original allocation machinery, saved requests, actor/key
+bindings, reviewed custody digests and existing caller-rule retirement/readback
+routes remain intact. Source deletion does not remove receipts, resources,
+credentials, grants or policy records.
 
-Keep the original target-affecting dispatch inputs, reason and any explicit
-allocation key. Former product metadata inputs remain accepted for compatibility
-but are optional and unused during recovery. For readback, set outer `mode=dry_run` and
-`allocation_control={"mode":"readback"}`. For continuation, use outer
-`mode=apply`, exact confirmation `APPLY GENERIC WEB ONBOARDING`, and
-`allocation_control={"mode":"apply"}`. Include the original `idempotency_key`
-when one was supplied; otherwise the original derived key is preserved.
-Retention additionally requires `retain_allocation: true` and the reviewed
-`expected_allocation_custody_sha256` from readback. Keep the original actor and
-request; never replace the old byte-artifact digest with a native canonical
-one. Recovery skips product and authorization record apply. Do not repin or
-retire the old worker until every old workflow allocation is accounted for;
-completed workflow history alone does not establish that custody is clear.
-If readback finds an old target whose product records were never applied,
-settle its custody through reviewed retention, then start native onboarding
-with fresh testing and preview contexts. Keep the retained resources; do not
-pass the old workflow allocation to native record apply, which requires its
-own same-actor native plan.
-The current-source worker is separate from this immutable recovery revision.
+The [retirement accounting](https://github.com/cbusillo/launchplane/issues/5246#issuecomment-6641873488)
+records the completed legacy receipts and absence of saved workflow allocations.
+One historical failed run's provider effects remain unknown. Investigate any
+resource discrepancy through supported read-only inventory, never a replay
+under another actor. Keep original requests and keys; legacy receipts are
+history, not proof of a current target's identity or health.
 
 Use `Generic Web Preview Authorization` for reviewed `onboard`, `expand`,
 `contract`, and `retire` operations. `onboard` bootstraps the managed preview
