@@ -356,21 +356,6 @@ class LaneHealthHistoryHttpTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LaneHealthHistoryAccountingTests(unittest.TestCase):
-    def test_rejected_pass_earns_no_health_or_identity_time(self) -> None:
-        from control_plane.lane_health_history import summarize_observations
-
-        result = summarize_observations(
-            (observation("rejected-pass", 0).unaccepted(),),
-            since=START,
-            until=START + timedelta(seconds=60),
-            instance="prod",
-            required_checks=REQUIRED,
-            identity_checks=REQUIRED,
-        )
-        self.assertEqual(result.lane_health_pass_seconds, 0)
-        self.assertEqual(result.lane_identity_verified_seconds, 0)
-        self.assertEqual(result.lane_health_unknown_seconds, result.denominator_seconds)
-
     def test_partial_or_mixed_pages_cannot_produce_a_percentage(self) -> None:
         from control_plane.cli_ingress import ingress
         from control_plane.lane_health_history import (

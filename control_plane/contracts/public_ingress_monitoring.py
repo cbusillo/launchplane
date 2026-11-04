@@ -413,28 +413,32 @@ class PublicIngressObservationRecord(BaseModel):
     def unaccepted(
         self,
         summary: str = "Monitoring authority changed before publication; observation was not accepted.",
+        *,
+        preserve_failures: bool = True,
     ) -> "PublicIngressObservationRecord":
-        failure_code = self.failure_code if self.purpose == "reconciliation" else None
+        skipped = self.status == "pass" or (not preserve_failures and self.purpose == "probe")
         return self.model_copy(
             update={
-                "status": "skipped",
-                "failure_code": failure_code,
+                "status": "skipped" if skipped else self.status,
+                "failure_code": None if skipped else self.failure_code,
                 "targets": tuple(
                     target.model_copy(
                         update={
-                            "status": "skipped",
-                            "failure_code": failure_code,
-                            "runtime_identity_status": "unverifiable",
-                            "summary": summary,
+                            "status": "skipped" if skipped else target.status,
+                            "failure_code": None if skipped else target.failure_code,
+                            "runtime_identity_status": "unverifiable"
+                            if target.runtime_identity_status == "match"
+                            else target.runtime_identity_status,
+                            "summary": summary if skipped else target.summary,
                         }
                     )
                     for target in self.targets
                 ),
-                "summary": summary,
+                "summary": summary if skipped else self.summary,
                 "incident_id": "",
                 "incident_event_id": "",
-                "material_fingerprint": None,
-                "material_fingerprint_sha256": "",
+                "material_fingerprint": None if skipped else self.material_fingerprint,
+                "material_fingerprint_sha256": "" if skipped else self.material_fingerprint_sha256,
             }
         )
 

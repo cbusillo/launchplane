@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+from itertools import product
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -15,13 +17,18 @@ from control_plane.workflows.public_ingress_monitor import (
     run_public_ingress_monitor_once,
 )
 from tests.support.stores import _sqlite_database_url
-from tests.test_public_ingress_monitor import _notification_policy, _profile
+from tests.test_public_ingress_monitor import _identity, _notification_policy, _profile
 
 
 class MonitorIncidentLifecycleTests(unittest.TestCase):
-    def test_old_health_target_earns_no_pass_after_authority_changes(self) -> None:
-        for incident_retry in (False, True):
-            with self.subTest(incident_retry=incident_retry), TemporaryDirectory() as directory:
+    def test_changed_health_target_cannot_keep_verified_probe_credit(self) -> None:
+        from control_plane.lane_health_history import summarize_observations
+
+        for failed, incident_retry in product((False, True), repeat=2):
+            with (
+                self.subTest(failed=failed, incident_retry=incident_retry),
+                TemporaryDirectory() as directory,
+            ):
                 store = PostgresRecordStore(
                     database_url=_sqlite_database_url(Path(directory) / "db")
                 )
@@ -47,24 +54,56 @@ class MonitorIncidentLifecycleTests(unittest.TestCase):
                     )
                     return write_transition(**kwargs)
 
-                with patch.object(
-                    store,
-                    "write_public_ingress_transition_with_outbox",
-                    side_effect=change_health_target_before_publication,
+                with (
+                    patch.object(
+                        store,
+                        "write_public_ingress_transition_with_outbox",
+                        side_effect=change_health_target_before_publication,
+                    ),
+                    patch(
+                        "control_plane.workflows.public_ingress_monitor._expected_runtime_identity",
+                        return_value=_identity(),
+                    ),
                 ):
                     result = run_public_ingress_monitor_once(
                         record_store=store,
                         checked_at="2026-07-27T16:42:00Z",
-                        http_get=lambda url, timeout: HttpObservation(200, url, 0),
+                        http_get=lambda url, timeout: HttpObservation(
+                            503 if failed and url == profile.lanes[0].base_url else 200,
+                            url,
+                            0,
+                            {"runtime_identity": _identity().model_dump(mode="json")},
+                        ),
                         notify=False,
                     )
                 self.assertEqual(result.authority_changed_count, 1)
                 self.assertEqual(result.pass_count, 0)
-                self.assertEqual(result.records[0].status, "skipped")
                 stored = store.list_public_ingress_observation_records()
                 self.assertEqual(len(stored), 1)
-                self.assertEqual(stored[0].status, "skipped")
+                self.assertEqual(stored[0].status, "fail" if failed else "skipped")
+                self.assertEqual(result.records[0], stored[0])
                 self.assertEqual(store.list_public_ingress_incident_records(), ())
+                checks = ((stored[0].check_kind, stored[0].check_name),)
+                start = datetime.fromisoformat(stored[0].observed_at)
+                accounting = summarize_observations(
+                    stored,
+                    since=start,
+                    until=start + timedelta(seconds=60),
+                    instance=stored[0].instance,
+                    required_checks=checks,
+                    identity_checks=checks,
+                )
+                self.assertEqual(accounting.lane_health_pass_seconds, 0)
+                self.assertEqual(accounting.lane_identity_verified_seconds, 0)
+                if failed:
+                    self.assertEqual(stored[0].failure_code, "http_error")
+                    self.assertEqual(
+                        accounting.lane_health_fail_seconds, accounting.denominator_seconds
+                    )
+                else:
+                    self.assertEqual(
+                        accounting.lane_health_unknown_seconds, accounting.denominator_seconds
+                    )
 
     def test_removed_lane_reconciles_without_rewriting_failed_probe(self) -> None:
         with TemporaryDirectory() as directory:

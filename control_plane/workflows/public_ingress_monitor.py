@@ -1215,7 +1215,7 @@ def _store_monitor_observation(
         write_status = getattr(write_result, "status", "written")
         if write_status in {"provider_source_changed", "authority_changed"}:
             if write_status == "authority_changed":
-                unavailable = record.unaccepted()
+                unavailable = plan.observation.unaccepted()
             else:
                 summary = (
                     "Provider operation evidence is unavailable; observation was not accepted."
@@ -1223,7 +1223,7 @@ def _store_monitor_observation(
                     and not expected_provider_hold_snapshot.source_sha256
                     else "Provider operation evidence changed before publication; observation was not accepted."
                 )
-                unavailable = record.unaccepted(summary)
+                unavailable = plan.observation.unaccepted(summary, preserve_failures=False)
             return _StoredMonitorTransition(unavailable, (), (), (), (), authority_changed=True)
         if write_status == "incident_changed":
             continue

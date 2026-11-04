@@ -1755,13 +1755,13 @@ its own incident id so recovery followed by a later failure does not replace the
 resolved history.
 
 If profile, private-endpoint or route-binding authority changes during a probe,
-the compare-and-write retains a successful probe as skipped, with unverifiable
-identity, rather than crediting its old target. Historical failures and
-administrative refusal evidence remain retained; incidents stay unchanged.
-The monitor reports the rejected result as skipped. Provider-source changes
-use the same result projection. Neither the pass count nor retained health or
-identity accounting credits a rejected pass. Verification stays UNKNOWN until
-an accepted probe supplies evidence for the current authority.
+the compare-and-write retains and reports a successful probe as skipped.
+Rejected failures keep their status and codes, administrative refusal evidence
+remains retained, and incidents stay unchanged. Any matching identity becomes
+unverifiable, while negative identity evidence stays intact. Provider-source
+rejections keep their existing skipped reports without storing them. Neither the pass
+count nor retained health or identity accounting credits a rejected success;
+rejected failures retain their failed-health time but earn no verified identity.
 
 Probe effectiveness and incident eligibility are separate. Public and TLS
 checks run for `public` and `prelaunch`; their failures open or update incidents
