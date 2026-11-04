@@ -369,6 +369,50 @@ the original intent is unavailable; unrelated previews remain independent. It
 does not recover the original action or plan, permit provider observation, or
 settle the reservation. Original availability flags remain false.
 
+## Inert exact-original evidence
+
+`GET /v1/products/{product}/preview-evidence` uses the existing `preview.read`
+scope. Supply `pr_number`, `source_git_ref`, `image_digest` and exactly one of
+`original_reservation_id` or `plan_id`. The latter looks up the existing
+controller reservation by its issued plan in that product's reconciliation
+scope. The reader validates the retained original intent and exact requested
+tuple before reading provider evidence. Missing original intent refuses;
+current naming, a held-list row or a newer controller plan cannot replace it.
+
+The response exposes the original's opaque reservation/reference, attempt,
+checkpoint, lease expiry and recorded terminal response status. Executor
+exclusion remains unknown: this read takes no executor lock and changes no
+lease. Completed originals remain readable after they disappear from the held
+reservation list. That list remains a discovery/classification surface.
+
+Optional `preview_id` and `generation_id` select current probes together. They
+must select the current serving generation and its exact completed original.
+The reader reuses the same inspection authority and inert qualification read
+as the safety publisher, including the production credential comparison and
+post-read authority checks. It returns process/runtime verification, use and
+resource separation only when those existing probes establish them. Missing
+probe evidence stays unknown with a bounded reason; positively observed sharing
+remains explicit. Credential comparison is limited to managed and provider
+production values. Database-only production credentials remain unavailable.
+Provider refusals remain
+authorization refusals. No normal visitor request, wake or login occurs.
+
+Provider histories use only a retained concrete target or a matching completed
+result, and the original's retained schedule binding. A generated target name
+cannot reconstruct a missing historical target ID. Complete retained history
+is distinguished from historical completeness and exact native-job attribution;
+missing/ambiguous schedules remain unavailable, and an empty retained list
+proves no historical absence. Provider job IDs are hashed; payloads, logs,
+coordinates and credentials are withheld. A provider terminal status is not
+native-workflow success or original settlement. An exact operation-title match
+is reported as a marker, independently of the stored original result status
+and HTTP response code.
+
+The response is noncacheable and publishes no disposable safety/admission
+record, reconciliation, effect, receipt, lease or resource change. Data origin,
+sanitization, needed-copy custody and missing historic proof remain unknown.
+The existing publishing and recovery paths retain their own gates.
+
 ## Client Review Handoff
 
 When a ready preview belongs to a repository with an authoritative Client

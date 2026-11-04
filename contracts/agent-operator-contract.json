@@ -46,6 +46,32 @@
     },
     "operations": [
       {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_exact_preview_evidence",
+        "path": "/v1/products/{product}/preview-evidence",
+        "purpose": "Read exact original intent, retained provider history and optional exact serving-generation probes without admission publication or effect settlement.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "d899140bf84d30358fa154b1a93571c721a3bc79bf7f27421c6b74a4d1d90f6d",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "apply",
         "identity_dependencies": [
           "read_browser_mutation_identity"
@@ -1339,8 +1365,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "d82c7781eefe8d7dc55d3166f2cb0747b84ade5c"
+    "source_commit_sha": "818af6d6e374507482d152121e99931b2aed2036"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "ac157b1bb730eea721e7e0ea04e8fb5b1bf5e3d7c26d1e69c463d4e57bcb3c84"
+  "semantic_digest_sha256": "9ca5a3f806880e8a266406b5f07c0987918cbcea75b793fbee960fff3e822dda"
 }
