@@ -231,12 +231,12 @@ def _workspace_pin_only(
             for ref in (old_ref, new_ref)
         ):
             return False
-        # Train admission proves the declared digests move forward; the file must pin them.
-        if declared_updates is not None and not any(
+        pins_forward_proven_digest = declared_updates is None or any(
             update.get("depName") == old_repo.get("repository")
             and (update.get("currentDigest"), update.get("newDigest")) == (old_ref, new_ref)
             for update in declared_updates
-        ):
+        )
+        if not pins_forward_proven_digest:
             return False
         changed = True
         old_repo.pop("ref")

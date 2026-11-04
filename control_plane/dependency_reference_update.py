@@ -207,11 +207,11 @@ def _action_reference_forward(
         return False
     old_ref, new_ref = before["ref"], after["ref"]
     repository = "/".join(before["name"].split("/")[:2])
-    # Renovate names a subpath action or reusable workflow by its repository.
+    renovate_subpath_dep_name = repository
     matching_updates = [
         update
         for update in declared_updates
-        if update.get("depName") in {before["name"], repository}
+        if update.get("depName") in {before["name"], renovate_subpath_dep_name}
         and (
             (update.get("currentDigest"), update.get("newDigest")) == (old_ref, new_ref)
             or _declared_values(update) == (old_ref, new_ref)
@@ -223,13 +223,7 @@ def _action_reference_forward(
         return True
     if not all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in (old_ref, new_ref)):
         return False
-    # A digest pin follows a named tag or branch; the comparison proves the new
-    # commit descends from the old one either way.
-    if not any(
-        _declared_values(update)[0]
-        and not re.fullmatch(r"[0-9a-f]{40}", _declared_values(update)[0])
-        for update in matching_updates
-    ):
+    if not any(_names_tag_or_branch(_declared_values(update)[0]) for update in matching_updates):
         return False
     comparison = read(f"/repos/{repository}/compare/{old_ref}...{new_ref}")
     if not isinstance(comparison, dict):
@@ -250,6 +244,10 @@ def _action_reference_forward(
         and isinstance(commits[-1], dict)
         and commits[-1].get("sha") == new_ref
     )
+
+
+def _names_tag_or_branch(value: str) -> bool:
+    return bool(value) and not re.fullmatch(r"[0-9a-f]{40}", value)
 
 
 def _docker_references_only(old: str, new: str, declared_updates: Sequence[dict[str, str]]) -> bool:

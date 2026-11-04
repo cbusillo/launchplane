@@ -97,8 +97,7 @@ def _digest_pin_class(
 
 class DependencyBotPolicyTests(unittest.TestCase):
     def test_verified_action_pins_need_forward_proof_and_no_unrelated_edits(self) -> None:
-        # Renovate names a subpath action by its repository, as on devkit's addon-tests action.
-        old = (
+        renovate_subpath_action_pin = (
             "jobs:\n  test:\n    steps:\n"
             "      - uses: example/action/.github/actions/test@" + "a" * 40 + "\n"
         )
@@ -132,8 +131,8 @@ class DependencyBotPolicyTests(unittest.TestCase):
                 self.assertEqual(
                     _digest_pin_class(
                         filename=filename,
-                        old=old,
-                        new=old.replace("a" * 40, "b" * 40) + extra,
+                        old=renovate_subpath_action_pin,
+                        new=renovate_subpath_action_pin.replace("a" * 40, "b" * 40) + extra,
                         dep_name="example/action",
                         current_value=current_value,
                         upstream_status=upstream_status,
