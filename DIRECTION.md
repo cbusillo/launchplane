@@ -123,8 +123,9 @@ fits this file.
   for anything beyond opening an issue, the Director touches Launchplane by
   hand, or the old approval code still decides a merge.
 - `Merge train that just works` proves an agent's merge lands in one pass
-  without a wedge, a hand merge, or main going red on its own; ends if the
-  friction log gains the same entry twice.
+  without a wedge, a hand merge, or main going red on its own, and a Ready
+  change runs on testing within 30 minutes; ends if the friction log gains
+  the same entry twice.
 - `Real prod safe on every live product` proves every promotion of a product
   marked Live is preceded by a verified backup, and each Live product's first
   Client-started release proves rollback with the one-time drill; ends if a
