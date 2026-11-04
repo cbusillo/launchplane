@@ -18,6 +18,7 @@ from control_plane.published_generation_resources import (
     published_generation_resources,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.dokploy_target_inspect import _generation_snapshot_keys
 from control_plane.production_recipient_publication import (
     RecipientPublication,
     commit_publication,
@@ -84,6 +85,14 @@ class RecipientPublicationTests(unittest.TestCase):
         self.assertEqual(
             retained, {key: value for key, value in before_values.items() if key in keys}
         )
+        snapshot_keys = _generation_snapshot_keys(store, self.publication.target)
+        self.assertEqual(snapshot_keys["resource_keys"], sorted(keys))
+        self.assertEqual(snapshot_keys["other_keys"], sorted(self.fixture.values.keys() - keys))
+        snapshot_count = snapshot_keys["snapshot_count"]
+        assert isinstance(snapshot_count, int)
+        self.assertGreater(snapshot_count, 0)
+        for value in (*generation_values.values(), *before_values.values()):
+            self.assertNotIn(value, str(snapshot_keys))
 
     def setUp(self) -> None:
         self.fixture = preparation_tests.ProductionRecipientTests()

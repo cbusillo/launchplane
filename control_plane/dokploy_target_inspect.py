@@ -27,6 +27,8 @@ from control_plane.dokploy.application_runtime import (
 from control_plane.dokploy.application_runtime_summary import summarize_application_runtime
 from control_plane.published_generation_resources import published_generation_resources
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.production_recipient import ProductionRecipientRecord
+from control_plane.contracts.testing_activation import TestingActivationRecord
 
 DokployTargetType = Literal["application", "compose"]
 _RUNTIME_EVIDENCE_LOG_LINE_COUNT = dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT
@@ -224,6 +226,72 @@ def _worker_heartbeat_evidence(
     }
 
 
+def _generation_snapshot_keys(
+    store: PostgresRecordStore, target: DokployTargetRecord
+) -> dict[str, object]:
+    snapshots: list[tuple[DokployTargetRecord, set[str]]] = []
+    for profile in store.list_product_profile_records():
+        if not any(
+            (lane.context, lane.instance) == (target.context, target.instance)
+            for lane in profile.lanes
+        ):
+            continue
+        if target.instance == "prod":
+            payload = store.read_production_recipient(profile.product, target.context)
+            if payload is None:
+                continue
+            current = ProductionRecipientRecord.model_validate(payload)
+            records = (
+                current,
+                *(ProductionRecipientRecord.model_validate(row) for row in current.prior_attempts),
+            )
+            for record in records:
+                resource_keys = {*record.request.volume_keys.values(), *record.request.ports}
+                snapshots.append((record.retained_target, resource_keys))
+                for publication in (record.publication, *record.publication.get("history", [])):
+                    if not isinstance(publication, dict):
+                        raise ValueError("Generation publication history is malformed.")
+                    for side in ("before", "published"):
+                        if publication.get(side):
+                            snapshots.append(
+                                (
+                                    DokployTargetRecord.model_validate(publication[side]["target"]),
+                                    resource_keys,
+                                )
+                            )
+        elif target.instance == "testing":
+            payloads = list(
+                store.list_testing_application_activations(profile.product, target.context)
+            )
+            legacy = store.read_testing_activation(profile.product, target.context)
+            if legacy is not None:
+                payloads.append(legacy)
+            for payload in payloads:
+                activation = TestingActivationRecord.model_validate(payload)
+                resource_keys = {
+                    *activation.request.volume_keys.values(),
+                    *activation.request.port_keys,
+                }
+                snapshots.append((activation.retained_target, resource_keys))
+                if activation.published_target is not None:
+                    snapshots.append((activation.published_target, resource_keys))
+    if any(
+        (snapshot.context, snapshot.instance) != (target.context, target.instance)
+        for snapshot, _ in snapshots
+    ):
+        raise ValueError("Generation snapshot belongs to another lane.")
+    return {
+        "status": "complete",
+        "snapshot_count": len(snapshots),
+        "resource_keys": sorted(
+            {key for snapshot, keys in snapshots for key in snapshot.env.keys() & keys}
+        ),
+        "other_keys": sorted(
+            {key for snapshot, keys in snapshots for key in snapshot.env.keys() - keys}
+        ),
+    }
+
+
 def _instance_setting_comparison(
     record_store: DokployTargetInspectStore, target: DokployTargetRecord
 ) -> dict[str, object] | None:
@@ -255,6 +323,9 @@ def _instance_setting_comparison(
         "instance_settings_updated_at": record.updated_at if record else None,
     }
     try:
+        comparison["generation_snapshots"] = _generation_snapshot_keys(
+            cast(PostgresRecordStore, record_store), target
+        )
         resources = published_generation_resources(
             cast(PostgresRecordStore, record_store),
             context=target.context,
@@ -280,6 +351,7 @@ def _instance_setting_comparison(
             }
     except (ValueError, FileNotFoundError, KeyError, TypeError):
         comparison["generation_resources"] = {"status": "unavailable"}
+        comparison["generation_snapshots"] = {"status": "unavailable"}
     return comparison
 
 

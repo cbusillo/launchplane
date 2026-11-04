@@ -235,7 +235,7 @@ class DokployTargetInspectTests(unittest.TestCase):
                 for key, value in _require_mapping(
                     tracked_target["instance_setting_comparison"]
                 ).items()
-                if key != "generation_resources"
+                if key not in {"generation_resources", "generation_snapshots"}
             },
             {
                 "same_value_keys": ["ODOO_UPSTREAM_USER"],
