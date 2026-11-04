@@ -725,7 +725,7 @@ def resolve_published_generation_environment_values(
             published_generation_resources(store, context=context_name, instance=instance_name)
             or {}
         )
-    except (ValueError, FileNotFoundError, KeyError, TypeError) as error:
+    except (ValueError, FileNotFoundError, KeyError) as error:
         raise click.ClickException("Published generation resources are unavailable.") from error
     finally:
         store.close()

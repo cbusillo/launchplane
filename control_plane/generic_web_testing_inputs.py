@@ -9,9 +9,6 @@ import click
 from control_plane import live_target_runtime as runtime
 from control_plane import runtime_environments as environments
 from control_plane import secrets
-from control_plane.published_generation_resources import (
-    published_generation_resources,
-)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -176,12 +173,8 @@ def testing_input_authority(
     declared = runtime.declared_runtime_keys(
         profile=profile, context_name=lane.context, instance_name=lane.instance
     )
-    resources = (
-        published_generation_resources(store, context=lane.context, instance=lane.instance) or {}
-    )
     if (
-        not resources
-        and not selected
+        not selected
         and not declared
         and not retired
         and not any(record.env for record in site_records)
@@ -195,7 +188,7 @@ def testing_input_authority(
                     "context": lane.context,
                     "instance": lane.instance,
                     "id": binding.target_id,
-                    "env": resources,
+                    "env": {},
                 },
                 "settings": sorted(
                     (
@@ -245,10 +238,7 @@ def prepare_testing_inputs(
         record_store=store,
         context_name=lane.context,
         instance_name=lane.instance,
-        target_environment=published_generation_resources(
-            store, context=lane.context, instance=lane.instance
-        )
-        or {},
+        target_environment={},
     )
     declared = runtime.product_lane_declared_keys(
         record_store=store,

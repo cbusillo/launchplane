@@ -445,6 +445,7 @@ def plan_product_onboarding_authority_bundle(
                     update={
                         "public_hosts": current_target.public_hosts,
                         "pending_public_host_effects": current_target.pending_public_host_effects,
+                        "env": current_target.env,
                     }
                 )
             )

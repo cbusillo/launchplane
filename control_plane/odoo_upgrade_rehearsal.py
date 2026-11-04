@@ -183,9 +183,7 @@ def _source_values(
                     "prod" if scope == "instance" else ""
                 ):
                     shape.update({key: str(value) for key, value in runtime.env.items()})
-        shape.update(
-            store.read_dokploy_target_record(context_name=prod.context, instance_name="prod").env
-        )
+        store.read_dokploy_target_record(context_name=prod.context, instance_name="prod")
         # Only sizing settings are reused. Identity, credentials, integrations,
         # mounts and routing are derived for the rehearsal independently.
         shape = {key: value for key, value in shape.items() if key in REHEARSAL_SHAPE_KEYS}

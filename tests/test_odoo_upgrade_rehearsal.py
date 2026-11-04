@@ -900,11 +900,19 @@ class RehearsalScenario(unittest.TestCase):
             )
         return adapter
 
-    def test_new_record_and_source_inputs_leave_canonical_lane_authority_unchanged(self) -> None:
+    def test_source_inputs_ignore_target_settings_and_keep_canonical_authority(self) -> None:
+        prod = next(lane for lane in self.profile.lanes if lane.instance == "prod")
+        target = self.store.read_dokploy_target_record(
+            context_name=prod.context, instance_name="prod"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"env": {**target.env, "ODOO_WORKERS": "99"}})
+        )
         before = self.authority()
-        planned, _, _ = rehearsal_inputs(
+        planned, _, shape = rehearsal_inputs(
             self.root, self.store, self.product, self.request, self.principal
         )
+        self.assertEqual(shape, self.shape)
         self.assertEqual(planned, self.record)
         self.assertEqual(self.authority(), before)
         spec = rehearsal_host_spec(

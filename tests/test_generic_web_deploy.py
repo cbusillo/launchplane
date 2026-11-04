@@ -98,21 +98,6 @@ def _source_of_truth() -> DokploySourceOfTruth:
 
 
 class _GenericWebDeployStore:
-    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]:
-        return (self.profile,)
-
-    @staticmethod
-    def read_production_recipient(_product: str, _context: str) -> None:
-        return None
-
-    @staticmethod
-    def list_testing_application_activations(_product: str, _context: str) -> tuple[()]:
-        return ()
-
-    @staticmethod
-    def read_testing_activation(_product: str, _context: str) -> None:
-        return None
-
     def list_secret_records(
         self,
         *,

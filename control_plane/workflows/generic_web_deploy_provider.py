@@ -13,9 +13,6 @@ from typing import Literal, NamedTuple, Protocol, cast, runtime_checkable
 import click
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
-from control_plane.published_generation_resources import (
-    published_generation_resources,
-)
 from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
@@ -974,12 +971,7 @@ class DokployGenericWebDeployProvider:
             record_store=dokploy_store,
             context_name=context_name,
             instance_name=instance_name,
-            target_environment=published_generation_resources(
-                dokploy_store,
-                context=context_name,
-                instance=instance_name,
-            )
-            or {},
+            target_environment={},
         )
         configured_ship_mode = dokploy_source.resolve_dokploy_ship_mode(
             context_name,
