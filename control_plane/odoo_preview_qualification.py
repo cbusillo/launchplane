@@ -265,12 +265,6 @@ def production_credentials(
     )
 
 
-def collect_odoo_preview_qualification(
-    store: PostgresRecordStore, *, preview: PreviewRecord, root: Path
-) -> PreviewQualification:
-    return read_odoo_preview_qualification(store, preview=preview, root=root)
-
-
 def read_odoo_preview_qualification(
     store: PostgresRecordStore, *, preview: PreviewRecord, root: Path
 ) -> PreviewQualification:

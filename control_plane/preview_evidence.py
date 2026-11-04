@@ -76,12 +76,8 @@ def project_provider_history(
     deployments: list[api.JsonObject], *, original_title: str = ""
 ) -> dict[str, object]:
     api.require_unique_deployment_ids(deployments)
-    terminal = (
-        post_deploy.DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
-        | post_deploy.DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
-        | {"error", "failed", "fail"}
-    )
-    known = terminal | {"pending", "queued", "running", "building"}
+    terminal = post_deploy.DOKPLOY_TERMINAL_DEPLOYMENT_STATUSES
+    known = terminal | post_deploy.DOKPLOY_RUNNING_DEPLOYMENT_STATUSES | {"building"}
     entries = [
         {
             "reference": canonical_json_sha256(api.deployment_key(item)),
@@ -154,21 +150,17 @@ def read_preview_provider_history(
         host, token = source.read_dokploy_config(
             control_plane_root=root, database_url=store.database_url
         )
-        schedules = api.extract_schedules(
-            api.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/schedule.list",
-                query={"id": binding.lookup_id, "scheduleType": binding.schedule_type},
-            )
+        schedules = post_deploy.read_bound_data_workflow_schedules(
+            host=host,
+            token=token,
+            binding=binding,
         )
         matches = [item for item in schedules if item.get("appName") == binding.app_name]
         if len(matches) != 1:
             return result
         raw = matches[0].get("deployments")
-        if api.parse_deployment_history(raw).state == "unknown":
+        if not isinstance(raw, list) or api.parse_deployment_history(raw).state == "unknown":
             return result
-        assert isinstance(raw, list)
         result["schedule"] = project_provider_history(
             api.collect_dokploy_object_items(raw), original_title=original_title
         )
@@ -227,12 +219,25 @@ def read_preview_evidence(
         "production_resources": "unknown",
         "data": "unknown",
         "runtime_identity": "unknown",
+        "serving_process": "unknown",
+        "credential_isolation": "unknown",
+        "credential_comparison_scope": "managed_and_provider_production_values",
+        "database_only_production_credentials": "unavailable",
         "reason_code": "not_requested",
     }
     authority = None
     sequence = None
     if query.preview_id:
+        records = reservation.response_payload.get("records")
+        if not isinstance(records, dict) or records.get("preview_id") != query.preview_id:
+            raise OdooRuntimeReadError(
+                "preview_original_binding_mismatch", "The preview is not bound to this original."
+            )
         preview = store.read_preview_record(query.preview_id)
+        if preview.context != profile.preview.context:
+            raise OdooRuntimeReadError(
+                "preview_original_binding_mismatch", "Preview context differs."
+            )
         if preview.serving_generation_id != query.generation_id:
             raise OdooRuntimeReadError(
                 "preview_generation_mismatch", "The requested generation is not serving."
@@ -249,11 +254,20 @@ def read_preview_evidence(
                 usage=qualification.usage.usage,
                 production_resources="isolated",
                 runtime_identity="verified",
+                serving_process="verified",
+                credential_isolation="separated",
                 **qualification.usage.payload(),
             )
         except PreviewQualificationMissing as error:
-            current["reason_code"] = error.reason or "preview_qualification_unavailable"
+            checkpoint = str(error).partition(":")[0]
+            if checkpoint == "preview_production_resources_shared":
+                current.update(production_resources="shared", reason_code=checkpoint)
+            elif checkpoint == "preview_production_credential_separation_unproven":
+                current.update(credential_isolation="shared", reason_code=checkpoint)
+            else:
+                current["reason_code"] = error.reason or "preview_qualification_unavailable"
     compose_id = issued.dry_run_plan.compose_ref
+    result_status = None
     if reservation.state == "completed":
         try:
             result = OdooPreviewDokployApplyResult.model_validate(
@@ -271,8 +285,9 @@ def read_preview_evidence(
                 )
             ):
                 compose_id = result.compose_id
+                result_status = result.status
         except ValueError:
-            compose_id = ""
+            result_status = None
     provider = read_preview_provider_history(
         store, root=root, reservation=reservation, compose_id=compose_id
     )
@@ -325,6 +340,7 @@ def read_preview_evidence(
             "provider_effect_phase": reservation.provider_effect_phase or None,
             "provider_effect_started_at": reservation.provider_effect_started_at or None,
             "response_status_code": reservation.response_status_code,
+            "result_status": result_status,
             "recorded_at": reservation.recorded_at or None,
             "intent_coverage": "validated_original",
             "schedule_binding_available": bool(retained.get("schedule_binding")),

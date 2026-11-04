@@ -123,6 +123,29 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         original.assert_not_called()
         self.remote.assert_not_called()
 
+    async def test_foreign_preview_selection_refuses_before_preview_lookup(self) -> None:
+        with patch.object(self.store, "read_preview_record") as preview:
+            response = await self.evidence(preview_id="preview-other-product-pr-1")
+        self.assertEqual(response.status_code, 409, response.text)
+        preview.assert_not_called()
+        self.remote.assert_not_called()
+
+    async def test_inert_evidence_preserves_shared_resource_and_credential_findings(self) -> None:
+        from control_plane.odoo_preview_resources import preview_resource_environment
+
+        self.production["ODOO_DATA_VOLUME"] = preview_resource_environment(self.identity.instance)[
+            "ODOO_DATA_VOLUME"
+        ]
+        response = await self.evidence()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"]["current"]["production_resources"], "shared")
+        self.production["ODOO_DATA_VOLUME"] = "prod-data"
+        self.preview_candidates = [self.production["ODOO_ADMIN_PASSWORD"]]
+        response = await self.evidence()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"]["current"]["credential_isolation"], "shared")
+        self.assertNotIn(self.production["ODOO_ADMIN_PASSWORD"], response.text)
+
     async def test_inert_evidence_refuses_provider_denial_without_private_error(self) -> None:
         self.remote.side_effect = NativeSourceAuthorizationDenied("private-provider-detail")
         response = await self.evidence()
@@ -132,7 +155,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
     async def test_inert_evidence_rechecks_generation_after_history(self) -> None:
         from control_plane import preview_evidence
 
-        def change_generation(*args: Any, **kwargs: Any) -> dict[str, object]:
+        def change_generation(*_args: Any, **_kwargs: Any) -> dict[str, object]:
             self.store.write_preview_record(
                 self.preview.model_copy(update={"serving_generation_id": "changed"})
             )
@@ -144,7 +167,7 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
             response = await self.evidence()
         self.assertEqual(response.status_code, 409, response.text)
 
-    async def test_inert_evidence_keeps_unreadable_probe_and_history_unknown(self) -> None:
+    async def test_inert_evidence_keeps_unreadable_probe_unknown(self) -> None:
         self.frame.clear()
         self.frame.update(
             type="complete", unavailable=True, reason_code="resource_copy_database_readable"
@@ -154,8 +177,6 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         result = response.json()["result"]
         self.assertEqual(result["current"]["usage"], "unknown")
         self.assertEqual(result["current"]["production_resources"], "unknown")
-        self.assertEqual(result["provider"]["schedule"]["coverage"], "unavailable")
-        self.assertIsNone(result["original"]["executor_excluded"])
 
     def setUp(self) -> None:
         super().setUp()

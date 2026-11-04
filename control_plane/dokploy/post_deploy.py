@@ -153,6 +153,11 @@ DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES = {
     "finished",
     "healthy",
 }
+DOKPLOY_TERMINAL_DEPLOYMENT_STATUSES = (
+    DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
+    | DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
+    | {"error", "failed", "fail"}
+)
 POST_DEPLOY_UPDATE_IGNORED_ENV_KEYS = {
     "DOKPLOY_HOST",
     "DOKPLOY_TOKEN",
@@ -2815,27 +2820,33 @@ def compose_data_workflow_binding(
     )
 
 
-def bound_data_workflow_is_quiescent(
+def read_bound_data_workflow_schedules(
     *,
     host: str,
     token: str,
     binding: ComposeDataWorkflowBinding,
-) -> bool:
+) -> list[api.JsonObject]:
     payload = api.dokploy_request(
         host=host,
         token=token,
         path="/api/schedule.list",
         query={"id": binding.lookup_id, "scheduleType": binding.schedule_type},
     )
+    return api.extract_schedules(payload)
+
+
+def bound_data_workflow_is_quiescent(
+    *,
+    host: str,
+    token: str,
+    binding: ComposeDataWorkflowBinding,
+) -> bool:
     try:
-        schedules = api.extract_schedules(payload)
+        schedules = read_bound_data_workflow_schedules(host=host, token=token, binding=binding)
+    except api.DokployRequestFailed:
+        raise
     except click.ClickException:
         return False
-    terminal = (
-        DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
-        | DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
-        | {"error", "failed", "fail"}
-    )
     for schedule in schedules:
         if not schedule.get("appName") or not schedule.get("name"):
             return False
@@ -2846,7 +2857,7 @@ def bound_data_workflow_is_quiescent(
             return False
         history = api.parse_deployment_history(deployments)
         if history.state == "unknown" or any(
-            api.deployment_status(deployment) not in terminal
+            api.deployment_status(deployment) not in DOKPLOY_TERMINAL_DEPLOYMENT_STATUSES
             for deployment in api.collect_dokploy_object_items(deployments)
         ):
             return False

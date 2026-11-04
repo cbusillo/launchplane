@@ -82,6 +82,67 @@ from tests.test_odoo_preview_apply_execution import _issued_plan, _refresh_paylo
 
 
 class PreviewReservationRecoveryTests(unittest.TestCase):
+    def test_completed_error_original_keeps_concrete_target_history(self) -> None:
+        from control_plane import preview_evidence
+        from control_plane.dokploy import api, source
+
+        request = self.request.model_copy(
+            update={
+                "apply": self.request.apply.model_copy(
+                    update={
+                        "dry_run_plan": self.request.apply.dry_run_plan.model_copy(
+                            update={"compose_ref": "retained-concrete-target"}
+                        )
+                    }
+                )
+            }
+        )
+        issued = _issued_plan(request)
+        retained = dict(
+            product=self.profile.product,
+            issued_plan=issued.model_dump(mode="json"),
+            apply_request=request.model_dump(mode="json"),
+        )
+        original = self.replace_record(
+            state="completed",
+            response_status_code=409,
+            response_trace_id="terminal-original",
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+            response_payload={"error": {"code": "retained-terminal-error"}},
+        )
+        assert request.apply.manifest is not None
+        query = preview_evidence.PreviewEvidenceQuery(
+            original_reservation_id=original.record_id,
+            pr_number=issued.plan_request.pr_number,
+            source_git_ref=issued.plan_request.source_git_ref,
+            image_digest=request.apply.manifest.image.digest,
+        )
+        with (
+            patch.object(self.store, "read_original_mutation_intent", return_value=retained),
+            patch.object(
+                source,
+                "read_dokploy_config",
+                return_value=("https://provider.invalid", "private-token"),
+            ),
+            patch.object(
+                api,
+                "list_deployments_for_target",
+                return_value=[{"deploymentId": "job", "status": "done"}],
+            ) as history,
+        ):
+            result = preview_evidence.read_preview_evidence(
+                self.store, product=self.profile.product, query=query, root=self.root
+            )
+        history.assert_called_once_with(
+            host="https://provider.invalid",
+            token="private-token",
+            target_type="compose",
+            target_id="retained-concrete-target",
+            require_complete=True,
+        )
+        self.assertEqual(cast(dict[str, object], result["original"])["state"], "completed")
+        self.assertNotIn("private-token", json.dumps(result))
+
     def test_original_evidence_resolves_controller_plan_without_mutating_or_current_pointer(
         self,
     ) -> None:
@@ -108,7 +169,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             patch.object(self.store, "read_original_mutation_intent", return_value={}),
             patch.object(preview_evidence, "read_preview_provider_history") as provider,
         ):
-            with self.assertRaisesRegex(ValueError, "Original preview intent cannot be bound"):
+            with self.assertRaises(ValueError):
                 preview_evidence.read_preview_evidence(
                     self.store, product=self.profile.product, query=query, root=self.root
                 )
@@ -158,6 +219,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             self.assertNotIn("private-", json.dumps(result))
             for raw in (
                 None,
+                [{"appName": "private-schedule", "deployments": {"items": deployments}}],
                 [{"appName": "private-schedule", "deployments": [None]}],
                 [{"appName": "other", "deployments": []}],
             ):

@@ -391,7 +391,10 @@ The reader reuses the same inspection authority and inert qualification read
 as the safety publisher, including the production credential comparison and
 post-read authority checks. It returns process/runtime verification, use and
 resource separation only when those existing probes establish them. Missing
-probe evidence stays unknown with a bounded reason. Provider refusals remain
+probe evidence stays unknown with a bounded reason; positively observed sharing
+remains explicit. Credential comparison is limited to managed and provider
+production values. Database-only production credentials remain unavailable.
+Provider refusals remain
 authorization refusals. No normal visitor request, wake or login occurs.
 
 Provider histories use only a retained concrete target or a matching completed
@@ -401,7 +404,9 @@ is distinguished from historical completeness and exact native-job attribution;
 missing/ambiguous schedules remain unavailable, and an empty retained list
 proves no historical absence. Provider job IDs are hashed; payloads, logs,
 coordinates and credentials are withheld. A provider terminal status is not
-native-workflow success or original settlement.
+native-workflow success or original settlement. An exact operation-title match
+is reported as a marker, independently of the stored original result status
+and HTTP response code.
 
 The response is noncacheable and publishes no disposable safety/admission
 record, reconciliation, effect, receipt, lease or resource change. Data origin,

@@ -23927,7 +23927,7 @@ def create_launchplane_fastapi_app(
                 observed_at = store.disposable_lane_observation_time()
                 from control_plane.odoo_preview_qualification import (
                     PreviewQualification,
-                    collect_odoo_preview_qualification,
+                    read_odoo_preview_qualification,
                 )
 
                 preview_reference = ""
@@ -23949,7 +23949,7 @@ def create_launchplane_fastapi_app(
                 elif profile.driver_id == "odoo" and preview is not None:
                     try:
                         preview_qualification: PreviewQualification = await run_in_threadpool(
-                            collect_odoo_preview_qualification,
+                            read_odoo_preview_qualification,
                             store,
                             preview=preview,
                             root=resolved_control_plane_root,
