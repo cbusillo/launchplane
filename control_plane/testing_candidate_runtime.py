@@ -302,7 +302,7 @@ def candidate_runtime_inputs(
             )
     elif source == "upstream":
         upstream = post_deploy.resolve_upstream_restore_workflow_environment(
-            desired_env_map={**runtime.values, **target.env}
+            desired_env_map=runtime.values
         )
     source_binding = authority.binding_sha256 if authority is not None else ""
     generation = (

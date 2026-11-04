@@ -205,13 +205,11 @@ def _authority(store: PrerequisiteStore, product: str) -> _Authority:
     values, expectation = import_runtime_authority(
         record_store=store, context=lane.context, instance=lane.instance
     )
-    target = store.read_dokploy_target_record(
-        context_name=lane.context, instance_name=lane.instance
-    )
+    store.read_dokploy_target_record(context_name=lane.context, instance_name=lane.instance)
     bindings = store.list_secret_bindings(
         integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION, context_name=lane.context
     )
-    excluded = set(target.env)
+    excluded: set[str] = set()
     for record in expectation.records:
         excluded.update(record.retired_provider_keys)
     excluded.update(

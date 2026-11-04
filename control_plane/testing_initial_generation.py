@@ -86,14 +86,11 @@ def require_initial_bootstrap_prerequisites(
     from control_plane.testing_replacement_bootstrap import bootstrap_copy_prerequisites
 
     profile = store.read_product_profile_record(product)
-    target = store.read_dokploy_target_record(context_name=request.context, instance_name="testing")
-    # Adoption installs an empty target; source wiring that exists only on the
-    # retained target cannot qualify the future independent copy.
+    store.read_dokploy_target_record(context_name=request.context, instance_name="testing")
     bootstrap_copy_prerequisites(
         store,
         profile,
         request.context,
-        target.model_copy(update={"env": {}}),
         None,
         request.source_mode,
     )

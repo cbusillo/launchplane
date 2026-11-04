@@ -12,6 +12,7 @@ import yaml
 
 from control_plane import runtime_environments
 from control_plane.build_provenance import GitHubBuildProvenanceTransport
+from control_plane.published_generation_resources import PublishedGenerationResourceStore
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -146,7 +147,7 @@ def verified_product_image(store: PostgresRecordStore, product: str, commit: str
 
 
 def activation_record(
-    store: PostgresRecordStore,
+    store: PublishedGenerationResourceStore,
     product: str,
     context: str,
     *,
@@ -580,10 +581,6 @@ def retained_fence_is_separated(store: object, reservation: object) -> bool:
             and target.target_id != record.retained_target_id.target_id
             and record.published_target is not None
             and current.target_type == "compose"
-            and all(
-                current.env.get(key) == record.published_target.env.get(key)
-                for key in (*record.request.volume_keys.values(), *record.request.port_keys)
-            )
         )
     except (ValueError, FileNotFoundError):
         return False

@@ -1944,7 +1944,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                         instance_name="local",
                     )
 
-    def test_resolve_runtime_environment_values_merges_tracked_target_env_for_lane(self) -> None:
+    def test_resolve_runtime_environment_values_ignores_tracked_target_settings(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
@@ -1992,14 +1992,8 @@ class RuntimeEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "shared-master")
         self.assertEqual(resolved_values["ODOO_DB_PASSWORD"], "testing-secret")
-        self.assertEqual(
-            resolved_values["ODOO_ADDON_REPOSITORIES"],
-            "cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2dc5540001043c327d",
-        )
-        self.assertEqual(
-            resolved_values["ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL"],
-            "https://cm-testing.example.com",
-        )
+        self.assertNotIn("ODOO_ADDON_REPOSITORIES", resolved_values)
+        self.assertNotIn("ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL", resolved_values)
 
     def test_resolve_runtime_context_values_merges_shared_and_context_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

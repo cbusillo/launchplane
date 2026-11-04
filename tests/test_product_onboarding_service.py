@@ -147,7 +147,6 @@ class ProductOnboardingServiceTests(unittest.TestCase):
                         "target_id": "app-discord-blue",
                         "target_type": "application",
                         "target_name": "discord-blue",
-                        "env": {"DISCORD_BLUE_TARGET_ENV": "stored-only"},
                         "domains": ["discord-blue.example.test"],
                         "healthcheck_enabled": False,
                     }
@@ -157,7 +156,10 @@ class ProductOnboardingServiceTests(unittest.TestCase):
                         "scope": "instance",
                         "context": "discord-blue",
                         "instance": "prod",
-                        "env": {"DISCORD_BLUE_STATE_DIR": "/var/lib/discord-blue"},
+                        "env": {
+                            "DISCORD_BLUE_STATE_DIR": "/var/lib/discord-blue",
+                            "DISCORD_BLUE_TARGET_ENV": "stored-only",
+                        },
                     }
                 ],
                 "secret_bindings": [

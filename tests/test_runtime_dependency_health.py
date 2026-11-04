@@ -137,7 +137,7 @@ class RuntimeDependencyHealthTests(unittest.TestCase):
         self.binding("DATABASE_URL", instance=self.lane.instance)
         self.assertEqual(self.derive().dependencies, ())
 
-    def test_target_metadata_and_driver_defaults(self) -> None:
+    def test_ignored_target_settings_and_driver_defaults(self) -> None:
         self.store.write_dokploy_target_record(
             DokployTargetRecord(
                 context=self.lane.context,
@@ -146,7 +146,7 @@ class RuntimeDependencyHealthTests(unittest.TestCase):
                 updated_at=STAMP,
             )
         )
-        self.assertEqual(self.derive().dependencies, ("database",))
+        self.assertEqual(self.derive().dependencies, ())
         self.profile = self.profile.model_copy(update={"driver_id": "odoo"})
         self.assertEqual(
             derive_runtime_dependencies(

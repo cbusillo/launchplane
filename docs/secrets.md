@@ -1158,7 +1158,7 @@ both refuse, with a fixed message and no value:
 
 - `provider_secret_missing`: the key is absent or empty in the provider env.
 - `provider_secret_already_recorded`: a Launchplane record already supplies the
-  key for the lane (a runtime setting, the tracked target's env, or a managed
+  key for the lane (a runtime setting or a managed
   secret), or the destination secret already exists under another binding key,
   so adoption never replaces a recorded value.
 

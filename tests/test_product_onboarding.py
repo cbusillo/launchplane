@@ -30,6 +30,7 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.workflows.product_onboarding import (
     apply_product_onboarding_manifest,
     build_product_profile_record,
+    build_provider_target_records,
 )
 from tests.support.workflows import load_workflow
 
@@ -804,7 +805,7 @@ class ProductOnboardingTests(unittest.TestCase):
                 "github-actions:12345:2:deploy",
             )
 
-    def test_reonboarding_preserves_product_config_public_hosts(self) -> None:
+    def test_reonboarding_preserves_public_hosts_and_generation_resource_evidence(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(Path(directory) / "db.sqlite3")
@@ -813,8 +814,11 @@ class ProductOnboardingTests(unittest.TestCase):
             manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
             apply_product_onboarding_manifest(record_store=store, manifest=manifest)
             target = store.list_dokploy_target_records()[0]
+            resources = {"RESOURCE_VOLUME": "published-generation"}
             store.write_dokploy_target_record(
-                target.model_copy(update={"public_hosts": ("public.example.com",)})
+                target.model_copy(
+                    update={"public_hosts": ("public.example.com",), "env": resources}
+                )
             )
             apply_product_onboarding_manifest(record_store=store, manifest=manifest)
             self.assertEqual(
@@ -823,6 +827,12 @@ class ProductOnboardingTests(unittest.TestCase):
                     instance_name=target.instance,
                 ).public_hosts,
                 ("public.example.com",),
+            )
+            self.assertEqual(
+                store.read_dokploy_target_record(
+                    context_name=target.context, instance_name=target.instance
+                ).env,
+                resources,
             )
 
     def test_apply_product_onboarding_manifest_writes_canonical_records(self) -> None:
@@ -1395,6 +1405,20 @@ class ProductOnboardingTests(unittest.TestCase):
         manifest = ProductOnboardingManifest.model_validate(payload)
 
         self.assertEqual(manifest.provider_targets, ())
+
+    def test_onboarding_requires_ordinary_settings_in_the_lane_declaration(self) -> None:
+        manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+        lane = manifest.runtime_environments[0]
+        conflicting = manifest.model_copy(
+            update={
+                "provider_targets": (
+                    manifest.provider_targets[0].model_copy(update={"env": dict(lane.env)}),
+                    *manifest.provider_targets[1:],
+                )
+            }
+        )
+        with self.assertRaises(ValueError):
+            build_provider_target_records(manifest=conflicting, updated_at="2026-11-04T00:00:00Z")
 
     def test_product_onboarding_manifest_keeps_empty_provider_targets_intentional(
         self,

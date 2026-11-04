@@ -1,11 +1,37 @@
-from control_plane.storage.postgres import PostgresRecordStore
+from typing import Any, Protocol, runtime_checkable
+
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+
+
+@runtime_checkable
+class PublishedGenerationResourceStore(Protocol):
+    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+    def read_production_recipient(self, product: str, context: str) -> dict[str, Any] | None: ...
+
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord: ...
+
+    def list_testing_application_activations(
+        self, product: str, context: str
+    ) -> tuple[dict[str, Any], ...]: ...
+
+    def read_testing_activation(self, product: str, context: str) -> dict[str, Any] | None: ...
 
 
 def published_generation_resources(
-    store: PostgresRecordStore, *, context: str, instance: str
+    store: object, *, context: str, instance: str
 ) -> dict[str, str] | None:
     if instance not in {"prod", "testing"}:
         return None
+    from control_plane.storage.filesystem import FilesystemRecordStore
+
+    if isinstance(store, FilesystemRecordStore):
+        return None
+    if not isinstance(store, PublishedGenerationResourceStore):
+        raise TypeError("Published resources require generation record reads.")
     products = [
         profile.product
         for profile in store.list_product_profile_records()
@@ -19,7 +45,6 @@ def published_generation_resources(
     if instance == "prod":
         from control_plane.contracts.production_recipient import ProductionRecipientRecord
         from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 
         payload = store.read_production_recipient(product, context)
         if payload is None:

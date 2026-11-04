@@ -243,11 +243,8 @@ def read_testing_prerequisites(
     )
 
     def source() -> None:
-        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
-        # An independent replacement does not inherit env from the retained target.
-        testing_restore_source_binding(
-            store, profile, context, target.model_copy(update={"env": {}}), generation, source_mode
-        )
+        store.read_dokploy_target_record(context_name=context, instance_name="testing")
+        testing_restore_source_binding(store, profile, context, generation, source_mode)
 
     check(
         "testing_restore_source",

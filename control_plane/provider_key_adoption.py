@@ -42,13 +42,6 @@ class ProviderKeyAdoptionError(ValueError):
 
 @dataclass(frozen=True)
 class LaneProviderEnv:
-    """The lane's current provider env, read by the service, and what decides each key.
-
-    ``recorded_keys`` are keys other site records already supply for the lane, such as
-    the tracked target's env and managed secret bindings. ``unretirable_keys`` are
-    declared application or driver settings, which a template default never retires.
-    """
-
     env: Mapping[str, str]
     template_defaults: Mapping[str, str]
     recorded_keys: frozenset[str] = frozenset()

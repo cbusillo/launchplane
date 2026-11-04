@@ -10,12 +10,10 @@ from unittest.mock import Mock, patch
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy_target_inspect import (
     DokployTargetInspectRequest,
     DokployTargetInspectStore,
-    _instance_setting_comparison,
     inspect_dokploy_target,
     summarize_dokploy_target_payload,
 )
@@ -126,36 +124,12 @@ class DokployTargetInspectTests(unittest.TestCase):
                         public_hosts=("example.com", "www.example.com"),
                         env={
                             "ODOO_UPSTREAM_USER": "synthetic-reader-not-for-output",
-                            "DIFFERENT": "target-only-value",
-                            "MISSING": "context-only-value",
-                            "RETIRED": "retired-value",
                         },
                         updated_at="2026-06-14T00:00:00Z",
                         source_label="test",
                     )
                 )
 
-                runtime_record = RuntimeEnvironmentRecord(
-                    scope="instance",
-                    context="cm_website",
-                    instance="prod",
-                    env={
-                        "ODOO_UPSTREAM_USER": "synthetic-reader-not-for-output",
-                        "DIFFERENT": "lane-only-value",
-                    },
-                    schema_version=2,
-                    retired_provider_keys=("RETIRED",),
-                    updated_at="2026-06-14T00:00:00Z",
-                )
-                store.write_runtime_environment_record(runtime_record)
-                store.write_runtime_environment_record(
-                    RuntimeEnvironmentRecord(
-                        scope="context",
-                        context="cm_website",
-                        env={"MISSING": "context-only-value"},
-                        updated_at="2026-06-14T00:00:00Z",
-                    )
-                )
                 store.write_dokploy_target_id_record(
                     DokployTargetIdRecord(
                         context="cm_website",
@@ -181,48 +155,18 @@ class DokployTargetInspectTests(unittest.TestCase):
                 )
 
                 with patch.object(store, "read_secret_version", side_effect=AssertionError):
-
-                    def inspect() -> dict[str, object]:
-                        return inspect_dokploy_target(
-                            record_store=store,
-                            host="https://dokploy.example.invalid",
-                            token="token",
-                            request=DokployTargetInspectRequest(
-                                context="cm_website", instance="prod"
-                            ),
-                            compare_instance_settings=True,
-                            fetch_target_payload=_fake_target_payload,
-                        )
-
-                    result = inspect()
-                    resources = {
-                        "ODOO_UPSTREAM_USER": "synthetic-reader-not-for-output",
-                        "DIFFERENT": "different-generation-value",
-                        "GENERATION_ONLY": "generation-only-value",
-                    }
-                    with patch(
-                        "control_plane.dokploy_target_inspect.published_generation_resources",
-                        return_value=resources,
-                    ):
-                        compared = inspect()
-                        with patch(
-                            "control_plane.dokploy_target_inspect._generation_snapshot_keys",
-                            side_effect=ValueError,
-                        ):
-                            history_unavailable = inspect()
-                    with patch(
-                        "control_plane.dokploy_target_inspect.published_generation_resources",
-                        side_effect=KeyError,
-                    ):
-                        unavailable = inspect()
+                    result = inspect_dokploy_target(
+                        record_store=store,
+                        host="https://dokploy.example.invalid",
+                        token="token",
+                        request=DokployTargetInspectRequest(context="cm_website", instance="prod"),
+                        fetch_target_payload=_fake_target_payload,
+                    )
                 stored_evidence = store.read_provider_target_record(
                     context_name="cm_website", instance_name="prod"
                 ).provider_evidence
                 stored_target = store.read_dokploy_target_record(
                     context_name="cm_website", instance_name="prod"
-                )
-                empty_comparison = _instance_setting_comparison(
-                    store, stored_target.model_copy(update={"env": {}})
                 )
             finally:
                 store.close()
@@ -238,65 +182,6 @@ class DokployTargetInspectTests(unittest.TestCase):
         self.assertEqual(tracked_target["domains"], list(stored_target.domains))
         self.assertEqual(tracked_target["env_keys"], sorted(stored_target.env))
         self.assertNotIn("synthetic-reader-not-for-output", str(tracked_target))
-        self.assertEqual(
-            {
-                key: value
-                for key, value in _require_mapping(
-                    tracked_target["instance_setting_comparison"]
-                ).items()
-                if key not in {"generation_resources", "generation_snapshots"}
-            },
-            {
-                "same_value_keys": ["ODOO_UPSTREAM_USER"],
-                "different_value_keys": ["DIFFERENT"],
-                "missing_keys": ["MISSING", "RETIRED"],
-                "retired_keys": ["RETIRED"],
-                "instance_settings_updated_at": runtime_record.updated_at,
-            },
-        )
-        self.assertEqual(
-            _require_mapping(empty_comparison["generation_resources"])["status"], "no_custody"
-        )
-        comparison = _require_mapping(tracked_target["instance_setting_comparison"])
-        generation = _require_mapping(
-            _require_mapping(compared["tracked_target"])["instance_setting_comparison"]
-        )
-        self.assertEqual(
-            generation["generation_resources"],
-            {
-                "status": "compared",
-                "same_value_keys": ["ODOO_UPSTREAM_USER"],
-                "different_value_keys": ["DIFFERENT"],
-                "target_only_keys": ["MISSING", "RETIRED"],
-                "generation_only_keys": ["GENERATION_ONLY"],
-            },
-        )
-        failed = _require_mapping(
-            _require_mapping(unavailable["tracked_target"])["instance_setting_comparison"]
-        )
-        self.assertEqual(_require_mapping(failed["generation_resources"])["status"], "unavailable")
-        degraded = _require_mapping(
-            _require_mapping(history_unavailable["tracked_target"])["instance_setting_comparison"]
-        )
-        self.assertEqual(degraded["generation_resources"], generation["generation_resources"])
-        self.assertEqual(
-            _require_mapping(degraded["generation_snapshots"])["status"], "unavailable"
-        )
-        for value in resources.values():
-            self.assertNotIn(value, str(compared))
-        self.assertEqual(
-            _require_mapping(comparison["generation_resources"])["status"], "no_custody"
-        )
-        self.assertEqual(
-            _require_mapping(comparison["generation_snapshots"])["status"], "no_custody"
-        )
-        for value in (
-            "target-only-value",
-            "lane-only-value",
-            "context-only-value",
-            "retired-value",
-        ):
-            self.assertNotIn(value, str(tracked_target))
         self.assertEqual(provider_target_record["display_name"], "cm-prod")
         self.assertEqual(
             provider_target_record["provider_evidence"],

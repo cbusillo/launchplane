@@ -95,7 +95,6 @@ def native_testing_source_authority(
                 "prod" if scope == "instance" else ""
             ):
                 values.update({key: str(value) for key, value in runtime.env.items()})
-    values.update({key: str(value) for key, value in target.env.items()})
     database = values.get("ODOO_DB_NAME", "")
     filestore = Path(values.get("ODOO_FILESTORE_PATH", "/volumes/data/filestore"))
     if not filestore.is_absolute() or ".." in filestore.parts:

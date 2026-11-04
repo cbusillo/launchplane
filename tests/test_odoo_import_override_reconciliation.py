@@ -316,9 +316,9 @@ class ImportOverrideHttpTests(unittest.IsolatedAsyncioTestCase):
             before,
         )
 
-    async def test_target_overlay_refuses_planning_and_later_rendering(self) -> None:
+    async def test_target_settings_do_not_hide_lane_import_authority(self) -> None:
         before = override_record()
-        _plan, bundle = plan_import_override_reconciliation(
+        plan, bundle = plan_import_override_reconciliation(
             record_store=self.store, profile=self.profile, record=before, keys=KEYS
         )
         self.store.write_dokploy_target_record(
@@ -330,18 +330,24 @@ class ImportOverrideHttpTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         response = await self.submit({"keys": KEYS})
-        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(
             self.store.read_odoo_instance_override_record(
                 context_name="cm", instance_name="testing"
             ),
             before,
         )
-        # An overlay added after record reconciliation still refuses delivery.
-        with self.assertRaises(click.ClickException):
-            build_post_deploy_environment(
-                bundle.odoo_instance_override_writes[0].record, record_store=self.store
-            )
+        self.assertEqual(response.json()["result"]["review_digest"], plan.review_digest)
+        environment = build_post_deploy_environment(
+            bundle.odoo_instance_override_writes[0].record, record_store=self.store
+        )
+        payload = json.loads(
+            base64.b64decode(environment.inline_environment["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"])
+        )
+        delivered = {entry["key"]: entry["value"] for entry in payload["config_parameters"]}
+        self.assertEqual(
+            delivered[KEYS[0]]["value"], runtime_record().env[import_parameter_runtime_key(KEYS[0])]
+        )
 
     async def test_changed_authority_and_changed_override_refuse_stale_review(self) -> None:
         for changed in ("runtime", "override", "profile"):

@@ -13,6 +13,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductOdooLaneDataPolicy,
 )
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.disposable_lane_collection import collect_testing_resource_facts
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_restore import read_current_testing_generation
@@ -58,6 +59,12 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
         self.target = DokployTargetRecord(
             context=self.generation.context,
             instance="testing",
+            updated_at=self.profile.updated_at,
+        )
+        self.runtime = RuntimeEnvironmentRecord(
+            scope="instance",
+            context=self.generation.context,
+            instance="testing",
             env={
                 **resources.volumes,
                 "ODOO_PROJECT_NAME": resources.namespace,
@@ -85,7 +92,7 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
             resource_namespace=resources.namespace,
             resources_binding_sha256=self.generation.resources_binding_sha256,
         )
-        self.store.list_runtime_environment_records.return_value = ()
+        self.store.list_runtime_environment_records.return_value = (self.runtime,)
         self.store.list_dokploy_target_id_records.return_value = ()
         self.store.list_physical_provider_target_records.return_value = ()
         self.credentials = self.enterContext(
@@ -353,9 +360,9 @@ class HeldTestingResourceCollectionTests(unittest.TestCase):
                     setattr(dependency, field, previous)
 
     def test_changed_resource_authority_still_refuses_before_physical_inspection(self) -> None:
-        self.target.env["ODOO_PROJECT_NAME"] = "another-copy"
+        self.runtime.env["ODOO_PROJECT_NAME"] = "another-copy"
         self.assertEqual(self.collect(), {})
-        self.target.env["ODOO_PROJECT_NAME"] = self.generation.namespace
+        self.runtime.env["ODOO_PROJECT_NAME"] = self.generation.namespace
         self.store.list_dokploy_target_id_records.return_value = (
             DokployTargetIdRecord(
                 context="other",

@@ -216,7 +216,7 @@ def inspect_testing_rebuild(
                 secret_binding_keys=frozenset(),
             )
             post_deploy.resolve_upstream_restore_workflow_environment(
-                desired_env_map={**environment.values, **intent.before.target.env}
+                desired_env_map=environment.values
             )
     except NativeSourceAuthorizationDenied:
         raise
