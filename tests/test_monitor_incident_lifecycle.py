@@ -20,37 +20,51 @@ from tests.test_public_ingress_monitor import _notification_policy, _profile
 
 class MonitorIncidentLifecycleTests(unittest.TestCase):
     def test_old_health_target_earns_no_pass_after_authority_changes(self) -> None:
-        with TemporaryDirectory() as directory:
-            store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))
-            self.addCleanup(store.close)
-            store.ensure_schema()
-            profile = _profile()
-            store.write_product_profile_record(profile)
-            write_transition = store.write_public_ingress_transition_with_outbox
-
-            def change_health_target_before_publication(**kwargs: Any) -> object:
-                lane = profile.lanes[0].model_copy(
-                    update={"health_url": "https://replacement.test/health"}
+        for incident_retry in (False, True):
+            with self.subTest(incident_retry=incident_retry), TemporaryDirectory() as directory:
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "db")
                 )
-                store.write_product_profile_record(profile.model_copy(update={"lanes": (lane,)}))
-                return write_transition(**kwargs)
+                self.addCleanup(store.close)
+                store.ensure_schema()
+                profile = _profile()
+                store.write_product_profile_record(profile)
+                write_transition = store.write_public_ingress_transition_with_outbox
+                attempts = 0
 
-            with patch.object(
-                store,
-                "write_public_ingress_transition_with_outbox",
-                side_effect=change_health_target_before_publication,
-            ):
-                result = run_public_ingress_monitor_once(
-                    record_store=store,
-                    checked_at="2026-07-27T16:42:00Z",
-                    http_get=lambda url, timeout: HttpObservation(200, url, 0),
-                    notify=False,
-                )
-            self.assertEqual(result.authority_changed_count, 1)
-            self.assertEqual(result.pass_count, 0)
-            self.assertEqual(result.records[0].status, "skipped")
-            self.assertEqual(store.list_public_ingress_observation_records(), ())
-            self.assertEqual(store.list_public_ingress_incident_records(), ())
+                def change_health_target_before_publication(**kwargs: Any) -> object:
+                    nonlocal attempts
+                    attempts += 1
+                    if incident_retry and attempts == 1:
+                        return write_transition(
+                            **{**kwargs, "expected_open_incident_id": "concurrently-replaced"}
+                        )
+                    lane = profile.lanes[0].model_copy(
+                        update={"health_url": "https://replacement.test/health"}
+                    )
+                    store.write_product_profile_record(
+                        profile.model_copy(update={"lanes": (lane,)})
+                    )
+                    return write_transition(**kwargs)
+
+                with patch.object(
+                    store,
+                    "write_public_ingress_transition_with_outbox",
+                    side_effect=change_health_target_before_publication,
+                ):
+                    result = run_public_ingress_monitor_once(
+                        record_store=store,
+                        checked_at="2026-07-27T16:42:00Z",
+                        http_get=lambda url, timeout: HttpObservation(200, url, 0),
+                        notify=False,
+                    )
+                self.assertEqual(result.authority_changed_count, 1)
+                self.assertEqual(result.pass_count, 0)
+                self.assertEqual(result.records[0].status, "skipped")
+                stored = store.list_public_ingress_observation_records()
+                self.assertEqual(len(stored), 1)
+                self.assertEqual(stored[0].status, "skipped")
+                self.assertEqual(store.list_public_ingress_incident_records(), ())
 
     def test_removed_lane_reconciles_without_rewriting_failed_probe(self) -> None:
         with TemporaryDirectory() as directory:
@@ -90,6 +104,9 @@ class MonitorIncidentLifecycleTests(unittest.TestCase):
                     notify=False,
                 )
             self.assertEqual(raced.authority_changed_count, 1)
+            rejected = store.read_public_ingress_observation_record(raced.records[0].record_id)
+            self.assertEqual(rejected.purpose, "reconciliation")
+            self.assertEqual(rejected.status, "skipped")
             self.assertEqual(
                 store.read_public_ingress_incident_record(incident.incident_id).status, "open"
             )

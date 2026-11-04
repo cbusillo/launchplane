@@ -410,6 +410,34 @@ class PublicIngressObservationRecord(BaseModel):
     notification_sent: bool = False
     summary: str
 
+    def unaccepted(
+        self,
+        summary: str = "Monitoring authority changed before publication; observation was not accepted.",
+    ) -> "PublicIngressObservationRecord":
+        failure_code = self.failure_code if self.purpose == "reconciliation" else None
+        return self.model_copy(
+            update={
+                "status": "skipped",
+                "failure_code": failure_code,
+                "targets": tuple(
+                    target.model_copy(
+                        update={
+                            "status": "skipped",
+                            "failure_code": failure_code,
+                            "runtime_identity_status": "unverifiable",
+                            "summary": summary,
+                        }
+                    )
+                    for target in self.targets
+                ),
+                "summary": summary,
+                "incident_id": "",
+                "incident_event_id": "",
+                "material_fingerprint": None,
+                "material_fingerprint_sha256": "",
+            }
+        )
+
     @model_validator(mode="after")
     def _validate_record(self) -> "PublicIngressObservationRecord":
         self.record_id = require_text(
