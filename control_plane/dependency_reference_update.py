@@ -206,10 +206,12 @@ def _action_reference_forward(
     if any(part in {".", ".."} for part in before["name"].split("/")):
         return False
     old_ref, new_ref = before["ref"], after["ref"]
+    repository = "/".join(before["name"].split("/")[:2])
+    # Renovate names a subpath action or reusable workflow by its repository.
     matching_updates = [
         update
         for update in declared_updates
-        if update.get("depName") == before["name"]
+        if update.get("depName") in {before["name"], repository}
         and (
             (update.get("currentDigest"), update.get("newDigest")) == (old_ref, new_ref)
             or _declared_values(update) == (old_ref, new_ref)
@@ -221,12 +223,14 @@ def _action_reference_forward(
         return True
     if not all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in (old_ref, new_ref)):
         return False
+    # A digest pin follows a named tag or branch; the comparison proves the new
+    # commit descends from the old one either way.
     if not any(
-        re.fullmatch(r"v?\d+(?:[.]\d+)*(?:-[a-zA-Z0-9.-]+)?", _declared_values(update)[0])
+        _declared_values(update)[0]
+        and not re.fullmatch(r"[0-9a-f]{40}", _declared_values(update)[0])
         for update in matching_updates
     ):
         return False
-    repository = "/".join(before["name"].split("/")[:2])
     comparison = read(f"/repos/{repository}/compare/{old_ref}...{new_ref}")
     if not isinstance(comparison, dict):
         return False
