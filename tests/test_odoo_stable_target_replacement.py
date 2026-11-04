@@ -1562,6 +1562,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
 
     def test_build_plan_reports_ready_when_records_and_volume_contract_exist(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+
         manifest = _artifact_manifest()
         target = _target_record()
         rendered_compose = control_plane_dokploy.render_odoo_raw_compose_file(
@@ -1591,8 +1593,36 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             }
         )
         encoded_overrides = base64.b64encode(overrides.to_wire_json_bytes()).decode("ascii")
+        fresh = generation().model_copy(
+            update={
+                "product": _profile().product,
+                "context": target.context,
+                "completed_at": generation().prepared_at,
+            }
+        )
+        isolated_compose = _render_replacement_compose(
+            image_reference=f"{manifest.image.repository}@{manifest.image.digest}",
+            instance=target.instance,
+            domain_hosts=target.domains,
+            runtime_port=_profile().runtime_port,
+            published_copy=None,
+            generation=fresh,
+        )
         cases: tuple[dict[str, Any], ...] = (
             {"name": "matching"},
+            {
+                "name": "completed isolated generation",
+                "generation": fresh,
+                "compose": isolated_compose,
+            },
+            {"name": "isolated generation plain source", "generation": fresh, "match": False},
+            {
+                "name": "pending generation",
+                "generation": fresh.model_copy(update={"completed_at": ""}),
+                "compose": isolated_compose,
+                "match": None,
+                "status": "blocked",
+            },
             {"name": "advisory render failure", "render_error": True, "match": None},
             {"name": "JSON", "compose": json.dumps(yaml.safe_load(rendered_compose))},
             {"name": "different startup", "compose": json.dumps(changed_compose), "match": False},
@@ -1679,8 +1709,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 }
                 domains = case.get("domains", target.domains)
 
+                render_attempts = 0
+
                 def render(**kwargs: Any) -> str:
-                    if case.get("render_error") and "@" in kwargs["image_reference"]:
+                    nonlocal render_attempts
+                    render_attempts += 1
+                    if case.get("render_error") and render_attempts == 2:
                         raise click.ClickException("advisory render refused")
                     return _render_replacement_compose(**kwargs)
 
@@ -1695,7 +1729,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     ),
                     patch(
                         "control_plane.workflows.odoo_stable_target_replacement.read_current_testing_generation",
-                        return_value=None,
+                        return_value=case.get("generation"),
                         side_effect=case.get("generation_error"),
                     ),
                     patch(

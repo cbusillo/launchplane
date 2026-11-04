@@ -1816,6 +1816,8 @@ def build_odoo_stable_target_replacement_plan(
                 and provider_identity.artifact_id == expected_artifact_id
                 and provider_identity.source_git_ref == expected_source_git_ref
                 and "fresh_testing_authority_unverified" not in blocker_codes
+                and refusal is None
+                and (generation is None or generation.completed_at)
             ):
                 try:
                     rendered_compose = _render_replacement_compose(
