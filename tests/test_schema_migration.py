@@ -104,12 +104,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 self.addCleanup(store.close)
                 store.verify_schema()
 
-    def test_prepared_history_is_recognized_without_exposing_activation(self) -> None:
-        with self.assertRaises(ValueError):
-            schema_migration_action(
-                current_revision=monitoring_history.down_revision,
-                target_revision=monitoring_history.revision,
-            )
+    def test_installed_history_routes_explicit_delivery_retirement_through_its_join(self) -> None:
         self.assertEqual(
             schema_migration_target(
                 current_revision=monitoring_history.revision,

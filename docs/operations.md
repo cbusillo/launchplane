@@ -6396,19 +6396,23 @@ It recognizes the future additive revision and its empty held-branch join,
 Qualify its deployed image before changing the startup target. Never activate
 with Alembic `head`: the separately held delivery drop remains unapproved.
 
-The prepared migration locks all three source tables in one transaction,
-records one coverage epoch and seeds monitoring facts from every existing row, including inactive
-profiles. Database triggers then append insert, update and deletion decisions
+The prepared PostgreSQL migration takes the existing authority-bundle lock, then
+locks all three source tables in one transaction. It records one coverage epoch
+and seeds monitoring facts from every existing row, including inactive profiles.
+Database triggers then append insert, update and deletion decisions
 in each source transaction, including writes from an older compatible image.
 Failed or rolled-back writes earn no revision. Application-supplied `updated_at`
 does not backdate coverage. The epoch describes retained authority starting at
 installation; it supplies no earlier Live roster, required-check applicability,
 passing observation, incident resolution or credited healthy time.
 
-Capture retains lifecycle/Live/website declarations, lane monitoring configuration,
-binding domains/status and endpoint identity/status. It excludes unrelated
-profile and lane settings. Source keys identify revisions across scope changes;
-PostgreSQL transaction IDs retain transaction grouping. Sequence numbers and
+Capture retains schema/driver/health-path and lifecycle/Live/website declarations,
+lane monitoring configuration, binding domains/status and endpoint identity,
+status, URL and public CA trust. It excludes unrelated profile and lane settings;
+rewrites that change no monitoring fact append no revision. Source keys identify
+revisions across scope changes: fold by source key before filtering by scope.
+PostgreSQL transaction IDs retain grouping within the current database history,
+not continuity or unique grouping across a database restore. Sequence numbers and
 recording timestamps identify writes, not commit order or commit time. The later
 reader/accountant must preserve this distinction and earlier incomplete intervals.
 These monitoring facts are private historical decision evidence, not a new current
@@ -6416,3 +6420,5 @@ authority or provider inventory. No capture health or timeline qualification is
 asserted by this compatibility slice.
 Downgrade retains this evidence; rollback uses the compatible image with the
 additive table and capture intact.
+SQLite remains a rehearsal backend without authority-history capture; the real
+PostgreSQL integration suite owns installation, atomicity and projection proof.

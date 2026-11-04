@@ -18,7 +18,6 @@ import time
 from typing import Any
 import unittest
 from tests import test_odoo_business_hours_config as calendar_config_tests
-from tests import test_monitoring_authority_history as monitoring_history_tests
 from control_plane.storage.migrations.versions import (
     e2b6c8d0a4f7_monitoring_authority_history as monitoring_history_migration,
 )
@@ -49,7 +48,7 @@ from uuid import uuid4
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine, delete, event, insert, inspect, select, text, update
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -301,16 +300,228 @@ POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
 LOCK_WAIT_TIMEOUT = "1000ms"
 
 
-class RealPostgresMonitoringAuthorityTests(
-    monitoring_history_tests.MonitoringAuthorityCaptureTests
-):
+class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
     def setUp(self) -> None:
+        from control_plane.storage.migrations import monitoring_authority_v1 as history
+
         self.url = self.enterContext(_isolated_postgres_database())
         alembic_command.upgrade(
             _alembic_config(self.url), monitoring_history_migration.down_revision
         )
         self.engine = create_engine(self.url)
         self.addCleanup(self.engine.dispose)
+        self.store = PostgresRecordStore(database_url=self.url)
+        self.addCleanup(self.store.close)
+        self.history = history
+
+    def initialize_history(self) -> None:
+        with self.engine.begin() as connection:
+            self.history.initialize(connection)
+
+    def rows(self, *, include_epoch: bool = False) -> list[dict[str, Any]]:
+        statement = select(self.history.history).order_by(self.history.history.c.sequence)
+        if not include_epoch:
+            statement = statement.where(self.history.history.c.operation != "epoch")
+        with self.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(statement).mappings()]
+
+    @staticmethod
+    def write_profile(connection: Connection, product: str, state: str = "active") -> None:
+        from control_plane.storage.postgres import LaunchplaneProductProfileRow
+
+        profile = _public_ingress_profile().model_copy(
+            update={
+                "product": product,
+                "lifecycle_state": state,
+            }
+        )
+        connection.execute(
+            insert(LaunchplaneProductProfileRow).values(
+                product=product,
+                display_name=profile.display_name,
+                repository=profile.repository,
+                driver_id=profile.driver_id,
+                updated_at=profile.updated_at,
+                payload=profile.model_dump(mode="json"),
+            )
+        )
+
+    def test_epoch_seeds_inactive_profiles_and_monitoring_facts_without_backdating(self) -> None:
+        profile = _public_ingress_profile()
+        self.store.write_product_profile_record(profile)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "product": "retired-site",
+                    "lifecycle_state": "retired",
+                }
+            )
+        )
+        self.initialize_history()
+        rows = self.rows(include_epoch=True)
+        self.assertEqual({row["product"] for row in rows}, {"", profile.product, "retired-site"})
+        self.assertEqual({row["operation"] for row in rows}, {"epoch", "seed"})
+        self.assertTrue(all(row["recorded_at"] > profile.updated_at for row in rows))
+        seed = next(row for row in rows if row["product"] == profile.product)
+        self.assertEqual(json.loads(seed["source_key"]), [profile.product])
+        self.assertEqual(
+            seed["payload"],
+            {
+                "schema_version": profile.schema_version,
+                "lifecycle_state": profile.lifecycle_state,
+                "production_use": profile.production_use,
+                "public_website": profile.model_dump(mode="json").get("public_website"),
+                "driver_id": profile.driver_id,
+                "health_path": profile.health_path,
+                "lanes": [
+                    {
+                        "context": profile.lanes[0].context,
+                        "instance": profile.lanes[0].instance,
+                        "base_url": profile.lanes[0].base_url,
+                        "health_url": profile.lanes[0].health_url,
+                        "health_monitoring": profile.lanes[0].health_monitoring.model_dump(
+                            mode="json"
+                        ),
+                    }
+                ],
+            },
+        )
+
+    def test_relevant_profile_changes_delete_and_rollback_are_atomic(self) -> None:
+        self.initialize_history()
+        profile = _public_ingress_profile()
+        self.store.write_product_profile_record(profile)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "display_name": "unrelated display change",
+                    "updated_at": "2026-08-01T00:00:00Z",
+                }
+            )
+        )
+        self.assertEqual(len(self.rows()), 1)
+        changed = profile.model_copy(update={"driver_id": "odoo", "health_path": "/new-health"})
+        self.store.write_product_profile_record(changed)
+        before = self.rows()
+        self.assertEqual(len(before), 2)
+        self.assertEqual(before[-1]["payload"]["driver_id"], changed.driver_id)
+        self.assertEqual(before[-1]["payload"]["health_path"], changed.health_path)
+        self.assertNotIn("unrelated display change", str(before))
+        with self.engine.connect() as connection:
+            transaction = connection.begin()
+            connection.execute(text("DELETE FROM launchplane_product_profiles"))
+            transaction.rollback()
+        self.assertEqual(self.rows(), before)
+        with self.engine.begin() as connection:
+            connection.execute(text("DELETE FROM launchplane_product_profiles"))
+        self.assertEqual([row["operation"] for row in self.rows()], ["insert", "update", "delete"])
+        self.assertEqual(self.rows()[-1]["payload"], before[-1]["payload"])
+
+    def test_route_and_private_target_trust_changes_retain_exact_facts(self) -> None:
+        from control_plane.contracts.private_health_endpoint_record import (
+            PrivateHealthEndpointRecord,
+        )
+        from tests.test_route_binding_record import _route_binding_record
+        from tests.test_private_testing_trust import certificate_fixture
+
+        self.initialize_history()
+        binding = _route_binding_record(instance="testing")
+        self.store.write_route_binding_record(binding)
+        self.store.write_route_binding_record(
+            binding.model_copy(update={"updated_at": "2026-08-01T00:00:00Z"})
+        )
+        self.assertEqual(len(self.rows()), 1)
+        changed_binding = binding.model_copy(update={"status": "disabled"})
+        self.store.write_route_binding_record(changed_binding)
+        changed_domain = changed_binding.model_copy(
+            update={
+                "domains": (
+                    binding.domains[0].model_copy(update={"domain_name": "new.example.test"}),
+                ),
+            }
+        )
+        self.store.write_route_binding_record(changed_domain)
+        endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="private-health",
+            product=binding.product,
+            context=binding.context,
+            instance="testing",
+            url="https://testing.internal/health",
+            updated_at=binding.updated_at,
+        )
+        self.store.write_private_health_endpoint_record(endpoint)
+        self.store.write_private_health_endpoint_record(
+            endpoint.model_copy(update={"source_label": "unrelated note"})
+        )
+        self.assertEqual(len(self.rows()), 4)
+        ca, _, _ = certificate_fixture()
+        replacement = PrivateHealthEndpointRecord.model_validate(
+            {
+                **endpoint.model_dump(),
+                "url": "https://other.internal/health",
+                "tls_ca_pem": ca,
+            }
+        )
+        self.store.write_private_health_endpoint_record(replacement)
+        rows = self.rows()
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(
+            json.loads(rows[0]["source_key"]), [binding.product, binding.context, binding.instance]
+        )
+        self.assertEqual(
+            rows[0]["payload"],
+            {
+                "status": binding.status,
+                "domains": [domain.model_dump(mode="json") for domain in binding.domains],
+                "external_ingress": None,
+            },
+        )
+        self.assertEqual(rows[1]["payload"]["status"], changed_binding.status)
+        self.assertEqual(
+            rows[2]["payload"]["domains"],
+            [domain.model_dump(mode="json") for domain in changed_domain.domains],
+        )
+        self.assertEqual(json.loads(rows[-1]["source_key"]), [replacement.endpoint_key])
+        self.assertEqual(
+            rows[-1]["payload"],
+            {
+                key: replacement.model_dump(mode="json").get(key)
+                for key in (
+                    "endpoint_key",
+                    "product",
+                    "context",
+                    "instance",
+                    "status",
+                    "url",
+                    "tls_ca_pem",
+                )
+            },
+        )
+        self.assertNotEqual(rows[-1]["payload"], rows[-2]["payload"])
+
+    def test_transaction_groups_are_shared_within_one_commit_and_distinct_after_it(self) -> None:
+        self.initialize_history()
+        with self.engine.begin() as connection:
+            self.write_profile(connection, "one")
+            self.write_profile(connection, "two")
+        with self.engine.begin() as connection:
+            self.write_profile(connection, "three")
+        first, second, third = self.rows()
+        self.assertTrue(first["transaction_id"])
+        self.assertEqual(first["transaction_id"], second["transaction_id"])
+        self.assertNotEqual(first["transaction_id"], third["transaction_id"])
+
+    def test_retained_history_cannot_be_changed_or_deleted(self) -> None:
+        self.initialize_history()
+        before = self.rows(include_epoch=True)
+        for statement in (
+            f"DELETE FROM {self.history.TABLE_NAME}",
+            f"UPDATE {self.history.TABLE_NAME} SET product='forged'",
+        ):
+            with self.assertRaises(DBAPIError):
+                with self.engine.begin() as connection:
+                    connection.execute(text(statement))
+            self.assertEqual(self.rows(include_epoch=True), before)
 
     def test_epoch_waits_for_preexisting_writer_and_records_only_committed_sources(self) -> None:
         from control_plane.storage.migrations import monitoring_authority_v1 as history
