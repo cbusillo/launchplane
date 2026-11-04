@@ -4312,7 +4312,7 @@ class GitHubMergeTrainSnapshotReader:
                 latest_kind = "unreadable"
         return MergeTrainReadyHandoff(
             status="waiting"
-            if latest_kind == "waiting"
+            if latest_kind in {"waiting", "client_wait"}
             else "edited"
             if latest_kind == "edited"
             else "unreadable"
@@ -4324,6 +4324,14 @@ class GitHubMergeTrainSnapshotReader:
             actor_id=actor_id,
             actor_role=role,
             comment_id=comment_id,
+            client_accepted=latest_kind == "client_wait"
+            and declared_head == head_sha
+            and self.client_accepted(
+                repository=repository_path,
+                pull_request_number=number,
+                head_sha=head_sha,
+                base_branch=base_branch,
+            ),
         )
 
     def _handoff_refresh_chain(
@@ -4914,23 +4922,52 @@ class GitHubMergeTrainSnapshotReader:
             labels=labels, repository=repository, body=body
         ).review_required
 
-    def client_veto(self, *, repository: str, pull_request_number: int) -> bool:
+    def _client_decisions(
+        self, *, repository: str, pull_request_number: int
+    ) -> tuple[
+        tuple[LaunchplaneProductProfileRecord, tuple[ProductReviewDecisionRecord, ...]], ...
+    ]:
         store = self._branch_refresh_store
         if not isinstance(store, _ClientVetoReadStore):
-            return False
-        profiles = tuple(
-            profile
+            return ()
+        return tuple(
+            (
+                profile,
+                store.list_product_review_decision_records(
+                    repository=profile.repository, pull_request_number=pull_request_number
+                ),
+            )
             for profile in store.list_product_profile_records()
             if profile.is_active
             and profile.owner.is_set
             and repository_key(profile.repository) == repository_key(repository)
         )
-        if not profiles:
-            return False
-        for profile in profiles:
-            decisions = store.list_product_review_decision_records(
-                repository=profile.repository, pull_request_number=pull_request_number
-            )
+
+    def client_accepted(
+        self, *, repository: str, pull_request_number: int, head_sha: str, base_branch: str
+    ) -> bool:
+        """Whether every Client of the repository accepted exactly `head_sha`."""
+        from control_plane.product_review_status import owner_review_status
+
+        clients = self._client_decisions(
+            repository=repository, pull_request_number=pull_request_number
+        )
+        return bool(clients) and all(
+            owner_review_status(
+                profile=profile,
+                pull_request_number=pull_request_number,
+                head_sha=head_sha,
+                decisions=decisions,
+                base_branch=base_branch,
+            ).state
+            == "success"
+            for profile, decisions in clients
+        )
+
+    def client_veto(self, *, repository: str, pull_request_number: int) -> bool:
+        for profile, decisions in self._client_decisions(
+            repository=repository, pull_request_number=pull_request_number
+        ):
             current = next(
                 iter(
                     applicable_product_review_decisions(

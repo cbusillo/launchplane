@@ -17,14 +17,21 @@ class MergeTrainReadyHandoff(BaseModel):
     actor_id: int | None = None
     actor_role: str = "unknown"
     comment_id: int | None = None
+    # A Client wait clears once Launchplane holds that Client's acceptance of
+    # exactly this head, including an acceptance carried to it.
+    client_accepted: bool = False
 
 
-def handoff_kind(body: str) -> Literal["ready", "waiting"] | None:
+def handoff_kind(body: str) -> Literal["ready", "client_wait", "waiting"] | None:
     first = body.splitlines()[0].strip().removesuffix(".") if body.splitlines() else ""
     if first.startswith("**") and first.endswith("**"):
         first = first[2:-2].removesuffix(".")
     if first == "Ready for the merge train":
         return "ready"
+    # The checked handoff's Client wait; any other wait names a hold the
+    # Client's acceptance cannot clear.
+    if first == "Engineering ready; waiting for the Client's acceptance":
+        return "client_wait"
     if first.startswith("Engineering ready; waiting for"):
         return "waiting"
     return None
@@ -80,7 +87,7 @@ def ready_handoff_refusal(
         return "trusted comment was edited; post a fresh checked gh-pr.py ready handoff"
     if handoff.status == "unreadable":
         return "Ready handoff evidence is unreadable"
-    if handoff.status == "waiting":
+    if handoff.status == "waiting" and not handoff.client_accepted:
         return "latest trusted engineering handoff is waiting"
     if handoff.status == "stale" or handoff.head_sha != head_sha:
         return "Ready handoff does not name exactly the current head; post a fresh checked gh-pr.py ready handoff"
