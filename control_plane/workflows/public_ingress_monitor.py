@@ -1157,7 +1157,7 @@ def _store_monitor_observation(
     ] = "monitoring_intent_changed",
 ) -> _StoredMonitorTransition:
     transition_writer = getattr(record_store, "write_public_ingress_transition_with_outbox", None)
-    plan: _PlannedIncidentTransition | None = None
+    plan: _PlannedIncidentTransition
     outbox_deliveries: tuple[OutboxDeliveryRecord, ...] = ()
     for _attempt in range(3):
         plan = _plan_public_ingress_incident_transition(
@@ -1230,8 +1230,6 @@ def _store_monitor_observation(
         break
     else:
         raise RuntimeError("public ingress incident changed during three transition attempts")
-    if plan is None:
-        raise RuntimeError("public ingress transition planning did not produce a plan")
     delivery_attempts: list[PublicIngressNotificationAttemptRecord] = []
     incidents_by_id = {incident.incident_id: incident for incident in plan.incidents}
     for incident_event in plan.incident_events:
