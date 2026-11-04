@@ -2711,7 +2711,10 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 "workflow_runs": [{"id": 103, "status": "waiting"}],
             },
             "status=pending": {"total_count": 0, "workflow_runs": []},
-            "status=requested": {"total_count": 0, "workflow_runs": []},
+            "status=requested": {
+                "total_count": 1,
+                "workflow_runs": [{"id": 104, "status": "requested"}],
+            },
             "/actions/runs/101/jobs": {
                 "total_count": 1,
                 "jobs": [
@@ -2738,6 +2741,10 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                         "labels": ["self-hosted", "ops-gate"],
                     }
                 ],
+            },
+            "/actions/runs/104/jobs": {
+                "total_count": 1,
+                "jobs": [{"status": "requested", "labels": ["self-hosted", "ops-gate"]}],
             },
             "/actions/runs/999/jobs": {
                 "total_count": 1,
@@ -2807,7 +2814,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
 
         by_source = {observation.source: observation for observation in observations}
         self.assertEqual(by_source["github_jobs"].state, "active")
-        self.assertEqual(by_source["github_jobs"].active_count, 2)
+        self.assertEqual(by_source["github_jobs"].active_count, 3)
         self.assertEqual(by_source["github_runners"].state, "idle")
         self.assertEqual(by_source["github_runners"].active_count, 0)
         self.assertNotEqual(by_source["github_jobs"].subject_key, "ops-gate")
@@ -3116,6 +3123,56 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             {observation.observed_at for observation in observations},
             {"2026-07-30T12:00:00Z"},
         )
+
+    def test_github_idle_aggregation_preserves_incomplete_sample_causes(self) -> None:
+        idle = RunnerHostHygieneIdleObservation(
+            source="github_jobs",
+            scope="full_host",
+            scope_key="host",
+            subject_key="lane-key",
+            observed_at="2026-07-30T12:00:00Z",
+            availability="available",
+            state="idle",
+            active_count=0,
+        )
+        for reason in (
+            "source_unauthorized",
+            "source_stale",
+            "source_truncated",
+            "source_unavailable",
+            "source_missing",
+            "source_contradictory",
+        ):
+            failed = idle.model_copy(
+                update={
+                    "availability": "partial" if reason == "source_truncated" else "unavailable",
+                    "state": "unknown",
+                    "active_count": None,
+                    "reason_code": reason,
+                    "truncated": reason == "source_truncated",
+                }
+            )
+            for companion in (
+                idle,
+                idle.model_copy(update={"state": "active", "active_count": 1}),
+                failed.model_copy(update={"reason_code": "source_unavailable", "truncated": False}),
+            ):
+                with self.subTest(reason=reason, companion=companion.availability):
+                    samples = ((companion,), (failed,))
+                    (observation,) = _aggregate_github_idle_samples(
+                        samples=samples,
+                        observed_at=idle.observed_at,
+                        observation_window_seconds=5,
+                    )
+                    self.assertEqual(observation.state, "unknown")
+                    if companion.availability == "available" or reason == "source_contradictory":
+                        self.assertEqual(observation.reason_code, reason)
+                    else:
+                        self.assertIn(observation.reason_code, {reason, companion.reason_code})
+                    self.assertEqual(observation.sample_count, len(samples))
+                    self.assertEqual(
+                        observation.truncated, observation.reason_code == "source_truncated"
+                    )
 
     def test_service_audit_poster_marks_route_not_found_non_retryable(self) -> None:
         poster = build_refreshing_service_audit_poster(
