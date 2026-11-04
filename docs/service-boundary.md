@@ -2554,15 +2554,12 @@ preview/testing caller grants. Empty target and record qualification is recorded
 in [#5263](https://github.com/cbusillo/launchplane/issues/5263#issuecomment-6490944855);
 working previews and real-repository provenance need independent verification.
 
-`Product Onboarding` refuses normal new-product dispatches. It retains only the
-old byte-artifact renderer and unchanged pinned worker for existing allocations'
-original actor/key recovery and reviewed custody retention. The current-source
-worker is not that pinned revision. Keep the original pin and required recovery
-inputs until old custody is accounted for. No new repository token, record plan,
-authz plan or authz reconciliation is issued by the wrapper. Existing caller-rule
-retirement and independent absence readback remain available. An old target
-without product records follows the [retention and fresh-context path](operations.md#compatibility-workflow-recovery);
-native record apply cannot adopt that workflow allocation.
+The retired `Product Onboarding` wrapper and reusable worker are removed.
+The native allocation machinery retains original-actor/key readback,
+continuation, reviewed custody retention and idempotent record apply. Existing
+caller-rule retirement and independent absence readback remain available.
+[Workflow retirement evidence](operations.md#compatibility-workflow-recovery)
+distinguishes completed legacy receipts from native allocation custody.
 
 The authz planning route requires `generic_web_preview_authz.plan`, reads the
 active DB-backed policy, retains unrelated managed rules, and returns a complete

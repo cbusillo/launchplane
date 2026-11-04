@@ -54,10 +54,9 @@ these up. Save inputs and reviewed receipts in admin-owned state outside the
 product repository; the runbook includes the metadata lookup and recovery steps.
 
 The native path creates an empty testing application and the product/lane
-records without preview/testing caller grants. `Product Onboarding` now refuses
-new onboarding and remains only for existing workflow allocations' original
-actor/key recovery. Keep its worker pinned until old allocation custody is
-accounted for. Native canonical digests cannot replace old artifact byte digests.
+records without preview/testing caller grants. The retired `Product Onboarding`
+workflow and its reusable worker are removed; use the native original-actor/key
+readback, continuation and reviewed retention path for native allocations.
 Target/record qualification does not prove working previews or real-repository
 artifact provenance; verify those through the ordinary event-driven path.
 

@@ -331,38 +331,16 @@ supply retain_allocation: true and expected_allocation_custody_sha256 from the
 reviewed readback. Keep every other setup input unchanged. Apply retains its
 exact confirmation and reason. Other operations do not accept allocation controls.
 
-The protected generic-web onboarding worker accepts an optional allocation_control
-JSON input. Including mode readback or apply selects recovery only: it never
-applies product records or authorization records. The default key stays
-`generic-web-onboarding:target:<product>:<testing_context>:v1`. An explicit
-idempotency_key selects the original key during recovery. The Product Onboarding
-wrapper refuses key-only envelopes and normal onboarding. Retention additionally requires
-retain_allocation: true and expected_allocation_custody_sha256. The worker verifies
-the original target request artifact digest even during recovery. Recovery needs
-no product or authorization plan artifacts. For a target with missing product
-records, follow the [retention and fresh-context onboarding path](operations.md#compatibility-workflow-recovery). Successful product registration keeps
-the adopted target and project names, and compares both target and identity
-snapshots atomically before writing records.
-
-Product Onboarding forwards allocation_control to the protected worker pinned to
-the exact [worker-contract landing](https://github.com/cbusillo/launchplane/pull/4590),
-following the two-landing policy in [GitHub Actions security](github-actions-security.md).
-For readback, keep the original dispatch inputs, select outer mode dry_run and
-supply `{"mode":"readback"}`. The caller renders only the original target request,
-skips repository-token creation and all three planning API calls, and invokes the
-protected worker even though the outer mode is dry_run. The worker retains the
-original workflow identity and allocation key; no product or authorization plan
-is required. Dispatches without a recovery mode are refused; new products use the
-[native target and record path](operations.md#native-target-allocation).
-
-To continue the original allocation, select outer mode apply, provide its exact
-confirmation, and supply `{"mode":"apply"}`. For reviewed retention, add
-retain_allocation: true and expected_allocation_custody_sha256 to that envelope.
-Use the same explicit idempotency_key if the original apply supplied one. A
-key-only envelope is refused by Product Onboarding. Neither
-source landing grants access or activates the new worker trust anchor; those
-remain separate operations. A denied worker identity stays denied and follows
-the recorded activation path without switching callers or scopes.
+The retired `Product Onboarding` wrapper and reusable worker are removed.
+New generic-web products use the [native target and record
+path](operations.md#native-target-allocation), including its original-actor/key
+readback, continuation and reviewed custody retention. The general `Dokploy
+Target Setup` recovery controls above remain available. Successful product
+registration preserves adopted target and project names and compares target
+and identity snapshots atomically before writing records. The [workflow
+retirement evidence](operations.md#compatibility-workflow-recovery) records the
+legacy receipt inventory; deleting source does not delete those receipts or
+provider resources.
 
 ### Testing application state volume
 
