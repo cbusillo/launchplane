@@ -3003,22 +3003,12 @@ bindings, reviewed custody digests and existing caller-rule retirement/readback
 routes remain intact. Source deletion does not remove receipts, resources,
 credentials, grants or policy records.
 
-Retirement accounting on November 4, 2026 found 22 historical dispatches, all
-before the October 23 allocation-recovery worker landed. A read-only transaction
-against the service database found 17 completed receipts in the old wrapper's
-scope, including two successful target receipts, and no nonterminal receipt,
-allocation plan or allocation-progress record. Both target keys retain their
-completed legacy receipts. These legacy receipts predate allocation custody;
-the wrapper has no saved allocation to continue or retain. The separate native
-qualification allocations keep their existing custody and recovery paths.
-
-One historical target step failed and its logs have expired (HTTP 410).
-That does not establish absent provider effects or authorize deleting old
-resources. Preserve historical evidence and original requests/keys; investigate
-any resource discrepancy through supported read-only inventory before choosing
-a recovery action. Never replace a legacy request with a native allocation or
-replay it under a different actor. Completed legacy setup receipts are history,
-not proof of the current target's identity or health.
+The [retirement accounting](https://github.com/cbusillo/launchplane/issues/5246#issuecomment-6641873488)
+records the completed legacy receipts and absence of saved workflow allocations.
+One historical failed run's provider effects remain unknown. Investigate any
+resource discrepancy through supported read-only inventory, never a replay
+under another actor. Keep original requests and keys; legacy receipts are
+history, not proof of a current target's identity or health.
 
 Use `Generic Web Preview Authorization` for reviewed `onboard`, `expand`,
 `contract`, and `retire` operations. `onboard` bootstraps the managed preview

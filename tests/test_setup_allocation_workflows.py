@@ -72,7 +72,7 @@ class SetupAllocationWorkflowTests(unittest.TestCase):
         )
 
     def test_setup_reuses_explicit_key_and_renders_readback_and_retention(self) -> None:
-        control = {"idempotency_key": "original-key"}
+        control = {"idempotency_key": "original key-é"}
         first = self.setup_request(control)
         self.assertEqual(first.returncode, 0, first.stderr)
         first_output = self.output.read_text()
