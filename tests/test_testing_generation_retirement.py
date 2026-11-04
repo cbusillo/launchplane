@@ -106,11 +106,20 @@ class TestingGenerationRetirementTests(unittest.TestCase):
             context_name=self.context, instance_name="testing"
         )
         self.store.write_dokploy_target_record(
-            target.model_copy(
+            target.model_copy(update={"domains": (self.gen.domain_host,)})
+        )
+        runtime = next(
+            iter(
+                self.store.list_runtime_environment_records(
+                    scope="instance", context_name=self.context, instance_name="testing"
+                )
+            )
+        )
+        self.store.write_runtime_environment_record(
+            runtime.model_copy(
                 update={
-                    "domains": (self.gen.domain_host,),
                     "env": {
-                        **target.env,
+                        **runtime.env,
                         "ODOO_PROJECT_NAME": self.gen.namespace,
                         "ODOO_STACK_NAME": self.gen.namespace,
                     },
