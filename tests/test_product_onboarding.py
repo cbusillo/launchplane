@@ -30,6 +30,7 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.workflows.product_onboarding import (
     apply_product_onboarding_manifest,
     build_product_profile_record,
+    build_provider_target_records,
 )
 from tests.support.workflows import load_workflow
 
@@ -1395,6 +1396,24 @@ class ProductOnboardingTests(unittest.TestCase):
         manifest = ProductOnboardingManifest.model_validate(payload)
 
         self.assertEqual(manifest.provider_targets, ())
+
+    def test_onboarding_requires_ordinary_settings_in_the_lane_declaration(self) -> None:
+        manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+        lane = manifest.runtime_environments[0]
+        targets = build_provider_target_records(
+            manifest=manifest, updated_at="2026-11-04T00:00:00Z"
+        )
+        self.assertFalse(any(target.env for target in targets))
+        conflicting = manifest.model_copy(
+            update={
+                "provider_targets": (
+                    manifest.provider_targets[0].model_copy(update={"env": dict(lane.env)}),
+                    *manifest.provider_targets[1:],
+                )
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "runtime_environments"):
+            build_provider_target_records(manifest=conflicting, updated_at="2026-11-04T00:00:00Z")
 
     def test_product_onboarding_manifest_keeps_empty_provider_targets_intentional(
         self,

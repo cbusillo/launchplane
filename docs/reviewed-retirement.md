@@ -11,43 +11,18 @@ Neither path calls a provider, syncs a runtime, deploys, or restarts a lane.
 
 ## Plain stored settings
 
-For the tracked-target environment fold, reuse the existing
-`GET /v1/dokploy-targets/inspect?context=<context>&instance=<instance>` read.
-Its `tracked_target.instance_setting_comparison` groups target key names by
-whether the exact instance runtime record has the same string value, a different
-value, or no value, and separately reports target keys retired by that record.
-It is null when the target has no environment overlay. Context/global settings,
-managed-secret values, provider values and retained operation snapshots are not
-compared. No values or value hashes are returned, and no secret versions are read.
-The nested `generation_resources` comparison checks the same target keys against
-the resources selected by existing published-generation custody. It reports
-equal, different, target-only and generation-only key names. `no_custody` means
-no supported generation record selects the lane; `unavailable` means its recorded
-custody could not be evaluated. Neither qualifies deletion. `compared` reports
-equality with the saved serving snapshot, including a retained snapshot after
-an inverse; it does not attest a publication phase or change delivery.
-`generation_snapshots` reports the number of saved recipient/activation target
-snapshots, including production prior attempts and publication history, and the
-union of their resource and other key names. It reads no secret versions and
-returns no values. It covers these recipient/activation records only; Odoo
-rebuild runtime snapshots are not read. Missing custody is distinct from a
-complete empty key set. History and serving comparisons fail independently;
-an unavailable history is not deletion qualification.
-Retained target rows and publication snapshots remain unchanged; inverse
-production publication selects the retained generation's resource values.
-The existing target-inspection permissions and provider read still apply.
-The comparison also requires the existing exact-lane `secret.list` runtime-setting
-read permission; other inspectors receive null without reading runtime settings.
-
-This is temporary evidence for deleting the tracked-target layer, not another
-settings inventory or removal authorization. The target and runtime record are
-read separately; their timestamps identify an observation, not an atomic
-migration plan. A fold must recheck equality and retirement under its write
-locks, preserve generation-specific resource ownership and retained operations,
-and keep live delivery on accepted releases. Remove this comparison when the
-tracked-target layer is deleted. Ordinary settings remain in lane declarations;
-generation resources stay with the existing published-generation records.
-Never overwrite a conflicting lane value to make a fold pass.
+Ordinary settings come from lane declarations. Volumes and ports selected by a
+published generation come from its saved recipient or activation records, bound
+to the serving target identity. Retained generations keep their own resource
+selections. Candidate preparation explicitly excludes the serving generation.
+Tracked target environment fields remain in frozen records for publication,
+rollback and recovery comparisons; they no longer supply runtime settings.
+Onboarding declares ordinary settings in `runtime_environments`, not provider
+targets. Live delivery still requires accepted releases and verified backups.
+The temporary target/lane/generation comparison has been removed after
+qualification; target inspection continues to report stored key names only.
+The settings inventory's `target_overlay` entries describe saved target fields,
+not runtime consumption.
 
 The existing Odoo target-replacement plan also reports two advisory fields on
 `current_target`. `compose_matches_generated` compares the live provider Compose

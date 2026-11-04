@@ -1116,17 +1116,6 @@ def register_dokploy_target_inspect_read_routes(
                 host=host,
                 token=token,
                 request=inspect_request,
-                compare_instance_settings=bool(
-                    context.strip()
-                    and instance.strip()
-                    and common.authorization_allows(
-                        identity=identity,
-                        action="secret.list",
-                        product=LAUNCHPLANE_SERVICE_CONTEXT,
-                        context=context.strip(),
-                        target=AuthorizationTarget(scope="instance", instances=(instance.strip(),)),
-                    )
-                ),
             )
         except ValidationError as error:
             raise common.http_error(

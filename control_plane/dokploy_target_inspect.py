@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PRIVILEGED_OPERATION_WORKER_HEARTBEAT_FUTURE_SKEW_SECONDS,
     PRIVILEGED_OPERATION_WORKER_KIND,
@@ -25,10 +24,6 @@ from control_plane.dokploy.application_runtime import (
     fetch_application_runtime,
 )
 from control_plane.dokploy.application_runtime_summary import summarize_application_runtime
-from control_plane.published_generation_resources import published_generation_resources
-from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.contracts.production_recipient import ProductionRecipientRecord
-from control_plane.contracts.testing_activation import TestingActivationRecord
 
 DokployTargetType = Literal["application", "compose"]
 _RUNTIME_EVIDENCE_LOG_LINE_COUNT = dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT
@@ -125,10 +120,6 @@ class DokployTargetInspectRequest(BaseModel):
 
 
 class DokployTargetInspectStore(Protocol):
-    def list_runtime_environment_records(
-        self, *, scope: str = "", context_name: str = "", instance_name: str = ""
-    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
-
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetRecord: ...
@@ -226,153 +217,12 @@ def _worker_heartbeat_evidence(
     }
 
 
-def _generation_snapshot_keys(
-    store: PostgresRecordStore, target: DokployTargetRecord
-) -> dict[str, object]:
-    snapshots: list[tuple[DokployTargetRecord, set[str]]] = []
-    profiles = [
-        profile
-        for profile in store.list_product_profile_records()
-        if any(
-            (lane.context, lane.instance) == (target.context, target.instance)
-            for lane in profile.lanes
-        )
-    ]
-    if len(profiles) > 1:
-        raise ValueError("Generation snapshots require an exclusively owned lane.")
-    for profile in profiles:
-        if target.instance == "prod":
-            payload = store.read_production_recipient(profile.product, target.context)
-            if payload is None:
-                continue
-            current = ProductionRecipientRecord.model_validate(payload)
-            records = (
-                current,
-                *(ProductionRecipientRecord.model_validate(row) for row in current.prior_attempts),
-            )
-            for record in records:
-                if (record.product, record.context) != (profile.product, target.context):
-                    raise ValueError("Generation history belongs to another product.")
-                resource_keys = {*record.request.volume_keys.values(), *record.request.ports}
-                snapshots.append((record.retained_target, resource_keys))
-                for publication in (record.publication, *record.publication.get("history", [])):
-                    if not isinstance(publication, dict):
-                        raise ValueError("Generation publication history is malformed.")
-                    for side in ("before", "published"):
-                        if side in publication:
-                            snapshots.append(
-                                (
-                                    DokployTargetRecord.model_validate(publication[side]["target"]),
-                                    resource_keys,
-                                )
-                            )
-        elif target.instance == "testing":
-            payloads = list(
-                store.list_testing_application_activations(profile.product, target.context)
-            )
-            legacy = store.read_testing_activation(profile.product, target.context)
-            if legacy is not None and legacy not in payloads:
-                payloads.append(legacy)
-            for payload in payloads:
-                activation = TestingActivationRecord.model_validate(payload)
-                if (activation.product, activation.context) != (profile.product, target.context):
-                    raise ValueError("Generation history belongs to another product.")
-                resource_keys = {
-                    *activation.request.volume_keys.values(),
-                    *activation.request.port_keys,
-                }
-                snapshots.append((activation.retained_target, resource_keys))
-                if activation.published_target is not None:
-                    snapshots.append((activation.published_target, resource_keys))
-    if any(
-        (snapshot.context, snapshot.instance) != (target.context, target.instance)
-        for snapshot, _ in snapshots
-    ):
-        raise ValueError("Generation snapshot belongs to another lane.")
-    return {
-        "status": "complete" if snapshots else "no_custody",
-        "snapshot_count": len(snapshots),
-        "resource_keys": sorted(
-            {key for snapshot, keys in snapshots for key in snapshot.env.keys() & keys}
-        ),
-        "other_keys": sorted(
-            {key for snapshot, keys in snapshots for key in snapshot.env.keys() - keys}
-        ),
-    }
-
-
-def _instance_setting_comparison(
-    record_store: DokployTargetInspectStore, target: DokployTargetRecord
-) -> dict[str, object] | None:
-    if not target.env:
-        return None
-    record = next(
-        (
-            record
-            for record in record_store.list_runtime_environment_records(
-                scope="instance", context_name=target.context, instance_name=target.instance
-            )
-            if record.scope == "instance"
-            and (record.context, record.instance) == (target.context, target.instance)
-        ),
-        None,
-    )
-    values = record.env if record else {}
-    comparison: dict[str, object] = {
-        "same_value_keys": sorted(
-            key for key, value in target.env.items() if key in values and value == str(values[key])
-        ),
-        "different_value_keys": sorted(
-            key for key, value in target.env.items() if key in values and value != str(values[key])
-        ),
-        "missing_keys": sorted(target.env.keys() - values.keys()),
-        "retired_keys": sorted(target.env.keys() & set(record.retired_provider_keys))
-        if record
-        else [],
-        "instance_settings_updated_at": record.updated_at if record else None,
-    }
-    try:
-        comparison["generation_snapshots"] = _generation_snapshot_keys(
-            cast(PostgresRecordStore, record_store), target
-        )
-    except (ValueError, FileNotFoundError, KeyError, TypeError):
-        comparison["generation_snapshots"] = {"status": "unavailable"}
-    try:
-        resources = published_generation_resources(
-            cast(PostgresRecordStore, record_store),
-            context=target.context,
-            instance=target.instance,
-        )
-        if resources is None:
-            comparison["generation_resources"] = {"status": "no_custody"}
-        else:
-            comparison["generation_resources"] = {
-                "status": "compared",
-                "same_value_keys": sorted(
-                    key
-                    for key in target.env.keys() & resources.keys()
-                    if target.env[key] == resources[key]
-                ),
-                "different_value_keys": sorted(
-                    key
-                    for key in target.env.keys() & resources.keys()
-                    if target.env[key] != resources[key]
-                ),
-                "target_only_keys": sorted(target.env.keys() - resources.keys()),
-                "generation_only_keys": sorted(resources.keys() - target.env.keys()),
-            }
-    except (ValueError, FileNotFoundError, KeyError, TypeError):
-        comparison["generation_resources"] = {"status": "unavailable"}
-    return comparison
-
-
 def inspect_dokploy_target(
     *,
     record_store: DokployTargetInspectStore,
     host: str,
     token: str,
     request: DokployTargetInspectRequest,
-    compare_instance_settings: bool = False,
     fetch_target_payload: FetchDokployTargetPayload | None = None,
     fetch_compose_service_runtime: FetchDokployComposeServiceRuntime | None = None,
     fetch_compose_logs: FetchDokployComposeLogs | None = None,
@@ -607,9 +457,6 @@ def inspect_dokploy_target(
             "source_label": target_record.source_label,
             "updated_at": target_record.updated_at,
             "env_keys": sorted(target_record.env),
-            "instance_setting_comparison": _instance_setting_comparison(record_store, target_record)
-            if compare_instance_settings
-            else None,
         }
         if provider_target_record is None:
             result["provider_target_record"] = {"status": "missing"}

@@ -154,7 +154,6 @@ def build_odoo_prod_backup_restore_plan(
 
     runtime_values = _runtime_values_from_store(
         record_store=record_store,
-        target_record=target_record,
         context=request.context,
         instance=request.instance,
     )
@@ -648,7 +647,6 @@ def execute_odoo_prod_backup_restore_apply(
         )
         runtime_values = _runtime_values_from_store(
             record_store=record_store,
-            target_record=target_record,
             context=plan.context,
             instance=plan.instance,
         )
@@ -1344,7 +1342,6 @@ def _read_inventory(
 def _runtime_values_from_store(
     *,
     record_store: OdooProdBackupRestoreStore,
-    target_record: DokployTargetRecord,
     context: str,
     instance: str,
 ) -> dict[str, str]:
@@ -1367,7 +1364,7 @@ def _runtime_values_from_store(
         definition=definition,
         context_name=context,
         instance_name=instance,
-        target_env={key: str(value) for key, value in target_record.env.items()},
+        target_env={},
         retired_keys=control_plane_runtime_environments.retired_provider_keys_from_store(
             record_store=record_store,
             context_name=context,

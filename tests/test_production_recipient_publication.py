@@ -18,7 +18,8 @@ from control_plane.published_generation_resources import (
     published_generation_resources,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.dokploy_target_inspect import _generation_snapshot_keys
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.runtime_environments import resolve_site_runtime_environment
 from control_plane.production_recipient_publication import (
     RecipientPublication,
     commit_publication,
@@ -85,39 +86,6 @@ class RecipientPublicationTests(unittest.TestCase):
         self.assertEqual(
             retained, {key: value for key, value in before_values.items() if key in keys}
         )
-        archive = {
-            **record.publication,
-            "before": {
-                **before,
-                "target": record.retained_target.model_copy(
-                    update={"env": {"HISTORY_ONLY": "history-value-not-for-output"}}
-                ).model_dump(mode="json"),
-            },
-        }
-        prior = record.model_copy(
-            update={
-                "publication": {},
-                "retained_target": record.retained_target.model_copy(
-                    update={"env": {"PRIOR_ONLY": "prior-value-not-for-output"}}
-                ),
-            }
-        )
-        record.publication["history"] = [archive]
-        record.prior_attempts = [prior.model_dump(mode="json", exclude={"prior_attempts"})]
-        store.read_production_recipient.return_value = record.model_dump(mode="json")
-        snapshot_keys = _generation_snapshot_keys(store, self.publication.target)
-        self.assertEqual(snapshot_keys["resource_keys"], sorted(keys))
-        self.assertEqual(
-            snapshot_keys["other_keys"],
-            sorted((self.fixture.values.keys() - keys) | {"HISTORY_ONLY", "PRIOR_ONLY"}),
-        )
-        snapshot_count = snapshot_keys["snapshot_count"]
-        assert isinstance(snapshot_count, int)
-        self.assertEqual(snapshot_count, 6)
-        for value in (*generation_values.values(), *before_values.values()):
-            self.assertNotIn(value, str(snapshot_keys))
-        self.assertNotIn("history-value-not-for-output", str(snapshot_keys))
-        self.assertNotIn("prior-value-not-for-output", str(snapshot_keys))
 
     def setUp(self) -> None:
         self.fixture = preparation_tests.ProductionRecipientTests()
@@ -254,6 +222,45 @@ class RecipientPublicationTests(unittest.TestCase):
         return commit_publication(
             self.store, self.record, self.publication, validate_release=lambda: None
         )
+
+    def test_site_runtime_keeps_published_resources_when_lane_and_target_settings_differ(
+        self,
+    ) -> None:
+        resources = {
+            **{key: f"generation-{role}" for role, key in self.record.request.volume_keys.items()},
+            **{key: str(value) for key, value in self.record.request.ports.items()},
+        }
+        self.publication = self.publication.model_copy(
+            update={"target": self.publication.target.model_copy(update={"env": resources})}
+        )
+        self.publish()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.record.context,
+                instance="prod",
+                env={**self.fixture.values, **{key: "stale-lane" for key in resources}},
+                updated_at=self.publication.target.updated_at,
+            )
+        )
+        target = self.store.read_dokploy_target_record(
+            context_name=self.record.context, instance_name="prod"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "env": {**{key: "stale-target" for key in resources}, "TARGET_ONLY": "ignored"}
+                }
+            )
+        )
+        resolved = resolve_site_runtime_environment(
+            control_plane_root=self.fixture.root,
+            context_name=self.record.context,
+            instance_name="prod",
+            database_url=self.store.database_url,
+        )
+        self.assertEqual({key: resolved.values[key] for key in resources}, resources)
+        self.assertNotIn("TARGET_ONLY", resolved.values)
 
     def test_read_only_inventory_bookkeeping_does_not_weaken_publication_mutation_guards(
         self,

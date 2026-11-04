@@ -324,7 +324,6 @@ def _provider_only_keys(
 def _site_runtime_key_names(
     *,
     record_store: OdooStableTargetReplacementStore,
-    target_record: DokployTargetRecord,
     context: str,
     instance: str,
 ) -> set[str]:
@@ -334,7 +333,7 @@ def _site_runtime_key_names(
     The site's context and lane records, its tracked target settings and the
     managed secrets stored for it; never global values or another site's.
     """
-    names: set[str] = set(target_record.env)
+    names: set[str] = set()
     definition = (
         control_plane_runtime_environments.load_optional_runtime_environment_definition_from_store(
             record_store=record_store
@@ -1006,13 +1005,12 @@ def _replacement_backup_values(
     record_store: OdooStableTargetReplacementStore,
     lane: ProductLaneProfile,
 ) -> dict[str, str]:
-    target = record_store.read_dokploy_target_record(
+    record_store.read_dokploy_target_record(
         context_name=lane.context,
         instance_name=lane.instance,
     )
     return _resolve_recorded_runtime_values(
         record_store=record_store,
-        target_record=target,
         context=lane.context,
         instance=lane.instance,
     )
@@ -1660,7 +1658,6 @@ def build_odoo_stable_target_replacement_plan(
         try:
             recorded_runtime_values = _resolve_recorded_runtime_values(
                 record_store=record_store,
-                target_record=target_record,
                 context=lane.context,
                 instance=lane.instance,
             )
@@ -1764,7 +1761,6 @@ def build_odoo_stable_target_replacement_plan(
             site_keys = control_plane_runtime_environments.site_application_keys(
                 _site_runtime_key_names(
                     record_store=record_store,
-                    target_record=target_record,
                     context=lane.context,
                     instance=lane.instance,
                 )
@@ -2018,7 +2014,6 @@ def _requires_two_slot_release(lane: ProductLaneProfile, inventory: object) -> b
 def _resolve_recorded_runtime_values(
     *,
     record_store: OdooStableTargetReplacementStore,
-    target_record: DokployTargetRecord,
     context: str,
     instance: str,
 ) -> dict[str, str]:
@@ -2034,7 +2029,6 @@ def _resolve_recorded_runtime_values(
         context_name=context,
         instance_name=instance,
     )
-    values.update(target_record.env)
     return values
 
 

@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+from control_plane.published_generation_resources import published_generation_resources
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from typing import Protocol, cast
@@ -81,15 +82,12 @@ def desired_release_settings(
         record for record in store.list_runtime_environment_records() if record.scope != "global"
     )
     definition = environments.build_runtime_environment_definition_from_records(records)
-    target_env: dict[str, str] = {}
-    try:
-        target_env = dict(
-            store.read_dokploy_target_record(
-                context_name=lane.context, instance_name=lane.instance
-            ).env
+    target_env = (
+        published_generation_resources(
+            cast(PostgresRecordStore, store), context=lane.context, instance=lane.instance
         )
-    except FileNotFoundError:
-        pass
+        or {}
+    )
     retired = environments.retired_provider_keys_from_store(
         record_store=store,
         context_name=lane.context,

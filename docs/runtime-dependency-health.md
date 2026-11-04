@@ -5,7 +5,7 @@ deployment metadata. It does not connect to an application's database or decrypt
 application credentials to monitor it.
 
 The Odoo driver implies a database. For web lanes, Launchplane examines the
-context and exact-lane runtime records, tracked target overrides and the managed
+context and exact-lane runtime records and the managed
 secret bindings selected by the same selector as runtime delivery. Global and
 other-site credentials, disabled bindings, other integrations and retired keys
 do not imply dependencies. Standard database keys (`DATABASE_URL`, `DIRECT_URL`,

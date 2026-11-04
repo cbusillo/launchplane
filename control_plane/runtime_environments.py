@@ -12,7 +12,7 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.secret_record import SecretBinding, SecretScope
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.dokploy import source as dokploy_source
+from control_plane.published_generation_resources import published_generation_resources
 from control_plane.preview_settings import validate_preview_scope
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
@@ -107,8 +107,7 @@ def resolve_runtime_environment_values(
         instance_name=instance_name,
     )
     merged_values.update(
-        resolve_tracked_target_environment_values(
-            control_plane_root=control_plane_root,
+        resolve_published_generation_environment_values(
             context_name=context_name,
             instance_name=instance_name,
             database_url=database_url,
@@ -214,8 +213,7 @@ def resolve_site_runtime_environment(
     target_environment = (
         target_environment_override
         if target_environment_override is not None
-        else resolve_tracked_target_environment_values(
-            control_plane_root=control_plane_root,
+        else resolve_published_generation_environment_values(
             context_name=context_name,
             instance_name=instance_name,
             database_url=database_url,
@@ -579,9 +577,7 @@ def _record_layers(
     layers.append(
         (
             target_env,
-            _RuntimeValueSource(
-                f"the {context_name}/{instance_name} tracked Dokploy target record"
-            ),
+            _RuntimeValueSource(f"the {context_name}/{instance_name} generation resources"),
         )
     )
     return layers
@@ -609,8 +605,7 @@ def _runtime_value_sources(
         ),
         context_name=context_name,
         instance_name=instance_name,
-        target_env=resolve_tracked_target_environment_values(
-            control_plane_root=control_plane_root,
+        target_env=resolve_published_generation_environment_values(
             context_name=context_name,
             instance_name=instance_name,
             database_url=database_url,
@@ -714,35 +709,26 @@ def resolve_runtime_context_values(
     )
 
 
-def resolve_tracked_target_environment_values(
+def resolve_published_generation_environment_values(
     *,
-    control_plane_root: Path,
     context_name: str,
     instance_name: str,
     database_url: str | None = None,
 ) -> dict[str, str]:
+    selected_database = resolve_database_url(database_url)
+    if not selected_database:
+        raise click.ClickException("Published generation resources require DB-backed records.")
+    store = PostgresRecordStore(database_url=selected_database)
     try:
-        source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
-            control_plane_root=control_plane_root,
-            database_url=database_url,
+        store.ensure_schema()
+        return (
+            published_generation_resources(store, context=context_name, instance=instance_name)
+            or {}
         )
-    except click.ClickException as error:
-        error_message = str(error)
-        if error_message.startswith(
-            "Missing Launchplane tracked Dokploy target authority"
-        ) or error_message.startswith(
-            "Missing DB-backed Launchplane tracked Dokploy target records."
-        ):
-            return {}
-        raise
-    target_definition = dokploy_source.find_dokploy_target_definition(
-        source_of_truth,
-        context_name=context_name,
-        instance_name=instance_name,
-    )
-    if target_definition is None:
-        return {}
-    return dict(target_definition.env)
+    except (ValueError, FileNotFoundError, KeyError, TypeError) as error:
+        raise click.ClickException("Published generation resources are unavailable.") from error
+    finally:
+        store.close()
 
 
 def _load_optional_runtime_environment_definition_from_database(

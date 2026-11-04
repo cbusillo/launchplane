@@ -70,6 +70,21 @@ from control_plane.workflows.ship import build_deployment_record
 
 
 class _GenericWebPromotionStore:
+    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        return (self.profile,)
+
+    @staticmethod
+    def read_production_recipient(_product: str, _context: str) -> None:
+        return None
+
+    @staticmethod
+    def list_testing_application_activations(_product: str, _context: str) -> tuple[()]:
+        return ()
+
+    @staticmethod
+    def read_testing_activation(_product: str, _context: str) -> None:
+        return None
+
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
         self.runtime_records: tuple[RuntimeEnvironmentRecord, ...] = ()

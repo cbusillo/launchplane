@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
+from control_plane.published_generation_resources import published_generation_resources
+from control_plane.storage.postgres import PostgresRecordStore
 import re
 from time import monotonic, sleep
 from typing import Literal, NamedTuple, Protocol, cast, runtime_checkable
@@ -971,7 +973,12 @@ class DokployGenericWebDeployProvider:
             record_store=dokploy_store,
             context_name=context_name,
             instance_name=instance_name,
-            target_environment=target_definition.env,
+            target_environment=published_generation_resources(
+                cast(PostgresRecordStore, dokploy_store),
+                context=context_name,
+                instance=instance_name,
+            )
+            or {},
         )
         configured_ship_mode = dokploy_source.resolve_dokploy_ship_mode(
             context_name,

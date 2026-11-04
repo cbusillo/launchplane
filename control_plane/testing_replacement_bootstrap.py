@@ -20,7 +20,7 @@ from control_plane.contracts.disposable_lane import (
     DisposableLaneSafety,
     TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
 )
-from control_plane.contracts.dokploy_target_record import PublicHostEffect, DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import PublicHostEffect
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.disposable_lanes import (
@@ -197,7 +197,6 @@ def bootstrap_copy_prerequisites(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
     context: str,
-    target: DokployTargetRecord,
     generation: FreshOdooTestingGeneration | None,
     source_mode: Literal["ssh", "container-export"],
 ) -> tuple[tuple[str, ...], str]:
@@ -210,7 +209,7 @@ def bootstrap_copy_prerequisites(
     with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED):
         require_distinct_testing_credentials(store, profile, context)
     source_binding = testing_restore_source_binding(
-        store, profile, context, target, generation, source_mode
+        store, profile, context, generation, source_mode
     )
     return tuple(sorted(omitted)), source_binding
 
@@ -278,7 +277,6 @@ def testing_restore_source_binding(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
     context: str,
-    target: DokployTargetRecord,
     generation: FreshOdooTestingGeneration | None,
     source_mode: Literal["ssh", "container-export"],
 ) -> str:
@@ -289,7 +287,6 @@ def testing_restore_source_binding(
                 "testing" if scope == "instance" else ""
             ):
                 source_values.update({key: str(value) for key, value in runtime_record.env.items()})
-    source_values.update({key: str(value) for key, value in target.env.items()})
     source_binding = ""
     with _bootstrap_prerequisite(BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED):
         if source_mode == "container-export":
@@ -377,7 +374,7 @@ def bootstrap_plan(
     ):
         raise ValueError("Fresh testing requires an independent, unbound hostname.")
     omitted, source_binding = bootstrap_copy_prerequisites(
-        store, profile, request.context, target, generation, request.source_mode
+        store, profile, request.context, generation, request.source_mode
     )
     digest = canonical_json_sha256(
         {

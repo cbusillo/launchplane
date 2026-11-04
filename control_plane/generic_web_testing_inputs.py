@@ -9,6 +9,8 @@ import click
 from control_plane import live_target_runtime as runtime
 from control_plane import runtime_environments as environments
 from control_plane import secrets
+from control_plane.published_generation_resources import published_generation_resources
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -172,8 +174,14 @@ def testing_input_authority(
     declared = runtime.declared_runtime_keys(
         profile=profile, context_name=lane.context, instance_name=lane.instance
     )
+    resources = (
+        published_generation_resources(
+            cast(PostgresRecordStore, store), context=lane.context, instance=lane.instance
+        )
+        or {}
+    )
     if (
-        not target.env
+        not resources
         and not selected
         and not declared
         and not retired
@@ -188,7 +196,7 @@ def testing_input_authority(
                     "context": lane.context,
                     "instance": lane.instance,
                     "id": binding.target_id,
-                    "env": target.env,
+                    "env": resources,
                 },
                 "settings": sorted(
                     (
@@ -233,14 +241,15 @@ def prepare_testing_inputs(
     profile = store.read_product_profile_record(profile.product)
     if testing_input_authority(store, profile, lane) != expected_digest:
         raise click.ClickException("Application testing input authority changed before delivery.")
-    target = store.read_dokploy_target_record(
-        context_name=lane.context, instance_name=lane.instance
-    )
+    store.read_dokploy_target_record(context_name=lane.context, instance_name=lane.instance)
     environment = environments.resolve_site_runtime_environment_from_store(
         record_store=store,
         context_name=lane.context,
         instance_name=lane.instance,
-        target_environment=target.env,
+        target_environment=published_generation_resources(
+            cast(PostgresRecordStore, store), context=lane.context, instance=lane.instance
+        )
+        or {},
     )
     declared = runtime.product_lane_declared_keys(
         record_store=store,

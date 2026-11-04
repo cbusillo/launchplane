@@ -60,9 +60,7 @@ def maintenance_spec(
     """Only stored recipient authority; host code independently inspects every consumer."""
     from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 
-    target = store.read_dokploy_target_record(
-        context_name=generation.context, instance_name="testing"
-    )
+    store.read_dokploy_target_record(context_name=generation.context, instance_name="testing")
     values: dict[str, Any] = {}
     for scope in ("context", "instance"):
         for runtime in store.list_runtime_environment_records(context_name=generation.context):
@@ -70,7 +68,6 @@ def maintenance_spec(
                 "testing" if scope == "instance" else ""
             ):
                 values.update(runtime.env)
-    values.update(target.env)
     inventory = store.read_environment_inventory(
         context_name=generation.context, instance_name="testing"
     )

@@ -630,11 +630,6 @@ class TestingReplacementResourceAdapter:
             None,
         )
         if any(
-            key in target.env and target.env[key] != value
-            for key, value in resources.volumes.items()
-        ):
-            raise ValueError("Target volume overrides disagree with the qualified allocation.")
-        if any(
             binding.status == "configured"
             and binding.binding_key in resources.volumes
             and binding.context in {"", self.request.context}

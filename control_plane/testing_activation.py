@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hmac
 import json
 from pathlib import Path
+from control_plane.published_generation_resources import published_generation_resources
 import re
 from typing import Any, Literal, cast
 
@@ -580,10 +581,8 @@ def retained_fence_is_separated(store: object, reservation: object) -> bool:
             and target.target_id != record.retained_target_id.target_id
             and record.published_target is not None
             and current.target_type == "compose"
-            and all(
-                current.env.get(key) == record.published_target.env.get(key)
-                for key in (*record.request.volume_keys.values(), *record.request.port_keys)
-            )
+            and published_generation_resources(store, context=record.context, instance="testing")
+            == record.published_target.env
         )
     except (ValueError, FileNotFoundError):
         return False

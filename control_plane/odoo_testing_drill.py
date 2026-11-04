@@ -343,9 +343,7 @@ def prepare_drill(
     if previous is None or not previous.completed_at:
         raise DrillPrerequisite("completed_qualified_testing_generation_required")
     safety = collect_drill_admission(store, previous, now)
-    target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
-    if "ODOO_DB_NAME" in target.env:
-        raise DrillPrerequisite("target_database_override_requires_migration")
+    store.read_dokploy_target_record(context_name=context, instance_name="testing")
     runtime = next(
         (
             item

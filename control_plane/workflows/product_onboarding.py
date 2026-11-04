@@ -218,6 +218,8 @@ def _read_existing_product_profile(
 def build_provider_target_records(
     *, manifest: ProductOnboardingManifest, updated_at: str
 ) -> tuple[DokployTargetRecord, ...]:
+    if any(target.env for target in manifest.provider_targets):
+        raise ValueError("Declare ordinary settings in runtime_environments, not provider targets.")
     return tuple(
         DokployTargetRecord(
             context=target.context,
@@ -238,7 +240,6 @@ def build_provider_target_records(
             healthcheck_enabled=target.healthcheck_enabled,
             healthcheck_path=target.healthcheck_path or manifest.health_path,
             healthcheck_timeout_seconds=target.healthcheck_timeout_seconds,
-            env=dict(target.env),
             domains=target.domains,
             updated_at=updated_at,
             source_label=manifest.source_label,

@@ -216,9 +216,6 @@ def read_lane_provider_env(
         if profile.driver_id == "odoo" and target_record.target_type == "compose"
         else {}
     )
-    # Keys the deploy takes from the tracked target or a managed secret are already
-    # recorded; the lane's runtime-environment records are checked by the planner.
-    # The same selection the deploy's secret delivery makes for this lane.
     secret_keys = control_plane_secrets.resolve_effective_secret_bindings_from_store(
         record_store=record_store,
         integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
@@ -235,7 +232,7 @@ def read_lane_provider_env(
     return provider_key_adoption.LaneProviderEnv(
         env=env,
         template_defaults=template_defaults,
-        recorded_keys=frozenset(target_record.env) | frozenset(secret_keys),
+        recorded_keys=frozenset(secret_keys),
         unretirable_keys=frozenset(
             key for key in env if live_target_runtime.provider_key_retirement_blocked(key, declared)
         ),
