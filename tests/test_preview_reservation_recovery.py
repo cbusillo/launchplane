@@ -82,6 +82,93 @@ from tests.test_odoo_preview_apply_execution import _issued_plan, _refresh_paylo
 
 
 class PreviewReservationRecoveryTests(unittest.TestCase):
+    def test_original_evidence_resolves_controller_plan_without_mutating_or_current_pointer(
+        self,
+    ) -> None:
+        from control_plane import preview_evidence
+
+        assert self.request.apply.manifest is not None
+        query = preview_evidence.PreviewEvidenceQuery(
+            plan_id=self.reservation.idempotency_key,
+            pr_number=self.issued.plan_request.pr_number,
+            source_git_ref=self.issued.plan_request.source_git_ref,
+            image_digest=self.request.apply.manifest.image.digest,
+        )
+        with patch.object(preview_evidence, "read_preview_provider_history", return_value={}):
+            result = preview_evidence.read_preview_evidence(
+                self.store, product=self.profile.product, query=query, root=self.root
+            )
+        original = cast(dict[str, object], result["original"])
+        self.assertEqual(original["reservation_id"], self.reservation.record_id)
+        self.assertEqual(original["state"], self.reservation.state)
+        self.assertEqual(
+            self.store.read_idempotency_record_by_id(self.reservation.record_id), self.reservation
+        )
+        with (
+            patch.object(self.store, "read_original_mutation_intent", return_value={}),
+            patch.object(preview_evidence, "read_preview_provider_history") as provider,
+        ):
+            with self.assertRaisesRegex(ValueError, "Original preview intent cannot be bound"):
+                preview_evidence.read_preview_evidence(
+                    self.store, product=self.profile.product, query=query, root=self.root
+                )
+        provider.assert_not_called()
+
+    def test_original_history_requires_retained_schedule_binding_and_complete_provider_shape(
+        self,
+    ) -> None:
+        from control_plane import preview_evidence
+        from control_plane.dokploy import api, source
+
+        retained = dict(self.operation.adapter.original_intent())
+        retained["schedule_binding"] = dict(
+            schedule_type="server", lookup_id="private-server", app_name="private-schedule"
+        )
+        deployments = [
+            {
+                "deploymentId": "private-job",
+                "status": "done",
+                "log": "private-log",
+                "env": "private-credential",
+            }
+        ]
+        with (
+            patch.object(self.store, "read_original_mutation_intent", return_value=retained),
+            patch.object(
+                source,
+                "read_dokploy_config",
+                return_value=("https://private-provider", "private-token"),
+            ),
+            patch.object(
+                api,
+                "dokploy_request",
+                return_value=[{"appName": "private-schedule", "deployments": deployments}],
+            ) as provider,
+        ):
+            result = preview_evidence.read_preview_provider_history(
+                self.store,
+                root=self.root,
+                reservation=self.reservation,
+                compose_id="${created.unproven}",
+            )
+            schedule = cast(dict[str, object], result["schedule"])
+            self.assertEqual(schedule["coverage"], "complete_retained_history")
+            self.assertTrue(schedule["quiescent"])
+            self.assertEqual(schedule["original_job_binding"], "unavailable")
+            self.assertNotIn("private-", json.dumps(result))
+            for raw in (
+                None,
+                [{"appName": "private-schedule", "deployments": [None]}],
+                [{"appName": "other", "deployments": []}],
+            ):
+                provider.return_value = raw
+                result = preview_evidence.read_preview_provider_history(
+                    self.store, root=self.root, reservation=self.reservation, compose_id=""
+                )
+                schedule = cast(dict[str, object], result["schedule"])
+                self.assertEqual(schedule["coverage"], "unavailable")
+                self.assertIsNone(schedule["quiescent"])
+
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

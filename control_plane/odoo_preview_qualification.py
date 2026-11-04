@@ -268,6 +268,12 @@ def production_credentials(
 def collect_odoo_preview_qualification(
     store: PostgresRecordStore, *, preview: PreviewRecord, root: Path
 ) -> PreviewQualification:
+    return read_odoo_preview_qualification(store, preview=preview, root=root)
+
+
+def read_odoo_preview_qualification(
+    store: PostgresRecordStore, *, preview: PreviewRecord, root: Path
+) -> PreviewQualification:
     checkpoint = "preview_serving_authority_unavailable"
     try:
         authority = read_preview_inspection_authority(store, preview)

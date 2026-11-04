@@ -28819,7 +28819,9 @@ def create_launchplane_fastapi_app(
         register_preview_reservation_read_routes,
     )
 
-    register_preview_reservation_read_routes(app, dependencies=read_route_dependencies)
+    register_preview_reservation_read_routes(
+        app, dependencies=read_route_dependencies, root=resolved_control_plane_root
+    )
 
     register_inventory_operation_read_routes(app, dependencies=read_route_dependencies)
 

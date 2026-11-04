@@ -5,6 +5,7 @@ import click
 import json
 from typing import Any
 from unittest.mock import Mock, patch
+from urllib.parse import urlencode
 
 from control_plane.contracts.odoo_post_deploy_payload import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane.disposable_lane_collection import collect_disposable_lane_facts
@@ -37,9 +38,125 @@ from control_plane.odoo_preview_qualification import PreviewQualificationMissing
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.test_disposable_lane_authority import _DisposableRuntimeAuthorityFixture
 from tests.test_odoo_preview_apply_execution import _issued_plan, _refresh_payload
+from tests.support.http import get
+from tests.support.auth import scoped_agent_transport
 
 
 class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
+    async def evidence(self, *, product: str = "", **changes: object) -> Any:
+        query = {
+            "pr_number": self.preview.anchor_pr_number,
+            "source_git_ref": self.identity.source_git_ref,
+            "image_digest": self.identity.image_reference.partition("@")[2],
+            "original_reservation_id": self.original.record_id,
+            "preview_id": self.preview.preview_id,
+            "generation_id": self.generation.generation_id,
+            **changes,
+        }
+        return await get(
+            self.app,
+            f"/v1/products/{product or self.profile.product}/preview-evidence?{urlencode(query)}",
+            headers={"Authorization": "Bearer local-operator-token"},
+        )
+
+    async def test_inert_evidence_reads_completed_original_and_probes_without_publication(
+        self,
+    ) -> None:
+        with (
+            patch.object(self.store, "reserve_mutation", side_effect=AssertionError("mutation")),
+            patch.object(
+                self.store,
+                "publish_collected_disposable_lane_safety",
+                side_effect=AssertionError("publication"),
+            ),
+        ):
+            response = await self.evidence()
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["result"]
+        self.assertEqual(result["original"]["reservation_id"], self.original.record_id)
+        self.assertEqual(result["original"]["state"], "completed")
+        self.assertEqual(result["binding"]["generation_id"], self.generation.generation_id)
+        self.assertEqual(result["current"]["usage"], "unused")
+        self.assertEqual(result["current"]["production_resources"], "isolated")
+        self.assertEqual(result["current"]["runtime_identity"], "verified")
+        self.assertEqual(result["current"]["data"], "unknown")
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product,
+                "cm",
+                self.issued.preview_slug,
+            )
+        )
+        self.assertEqual(
+            self.store.read_idempotency_record_by_id(self.original.record_id), self.original
+        )
+        for secret in (
+            *self.production.values(),
+            "private-provider-token",
+            "fixture-local-password",
+        ):
+            self.assertNotIn(secret, response.text)
+
+    async def test_inert_evidence_refuses_wrong_original_tuple_before_probes(self) -> None:
+        for change in (
+            {"source_git_ref": "f" * 40},
+            {"image_digest": "sha256:" + "f" * 64},
+            {"pr_number": 999},
+            {"generation_id": "different-generation"},
+        ):
+            with self.subTest(change=change):
+                self.remote.reset_mock()
+                response = await self.evidence(**change)
+                self.assertEqual(response.status_code, 409, response.text)
+                self.remote.assert_not_called()
+
+    async def test_inert_evidence_refuses_other_product_and_unauthorized_lookup(self) -> None:
+        response = await self.evidence(product="example-site")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.remote.assert_not_called()
+        with (
+            scoped_agent_transport(),
+            patch.object(self.store, "read_idempotency_record_by_id") as original,
+        ):
+            response = await self.evidence()
+        self.assertEqual(response.status_code, 403, response.text)
+        original.assert_not_called()
+        self.remote.assert_not_called()
+
+    async def test_inert_evidence_refuses_provider_denial_without_private_error(self) -> None:
+        self.remote.side_effect = NativeSourceAuthorizationDenied("private-provider-detail")
+        response = await self.evidence()
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertNotIn("private-provider-detail", response.text)
+
+    async def test_inert_evidence_rechecks_generation_after_history(self) -> None:
+        from control_plane import preview_evidence
+
+        def change_generation(*args: Any, **kwargs: Any) -> dict[str, object]:
+            self.store.write_preview_record(
+                self.preview.model_copy(update={"serving_generation_id": "changed"})
+            )
+            return {}
+
+        with patch.object(
+            preview_evidence, "read_preview_provider_history", side_effect=change_generation
+        ):
+            response = await self.evidence()
+        self.assertEqual(response.status_code, 409, response.text)
+
+    async def test_inert_evidence_keeps_unreadable_probe_and_history_unknown(self) -> None:
+        self.frame.clear()
+        self.frame.update(
+            type="complete", unavailable=True, reason_code="resource_copy_database_readable"
+        )
+        response = await self.evidence()
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()["result"]
+        self.assertEqual(result["current"]["usage"], "unknown")
+        self.assertEqual(result["current"]["production_resources"], "unknown")
+        self.assertEqual(result["provider"]["schedule"]["coverage"], "unavailable")
+        self.assertIsNone(result["original"]["executor_excluded"])
+
     def setUp(self) -> None:
         super().setUp()
         self.root = Path(self.temporary.name)
