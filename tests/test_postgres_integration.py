@@ -15,7 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 import unittest
 from tests import test_odoo_business_hours_config as calendar_config_tests
 from control_plane.storage.migrations.versions import (
@@ -323,7 +323,9 @@ class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
         if not include_epoch:
             statement = statement.where(self.history.history.c.operation != "epoch")
         with self.engine.connect() as connection:
-            return [dict(row) for row in connection.execute(statement).mappings()]
+            return [
+                cast(dict[str, Any], dict(row)) for row in connection.execute(statement).mappings()
+            ]
 
     @staticmethod
     def write_profile(connection: Connection, product: str, state: str = "active") -> None:
@@ -528,7 +530,7 @@ class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
 
         with self.engine.connect() as writer, self.engine.connect() as installer:
             transaction = writer.begin()
-            self.write_profile(writer, "committed-before-epoch", "active")
+            self.write_profile(writer, "committed-before-epoch")
             with self.assertRaises(OperationalError):
                 with installer.begin():
                     installer.execute(text("SET LOCAL lock_timeout = '100ms'"))
