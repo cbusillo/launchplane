@@ -209,6 +209,15 @@ OPERATION_SPECS = (
     ),
     OperationSpec(
         "GET",
+        "/v1/monitoring-authority-history",
+        "Read settled monitoring revisions and completed batch confirmations within existing product-profile read access; earlier authority stays unknown.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "GET",
         DISCUSSION_TOPICS_ROUTE,
         "Read a product's discussion topics within existing product-profile read access.",
         ("service_api",),

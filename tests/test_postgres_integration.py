@@ -301,6 +301,130 @@ LOCK_WAIT_TIMEOUT = "1000ms"
 
 
 class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
+    def test_monitor_confirms_once_only_after_a_completed_batch(self) -> None:
+        from control_plane.workflows.public_ingress_monitor import (
+            MonitorRunCancelled,
+            run_public_ingress_monitor_once,
+        )
+
+        self.initialize_history()
+        result = run_public_ingress_monitor_once(record_store=self.store, notify=False)
+        confirmations = [row for row in self.rows() if row["operation"] == "confirmation"]
+        self.assertEqual(len(confirmations), 1)
+        self.assertEqual(confirmations[0]["payload"]["checked_at"], result.checked_at)
+        with self.assertRaises(MonitorRunCancelled):
+            run_public_ingress_monitor_once(record_store=self.store, should_stop=lambda: True)
+        self.assertEqual(len([row for row in self.rows() if row["operation"] == "confirmation"]), 1)
+
+    def test_completed_batches_confirm_capture_without_backdating(self) -> None:
+        self.store.write_product_profile_record(_public_ingress_profile())
+        self.initialize_history()
+        initial = self.store.read_monitoring_authority_history(product="", limit=500, cursor=None)
+        self.assertIsNone(initial.confirmed_since)
+        self.assertEqual(initial.coverage.status, "complete")
+        start = self.store.begin_monitoring_authority_batch()
+        assert start is not None
+        self.store.complete_monitoring_authority_batch(
+            start=start,
+            checked_at="2026-01-01T00:00:00Z",
+            lanes=(("example-site", "example-site", "prod"),),
+        )
+        page = self.store.read_monitoring_authority_history(product="", limit=500, cursor=None)
+        confirmation = page.revisions[-1]
+        self.assertEqual(confirmation.operation, "confirmation")
+        self.assertGreaterEqual(confirmation.recorded_at, start.started_at)
+        self.assertEqual(page.confirmed_since, confirmation.recorded_at)
+        self.assertEqual(confirmation.payload["checked_at"], "2026-01-01T00:00:00Z")
+        self.assertEqual(page.capture_errors, ())
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE launchplane_route_bindings DISABLE TRIGGER launchplane_route_bindings_monitoring_capture"
+                )
+            )
+        self.store.complete_monitoring_authority_batch(start=start, checked_at="later", lanes=())
+        incomplete = self.store.read_monitoring_authority_history(
+            product="", limit=500, cursor=None
+        )
+        self.assertEqual(incomplete.coverage.status, "unknown")
+        self.assertIsNone(incomplete.confirmed_since)
+        self.assertFalse(incomplete.revisions[-1].payload["capture_valid"])
+
+    def test_frozen_pages_exclude_late_commits_even_below_the_page_sequence(self) -> None:
+        from control_plane.monitoring_authority_history import MonitoringAuthorityQueryError
+
+        self.initialize_history()
+        with self.engine.connect() as slow:
+            transaction = slow.begin()
+            self.write_profile(slow, "slow")
+            with self.engine.begin() as fast:
+                self.write_profile(fast, "fast")
+            first = self.store.read_monitoring_authority_history(product="", limit=1, cursor=None)
+            self.assertIsNone(first.next_cursor)
+            self.assertEqual([row.operation for row in first.revisions], ["epoch"])
+            transaction.commit()
+        first = self.store.read_monitoring_authority_history(product="", limit=1, cursor=None)
+        self.assertIsNotNone(first.next_cursor)
+        self.store.write_product_profile_record(
+            _public_ingress_profile().model_copy(update={"product": "later"})
+        )
+        page = self.store.read_monitoring_authority_history(
+            product="", limit=500, cursor=first.next_cursor
+        )
+        self.assertEqual({row.product for row in page.revisions}, {"slow", "fast"})
+        self.assertIsNone(page.next_cursor)
+        with self.assertRaises(MonitoringAuthorityQueryError):
+            self.store.read_monitoring_authority_history(
+                product="other", limit=500, cursor=first.next_cursor
+            )
+
+    def test_private_endpoint_departure_is_scoped_and_redacted(self) -> None:
+        from control_plane.contracts.private_health_endpoint_record import (
+            PrivateHealthEndpointRecord,
+        )
+
+        self.initialize_history()
+        endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="moving",
+            product="example-site",
+            context="example-site",
+            instance="testing",
+            url="https://private.invalid/health",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        self.store.write_private_health_endpoint_record(endpoint)
+        self.store.write_private_health_endpoint_record(
+            endpoint.model_copy(update={"product": "another", "context": "private-other"})
+        )
+        self.store.write_private_health_endpoint_record(
+            endpoint.model_copy(
+                update={"product": "another", "context": "private-other", "status": "disabled"}
+            )
+        )
+        page = self.store.read_monitoring_authority_history(
+            product="example-site", limit=500, cursor=None
+        )
+        revisions = [row for row in page.revisions if row.source]
+        self.assertEqual(len(revisions), 2)
+        self.assertNotIn("private.invalid", page.model_dump_json())
+        self.assertNotIn("private-other", page.model_dump_json())
+        self.assertTrue(revisions[0].material_sha256)
+        self.assertFalse(revisions[1].scope_visible)
+        self.assertEqual(revisions[1].payload, {})
+        self.assertEqual(page.coverage.status, "scoped")
+
+    def test_disabled_capture_cannot_validate_a_history_schema(self) -> None:
+        alembic_command.upgrade(_alembic_config(self.url), monitoring_history_migration.revision)
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE launchplane_product_profiles "
+                    "DISABLE TRIGGER launchplane_product_profiles_monitoring_capture"
+                )
+            )
+        with self.assertRaises(RuntimeError):
+            self.store.verify_schema()
+
     def setUp(self) -> None:
         from control_plane.storage.migrations import monitoring_authority_v1 as history
 
@@ -331,10 +455,14 @@ class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
     def write_profile(connection: Connection, product: str, state: str = "active") -> None:
         from control_plane.storage.postgres import LaunchplaneProductProfileRow
 
-        profile = _public_ingress_profile().model_copy(
+        template = _public_ingress_profile()
+        profile = template.model_copy(
             update={
                 "product": product,
                 "lifecycle_state": state,
+                "lanes": tuple(
+                    lane.model_copy(update={"context": product}) for lane in template.lanes
+                ),
             }
         )
         connection.execute(

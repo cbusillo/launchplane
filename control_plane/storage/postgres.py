@@ -70,6 +70,11 @@ from control_plane.storage.delivery_evidence import (
     metadata as delivery_evidence_metadata,
     register_source_events,
 )
+from control_plane.storage import monitoring_authority
+from control_plane.monitoring_authority_history import (
+    MonitoringAuthorityBatchStart,
+    MonitoringAuthorityHistory,
+)
 
 from uuid import uuid4
 
@@ -30575,6 +30580,27 @@ class PostgresRecordStore(HumanSessionStore):
             filters=filters,
             order_by=(observed.desc(), row.record_id.desc()),
             limit=limit,
+        )
+
+    def begin_monitoring_authority_batch(self) -> MonitoringAuthorityBatchStart | None:
+        return monitoring_authority.begin_batch(self._engine)
+
+    def complete_monitoring_authority_batch(
+        self,
+        *,
+        start: MonitoringAuthorityBatchStart,
+        checked_at: str,
+        lanes: tuple[tuple[str, str, str], ...],
+    ) -> None:
+        monitoring_authority.complete_batch(
+            self._engine, start=start, checked_at=checked_at, lanes=lanes
+        )
+
+    def read_monitoring_authority_history(
+        self, *, product: str, limit: int, cursor: str | None
+    ) -> MonitoringAuthorityHistory:
+        return monitoring_authority.read_history(
+            self._engine, product=product, limit=limit, cursor=cursor
         )
 
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> None:

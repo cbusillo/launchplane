@@ -896,6 +896,8 @@ def run_public_ingress_monitor_once(
     lane_keys: frozenset[tuple[str, str, str]] | None = None,
     max_concurrent_probes: int = 1,
 ) -> PublicIngressMonitorResult:
+    begin_authority = getattr(record_store, "begin_monitoring_authority_batch", None)
+    authority_start = begin_authority() if callable(begin_authority) else None
     observed_at = checked_at.strip() or utc_now_timestamp()
     public_get = http_get or fetch_public_ingress_url
     private_get = private_http_get or fetch_private_health_url
@@ -1039,7 +1041,7 @@ def run_public_ingress_monitor_once(
         reminder_states.extend(stored_transition.reminder_states)
         delivery_attempts.extend(stored_transition.delivery_attempts)
         authority_changed_count += int(stored_transition.authority_changed)
-    return PublicIngressMonitorResult(
+    result = PublicIngressMonitorResult(
         checked_at=observed_at,
         target_count=len(targets),
         pass_count=sum(
@@ -1062,6 +1064,15 @@ def run_public_ingress_monitor_once(
         reminder_states=tuple(reminder_states),
         delivery_attempts=tuple(delivery_attempts),
     )
+    _check_monitor_cancelled(should_stop)
+    if authority_start is not None:
+        complete_authority = getattr(record_store, "complete_monitoring_authority_batch")
+        complete_authority(
+            start=authority_start,
+            checked_at=observed_at,
+            lanes=tuple(sorted({(row.product, row.context, row.instance) for row in records})),
+        )
+    return result
 
 
 def record_monitor_cadence(

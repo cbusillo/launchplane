@@ -77,6 +77,40 @@ def observation(
 
 
 class LaneHealthHistoryHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retained_observations_remain_readable_after_profile_retirement(self) -> None:
+        with TemporaryDirectory() as temporary:
+            url = _sqlite_database_url(Path(temporary) / "records.sqlite")
+            _seed_product_environment_read_records(url)
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            store.write_public_ingress_observation_record(observation("old-pass", 0))
+            profile = store.read_product_profile_record("example-site")
+            store.write_product_profile_record(
+                profile.model_copy(update={"lifecycle_state": "retired"})
+            )
+            for context, expected in (("example-site", 200), ("another", 403)):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_product_environment_read_policy(context=context),
+                    record_store_factory=lambda: store,
+                )
+                path = "/v1/products/example-site/environments/prod/health-history?" + urlencode(
+                    {
+                        "historical_context": "example-site",
+                        "since": stamp(0),
+                        "until": stamp(60),
+                    }
+                )
+                response = await request(
+                    app, "GET", path, headers={"Authorization": "Bearer valid-token"}
+                )
+                self.assertEqual(response.status_code, expected, response.text)
+                if expected == 200:
+                    self.assertEqual(
+                        [row["record_id"] for row in response.json()["history"]["observations"]],
+                        ["old-pass"],
+                    )
+
     async def test_incident_history_pages_all_retained_occurrences_across_recovery(self) -> None:
         self.enterContext(
             patch.dict(os.environ, {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "incident-test-key"})

@@ -78,7 +78,13 @@ def initialize(connection: Connection) -> None:
             context="",
             instance="",
             operation="epoch",
-            payload={"sources": list(SOURCES), "earlier_authority": "unknown"},
+            payload={
+                "sources": list(SOURCES),
+                "earlier_authority": "unknown",
+                "cluster_id": str(
+                    connection.scalar(text("SELECT system_identifier FROM pg_control_system()"))
+                ),
+            },
         )
     )
     key_cases = []
