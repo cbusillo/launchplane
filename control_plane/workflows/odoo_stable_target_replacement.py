@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import re
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -21,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.integration_readback import web_held_until_integration_readback
 from control_plane.odoo_testing_restore import (
+    FreshOdooTestingGeneration,
     read_current_testing_generation,
     generation_snapshot_matches,
     fresh_testing_authority_sha256,
@@ -85,6 +87,12 @@ from control_plane.contracts.runtime_identity import (
     runtime_identity_env,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.testing_publication import TestingPublicationRecord
+from control_plane.contracts.odoo_post_deploy_payload import (
+    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+    OdooPostDeployPayload,
+)
+from control_plane.runtime_setting_removal import printable_key
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.contracts.odoo_stable_target_replacement import (
     LAUNCHPLANE_REQUIRED_ODOO_MODULES,
@@ -220,6 +228,8 @@ ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS = 5
 ODOO_ADDONS_PATH_ENV_KEY = "ODOO_ADDONS_PATH"
 ODOO_INSTALL_MODULES_ENV_KEY = "ODOO_INSTALL_MODULES"
 ODOO_REQUIRED_VOLUME_ENV_KEYS = ("ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME", "ODOO_DB_VOLUME")
+ODOO_OVERRIDE_READ_MAX_KEYS = 256
+ODOO_OVERRIDE_READ_MAX_BYTES = 262144
 # Legacy provider values this driver drops, so they are not leftovers to record.
 ODOO_DISCARDED_LEGACY_PROVIDER_ENV = {"ODOO_WEB_COMMAND": "/odoo/odoo-bin"}
 ODOO_REPLACEMENT_DRIVER_ENV_KEYS = {
@@ -357,6 +367,10 @@ class OdooStableTargetRuntimeSnapshot(BaseModel):
     source_type: str = ""
     compose_path: str = ""
     compose_file_sha256: str = ""
+    compose_matches_generated: bool | None = None
+    override_environment_keys: tuple[str, ...] | None = Field(
+        default=None, max_length=ODOO_OVERRIDE_READ_MAX_KEYS
+    )
     domain_hosts: tuple[str, ...] = ()
     latest_deployment_status: str = ""
     latest_deployment_id: str = ""
@@ -1268,6 +1282,56 @@ def _runtime_error_binding_keys(
     )
 
 
+def _override_environment_keys(
+    environment: dict[str, str], *, context: str, instance: str
+) -> tuple[str, ...] | None:
+    encoded = environment.get(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, "").strip()
+    if not encoded or len(encoded) > ODOO_OVERRIDE_READ_MAX_BYTES:
+        return None
+    try:
+        payload = OdooPostDeployPayload.model_validate_json(
+            base64.b64decode(encoded, validate=True)
+        )
+    except ValueError:
+        return None
+    if (payload.context, payload.instance) != (
+        context,
+        instance,
+    ) or payload.schema_version != OdooPostDeployPayload.model_fields["schema_version"].default:
+        return None
+    keys = payload.required_container_environment_keys
+    if len(keys) > ODOO_OVERRIDE_READ_MAX_KEYS or any(not printable_key(key) for key in keys):
+        return None
+    return keys
+
+
+def _render_replacement_compose(
+    *,
+    image_reference: str,
+    instance: str,
+    domain_hosts: tuple[str, ...],
+    runtime_port: int,
+    published_copy: TestingPublicationRecord | None,
+    generation: FreshOdooTestingGeneration | None,
+) -> str:
+    if published_copy is not None:
+        return render_maintained_testing_copy(
+            published_copy,
+            image_reference=image_reference,
+            hold_web=web_held_until_integration_readback(instance),
+        )
+    return dokploy_compose.render_odoo_raw_compose_file(
+        image_reference=image_reference,
+        hold_web_until_integration_readback=web_held_until_integration_readback(instance),
+        domain_hosts=domain_hosts,
+        runtime_port=runtime_port,
+        publish_host_ports=generation is None,
+        mount_workflow_ssh=generation is None,
+        isolated_testing=generation is not None,
+        domain_certificate_type=generation.certificate_type if generation is not None else "none",
+    )
+
+
 def _snapshot_current_target(
     *,
     host: str,
@@ -1314,6 +1378,9 @@ def _snapshot_current_target(
         compose_file_sha256=dokploy_compose.compose_file_sha256(compose_file)
         if compose_file
         else "",
+        override_environment_keys=_override_environment_keys(
+            env_map, context=target_record.context, instance=target_record.instance
+        ),
         domain_hosts=_domains_for_target(
             host=host,
             token=token,
@@ -1686,21 +1753,14 @@ def build_odoo_stable_target_replacement_plan(
                 )
             )
             # Rendering checks the image, domains and port before any provider write.
-            if published_copy is not None:
-                render_maintained_testing_copy(
-                    published_copy,
-                    image_reference=profile.image.repository,
-                    hold_web=web_held_until_integration_readback(lane.instance),
-                )
-            else:
-                dokploy_compose.render_odoo_raw_compose_file(
-                    image_reference=profile.image.repository,
-                    hold_web_until_integration_readback=(
-                        web_held_until_integration_readback(lane.instance)
-                    ),
-                    domain_hosts=current_target.domain_hosts,
-                    runtime_port=profile.runtime_port,
-                )
+            _render_replacement_compose(
+                image_reference=profile.image.repository,
+                instance=lane.instance,
+                domain_hosts=current_target.domain_hosts,
+                runtime_port=profile.runtime_port,
+                published_copy=published_copy,
+                generation=generation,
+            )
             if request.data_source_mode == "upstream_restore" and not (
                 generation is not None and generation.source_mode == "container-export"
             ):
@@ -1773,10 +1833,11 @@ def build_odoo_stable_target_replacement_plan(
                 f"Launchplane has no artifact manifest for {expected_artifact_id!r}.",
             )
         else:
-            if not artifact_manifest_matches_image_repository(
+            artifact_matches_profile = artifact_manifest_matches_image_repository(
                 artifact_manifest,
                 expected_repository=profile.image.repository,
-            ):
+            )
+            if not artifact_matches_profile:
                 block(
                     "artifact_repository_mismatch",
                     "Selected artifact image repository does not match product profile.",
@@ -1790,6 +1851,23 @@ def build_odoo_stable_target_replacement_plan(
                 block(
                     "artifact_source_ref_mismatch",
                     "Selected artifact source ref does not match the stored manifest.",
+                )
+            elif (
+                artifact_matches_profile
+                and current_target is not None
+                and current_target.compose_file_sha256
+            ):
+                rendered_compose = _render_replacement_compose(
+                    image_reference=f"{artifact_manifest.image.repository}@{artifact_manifest.image.digest}",
+                    instance=lane.instance,
+                    domain_hosts=current_target.domain_hosts,
+                    runtime_port=profile.runtime_port,
+                    published_copy=published_copy,
+                    generation=generation,
+                )
+                current_target.compose_matches_generated = (
+                    current_target.compose_file_sha256
+                    == dokploy_compose.compose_file_sha256(rendered_compose)
                 )
             if ODOO_VERSION_ENV_KEY in provider_only_keys and artifact_odoo_version(
                 artifact_manifest
@@ -2438,27 +2516,14 @@ def execute_odoo_stable_target_replacement_apply(
                 if key in {"required", "status", "policy_record_id", "policy_sha256"}
             }
         )
-        if published_copy is not None:
-            compose_file = render_maintained_testing_copy(
-                published_copy,
-                image_reference=image_reference,
-                hold_web=web_held_until_integration_readback(plan.instance),
-            )
-        else:
-            compose_file = dokploy_compose.render_odoo_raw_compose_file(
-                image_reference=image_reference,
-                hold_web_until_integration_readback=web_held_until_integration_readback(
-                    plan.instance
-                ),
-                domain_hosts=plan.expected_domain_hosts,
-                runtime_port=profile.runtime_port,
-                publish_host_ports=generation is None,
-                mount_workflow_ssh=generation is None,
-                isolated_testing=generation is not None,
-                domain_certificate_type=generation.certificate_type
-                if generation is not None
-                else "none",
-            )
+        compose_file = _render_replacement_compose(
+            image_reference=image_reference,
+            instance=plan.instance,
+            domain_hosts=plan.expected_domain_hosts,
+            runtime_port=profile.runtime_port,
+            published_copy=published_copy,
+            generation=generation,
+        )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
         current_identity = _runtime_identity_map(current_env_map)
         try:

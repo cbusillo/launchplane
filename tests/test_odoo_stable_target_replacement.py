@@ -21,6 +21,7 @@ from control_plane.contracts.artifact_identity import (
     ArtifactImageReference,
     ArtifactIdentityManifest,
 )
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -93,6 +94,7 @@ from control_plane.contracts.odoo_target_replacement_failures import (
 )
 from control_plane.operation_status_read import safe_operation_error_code
 from control_plane.workflows.odoo_stable_target_replacement import (
+    _override_environment_keys,
     OdooStableTargetReplacementPlan,
     DokployRequest,
     TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
@@ -1453,66 +1455,156 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertIn("lane data policy", "; ".join(plan.blockers))
         self.assertIn("'upstream_restore'", "; ".join(plan.blockers))
 
-    def test_build_plan_reports_ready_when_records_and_volume_contract_exist(self) -> None:
-        identity = json.dumps(
-            {"deployment_record_id": "deployment-cm-testing", "artifact_id": "artifact"}
-        )
-        with (
-            patch(
-                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
-                return_value=("host", "token"),
-            ),
-            patch(
-                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
-                return_value={
-                    "name": "cm-testing",
-                    "sourceType": "raw",
-                    "composePath": "docker-compose.yml",
-                    "composeFile": "services: {}",
-                    "env": "\n".join(
-                        (
-                            *_DATABASE_ENV_LINES,
-                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
-                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
-                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
-                            f"LAUNCHPLANE_RUNTIME_IDENTITY_JSON={identity}",
-                        )
-                    ),
+    def test_override_environment_names_follow_both_payload_lists_and_reject_unknowns(self) -> None:
+        context, instance = "sample", "testing"
+        raw: dict[str, Any] = {
+            "context": context,
+            "instance": instance,
+            "config_parameters": [
+                {
+                    "key": "sample.setting",
+                    "value": {
+                        "source": "secret_binding",
+                        "secret_binding_id": "config-binding",
+                        "environment_variable": "CONFIG_INPUT",
+                    },
+                }
+            ],
+            "addon_settings": [
+                {
+                    "addon": "sample",
+                    "setting": "option",
+                    "value": {
+                        "source": "secret_binding",
+                        "secret_binding_id": "addon-binding",
+                        "environment_variable": "ADDON_INPUT",
+                    },
                 },
-            ),
-            patch(
-                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
-                return_value={"deploymentId": "deploy-123", "status": "success"},
-            ),
-        ):
-            plan = build_odoo_stable_target_replacement_plan(
-                control_plane_root=Path("."),
-                record_store=_Store(
-                    target_record=_target_record(),
-                    target_id_record=_target_id_record(),
-                    inventory=_inventory(),
-                ),
-                request=OdooStableTargetReplacementRequest(
-                    product="odoo-tenant-cm", instance="testing"
-                ),
-                dokploy_request=cast(DokployRequest, _request),
-            )
+                {
+                    "addon": "sample",
+                    "setting": "text",
+                    "value": {
+                        "source": "literal",
+                        "value": "PRIVATE_LITERAL",
+                    },
+                },
+            ],
+        }
+        payload = OdooPostDeployPayload.model_validate(raw)
 
-        self.assertEqual(plan.plan_status, "ready")
-        self.assertEqual(plan.context, "cm")
-        self.assertEqual(plan.expected_artifact_id, "artifact-cm-testing")
-        assert plan.current_target is not None
-        self.assertEqual(plan.current_target.required_volume_keys_missing, ())
+        def encoded(value: dict[str, Any]) -> dict[str, str]:
+            return {
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                    json.dumps(value).encode()
+                ).decode("ascii")
+            }
+
         self.assertEqual(
-            plan.current_target.live_volume_values,
-            {
-                "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
-                "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
-                "ODOO_DB_VOLUME": "cm_testing_odoo_db",
-            },
+            _override_environment_keys(encoded(raw), context=context, instance=instance),
+            payload.required_container_environment_keys,
         )
-        self.assertTrue(plan.current_target.runtime_identity_present)
-        self.assertEqual(plan.current_target.domain_hosts, ("cm-testing.shinycomputers.com",))
+        for changed in (
+            {**raw, "context": "another"},
+            {**raw, "schema_version": payload.schema_version + 1},
+            {**raw, "config_parameters": "PRIVATE_INVALID"},
+        ):
+            with self.subTest(changed=list(changed)):
+                self.assertIsNone(
+                    _override_environment_keys(encoded(changed), context=context, instance=instance)
+                )
+        for environment in ({}, {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "not-base64"}):
+            self.assertIsNone(
+                _override_environment_keys(environment, context=context, instance=instance)
+            )
+        raw["config_parameters"][0]["value"]["environment_variable"] = "sk-" + "A" * 20
+        self.assertIsNone(
+            _override_environment_keys(encoded(raw), context=context, instance=instance)
+        )
+
+    def test_build_plan_reports_ready_when_records_and_volume_contract_exist(self) -> None:
+        manifest = _artifact_manifest()
+        target = _target_record()
+        rendered_compose = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference=f"{manifest.image.repository}@{manifest.image.digest}",
+            hold_web_until_integration_readback=True,
+            domain_hosts=target.domains,
+            runtime_port=_profile().runtime_port,
+        )
+        overrides = OdooPostDeployPayload(context=target.context, instance=target.instance)
+        encoded_overrides = base64.b64encode(overrides.to_wire_json_bytes()).decode("ascii")
+        for observed_compose, expected_match in (
+            (rendered_compose, True),
+            ("services: {}", False),
+            ("", None),
+        ):
+            with self.subTest(matches=expected_match):
+                identity = json.dumps(
+                    {"deployment_record_id": "deployment-cm-testing", "artifact_id": "artifact"}
+                )
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                        return_value=("host", "token"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                        return_value={
+                            "name": "cm-testing",
+                            "sourceType": "raw",
+                            "composePath": "docker-compose.yml",
+                            "composeFile": observed_compose,
+                            "env": "\n".join(
+                                (
+                                    *_DATABASE_ENV_LINES,
+                                    "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                                    "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                                    "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                                    f"LAUNCHPLANE_RUNTIME_IDENTITY_JSON={identity}",
+                                    f"{ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}={encoded_overrides}",
+                                )
+                            ),
+                        },
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                        return_value={"deploymentId": "deploy-123", "status": "success"},
+                    ),
+                ):
+                    plan = build_odoo_stable_target_replacement_plan(
+                        control_plane_root=Path("."),
+                        record_store=_Store(
+                            target_record=_target_record(),
+                            target_id_record=_target_id_record(),
+                            inventory=_inventory(),
+                        ),
+                        request=OdooStableTargetReplacementRequest(
+                            product="odoo-tenant-cm", instance="testing"
+                        ),
+                        dokploy_request=cast(DokployRequest, _request),
+                    )
+
+                self.assertEqual(plan.plan_status, "ready")
+                self.assertEqual(plan.context, "cm")
+                self.assertEqual(plan.expected_artifact_id, "artifact-cm-testing")
+                assert plan.current_target is not None
+                self.assertEqual(plan.current_target.required_volume_keys_missing, ())
+                self.assertEqual(
+                    plan.current_target.live_volume_values,
+                    {
+                        "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
+                        "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
+                        "ODOO_DB_VOLUME": "cm_testing_odoo_db",
+                    },
+                )
+                self.assertTrue(plan.current_target.runtime_identity_present)
+                self.assertEqual(
+                    plan.current_target.domain_hosts, ("cm-testing.shinycomputers.com",)
+                )
+                self.assertIs(plan.current_target.compose_matches_generated, expected_match)
+                self.assertEqual(
+                    plan.current_target.override_environment_keys,
+                    overrides.required_container_environment_keys,
+                )
 
     def test_build_plan_blocks_when_selected_artifact_omits_required_modules(self) -> None:
         with (

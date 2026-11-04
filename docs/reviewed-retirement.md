@@ -32,6 +32,19 @@ and keep live delivery on accepted releases. Remove this comparison when the
 tracked-target layer is deleted. Existing lane declarations and values remain
 the destination; never overwrite a conflicting lane value to make a fold pass.
 
+The existing Odoo target-replacement plan also reports two advisory fields on
+`current_target`. `compose_matches_generated` compares the live provider Compose
+snapshot with the deployment renderer for the plan's exact evaluated artifact.
+Null means no comparison was available; false reports a difference, not a blocker.
+`override_environment_keys` lists the environment names referenced by the saved
+provider override payload's config-parameter and addon-setting descriptors. It
+reuses the producer payload schema and returns no values. Null means the payload
+is absent, malformed, unsupported, belongs to another lane or exceeds the read's
+bounds; an empty list means a complete valid payload references no environment
+names. These fields add no provider call, stored record, removal authorization or
+replacement gate. They observe provider configuration, not a running container's
+command or environment, and do not establish consumer or rollback qualification.
+
 `POST /v1/admin/runtime-settings/removal` accepts `mode: dry-run`, `apply`, or
 `readback`, an exact `product`, `scope` (`global`, `context`, `instance`),
 `context`, `instance`, `keys`, and `reason`. Global scope requires
