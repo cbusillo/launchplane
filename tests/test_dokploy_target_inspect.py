@@ -5,7 +5,6 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -58,26 +57,6 @@ def _fake_target_payload(
 
 
 class DokployTargetInspectTests(unittest.TestCase):
-    def test_empty_target_overlay_still_reports_unavailable_generation_custody(self) -> None:
-        store = Mock(spec=PostgresRecordStore)
-        store.list_runtime_environment_records.return_value = ()
-        store.list_product_profile_records.return_value = ()
-        store.read_secret_version.side_effect = AssertionError
-        target = DokployTargetRecord(
-            context="cm", instance="prod", updated_at="2026-11-04T00:00:00Z"
-        )
-        with patch(
-            "control_plane.dokploy_target_inspect.published_generation_resources",
-            side_effect=ValueError,
-        ):
-            comparison = _require_mapping(
-                _instance_setting_comparison(cast(DokployTargetInspectStore, store), target)
-            )
-        self.assertEqual(
-            _require_mapping(comparison["generation_resources"])["status"], "unavailable"
-        )
-        store.read_secret_version.assert_not_called()
-
     def test_application_endpoint_summary_distinguishes_default_custom_and_unknown(self) -> None:
         cases: tuple[tuple[dict[str, object], str, int | None], ...] = (
             ({"endpointSpecSwarm": None, "ports": []}, "provider_default", 0),
@@ -242,6 +221,9 @@ class DokployTargetInspectTests(unittest.TestCase):
                 stored_target = store.read_dokploy_target_record(
                     context_name="cm_website", instance_name="prod"
                 )
+                empty_comparison = _instance_setting_comparison(
+                    store, stored_target.model_copy(update={"env": {}})
+                )
             finally:
                 store.close()
 
@@ -271,6 +253,9 @@ class DokployTargetInspectTests(unittest.TestCase):
                 "retired_keys": ["RETIRED"],
                 "instance_settings_updated_at": runtime_record.updated_at,
             },
+        )
+        self.assertEqual(
+            _require_mapping(empty_comparison["generation_resources"])["status"], "no_custody"
         )
         comparison = _require_mapping(tracked_target["instance_setting_comparison"])
         generation = _require_mapping(
