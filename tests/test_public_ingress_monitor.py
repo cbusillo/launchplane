@@ -1065,6 +1065,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                 )
                 self.assertEqual(result.status, "authority_changed")
                 self.assertEqual(store.list_public_ingress_incident_records(), ())
+                self.assertEqual(store.list_public_ingress_observation_records(), ())
             finally:
                 store.close()
 
@@ -3501,7 +3502,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             store.close()
 
         self.assertEqual(write_result.status, "authority_changed")
-        self.assertEqual(len(stored_observations), 1)
+        self.assertEqual(stored_observations, ())
         self.assertEqual(stored_incidents, ())
 
     def test_postgres_transition_fences_private_endpoint_authority_change(self) -> None:
@@ -3573,6 +3574,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                 expected_private_endpoint_key=target.private_endpoint_key,
                 expected_private_endpoint_sha256=target.private_endpoint_sha256,
             )
+            self.assertEqual(store.list_public_ingress_observation_records(), ())
             stored_incidents = store.list_public_ingress_incident_records()
             store.close()
 

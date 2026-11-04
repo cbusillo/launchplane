@@ -1213,22 +1213,28 @@ def _store_monitor_observation(
             ),
         )
         write_status = getattr(write_result, "status", "written")
-        if write_status == "provider_source_changed":
-            summary = (
-                "Provider operation evidence is unavailable; observation was not accepted."
-                if expected_provider_hold_snapshot is not None
-                and not expected_provider_hold_snapshot.source_sha256
-                else "Provider operation evidence changed before publication; observation was not accepted."
-            )
+        if write_status in {"provider_source_changed", "authority_changed"}:
+            if write_status == "authority_changed":
+                summary = (
+                    "Monitoring authority changed before publication; observation was not accepted."
+                )
+            else:
+                summary = (
+                    "Provider operation evidence is unavailable; observation was not accepted."
+                    if expected_provider_hold_snapshot is not None
+                    and not expected_provider_hold_snapshot.source_sha256
+                    else "Provider operation evidence changed before publication; observation was not accepted."
+                )
+            failure_code = record.failure_code if record.purpose == "reconciliation" else None
             unavailable = record.model_copy(
                 update={
                     "status": "skipped",
-                    "failure_code": None,
+                    "failure_code": failure_code,
                     "targets": tuple(
                         target.model_copy(
                             update={
                                 "status": "skipped",
-                                "failure_code": None,
+                                "failure_code": failure_code,
                                 "summary": summary,
                             }
                         )
@@ -1244,15 +1250,6 @@ def _store_monitor_observation(
             return _StoredMonitorTransition(unavailable, (), (), (), (), authority_changed=True)
         if write_status == "incident_changed":
             continue
-        if write_status == "authority_changed":
-            return _StoredMonitorTransition(
-                observation=record.model_copy(update={"incident_id": "", "incident_event_id": ""}),
-                incidents=(),
-                incident_events=(),
-                reminder_states=(),
-                delivery_attempts=(),
-                authority_changed=True,
-            )
         break
     else:
         raise RuntimeError("public ingress incident changed during three transition attempts")

@@ -1754,6 +1754,13 @@ overwrite each other. The active key is stable, but each opened occurrence has
 its own incident id so recovery followed by a later failure does not replace the
 resolved history.
 
+If profile, private-endpoint or route-binding authority changes during a probe,
+the compare-and-write rejects that result without retaining an observation or
+changing incidents. The monitor reports it as skipped, so neither its pass count
+nor retained health accounting credits the old target. Provider-source changes
+use the same skipped-result path. Rejected probes leave verification UNKNOWN
+until an accepted probe supplies evidence for the current authority.
+
 Probe effectiveness and incident eligibility are separate. Public and TLS
 checks run for `public` and `prelaunch`; their failures open or update incidents
 only for `public`. Private intent suppresses public and TLS probes, while private
