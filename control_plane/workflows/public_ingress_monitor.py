@@ -20,6 +20,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
+from control_plane.monitoring_authority_history import MonitoringAuthorityBatchStart
 
 from control_plane.contracts.secret_record import SecretRecord
 from control_plane.provider_target_holds import (
@@ -896,8 +897,18 @@ def run_public_ingress_monitor_once(
     lane_keys: frozenset[tuple[str, str, str]] | None = None,
     max_concurrent_probes: int = 1,
 ) -> PublicIngressMonitorResult:
-    begin_authority = getattr(record_store, "begin_monitoring_authority_batch", None)
-    authority_start = begin_authority() if callable(begin_authority) else None
+    _check_monitor_cancelled(should_stop)
+    begin_authority: Callable[[], MonitoringAuthorityBatchStart | None] | None = getattr(
+        record_store, "begin_monitoring_authority_batch", None
+    )
+    authority_start: MonitoringAuthorityBatchStart | None = None
+    if begin_authority is not None:
+        try:
+            authority_start = begin_authority()
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "Monitoring authority batch start failed: %s", type(error).__name__
+            )
     observed_at = checked_at.strip() or utc_now_timestamp()
     public_get = http_get or fetch_public_ingress_url
     private_get = private_http_get or fetch_private_health_url
@@ -1064,14 +1075,16 @@ def run_public_ingress_monitor_once(
         reminder_states=tuple(reminder_states),
         delivery_attempts=tuple(delivery_attempts),
     )
-    _check_monitor_cancelled(should_stop)
     if authority_start is not None:
-        complete_authority = getattr(record_store, "complete_monitoring_authority_batch")
-        complete_authority(
-            start=authority_start,
-            checked_at=observed_at,
-            lanes=tuple(sorted({(row.product, row.context, row.instance) for row in records})),
-        )
+        try:
+            complete_authority = getattr(record_store, "complete_monitoring_authority_batch")
+            complete_authority(
+                start=authority_start, checked_at=observed_at, records=result.records
+            )
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "Monitoring authority batch completion failed: %s", type(error).__name__
+            )
     return result
 
 

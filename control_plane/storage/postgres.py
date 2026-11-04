@@ -30590,10 +30590,10 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         start: MonitoringAuthorityBatchStart,
         checked_at: str,
-        lanes: tuple[tuple[str, str, str], ...],
+        records: tuple[PublicIngressObservationRecord, ...],
     ) -> None:
         monitoring_authority.complete_batch(
-            self._engine, start=start, checked_at=checked_at, lanes=lanes
+            self._engine, start=start, checked_at=checked_at, records=records
         )
 
     def read_monitoring_authority_history(

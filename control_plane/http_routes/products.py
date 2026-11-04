@@ -1366,6 +1366,13 @@ def register_product_environment_read_routes(
     ) -> LaneHealthHistoryResponse:
         trace_id = common.next_trace_id()
         if historical_context:
+            if environment not in {"testing", "prod"}:
+                raise common.http_error(
+                    status_code=404,
+                    trace_id=trace_id,
+                    code="not_found",
+                    message="Historical observations require a testing or production lane.",
+                )
             if not common.authorization_allows(
                 identity=identity,
                 action="product_environment.read",

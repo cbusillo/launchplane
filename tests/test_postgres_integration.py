@@ -316,6 +316,67 @@ class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
             run_public_ingress_monitor_once(record_store=self.store, should_stop=lambda: True)
         self.assertEqual(len([row for row in self.rows() if row["operation"] == "confirmation"]), 1)
 
+    def test_bookkeeping_failures_do_not_abort_the_monitor(self) -> None:
+        from control_plane.workflows.public_ingress_monitor import run_public_ingress_monitor_once
+
+        self.initialize_history()
+        for method in ("begin_monitoring_authority_batch", "complete_monitoring_authority_batch"):
+            with patch.object(self.store, method, side_effect=RuntimeError("private detail")):
+                with self.assertLogs(
+                    "control_plane.workflows.public_ingress_monitor", level="WARNING"
+                ) as logs:
+                    result = run_public_ingress_monitor_once(record_store=self.store, notify=False)
+                self.assertNotIn("private detail", str(logs.output))
+                self.assertEqual(result.target_count, 0)
+            self.assertEqual(
+                len([row for row in self.rows() if row["operation"] == "confirmation"]), 0
+            )
+
+    def test_confirmation_binds_the_exact_retained_observations_for_the_accountant(self) -> None:
+        from control_plane.monitoring_authority_history import MonitoringAuthorityLaneEvidence
+        from control_plane.lane_health_history import project_observation, summarize_observations
+        from tests.test_lane_health_history import observation, START
+
+        self.initialize_history()
+        record = observation("same-second", 0)
+        self.store.write_public_ingress_observation_record(record)
+        start = self.store.begin_monitoring_authority_batch()
+        assert start is not None
+        self.store.complete_monitoring_authority_batch(
+            start=start, checked_at=record.observed_at, records=(record,)
+        )
+        page = self.store.read_monitoring_authority_history(
+            product=record.product, limit=500, cursor=None
+        )
+        lanes = page.revisions[-1].payload["lanes"]
+        assert isinstance(lanes, list)
+        evidence = MonitoringAuthorityLaneEvidence.model_validate(lanes[0])
+        stored = self.store.list_public_ingress_history_records(
+            product=record.product,
+            context_name=record.context,
+            instance_name=record.instance,
+            since=START,
+            until=START + timedelta(seconds=60),
+            before=None,
+            limit=500,
+        )
+        confirmed = evidence.confirmed_observations(project_observation(row) for row in stored)
+        accounting = summarize_observations(
+            confirmed,
+            since=START,
+            until=START + timedelta(seconds=60),
+            instance=record.instance,
+            required_checks=((record.check_kind, record.check_name),),
+            identity_checks=((record.check_kind, record.check_name),),
+        )
+        self.assertEqual(accounting.lane_health_and_identity_seconds, 60)
+        changed = observation(record.record_id, 0, status="fail")
+        self.store.write_public_ingress_observation_record(changed)
+        with self.assertRaises(ValueError):
+            evidence.confirmed_observations((project_observation(changed),))
+        with self.assertRaises(ValueError):
+            evidence.confirmed_observations(())
+
     def test_completed_batches_confirm_capture_without_backdating(self) -> None:
         self.store.write_product_profile_record(_public_ingress_profile())
         self.initialize_history()
@@ -327,7 +388,7 @@ class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
         self.store.complete_monitoring_authority_batch(
             start=start,
             checked_at="2026-01-01T00:00:00Z",
-            lanes=(("example-site", "example-site", "prod"),),
+            records=(),
         )
         page = self.store.read_monitoring_authority_history(product="", limit=500, cursor=None)
         confirmation = page.revisions[-1]
@@ -342,13 +403,28 @@ class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
                     "ALTER TABLE launchplane_route_bindings DISABLE TRIGGER launchplane_route_bindings_monitoring_capture"
                 )
             )
-        self.store.complete_monitoring_authority_batch(start=start, checked_at="later", lanes=())
+        self.store.complete_monitoring_authority_batch(start=start, checked_at="later", records=())
         incomplete = self.store.read_monitoring_authority_history(
             product="", limit=500, cursor=None
         )
         self.assertEqual(incomplete.coverage.status, "unknown")
         self.assertIsNone(incomplete.confirmed_since)
         self.assertFalse(incomplete.revisions[-1].payload["capture_valid"])
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE launchplane_route_bindings ENABLE TRIGGER launchplane_route_bindings_monitoring_capture"
+                )
+            )
+        restored_start = self.store.begin_monitoring_authority_batch()
+        assert restored_start is not None
+        self.store.complete_monitoring_authority_batch(
+            start=restored_start, checked_at="restored", records=()
+        )
+        restored = self.store.read_monitoring_authority_history(product="", limit=500, cursor=None)
+        self.assertTrue(restored.revisions[-1].payload["capture_valid"])
+        self.assertEqual(restored.coverage.status, "unknown")
+        self.assertIsNone(restored.confirmed_since)
 
     def test_frozen_pages_exclude_late_commits_even_below_the_page_sequence(self) -> None:
         from control_plane.monitoring_authority_history import MonitoringAuthorityQueryError
@@ -365,6 +441,21 @@ class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
             transaction.commit()
         first = self.store.read_monitoring_authority_history(product="", limit=1, cursor=None)
         self.assertIsNotNone(first.next_cursor)
+        assert first.epoch is not None
+        backdated = base64.urlsafe_b64encode(
+            json.dumps(
+                [
+                    first.product,
+                    first.cluster_id,
+                    first.settled_before_transaction,
+                    "2000-01-01T00:00:00+00:00",
+                    first.revisions[-1].sequence,
+                    first.epoch.sequence,
+                ]
+            ).encode()
+        ).decode()
+        with self.assertRaises(MonitoringAuthorityQueryError):
+            self.store.read_monitoring_authority_history(product="", limit=500, cursor=backdated)
         self.store.write_product_profile_record(
             _public_ingress_profile().model_copy(update={"product": "later"})
         )
@@ -373,6 +464,7 @@ class RealPostgresMonitoringAuthorityTests(unittest.TestCase):
         )
         self.assertEqual({row.product for row in page.revisions}, {"slow", "fast"})
         self.assertIsNone(page.next_cursor)
+        self.assertGreaterEqual(page.read_at, first.read_at)
         with self.assertRaises(MonitoringAuthorityQueryError):
             self.store.read_monitoring_authority_history(
                 product="other", limit=500, cursor=first.next_cursor

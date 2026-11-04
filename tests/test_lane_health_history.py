@@ -110,6 +110,13 @@ class LaneHealthHistoryHttpTests(unittest.IsolatedAsyncioTestCase):
                         [row["record_id"] for row in response.json()["history"]["observations"]],
                         ["old-pass"],
                     )
+                    preview = await request(
+                        app,
+                        "GET",
+                        path.replace("/environments/prod/", "/environments/preview-42/"),
+                        headers={"Authorization": "Bearer valid-token"},
+                    )
+                    self.assertEqual(preview.status_code, 404, preview.text)
 
     async def test_incident_history_pages_all_retained_occurrences_across_recovery(self) -> None:
         self.enterContext(

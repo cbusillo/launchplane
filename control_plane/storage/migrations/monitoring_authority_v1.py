@@ -19,6 +19,18 @@ history = Table(
     Column("payload", JSON().with_variant(JSONB(), "postgresql"), nullable=False),
 )
 Index("monitoring_authority_scope_idx", history.c.product, history.c.sequence)
+Index("monitoring_authority_operation_idx", history.c.operation, history.c.sequence)
+Index(
+    "monitoring_authority_source_idx",
+    history.c.source,
+    history.c.source_key,
+    history.c.sequence,
+    postgresql_where=text("source <> ''"),
+)
+INVALID_CONFIRMATION = text(
+    "operation = 'confirmation' AND (payload->>'capture_valid') IS DISTINCT FROM 'true'"
+)
+Index("monitoring_authority_invalid_idx", history.c.sequence, postgresql_where=INVALID_CONFIRMATION)
 SOURCES = {
     "launchplane_product_profiles": ("product",),
     "launchplane_route_bindings": ("product", "context", "instance"),

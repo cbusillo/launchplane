@@ -1,21 +1,26 @@
 import base64
+from collections import defaultdict
 from datetime import datetime, timezone
 import json
 from typing import Any, Literal, cast
 
-from sqlalchemy import Numeric, String, func, inspect, or_, select
+from sqlalchemy import Numeric, String, func, inspect, or_, select, union_all
 from sqlalchemy.engine import Connection, Engine
 
 from control_plane.contracts.canonical_json import nonvalidating_compact_sorted_json_sha256
 from control_plane.contracts.read_coverage import ReadCoverage
+from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.lane_health_history import HistoryObservation, project_observation
 from control_plane.monitoring_authority_history import (
     MonitoringAuthorityBatchStart,
     MonitoringAuthorityHistory,
+    MonitoringAuthorityLaneEvidence,
     MonitoringAuthorityQueryError,
     MonitoringAuthorityRevision,
     MonitoringAuthorityUnavailable,
+    monitoring_observations_sha256,
 )
-from control_plane.storage.migrations.monitoring_authority_v1 import history
+from control_plane.storage.migrations.monitoring_authority_v1 import history, INVALID_CONFIRMATION
 from control_plane.storage.schema_invariants import monitoring_authority_capture_errors
 
 
@@ -43,7 +48,7 @@ def _snapshot(connection: Connection) -> dict[str, Any]:
         .mappings()
         .one()
     )
-    return dict(row)
+    return cast(dict[str, Any], dict(row))
 
 
 def begin_batch(engine: Engine) -> MonitoringAuthorityBatchStart | None:
@@ -69,8 +74,23 @@ def complete_batch(
     *,
     start: MonitoringAuthorityBatchStart,
     checked_at: str,
-    lanes: tuple[tuple[str, str, str], ...],
+    records: tuple[PublicIngressObservationRecord, ...],
 ) -> None:
+    by_lane: dict[tuple[str, str, str], list[HistoryObservation]] = defaultdict(list)
+    for record in records:
+        by_lane[(record.product, record.context, record.instance)].append(
+            project_observation(record)
+        )
+    lanes = tuple(
+        MonitoringAuthorityLaneEvidence(
+            product=lane[0],
+            context=lane[1],
+            instance=lane[2],
+            observation_ids=tuple(sorted(record.record_id for record in observations)),
+            observations_sha256=monitoring_observations_sha256(observations),
+        )
+        for lane, observations in sorted(by_lane.items())
+    )
     with engine.begin() as connection:
         errors = [*start.capture_errors, *monitoring_authority_capture_errors(connection)]
         snapshot = _snapshot(connection)
@@ -80,7 +100,9 @@ def complete_batch(
             errors.append("Monitoring authority epoch changed during the batch")
         connection.execute(
             history.insert().values(
-                recorded_at=snapshot["at"].astimezone(timezone.utc).isoformat(),
+                recorded_at=snapshot["at"]
+                .astimezone(timezone.utc)
+                .isoformat(timespec="microseconds"),
                 source="",
                 source_key="",
                 transaction_id=func.pg_current_xact_id().cast(String),
@@ -94,7 +116,7 @@ def complete_batch(
                     "epoch_sequence": start.epoch_sequence,
                     "started_at": start.started_at.isoformat(),
                     "checked_at": checked_at,
-                    "lanes": [list(lane) for lane in lanes],
+                    "lanes": [lane.model_dump(mode="json") for lane in lanes],
                     "capture_valid": not errors,
                     "capture_errors": sorted(set(errors)),
                 },
@@ -113,7 +135,8 @@ def _project(row: dict[str, Any], product: str) -> MonitoringAuthorityRevision:
     elif row["source"] == "launchplane_route_bindings" and payload.get("external_ingress"):
         payload["external_ingress"] = {"domains": payload["external_ingress"]["domains"]}
     elif row["operation"] == "confirmation" and product:
-        payload["lanes"] = [lane for lane in payload["lanes"] if lane[0] == product]
+        payload["lanes"] = [lane for lane in payload["lanes"] if lane["product"] == product]
+        material = nonvalidating_compact_sorted_json_sha256(payload)
     return MonitoringAuthorityRevision.model_validate(
         {
             **row,
@@ -146,21 +169,18 @@ def read_history(
                 data = json.loads(base64.b64decode(cursor, altchars=b"-_", validate=True))
                 if (
                     not isinstance(data, list)
-                    or len(data) != 6
+                    or len(data) != 5
                     or data[0] != product
                     or data[1] != str(current["cluster_id"])
                     or type(data[2]) is not int
                     or not 0 < data[2] <= int(current["xmin"])
-                    or type(data[4]) is not int
-                    or data[4] < 0
-                    or data[5] != current["epoch_sequence"]
+                    or type(data[3]) is not int
+                    or data[3] < 0
+                    or data[4] != current["epoch_sequence"]
                 ):
                     raise ValueError
-                at = datetime.fromisoformat(data[3])
-                if at.tzinfo is None or at > current["at"]:
-                    raise ValueError
-                snapshot = {**current, "xmin": data[2], "at": at}
-                after = data[4]
+                snapshot = {**current, "xmin": data[2]}
+                after = data[3]
             except (ValueError, TypeError, UnicodeError) as error:
                 raise MonitoringAuthorityQueryError(
                     "Authority cursor does not match this scope"
@@ -176,33 +196,34 @@ def read_history(
             .mappings()
             .one_or_none()
         )
-        epoch = _project(dict(epoch_row), "") if epoch_row is not None else None
+        epoch = (
+            _project(cast(dict[str, Any], dict(epoch_row)), "") if epoch_row is not None else None
+        )
         confirmed_since = None
         if epoch is None:
             errors.append("The installation epoch is not settled in this snapshot")
         elif epoch.payload.get("cluster_id") != str(snapshot["cluster_id"]):
             errors.append("Database incarnation differs from the installation epoch")
         else:
-            confirmations = connection.execute(
-                select(history)
+            confirmation = connection.scalar(
+                select(history.c.recorded_at)
                 .where(
                     history.c.operation == "confirmation",
                     settled,
                     history.c.sequence > epoch.sequence,
                 )
                 .order_by(history.c.sequence)
-            ).mappings()
-            for row in confirmations:
-                payload = row["payload"]
-                if (
-                    not payload.get("capture_valid")
-                    or payload.get("cluster_id") != str(snapshot["cluster_id"])
-                    or payload.get("epoch_sequence") != epoch.sequence
-                ):
-                    errors.append("A retained confirmation records incomplete capture")
-                    break
-                if confirmed_since is None:
-                    confirmed_since = datetime.fromisoformat(row["recorded_at"])
+                .limit(1)
+            )
+            if confirmation is not None:
+                confirmed_since = datetime.fromisoformat(cast(str, confirmation))
+            if (
+                connection.scalar(
+                    select(history.c.sequence).where(INVALID_CONFIRMATION, settled).limit(1)
+                )
+                is not None
+            ):
+                errors.append("A retained confirmation records incomplete capture")
         if errors:
             confirmed_since = None
         rows_query = select(history).where(settled)
@@ -217,17 +238,20 @@ def read_history(
                     )
                     .label("previous_product"),
                 )
-                .where(settled)
+                .where(settled, history.c.source != "")
                 .subquery()
             )
-            rows_query = select(*(scoped.c[column.name] for column in history.c)).where(
+            scoped_rows = select(*(scoped.c[column.name] for column in history.c)).where(
                 or_(
-                    scoped.c.source == "",
                     scoped.c.product == product,
                     scoped.c.previous_product == product,
                 )
             )
-            sequence = scoped.c.sequence
+            combined = union_all(
+                scoped_rows, select(history).where(settled, history.c.source == "")
+            ).subquery()
+            rows_query = select(combined)
+            sequence = combined.c.sequence
         else:
             sequence = history.c.sequence
         rows = (
@@ -246,7 +270,6 @@ def read_history(
                         product,
                         str(snapshot["cluster_id"]),
                         int(snapshot["xmin"]),
-                        snapshot["at"].isoformat(),
                         page[-1]["sequence"],
                         current["epoch_sequence"],
                     ]

@@ -6422,23 +6422,36 @@ PostgreSQL integration suite owns installation, atomicity and projection proof.
 Under Director decision Q1263 on #2993, each completed batch of the existing
 monitor appends one small confirmation. It records the database clock before
 profile discovery and after completion, the batch's observation timestamp and
-lane scopes, cluster identifier, epoch, capture verification and snapshot xmin.
+lane scopes, exact observation identifiers and a digest of each lane's redacted
+observations, cluster identifier, epoch, capture verification and snapshot xmin.
 Cancelled or failed batches produce no confirmation. A confirmation proves that
 transactions below its xmin had settled by its database timestamp. Changes,
 including the epoch and seeds, earn no healthy time before a later confirmation
 settles them. An application timestamp cannot backdate this proof. No timer,
 service, grant, database setting, baseline or reset is added.
+Bookkeeping failures are logged by exception type and leave the confirmation
+missing; they do not repeat completed probes or prevent monitor receipts. The
+confirmation records a completed probe batch, not scheduler lease ownership or
+cadence completion. Its identifiers and digest reject overwritten, missing or
+same-second observations before the existing accountant receives them.
 
 `GET /v1/monitoring-authority-history` returns a paginated settled prefix,
-including inactive and deleted authority. The first page freezes xmin and the
-database read time; following pages use that same boundary. Restart at the first
+including inactive and deleted authority. The first page freezes xmin; following
+pages use that same boundary and report their actual database read time. A cursor
+never supplies a historical read time. Restart at the first
 page for a fresh prefix, rather than using the last sequence as a delta cursor:
 lower sequences can commit later. Current capture errors or a changed cluster
-identifier make coverage UNKNOWN. An earlier invalid confirmation remains an
-unproved interval. Restore continuity and authority before installation are
+identifier make coverage UNKNOWN. An earlier invalid confirmation means source
+changes could have been missed. Later healthy confirmations cannot reconstruct
+them, so the retained authority stays UNKNOWN; the ordinary monitor continues.
+There is no automatic reset or invented replacement baseline. Restore continuity
+and authority before installation are
 explicitly excluded; a physical restore within one cluster also needs separate
 continuity evidence. Privileged trigger bypass between confirmations cannot be
 reconstructed from this history.
+The xmin boundary is cluster-wide. A long or prepared transaction in any database
+can hold it back; its unchanged value and the last retained confirmation expose
+that stalled proof. This reader does not block or terminate those transactions.
 
 The existing `product_profile.read` permission authorizes an explicit product.
 Only the existing service-wide read permission or authenticated Director agent
@@ -6449,7 +6462,8 @@ URLs and CA values are replaced by a material digest; external-ingress metadata
 is limited to domains. Responses are not cached. These permissions add no grant.
 
 The existing lane `health-history` read accepts an explicit `historical_context`
-under the exact product/context/instance `product_environment.read` permission,
+for testing and production under the exact product/context/instance
+`product_environment.read` permission,
 even when its current profile is absent or retired. Its observations establish
 neither Live membership nor check applicability; use the retained decisions for
 those. A complete settled source prefix is not a seven-day health result.
