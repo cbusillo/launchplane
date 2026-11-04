@@ -16,6 +16,7 @@ from sqlalchemy.engine import make_url
 from control_plane.contracts.merge_train_controller_state import build_merge_train_controller_key
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.github_app_webhook import GitHubAppWebhookStore, _mapping, _positive_id, _string
+from control_plane.merge_train_handoff import handoff_kind
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
@@ -44,9 +45,20 @@ def wake_merge_train_for_event(
     completion = (
         event in {"check_run", "check_suite", "workflow_run"} and action == "completed"
     ) or (event == "status" and _string(payload, "state") in {"success", "failure", "error"})
-    relevant = completion or (
-        event == "pull_request"
-        and action in {"labeled", "unlabeled", "opened", "reopened", "synchronize", "closed"}
+    # A new handoff changes admission as a label does; the pass rereads the discussion.
+    handoff = (
+        event == "issue_comment"
+        and action == "created"
+        and bool(_mapping(_mapping(payload, "issue"), "pull_request"))
+        and handoff_kind(_string(_mapping(payload, "comment"), "body")) is not None
+    )
+    relevant = (
+        completion
+        or handoff
+        or (
+            event == "pull_request"
+            and action in {"labeled", "unlabeled", "opened", "reopened", "synchronize", "closed"}
+        )
     )
     if not relevant:
         return False
@@ -76,7 +88,8 @@ def wake_merge_train_for_event(
             if target.base_branch == base
             and (action not in {"labeled", "unlabeled"} or target.enqueue_label == label)
         )
-    else:
+    elif not handoff:
+        # A comment names no base, so a handoff wakes every train of its repository.
         train_bases = frozenset(target.base_branch for target in policies)
         policies = tuple(
             target

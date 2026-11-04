@@ -107,8 +107,9 @@ handoffs, and label-free dependency-update identities decide that enrichment;
 policies without a required label still read every non-draft PR. Unlabelled
 ordinary PRs first get a bounded discussion read, then details and checks only
 when their latest trusted handoff names the listed head. Draft entries carry
-unknown readiness and cannot justify a landing. A new handoff or label is
-observed on the next snapshot sweep.
+unknown readiness and cannot justify a landing. A new handoff comment or label
+wakes its repository's train, which rereads the discussion; the event itself is
+never admission evidence.
 
 Authenticated REST GETs retain response bodies and ETags in a bounded process-local
 cache separated by credential and API origin. Native controller token resolution
