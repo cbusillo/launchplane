@@ -2,7 +2,7 @@
 
 from typing import Any
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
@@ -17,8 +17,10 @@ from control_plane.production_recipient import custody, authority_snapshot
 from control_plane.published_generation_resources import (
     published_generation_resources,
 )
-from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.dokploy_target_inspect import _generation_snapshot_keys
+from control_plane.workflows.generic_web_deploy_provider import DokployGenericWebDeployProvider
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.runtime_environments import resolve_site_runtime_environment
+from control_plane.product_config_service import read_lane_provider_env
 from control_plane.production_recipient_publication import (
     RecipientPublication,
     commit_publication,
@@ -36,14 +38,9 @@ class RecipientPublicationTests(unittest.TestCase):
     def test_generation_resources_keep_the_published_and_retained_targets_distinct(self) -> None:
         keys = {*self.record.request.volume_keys.values(), *self.record.request.ports}
         generation_values = {
-            key: value for key, value in self.fixture.values.items() if key in keys
+            **{key: f"published-{role}" for role, key in self.record.request.volume_keys.items()},
+            **{key: str(value) for key, value in self.record.request.ports.items()},
         }
-        generation_values.update(
-            {key: str(value) for key, value in self.record.request.ports.items()}
-        )
-        generation_values.update(
-            {key: f"published-{role}" for role, key in self.record.request.volume_keys.items()}
-        )
         publication = self.publication.model_copy(
             update={
                 "target": self.publication.target.model_copy(
@@ -70,54 +67,32 @@ class RecipientPublicationTests(unittest.TestCase):
                 ),
             }
         )
-        store = Mock(spec=PostgresRecordStore)
-        store.list_product_profile_records.return_value = (self.fixture.profile,)
-        store.read_production_recipient.return_value = record.model_dump(mode="json")
-        store.read_dokploy_target_id_record.return_value = self.publication.target_id
-        selected = published_generation_resources(store, context=record.context, instance="prod")
-        self.assertEqual(selected, generation_values)
-        store.read_dokploy_target_id_record.return_value = record.retained_target_id
-        with self.assertRaises(ValueError):
-            published_generation_resources(store, context=record.context, instance="prod")
-        record.phase = "inverse_published"
-        store.read_production_recipient.return_value = record.model_dump(mode="json")
-        retained = published_generation_resources(store, context=record.context, instance="prod")
-        self.assertEqual(
-            retained, {key: value for key, value in before_values.items() if key in keys}
-        )
-        archive = {
-            **record.publication,
-            "before": {
-                **before,
-                "target": record.retained_target.model_copy(
-                    update={"env": {"HISTORY_ONLY": "history-value-not-for-output"}}
-                ).model_dump(mode="json"),
-            },
-        }
-        prior = record.model_copy(
-            update={
-                "publication": {},
-                "retained_target": record.retained_target.model_copy(
-                    update={"env": {"PRIOR_ONLY": "prior-value-not-for-output"}}
-                ),
-            }
-        )
-        record.publication["history"] = [archive]
-        record.prior_attempts = [prior.model_dump(mode="json", exclude={"prior_attempts"})]
-        store.read_production_recipient.return_value = record.model_dump(mode="json")
-        snapshot_keys = _generation_snapshot_keys(store, self.publication.target)
-        self.assertEqual(snapshot_keys["resource_keys"], sorted(keys))
-        self.assertEqual(
-            snapshot_keys["other_keys"],
-            sorted((self.fixture.values.keys() - keys) | {"HISTORY_ONLY", "PRIOR_ONLY"}),
-        )
-        snapshot_count = snapshot_keys["snapshot_count"]
-        assert isinstance(snapshot_count, int)
-        self.assertEqual(snapshot_count, 6)
-        for value in (*generation_values.values(), *before_values.values()):
-            self.assertNotIn(value, str(snapshot_keys))
-        self.assertNotIn("history-value-not-for-output", str(snapshot_keys))
-        self.assertNotIn("prior-value-not-for-output", str(snapshot_keys))
+        store = self.store
+        with (
+            patch.object(
+                store, "read_production_recipient", return_value=record.model_dump(mode="json")
+            ) as read_recipient,
+            patch.object(
+                store, "read_dokploy_target_id_record", return_value=self.publication.target_id
+            ) as read_identity,
+        ):
+            selected = published_generation_resources(
+                store, context=record.context, instance="prod"
+            )
+            self.assertEqual(selected, generation_values)
+            read_identity.return_value = record.retained_target_id
+            with self.assertRaises(ValueError):
+                published_generation_resources(store, context=record.context, instance="prod")
+            record.phase = "inverse_published"
+            read_recipient.return_value = record.model_dump(mode="json")
+            retained = published_generation_resources(
+                store, context=record.context, instance="prod"
+            )
+            self.assertEqual(
+                retained, {key: value for key, value in before_values.items() if key in keys}
+            )
+        with self.assertRaises(TypeError):
+            published_generation_resources(object(), context=record.context, instance="prod")
 
     def setUp(self) -> None:
         self.fixture = preparation_tests.ProductionRecipientTests()
@@ -254,6 +229,83 @@ class RecipientPublicationTests(unittest.TestCase):
         return commit_publication(
             self.store, self.record, self.publication, validate_release=lambda: None
         )
+
+    def test_published_resources_remain_authoritative_across_runtime_deploy_and_adoption(
+        self,
+    ) -> None:
+        resources = {
+            **{key: f"generation-{role}" for role, key in self.record.request.volume_keys.items()},
+            **{key: str(value) for key, value in self.record.request.ports.items()},
+        }
+        self.publication = self.publication.model_copy(
+            update={"target": self.publication.target.model_copy(update={"env": resources})}
+        )
+        self.publish()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.record.context,
+                instance="prod",
+                env={**self.fixture.values, **{key: "stale-lane" for key in resources}},
+                updated_at=self.publication.target.updated_at,
+            )
+        )
+        target = self.store.read_dokploy_target_record(
+            context_name=self.record.context, instance_name="prod"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "env": {
+                        **{key: "stale-target" for key in resources},
+                        "TARGET_ONLY": "ignored",
+                        "DOKPLOY_SHIP_MODE": "application",
+                    }
+                }
+            )
+        )
+        resolved = resolve_site_runtime_environment(
+            control_plane_root=self.fixture.root,
+            context_name=self.record.context,
+            instance_name="prod",
+            database_url=self.store.database_url,
+        )
+        self.assertEqual({key: resolved.values[key] for key in resources}, resources)
+        self.assertNotIn("TARGET_ONLY", resolved.values)
+        lane = next(lane for lane in self.fixture.profile.lanes if lane.instance == "prod")
+        deployment = DokployGenericWebDeployProvider().resolve_deploy_target(
+            control_plane_root=self.fixture.root,
+            request_artifact_id=self.record.image_reference,
+            request_source_git_ref=self.record.request.source_commit,
+            request_timeout_seconds=None,
+            request_no_cache=False,
+            record_store=self.store,
+            profile=self.fixture.profile,
+            lane=lane,
+            normalized_artifact_id=self.record.image_reference,
+            fallback_target_name=target.target_name,
+        )
+        self.assertEqual(deployment.ship_request.deploy_mode, "dokploy-compose-api")
+        with (
+            patch(
+                "control_plane.product_config_service.dokploy_source.read_dokploy_config",
+                return_value=("https://dokploy.invalid", "fixture-token"),
+            ),
+            patch(
+                "control_plane.product_config_service.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "\n".join(f"{key}={value}" for key, value in resources.items())
+                },
+            ),
+        ):
+            provider = read_lane_provider_env(
+                record_store=self.store,
+                control_plane_root=self.fixture.root,
+                product=self.record.product,
+                context_name=self.record.context,
+                instance_name="prod",
+            )
+        self.assertTrue(resources.keys() <= provider.recorded_keys)
 
     def test_read_only_inventory_bookkeeping_does_not_weaken_publication_mutation_guards(
         self,

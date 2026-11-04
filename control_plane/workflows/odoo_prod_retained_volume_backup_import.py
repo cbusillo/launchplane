@@ -124,7 +124,6 @@ def build_odoo_prod_retained_volume_backup_import_plan(
 
     runtime_values = _runtime_values_from_store(
         record_store=record_store,
-        target_record=target_record,
         context=request.context,
         instance=request.instance,
     )
@@ -744,7 +743,6 @@ def _read_inventory(
 def _runtime_values_from_store(
     *,
     record_store: OdooProdRetainedVolumeBackupImportStore,
-    target_record: DokployTargetRecord,
     context: str,
     instance: str,
 ) -> dict[str, str]:
@@ -762,7 +760,6 @@ def _runtime_values_from_store(
         context_name=context,
         instance_name=instance,
     )
-    values.update(target_record.env)
     return {key: str(value) for key, value in values.items()}
 
 

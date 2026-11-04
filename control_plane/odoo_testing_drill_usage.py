@@ -35,8 +35,7 @@ def testing_drill_environment(store: PostgresRecordStore, context: str) -> dict[
                 "testing" if scope == "instance" else ""
             ):
                 environment.update({key: str(value) for key, value in record.env.items()})
-    target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
-    environment.update({key: str(value) for key, value in target.env.items()})
+    store.read_dokploy_target_record(context_name=context, instance_name="testing")
     return environment
 
 

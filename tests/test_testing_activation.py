@@ -2331,7 +2331,7 @@ class ActivationTests(unittest.TestCase):
         )
         self.assertTrue(require_activation_hold_lift(self.store, request, self.actor, self.root))
 
-    def test_safe_target_edits_keep_old_fence_attributed_but_resource_drift_does_not(self) -> None:
+    def test_inert_target_edits_keep_old_fence_attributed_but_identity_drift_does_not(self) -> None:
         self.assertEqual(self.run_activation().response_status_code, 202)
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
@@ -2341,6 +2341,13 @@ class ActivationTests(unittest.TestCase):
         self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
         target.env[self.request.port_keys[0]] = "3307"
         self.store.write_dokploy_target_record(target)
+        self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
+        identity = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(
+            identity.model_copy(update={"target_id": "foreign-target"})
+        )
         self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
 
     def test_provider_monitor_source_recheck_refuses_published_separation_drift(self) -> None:
@@ -2373,11 +2380,12 @@ class ActivationTests(unittest.TestCase):
             tls_get=Mock(),
         )
         self.assertEqual(observation.status, "pass")
-        current = self.store.read_dokploy_target_record(
+        identity = self.store.read_dokploy_target_id_record(
             context_name=self.context, instance_name="testing"
         )
-        current.env[self.request.port_keys[0]] = "3307"
-        self.store.write_dokploy_target_record(current)
+        self.store.write_dokploy_target_id_record(
+            identity.model_copy(update={"target_id": "foreign-target"})
+        )
         self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
         result = self.store.write_public_ingress_transition_with_outbox(
             observation=observation,

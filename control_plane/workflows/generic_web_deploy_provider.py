@@ -590,13 +590,13 @@ class DokployGenericWebDeployStore(control_plane_secrets.SecretReadStore, Protoc
         self, *, context_name: str, instance_name: str
     ) -> ProviderTargetRecord: ...
 
-    def read_dokploy_target_record(
-        self, *, context_name: str, instance_name: str
-    ) -> DokployTargetRecord: ...
-
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord: ...
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
 
     def list_runtime_environment_records(
         self, *, context_name: str = "", instance_name: str = ""
@@ -971,7 +971,7 @@ class DokployGenericWebDeployProvider:
             record_store=dokploy_store,
             context_name=context_name,
             instance_name=instance_name,
-            target_environment=target_definition.env,
+            target_environment={},
         )
         configured_ship_mode = dokploy_source.resolve_dokploy_ship_mode(
             context_name,

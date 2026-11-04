@@ -63,18 +63,12 @@ def _derive_runtime_dependencies(
     if profile.driver_id == "odoo":
         dependencies.add("database")
     read_runtime = getattr(record_store, "list_runtime_environment_records", None)
-    read_target = getattr(record_store, "read_dokploy_target_record", None)
-    if (
-        not callable(read_runtime)
-        or not callable(read_target)
-        or not all(
-            callable(getattr(record_store, name, None))
-            for name in (
-                "list_runtime_environment_records",
-                "read_dokploy_target_record",
-                "list_secret_records",
-                "list_secret_bindings",
-            )
+    if not callable(read_runtime) or not all(
+        callable(getattr(record_store, name, None))
+        for name in (
+            "list_runtime_environment_records",
+            "list_secret_records",
+            "list_secret_bindings",
         )
     ):
         return RuntimeDependencyExpectations(
@@ -82,7 +76,6 @@ def _derive_runtime_dependencies(
         )
     values: dict[str, object] = {}
     retired_keys: set[str] = set()
-    # Match site runtime: no global values; context then exact lane then target.
     records: tuple[RuntimeEnvironmentRecord, ...] = read_runtime(context_name=lane.context)
     for record in sorted(records, key=lambda item: item.scope == "instance"):
         if record.context != lane.context or record.scope == "global":
@@ -92,12 +85,6 @@ def _derive_runtime_dependencies(
         elif record.scope == "instance" and record.instance == lane.instance:
             values.update(record.env)
             retired_keys.update(record.retired_provider_keys)
-    try:
-        target = read_target(context_name=lane.context, instance_name=lane.instance)
-    except FileNotFoundError:
-        target = None
-    if target is not None:
-        values.update(target.env)
     bindings = site_delivered_secret_bindings_from_store(
         record_store=cast(SiteSecretDeliveryStore, record_store),
         context_name=lane.context,

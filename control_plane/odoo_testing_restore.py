@@ -1387,7 +1387,6 @@ def read_current_testing_generation(
                 "testing" if scope == "instance" else ""
             ):
                 values.update(runtime.env)
-    values.update(target.env)
     from control_plane.odoo_testing_resources import OdooTestingResources
 
     resources = OdooTestingResources(

@@ -260,9 +260,7 @@ class LaneProviderEnvReadTests(unittest.TestCase):
         provider = self._read(product="odoo-tenant-cm")
         self.assertEqual(provider.env["APP_LABEL"], ADOPTED_VALUE)
         self.assertEqual(dict(provider.template_defaults), odoo_compose_template_defaults())
-        self.assertEqual(
-            provider.recorded_keys, frozenset({"TRACKED_SETTING", "SHARED_SERVICE_PASSWORD"})
-        )
+        self.assertEqual(provider.recorded_keys, frozenset({"SHARED_SERVICE_PASSWORD"}))
         self.assertEqual(provider.unretirable_keys, frozenset({"ODOO_ADDONS_PATH"}))
 
     def test_refuses_a_lane_the_product_does_not_own(self) -> None:

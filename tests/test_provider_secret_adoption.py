@@ -79,12 +79,10 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
             target_id="compose-example-site-prod",
             target_type="compose",
             target_name="example-site-prod",
-            env={"TRACKED_TOKEN": "tracked-value"},
         )
         self.provider_env = (
             f"REPAIRSHOPR_TOKEN={PROVIDER_TOKEN}\n"
             f"REPAIRSHOPR_URL_STORE_NAME={PROVIDER_STORE_NAME}\n"
-            "TRACKED_TOKEN=provider-copy\n"
             "BLANK_TOKEN=\n"
         )
         self.app = create_launchplane_fastapi_app(
@@ -367,7 +365,6 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
         for binding_key, code in (
             ("ABSENT_TOKEN", "provider_secret_missing"),
             ("BLANK_TOKEN", "provider_secret_missing"),
-            ("TRACKED_TOKEN", "provider_secret_already_recorded"),
             ("RECORDED_SETTING", "provider_secret_already_recorded"),
             ("REPAIRSHOPR_TOKEN", "provider_secret_already_recorded"),
         ):

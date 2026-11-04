@@ -78,7 +78,6 @@ class TestingOverridePointerRetirementTests(unittest.TestCase):
             "secret_declaration",
             "context",
             "instance",
-            "target",
             "other_lane",
             "wrong_product",
             "production",
@@ -133,21 +132,6 @@ class TestingOverridePointerRetirementTests(unittest.TestCase):
                             updated_at=_runtime_record().updated_at,
                             source_label="test",
                         )
-                    )
-                if case == "target":
-                    _seed_tracked_target_records(
-                        database_url=database_url,
-                        context="example-site",
-                        instance="testing",
-                        target_id="fixture-app",
-                        target_type="application",
-                        target_name="fixture-app",
-                    )
-                    target = store.read_dokploy_target_record(
-                        context_name="example-site", instance_name="testing"
-                    )
-                    store.write_dokploy_target_record(
-                        target.model_copy(update={"env": {key: "private-value"}})
                     )
                 if case.startswith(("config_", "addon_")):
                     value = OdooOverrideValue(

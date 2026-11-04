@@ -682,9 +682,6 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("provider-token", str(payload))
                     read_settings.assert_not_called()
                     if expected_status == 200:
-                        self.assertIsNone(
-                            payload["inspect"]["tracked_target"]["instance_setting_comparison"]
-                        )
                         self.assertEqual(payload["inspect"]["target_id"], "compose-cm-prod")
                         self.assertEqual(
                             payload["inspect"]["provider"]["env"]["keys"], ["ODOO_DB_PASSWORD"]
@@ -949,7 +946,6 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
                     "read_dokploy_target_record",
                     "read_dokploy_target_id_record",
                     "read_provider_target_record",
-                    "list_runtime_environment_records",
                 ):
                     with (
                         self.subTest(method=method),
