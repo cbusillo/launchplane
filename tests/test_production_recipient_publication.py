@@ -2,7 +2,7 @@
 
 from typing import Any
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
@@ -14,6 +14,10 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.promotion_record import HealthcheckEvidence, DeploymentEvidence
 from control_plane.production_recipient import custody, authority_snapshot
+from control_plane.published_generation_resources import (
+    published_generation_resources,
+)
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.production_recipient_publication import (
     RecipientPublication,
     commit_publication,
@@ -27,6 +31,59 @@ from tests import test_production_recipient as preparation_tests
 
 class RecipientPublicationTests(unittest.TestCase):
     database_url = ""
+
+    def test_generation_resources_keep_the_published_and_retained_targets_distinct(self) -> None:
+        keys = {*self.record.request.volume_keys.values(), *self.record.request.ports}
+        generation_values = {
+            key: value for key, value in self.fixture.values.items() if key in keys
+        }
+        generation_values.update(
+            {key: str(value) for key, value in self.record.request.ports.items()}
+        )
+        generation_values.update(
+            {key: f"published-{role}" for role, key in self.record.request.volume_keys.items()}
+        )
+        publication = self.publication.model_copy(
+            update={
+                "target": self.publication.target.model_copy(
+                    update={"env": {**self.fixture.values, **generation_values}}
+                )
+            }
+        )
+        before_values = {
+            **self.fixture.values,
+            **{key: f"inverse-{role}" for role, key in self.record.request.volume_keys.items()},
+        }
+        before = {
+            **self.record.authority_snapshot,
+            "target": self.record.retained_target.model_copy(
+                update={"env": before_values}
+            ).model_dump(mode="json"),
+        }
+        record = self.record.model_copy(
+            update={
+                "phase": "published",
+                "publication": {"published": publication.model_dump(mode="json"), "before": before},
+                "retained_target": self.record.retained_target.model_copy(
+                    update={"env": self.fixture.values}
+                ),
+            }
+        )
+        store = Mock(spec=PostgresRecordStore)
+        store.list_product_profile_records.return_value = (self.fixture.profile,)
+        store.read_production_recipient.return_value = record.model_dump(mode="json")
+        store.read_dokploy_target_id_record.return_value = self.publication.target_id
+        selected = published_generation_resources(store, context=record.context, instance="prod")
+        self.assertEqual(selected, generation_values)
+        store.read_dokploy_target_id_record.return_value = record.retained_target_id
+        with self.assertRaises(ValueError):
+            published_generation_resources(store, context=record.context, instance="prod")
+        record.phase = "inverse_published"
+        store.read_production_recipient.return_value = record.model_dump(mode="json")
+        retained = published_generation_resources(store, context=record.context, instance="prod")
+        self.assertEqual(
+            retained, {key: value for key, value in before_values.items() if key in keys}
+        )
 
     def setUp(self) -> None:
         self.fixture = preparation_tests.ProductionRecipientTests()

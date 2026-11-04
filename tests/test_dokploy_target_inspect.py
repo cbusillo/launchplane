@@ -180,17 +180,35 @@ class DokployTargetInspectTests(unittest.TestCase):
                 )
 
                 with patch.object(store, "read_secret_version", side_effect=AssertionError):
-                    result = inspect_dokploy_target(
-                        record_store=store,
-                        host="https://dokploy.example.invalid",
-                        token="token",
-                        request=DokployTargetInspectRequest(
-                            context="cm_website",
-                            instance="prod",
-                        ),
-                        compare_instance_settings=True,
-                        fetch_target_payload=_fake_target_payload,
-                    )
+
+                    def inspect() -> dict[str, object]:
+                        return inspect_dokploy_target(
+                            record_store=store,
+                            host="https://dokploy.example.invalid",
+                            token="token",
+                            request=DokployTargetInspectRequest(
+                                context="cm_website", instance="prod"
+                            ),
+                            compare_instance_settings=True,
+                            fetch_target_payload=_fake_target_payload,
+                        )
+
+                    result = inspect()
+                    resources = {
+                        "ODOO_UPSTREAM_USER": "synthetic-reader-not-for-output",
+                        "DIFFERENT": "different-generation-value",
+                        "GENERATION_ONLY": "generation-only-value",
+                    }
+                    with patch(
+                        "control_plane.dokploy_target_inspect.published_generation_resources",
+                        return_value=resources,
+                    ):
+                        compared = inspect()
+                    with patch(
+                        "control_plane.dokploy_target_inspect.published_generation_resources",
+                        side_effect=KeyError,
+                    ):
+                        unavailable = inspect()
                 stored_evidence = store.read_provider_target_record(
                     context_name="cm_website", instance_name="prod"
                 ).provider_evidence
@@ -212,7 +230,13 @@ class DokployTargetInspectTests(unittest.TestCase):
         self.assertEqual(tracked_target["env_keys"], sorted(stored_target.env))
         self.assertNotIn("synthetic-reader-not-for-output", str(tracked_target))
         self.assertEqual(
-            tracked_target["instance_setting_comparison"],
+            {
+                key: value
+                for key, value in _require_mapping(
+                    tracked_target["instance_setting_comparison"]
+                ).items()
+                if key != "generation_resources"
+            },
             {
                 "same_value_keys": ["ODOO_UPSTREAM_USER"],
                 "different_value_keys": ["DIFFERENT"],
@@ -220,6 +244,29 @@ class DokployTargetInspectTests(unittest.TestCase):
                 "retired_keys": ["RETIRED"],
                 "instance_settings_updated_at": runtime_record.updated_at,
             },
+        )
+        comparison = _require_mapping(tracked_target["instance_setting_comparison"])
+        generation = _require_mapping(
+            _require_mapping(compared["tracked_target"])["instance_setting_comparison"]
+        )
+        self.assertEqual(
+            generation["generation_resources"],
+            {
+                "status": "compared",
+                "same_value_keys": ["ODOO_UPSTREAM_USER"],
+                "different_value_keys": ["DIFFERENT"],
+                "target_only_keys": ["MISSING", "RETIRED"],
+                "generation_only_keys": ["GENERATION_ONLY"],
+            },
+        )
+        failed = _require_mapping(
+            _require_mapping(unavailable["tracked_target"])["instance_setting_comparison"]
+        )
+        self.assertEqual(_require_mapping(failed["generation_resources"])["status"], "unavailable")
+        for value in resources.values():
+            self.assertNotIn(value, str(compared))
+        self.assertEqual(
+            _require_mapping(comparison["generation_resources"])["status"], "no_custody"
         )
         for value in (
             "target-only-value",

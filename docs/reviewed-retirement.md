@@ -19,6 +19,15 @@ value, or no value, and separately reports target keys retired by that record.
 It is null when the target has no environment overlay. Context/global settings,
 managed-secret values, provider values and retained operation snapshots are not
 compared. No values or value hashes are returned, and no secret versions are read.
+The nested `generation_resources` comparison checks the same target keys against
+the resources selected by existing published-generation custody. It reports
+equal, different, target-only and generation-only key names. `no_custody` means
+no supported generation record selects the lane; `unavailable` means its recorded
+custody could not be evaluated. Neither qualifies deletion. `compared` reports
+equality with the saved serving snapshot, including a retained snapshot after
+an inverse; it does not attest a publication phase or change delivery.
+Retained target rows and publication snapshots remain unchanged; inverse
+production publication selects the retained generation's resource values.
 The existing target-inspection permissions and provider read still apply.
 The comparison also requires the existing exact-lane `secret.list` runtime-setting
 read permission; other inspectors receive null without reading runtime settings.
@@ -29,8 +38,9 @@ read separately; their timestamps identify an observation, not an atomic
 migration plan. A fold must recheck equality and retirement under its write
 locks, preserve generation-specific resource ownership and retained operations,
 and keep live delivery on accepted releases. Remove this comparison when the
-tracked-target layer is deleted. Existing lane declarations and values remain
-the destination; never overwrite a conflicting lane value to make a fold pass.
+tracked-target layer is deleted. Ordinary settings remain in lane declarations;
+generation resources stay with the existing published-generation records.
+Never overwrite a conflicting lane value to make a fold pass.
 
 The existing Odoo target-replacement plan also reports two advisory fields on
 `current_target`. `compose_matches_generated` compares the live provider Compose
