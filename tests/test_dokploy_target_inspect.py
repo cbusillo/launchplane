@@ -15,6 +15,7 @@ from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy_target_inspect import (
     DokployTargetInspectRequest,
     DokployTargetInspectStore,
+    _instance_setting_comparison,
     inspect_dokploy_target,
     summarize_dokploy_target_payload,
 )
@@ -220,6 +221,9 @@ class DokployTargetInspectTests(unittest.TestCase):
                 stored_target = store.read_dokploy_target_record(
                     context_name="cm_website", instance_name="prod"
                 )
+                empty_comparison = _instance_setting_comparison(
+                    store, stored_target.model_copy(update={"env": {}})
+                )
             finally:
                 store.close()
 
@@ -249,6 +253,9 @@ class DokployTargetInspectTests(unittest.TestCase):
                 "retired_keys": ["RETIRED"],
                 "instance_settings_updated_at": runtime_record.updated_at,
             },
+        )
+        self.assertEqual(
+            _require_mapping(empty_comparison["generation_resources"])["status"], "no_custody"
         )
         comparison = _require_mapping(tracked_target["instance_setting_comparison"])
         generation = _require_mapping(

@@ -16,7 +16,9 @@ For the tracked-target environment fold, reuse the existing
 Its `tracked_target.instance_setting_comparison` groups target key names by
 whether the exact instance runtime record has the same string value, a different
 value, or no value, and separately reports target keys retired by that record.
-It is null when the target has no environment overlay. Context/global settings,
+Empty target overlays are checked too, so stale generation custody is visible
+on every stable lane the reader may compare with its existing exact-lane
+`secret.list` permission. Context/global settings,
 managed-secret values, provider values and retained operation snapshots are not
 compared. No values or value hashes are returned, and no secret versions are read.
 The nested `generation_resources` comparison checks the same target keys against
