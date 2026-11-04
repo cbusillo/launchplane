@@ -547,6 +547,17 @@ jobs:
             --exit-code 1 \
             "$LAUNCHPLANE_CI_IMAGE_TAG"
 
+      # Trivy runs as root; a root-owned cache stops the runner emptying its temp folder after every job.
+      - name: Return Trivy cache to the runner user
+        if: always()
+        env:
+          LAUNCHPLANE_TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          [ -d "$LAUNCHPLANE_TRIVY_CACHE_DIR" ] || exit 0
+          docker run --rm --entrypoint chown \
+            -v "${LAUNCHPLANE_TRIVY_CACHE_DIR}:/root/.cache" \
+            ghcr.io/aquasecurity/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
+            -R "$(id -u):$(id -g)" /root/.cache
 
       - name: Report image audit outcome
         if: always()
@@ -631,6 +642,17 @@ jobs:
             --exit-code 1 \
             "$LAUNCHPLANE_CI_IMAGE_TAG"
 
+      # Trivy runs as root; a root-owned cache stops the runner emptying its temp folder after every job.
+      - name: Return Trivy cache to the runner user
+        if: always()
+        env:
+          LAUNCHPLANE_TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
+        run: |
+          [ -d "$LAUNCHPLANE_TRIVY_CACHE_DIR" ] || exit 0
+          docker run --rm --entrypoint chown \
+            -v "${LAUNCHPLANE_TRIVY_CACHE_DIR}:/root/.cache" \
+            ghcr.io/aquasecurity/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
+            -R "$(id -u):$(id -g)" /root/.cache
 
       - name: Report image audit outcome
         if: always()
