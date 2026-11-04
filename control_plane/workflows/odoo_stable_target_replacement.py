@@ -327,12 +327,6 @@ def _site_runtime_key_names(
     context: str,
     instance: str,
 ) -> set[str]:
-    """The key names ``resolve_site_runtime_environment`` would deliver, before
-    retirement, read without decrypting any secret.
-
-    The site's context and lane records, its tracked target settings and the
-    managed secrets stored for it; never global values or another site's.
-    """
     names: set[str] = set()
     definition = (
         control_plane_runtime_environments.load_optional_runtime_environment_definition_from_store(

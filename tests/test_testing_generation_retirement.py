@@ -9,6 +9,7 @@ from unittest.mock import patch
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.disposable_lane import DisposableTestingSupersession
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.testing_replacement_recovery import (
     TestingReplacementRecoveryJournal,
     TestingReplacementEffect,
@@ -78,12 +79,16 @@ class TestingGenerationRetirementTests(unittest.TestCase):
         if getattr(self, "native_source", False):
             from control_plane.odoo_testing_native_source import native_testing_source_authority
 
-            production = self.store.read_dokploy_target_record(
-                context_name=self.context, instance_name="prod"
+            production_lane = next(
+                lane for lane in fixture.profile.lanes if lane.instance == "prod"
             )
-            self.store.write_dokploy_target_record(
-                production.model_copy(
-                    update={"env": {**production.env, "ODOO_DB_NAME": "production"}}
+            self.store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context=production_lane.context,
+                    instance="prod",
+                    env={"ODOO_DB_NAME": "production"},
+                    updated_at=fixture.profile.updated_at,
                 )
             )
             source_binding = native_testing_source_authority(
