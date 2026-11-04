@@ -40,13 +40,24 @@ class RecipientPublicationTests(unittest.TestCase):
         generation_values.update(
             {key: str(value) for key, value in self.record.request.ports.items()}
         )
-        publication = self.publication.model_copy(
-            update={"target": self.publication.target.model_copy(update={"env": generation_values})}
+        generation_values.update(
+            {key: f"published-{role}" for role, key in self.record.request.volume_keys.items()}
         )
+        publication = self.publication.model_copy(
+            update={
+                "target": self.publication.target.model_copy(
+                    update={"env": {**self.fixture.values, **generation_values}}
+                )
+            }
+        )
+        before_values = {
+            **self.fixture.values,
+            **{key: f"inverse-{role}" for role, key in self.record.request.volume_keys.items()},
+        }
         before = {
             **self.record.authority_snapshot,
             "target": self.record.retained_target.model_copy(
-                update={"env": self.fixture.values}
+                update={"env": before_values}
             ).model_dump(mode="json"),
         }
         record = self.record.model_copy(
@@ -71,7 +82,7 @@ class RecipientPublicationTests(unittest.TestCase):
         store.read_production_recipient.return_value = record.model_dump(mode="json")
         retained = published_generation_resources(store, context=record.context, instance="prod")
         self.assertEqual(
-            retained, {key: value for key, value in self.fixture.values.items() if key in keys}
+            retained, {key: value for key, value in before_values.items() if key in keys}
         )
 
     def setUp(self) -> None:

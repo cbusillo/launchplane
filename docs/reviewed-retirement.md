@@ -22,8 +22,10 @@ compared. No values or value hashes are returned, and no secret versions are rea
 The nested `generation_resources` comparison checks the same target keys against
 the resources selected by existing published-generation custody. It reports
 equal, different, target-only and generation-only key names. `no_custody` means
-there is no generation record for the lane; `unavailable` means recorded custody
-cannot select the serving target. Neither qualifies deletion. It does not change delivery.
+no supported generation record selects the lane; `unavailable` means its recorded
+custody could not be evaluated. Neither qualifies deletion. `compared` reports
+equality with the saved serving snapshot, including a retained snapshot after
+an inverse; it does not attest a publication phase or change delivery.
 Retained target rows and publication snapshots remain unchanged; inverse
 production publication selects the retained generation's resource values.
 The existing target-inspection permissions and provider read still apply.
