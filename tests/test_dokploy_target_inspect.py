@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -69,7 +70,9 @@ class DokployTargetInspectTests(unittest.TestCase):
             "control_plane.dokploy_target_inspect.published_generation_resources",
             side_effect=ValueError,
         ):
-            comparison = _require_mapping(_instance_setting_comparison(store, target))
+            comparison = _require_mapping(
+                _instance_setting_comparison(cast(DokployTargetInspectStore, store), target)
+            )
         self.assertEqual(
             _require_mapping(comparison["generation_resources"])["status"], "unavailable"
         )
