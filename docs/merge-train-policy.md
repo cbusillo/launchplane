@@ -473,7 +473,11 @@ dispositions are complete. The GitHub adapter reads the complete discussion,
 bounded to 100 pages of 100 comments. The latest trusted ready or
 `Engineering ready; waiting for ...` comment wins by update time and comment id;
 an edited handoff has unproven editor authority and requires a new checked
-`gh-pr.py ready` comment. A waiting handoff cancels readiness. A push
+`gh-pr.py ready` comment. A waiting handoff cancels readiness, except the
+checked `Engineering ready; waiting for the Client's acceptance` wait naming
+exactly the current head: it admits once Launchplane holds every Client's
+acceptance of that head, including one carried to it, with no second handoff.
+Every other admission check still applies. A push
 requires a fresh handoff naming exactly the current head. Missing, duplicate,
 quoted, fenced, stale or unreadable head evidence cannot admit a PR. The adapter
 reports unavailable or incomplete discussion evidence as unreadable rather than
