@@ -30802,6 +30802,7 @@ class PostgresRecordStore(HumanSessionStore):
             if authority_changed:
                 if expected_provider_hold_snapshot is not None:
                     return PublicIngressTransitionWriteResult(status="provider_source_changed")
+                observation = observation.unaccepted()
                 observation_row = LaunchplanePublicIngressObservationRow(
                     record_id=observation.record_id,
                     product=observation.product,
@@ -30811,14 +30812,7 @@ class PostgresRecordStore(HumanSessionStore):
                     observed_at=observation.observed_at,
                     check_token=check_token,
                     check_kind=observation.check_kind,
-                    payload=self._payload_dict(
-                        observation.model_copy(
-                            update={
-                                "incident_id": "",
-                                "incident_event_id": "",
-                            }
-                        )
-                    ),
+                    payload=self._payload_dict(observation),
                 )
                 observation_row.incident_id = ""
                 session.merge(observation_row)

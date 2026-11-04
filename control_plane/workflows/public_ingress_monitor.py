@@ -1157,7 +1157,7 @@ def _store_monitor_observation(
     ] = "monitoring_intent_changed",
 ) -> _StoredMonitorTransition:
     transition_writer = getattr(record_store, "write_public_ingress_transition_with_outbox", None)
-    plan: _PlannedIncidentTransition | None = None
+    plan: _PlannedIncidentTransition
     outbox_deliveries: tuple[OutboxDeliveryRecord, ...] = ()
     for _attempt in range(3):
         plan = _plan_public_ingress_incident_transition(
@@ -1213,51 +1213,23 @@ def _store_monitor_observation(
             ),
         )
         write_status = getattr(write_result, "status", "written")
-        if write_status == "provider_source_changed":
-            summary = (
-                "Provider operation evidence is unavailable; observation was not accepted."
-                if expected_provider_hold_snapshot is not None
-                and not expected_provider_hold_snapshot.source_sha256
-                else "Provider operation evidence changed before publication; observation was not accepted."
-            )
-            unavailable = record.model_copy(
-                update={
-                    "status": "skipped",
-                    "failure_code": None,
-                    "targets": tuple(
-                        target.model_copy(
-                            update={
-                                "status": "skipped",
-                                "failure_code": None,
-                                "summary": summary,
-                            }
-                        )
-                        for target in record.targets
-                    ),
-                    "summary": summary,
-                    "incident_id": "",
-                    "incident_event_id": "",
-                    "material_fingerprint": None,
-                    "material_fingerprint_sha256": "",
-                }
-            )
+        if write_status in {"provider_source_changed", "authority_changed"}:
+            if write_status == "authority_changed":
+                unavailable = plan.observation.unaccepted()
+            else:
+                summary = (
+                    "Provider operation evidence is unavailable; observation was not accepted."
+                    if expected_provider_hold_snapshot is not None
+                    and not expected_provider_hold_snapshot.source_sha256
+                    else "Provider operation evidence changed before publication; observation was not accepted."
+                )
+                unavailable = plan.observation.unaccepted(summary, preserve_failures=False)
             return _StoredMonitorTransition(unavailable, (), (), (), (), authority_changed=True)
         if write_status == "incident_changed":
             continue
-        if write_status == "authority_changed":
-            return _StoredMonitorTransition(
-                observation=record.model_copy(update={"incident_id": "", "incident_event_id": ""}),
-                incidents=(),
-                incident_events=(),
-                reminder_states=(),
-                delivery_attempts=(),
-                authority_changed=True,
-            )
         break
     else:
         raise RuntimeError("public ingress incident changed during three transition attempts")
-    if plan is None:
-        raise RuntimeError("public ingress transition planning did not produce a plan")
     delivery_attempts: list[PublicIngressNotificationAttemptRecord] = []
     incidents_by_id = {incident.incident_id: incident for incident in plan.incidents}
     for incident_event in plan.incident_events:
