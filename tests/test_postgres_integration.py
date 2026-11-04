@@ -18,6 +18,10 @@ import time
 from typing import Any
 import unittest
 from tests import test_odoo_business_hours_config as calendar_config_tests
+from tests import test_monitoring_authority_history as monitoring_history_tests
+from control_plane.storage.migrations.versions import (
+    e2b6c8d0a4f7_monitoring_authority_history as monitoring_history_migration,
+)
 from tests import test_product_retirement_previews as integrated_retirement_tests
 from tests import test_legacy_preview_sibling_ownership as generic_sibling_tests
 from tests import test_odoo_secret_transport as secret_transport_tests
@@ -295,6 +299,40 @@ from tests.test_trusted_maintenance import (
 
 POSTGRES_TEST_URL_ENV = "LAUNCHPLANE_TEST_POSTGRES_URL"
 LOCK_WAIT_TIMEOUT = "1000ms"
+
+
+class RealPostgresMonitoringAuthorityTests(
+    monitoring_history_tests.MonitoringAuthorityCaptureTests
+):
+    def setUp(self) -> None:
+        self.url = self.enterContext(_isolated_postgres_database())
+        alembic_command.upgrade(
+            _alembic_config(self.url), monitoring_history_migration.down_revision
+        )
+        self.engine = create_engine(self.url)
+        self.addCleanup(self.engine.dispose)
+
+    def test_epoch_waits_for_preexisting_writer_and_records_only_committed_sources(self) -> None:
+        from control_plane.storage.migrations import monitoring_authority_v1 as history
+
+        with self.engine.connect() as writer, self.engine.connect() as installer:
+            transaction = writer.begin()
+            self.write_profile(writer, "committed-before-epoch", "active")
+            with self.assertRaises(OperationalError):
+                with installer.begin():
+                    installer.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                    history.initialize(installer)
+            transaction.commit()
+            with installer.begin():
+                history.initialize(installer)
+                products = (
+                    installer.execute(
+                        text(f"SELECT product FROM {history.TABLE_NAME} WHERE operation='seed'")
+                    )
+                    .scalars()
+                    .all()
+                )
+            self.assertEqual(products, ["committed-before-epoch"])
 
 
 def _postgres_root_database_url() -> str:

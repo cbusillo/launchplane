@@ -13,6 +13,9 @@ from control_plane.storage.migrations.versions import (
     a4c8e0f2b6d3_archive_nonruntime_product_profiles as profile_archive,
     c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
 )
+from control_plane.storage.migrations.monitoring_authority_v1 import (
+    TABLE_NAME as MONITORING_HISTORY_TABLE,
+)
 from control_plane.storage.postgres import Base, _build_engine
 from control_plane.storage.schema_invariants import (
     CRITICAL_SCHEMA_INDEXES,
@@ -144,7 +147,7 @@ LEGACY_KNOWN_LATER_TABLES = (
     frozenset(Base.metadata.tables)
     | frozenset(retired_delivery.RETIRED_TABLES)
     | frozenset({profile_archive.ARCHIVE_TABLE})
-    | frozenset({integration_attestations.TABLE_NAME})
+    | frozenset({integration_attestations.TABLE_NAME, MONITORING_HISTORY_TABLE})
     | frozenset(LEGACY_CURRENT_SCHEMA)
 ) - frozenset(LEGACY_BASELINE_SCHEMA)
 

@@ -6384,3 +6384,29 @@ carried Client decisions. Both additive fields are omitted when empty, so its
 ordinary carries remain readable by the preceding image. Activation uses the
 same read contract unchanged. Do not roll activation back past this compatible
 image after any populated carry has been saved.
+
+### Monitoring-authority history compatibility
+
+The prepared additive revision `e2b6c8d0a4f7` retains profile, route-binding and
+private-endpoint decisions in `launchplane_monitoring_authority_history`.
+Ordinary startup still targets the integration-attestation revision. This
+compatibility release neither creates the history table nor establishes coverage.
+It recognizes the future additive revision and its empty held-branch join,
+`f3c7d9e1b5a8`, so it can remain the previous-image rollback target after activation.
+Qualify its deployed image before changing the startup target. Never activate
+with Alembic `head`: the separately held delivery drop remains unapproved.
+
+The prepared migration locks all three source tables in one transaction,
+records one coverage epoch and seeds every existing row, including inactive
+profiles. Database triggers then append insert, update and deletion decisions
+in each source transaction, including writes from an older compatible image.
+Failed or rolled-back writes earn no revision. Application-supplied `updated_at`
+does not backdate coverage. The epoch describes retained authority starting at
+installation; it supplies no earlier Live roster, required-check applicability,
+passing observation, incident resolution or credited healthy time.
+
+The retained payloads are private decision evidence. They are not a new current
+authority or a provider inventory. Read/accounting activation must project only
+the authorized monitoring facts and keep incomplete earlier intervals UNKNOWN.
+Downgrade retains this evidence; rollback uses the compatible image with the
+additive table and capture intact.
