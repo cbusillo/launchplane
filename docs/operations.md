@@ -6397,7 +6397,7 @@ Qualify its deployed image before changing the startup target. Never activate
 with Alembic `head`: the separately held delivery drop remains unapproved.
 
 The prepared migration locks all three source tables in one transaction,
-records one coverage epoch and seeds every existing row, including inactive
+records one coverage epoch and seeds monitoring facts from every existing row, including inactive
 profiles. Database triggers then append insert, update and deletion decisions
 in each source transaction, including writes from an older compatible image.
 Failed or rolled-back writes earn no revision. Application-supplied `updated_at`
@@ -6405,8 +6405,14 @@ does not backdate coverage. The epoch describes retained authority starting at
 installation; it supplies no earlier Live roster, required-check applicability,
 passing observation, incident resolution or credited healthy time.
 
-The retained payloads are private decision evidence. They are not a new current
-authority or a provider inventory. Read/accounting activation must project only
-the authorized monitoring facts and keep incomplete earlier intervals UNKNOWN.
+Capture retains lifecycle/Live/website declarations, lane monitoring configuration,
+binding domains/status and endpoint identity/status. It excludes unrelated
+profile and lane settings. Source keys identify revisions across scope changes;
+PostgreSQL transaction IDs retain transaction grouping. Sequence numbers and
+recording timestamps identify writes, not commit order or commit time. The later
+reader/accountant must preserve this distinction and earlier incomplete intervals.
+These monitoring facts are private historical decision evidence, not a new current
+authority or provider inventory. No capture health or timeline qualification is
+asserted by this compatibility slice.
 Downgrade retains this evidence; rollback uses the compatible image with the
 additive table and capture intact.

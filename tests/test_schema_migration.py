@@ -35,6 +35,8 @@ from control_plane.storage.migrations.versions import (
     b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
     f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
     c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
+    e2b6c8d0a4f7_monitoring_authority_history as monitoring_history,
+    f3c7d9e1b5a8_join_monitoring_history as monitoring_history_join,
 )
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
@@ -81,26 +83,40 @@ class SchemaMigrationTests(unittest.TestCase):
             )
 
     def test_preceding_target_reads_additive_schema_without_downgrading_it(self) -> None:
-        with TemporaryDirectory() as temporary:
-            url = f"sqlite+pysqlite:///{Path(temporary) / 'compatibility.db'}"
-            command.upgrade(alembic_config(url), integration_attestations.down_revision)
-            engine = create_engine(url)
-            self.addCleanup(engine.dispose)
-            before = set(inspect(engine).get_table_names())
-            self.assertTrue(set(retired_delivery.RETIRED_TABLES) & before)
-            self.assertNotIn("launchplane_integration_attestations", before)
-            command.upgrade(alembic_config(url), integration_attestations.revision)
-            self.assertEqual(
-                schema_migration_action(
-                    current_revision=integration_attestations.revision,
-                    target_revision=integration_attestations.down_revision,
-                ),
-                "compatible_ahead",
+        for migration in (integration_attestations, monitoring_history):
+            with self.subTest(revision=migration.revision), TemporaryDirectory() as temporary:
+                url = f"sqlite+pysqlite:///{Path(temporary) / 'compatibility.db'}"
+                command.upgrade(alembic_config(url), migration.down_revision)
+                engine = create_engine(url)
+                self.addCleanup(engine.dispose)
+                before = set(inspect(engine).get_table_names())
+                self.assertTrue(set(retired_delivery.RETIRED_TABLES) & before)
+                command.upgrade(alembic_config(url), migration.revision)
+                self.assertEqual(
+                    schema_migration_action(
+                        current_revision=migration.revision,
+                        target_revision=migration.down_revision,
+                    ),
+                    "compatible_ahead",
+                )
+                self.assertTrue(before <= set(inspect(engine).get_table_names()))
+                store = PostgresRecordStore(database_url=url)
+                self.addCleanup(store.close)
+                store.verify_schema()
+
+    def test_prepared_history_is_recognized_without_exposing_activation(self) -> None:
+        with self.assertRaises(ValueError):
+            schema_migration_action(
+                current_revision=monitoring_history.down_revision,
+                target_revision=monitoring_history.revision,
             )
-            self.assertTrue(before <= set(inspect(engine).get_table_names()))
-            store = PostgresRecordStore(database_url=url)
-            self.addCleanup(store.close)
-            store.verify_schema()
+        self.assertEqual(
+            schema_migration_target(
+                current_revision=monitoring_history.revision,
+                target_revision=retired_delivery.revision,
+            ),
+            monitoring_history_join.revision,
+        )
 
     def test_migration_preserves_existing_application_loggers(self) -> None:
         application_logger = logging.getLogger("control_plane.merge_train_controller_run_once")
