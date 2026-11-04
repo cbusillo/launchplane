@@ -230,12 +230,17 @@ def _generation_snapshot_keys(
     store: PostgresRecordStore, target: DokployTargetRecord
 ) -> dict[str, object]:
     snapshots: list[tuple[DokployTargetRecord, set[str]]] = []
-    for profile in store.list_product_profile_records():
-        if not any(
+    profiles = [
+        profile
+        for profile in store.list_product_profile_records()
+        if any(
             (lane.context, lane.instance) == (target.context, target.instance)
             for lane in profile.lanes
-        ):
-            continue
+        )
+    ]
+    if len(profiles) > 1:
+        raise ValueError("Generation snapshots require an exclusively owned lane.")
+    for profile in profiles:
         if target.instance == "prod":
             payload = store.read_production_recipient(profile.product, target.context)
             if payload is None:
@@ -246,13 +251,15 @@ def _generation_snapshot_keys(
                 *(ProductionRecipientRecord.model_validate(row) for row in current.prior_attempts),
             )
             for record in records:
+                if (record.product, record.context) != (profile.product, target.context):
+                    raise ValueError("Generation history belongs to another product.")
                 resource_keys = {*record.request.volume_keys.values(), *record.request.ports}
                 snapshots.append((record.retained_target, resource_keys))
                 for publication in (record.publication, *record.publication.get("history", [])):
                     if not isinstance(publication, dict):
                         raise ValueError("Generation publication history is malformed.")
                     for side in ("before", "published"):
-                        if publication.get(side):
+                        if side in publication:
                             snapshots.append(
                                 (
                                     DokployTargetRecord.model_validate(publication[side]["target"]),
@@ -264,10 +271,12 @@ def _generation_snapshot_keys(
                 store.list_testing_application_activations(profile.product, target.context)
             )
             legacy = store.read_testing_activation(profile.product, target.context)
-            if legacy is not None:
+            if legacy is not None and legacy not in payloads:
                 payloads.append(legacy)
             for payload in payloads:
                 activation = TestingActivationRecord.model_validate(payload)
+                if (activation.product, activation.context) != (profile.product, target.context):
+                    raise ValueError("Generation history belongs to another product.")
                 resource_keys = {
                     *activation.request.volume_keys.values(),
                     *activation.request.port_keys,
@@ -281,7 +290,7 @@ def _generation_snapshot_keys(
     ):
         raise ValueError("Generation snapshot belongs to another lane.")
     return {
-        "status": "complete",
+        "status": "complete" if snapshots else "no_custody",
         "snapshot_count": len(snapshots),
         "resource_keys": sorted(
             {key for snapshot, keys in snapshots for key in snapshot.env.keys() & keys}
@@ -326,6 +335,9 @@ def _instance_setting_comparison(
         comparison["generation_snapshots"] = _generation_snapshot_keys(
             cast(PostgresRecordStore, record_store), target
         )
+    except (ValueError, FileNotFoundError, KeyError, TypeError):
+        comparison["generation_snapshots"] = {"status": "unavailable"}
+    try:
         resources = published_generation_resources(
             cast(PostgresRecordStore, record_store),
             context=target.context,
@@ -351,7 +363,6 @@ def _instance_setting_comparison(
             }
     except (ValueError, FileNotFoundError, KeyError, TypeError):
         comparison["generation_resources"] = {"status": "unavailable"}
-        comparison["generation_snapshots"] = {"status": "unavailable"}
     return comparison
 
 

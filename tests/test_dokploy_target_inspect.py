@@ -204,6 +204,11 @@ class DokployTargetInspectTests(unittest.TestCase):
                         return_value=resources,
                     ):
                         compared = inspect()
+                        with patch(
+                            "control_plane.dokploy_target_inspect._generation_snapshot_keys",
+                            side_effect=ValueError,
+                        ):
+                            history_unavailable = inspect()
                     with patch(
                         "control_plane.dokploy_target_inspect.published_generation_resources",
                         side_effect=KeyError,
@@ -263,10 +268,20 @@ class DokployTargetInspectTests(unittest.TestCase):
             _require_mapping(unavailable["tracked_target"])["instance_setting_comparison"]
         )
         self.assertEqual(_require_mapping(failed["generation_resources"])["status"], "unavailable")
+        degraded = _require_mapping(
+            _require_mapping(history_unavailable["tracked_target"])["instance_setting_comparison"]
+        )
+        self.assertEqual(degraded["generation_resources"], generation["generation_resources"])
+        self.assertEqual(
+            _require_mapping(degraded["generation_snapshots"])["status"], "unavailable"
+        )
         for value in resources.values():
             self.assertNotIn(value, str(compared))
         self.assertEqual(
             _require_mapping(comparison["generation_resources"])["status"], "no_custody"
+        )
+        self.assertEqual(
+            _require_mapping(comparison["generation_snapshots"])["status"], "no_custody"
         )
         for value in (
             "target-only-value",
