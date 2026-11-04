@@ -91,6 +91,14 @@ class MergeTrainEventTests(TestCase):
             ("check_suite", {"action": "completed", "check_suite": {"head_branch": "main"}}),
             # A commit status names no PR, so a PR head branch may be queued.
             ("status", {"state": "success", "branches": [{"name": "feature"}]}),
+            (
+                "issue_comment",
+                {
+                    "action": "created",
+                    "issue": {"number": 7, "pull_request": {"url": "pulls/7"}},
+                    "comment": {"body": f"Ready for the merge train\n\nHead: {'a' * 40}\n"},
+                },
+            ),
         )
         for event, payload in wakes:
             with self.subTest(event=event, payload=payload):
@@ -135,6 +143,30 @@ class MergeTrainEventTests(TestCase):
             ),
             ("check_run", {"action": "completed"}),
             ("status", {"state": "success", "branches": []}),
+            (
+                "issue_comment",
+                {
+                    "action": "created",
+                    "issue": {"number": 7, "pull_request": {"url": "pulls/7"}},
+                    "comment": {"body": "Looks good to me"},
+                },
+            ),
+            (
+                "issue_comment",
+                {
+                    "action": "edited",
+                    "issue": {"number": 7, "pull_request": {"url": "pulls/7"}},
+                    "comment": {"body": "Ready for the merge train"},
+                },
+            ),
+            (
+                "issue_comment",
+                {
+                    "action": "created",
+                    "issue": {"number": 7},
+                    "comment": {"body": "Ready for the merge train"},
+                },
+            ),
             (
                 "pull_request",
                 {
