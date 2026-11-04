@@ -303,9 +303,7 @@ def _generation_snapshot_keys(
 
 def _instance_setting_comparison(
     record_store: DokployTargetInspectStore, target: DokployTargetRecord
-) -> dict[str, object] | None:
-    if not target.env:
-        return None
+) -> dict[str, object]:
     record = next(
         (
             record
