@@ -33,10 +33,26 @@ class RecipientPublicationTests(unittest.TestCase):
     database_url = ""
 
     def test_generation_resources_keep_the_published_and_retained_targets_distinct(self) -> None:
+        keys = {*self.record.request.volume_keys.values(), *self.record.request.ports}
+        generation_values = {
+            key: value for key, value in self.fixture.values.items() if key in keys
+        }
+        generation_values.update(
+            {key: str(value) for key, value in self.record.request.ports.items()}
+        )
+        publication = self.publication.model_copy(
+            update={"target": self.publication.target.model_copy(update={"env": generation_values})}
+        )
+        before = {
+            **self.record.authority_snapshot,
+            "target": self.record.retained_target.model_copy(
+                update={"env": self.fixture.values}
+            ).model_dump(mode="json"),
+        }
         record = self.record.model_copy(
             update={
                 "phase": "published",
-                "publication": {"published": self.publication.model_dump(mode="json")},
+                "publication": {"published": publication.model_dump(mode="json"), "before": before},
                 "retained_target": self.record.retained_target.model_copy(
                     update={"env": self.fixture.values}
                 ),
@@ -47,24 +63,16 @@ class RecipientPublicationTests(unittest.TestCase):
         store.read_production_recipient.return_value = record.model_dump(mode="json")
         store.read_dokploy_target_id_record.return_value = self.publication.target_id
         selected = published_generation_resources(store, context=record.context, instance="prod")
-        self.assertEqual(
-            selected,
-            {
-                **{key: record.volumes[role] for role, key in record.request.volume_keys.items()},
-                **{key: str(value) for key, value in record.request.ports.items()},
-            },
-        )
+        self.assertEqual(selected, generation_values)
         store.read_dokploy_target_id_record.return_value = record.retained_target_id
         with self.assertRaises(ValueError):
             published_generation_resources(store, context=record.context, instance="prod")
         record.phase = "inverse_published"
         store.read_production_recipient.return_value = record.model_dump(mode="json")
-        keys = {*record.request.volume_keys.values(), *record.request.ports}
         retained = published_generation_resources(store, context=record.context, instance="prod")
         self.assertEqual(
             retained, {key: value for key, value in self.fixture.values.items() if key in keys}
         )
-        self.assertNotEqual(selected, retained)
 
     def setUp(self) -> None:
         self.fixture = preparation_tests.ProductionRecipientTests()

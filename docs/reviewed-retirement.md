@@ -21,8 +21,9 @@ managed-secret values, provider values and retained operation snapshots are not
 compared. No values or value hashes are returned, and no secret versions are read.
 The nested `generation_resources` comparison checks the same target keys against
 the resources selected by existing published-generation custody. It reports
-equal, different, target-only and generation-only key names, or `unavailable`
-when custody cannot select the serving target. It does not change delivery.
+equal, different, target-only and generation-only key names. `no_custody` means
+there is no generation record for the lane; `unavailable` means recorded custody
+cannot select the serving target. Neither qualifies deletion. It does not change delivery.
 Retained target rows and publication snapshots remain unchanged; inverse
 production publication selects the retained generation's resource values.
 The existing target-inspection permissions and provider read still apply.
@@ -35,8 +36,9 @@ read separately; their timestamps identify an observation, not an atomic
 migration plan. A fold must recheck equality and retirement under its write
 locks, preserve generation-specific resource ownership and retained operations,
 and keep live delivery on accepted releases. Remove this comparison when the
-tracked-target layer is deleted. Existing lane declarations and values remain
-the destination; never overwrite a conflicting lane value to make a fold pass.
+tracked-target layer is deleted. Ordinary settings remain in lane declarations;
+generation resources stay with the existing published-generation records.
+Never overwrite a conflicting lane value to make a fold pass.
 
 The existing Odoo target-replacement plan also reports two advisory fields on
 `current_target`. `compose_matches_generated` compares the live provider Compose

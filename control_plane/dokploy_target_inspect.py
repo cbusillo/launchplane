@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -254,11 +254,15 @@ def _instance_setting_comparison(
         else [],
         "instance_settings_updated_at": record.updated_at if record else None,
     }
-    if isinstance(record_store, PostgresRecordStore):
-        try:
-            resources = published_generation_resources(
-                record_store, context=target.context, instance=target.instance
-            )
+    try:
+        resources = published_generation_resources(
+            cast(PostgresRecordStore, record_store),
+            context=target.context,
+            instance=target.instance,
+        )
+        if resources is None:
+            comparison["generation_resources"] = {"status": "no_custody"}
+        else:
             comparison["generation_resources"] = {
                 "status": "compared",
                 "same_value_keys": sorted(
@@ -274,8 +278,8 @@ def _instance_setting_comparison(
                 "target_only_keys": sorted(target.env.keys() - resources.keys()),
                 "generation_only_keys": sorted(resources.keys() - target.env.keys()),
             }
-        except (ValueError, FileNotFoundError):
-            comparison["generation_resources"] = {"status": "unavailable"}
+    except (ValueError, FileNotFoundError, KeyError, TypeError):
+        comparison["generation_resources"] = {"status": "unavailable"}
     return comparison
 
 
