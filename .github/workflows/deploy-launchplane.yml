@@ -348,6 +348,7 @@ jobs:
         if: always()
         timeout-minutes: 1
         env:
+          CANDIDATE_IMAGE: ${{ steps.image.outputs.image_reference }}
           LAUNCHPLANE_PREFLIGHT_OWNER: github-actions:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
         run: bash scripts/deploy/cleanup-stored-record-preflight.sh
 
@@ -1673,6 +1674,7 @@ jobs:
         if: always()
         timeout-minutes: 1
         env:
+          CANDIDATE_IMAGE: ${{ inputs.image_reference }}
           LAUNCHPLANE_PREFLIGHT_OWNER: github-actions:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
         run: bash scripts/deploy/cleanup-stored-record-preflight.sh
       - name: Retain safe qualification result
