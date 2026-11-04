@@ -1356,7 +1356,7 @@ def _snapshot_current_target(
     target_record: DokployTargetRecord,
     target_id_record: DokployTargetIdRecord,
     request: DokployRequest,
-) -> tuple[OdooStableTargetRuntimeSnapshot, dict[str, str], JsonObject]:
+) -> tuple[OdooStableTargetRuntimeSnapshot, JsonObject]:
     target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
         token=token,
@@ -1417,7 +1417,7 @@ def _snapshot_current_target(
         runtime_identity_deployment_record_id=runtime_identity.get("deployment_record_id", ""),
     )
 
-    return snapshot, env_map, target_payload
+    return snapshot, target_payload
 
 
 def _build_steps(
@@ -1674,12 +1674,15 @@ def build_odoo_stable_target_replacement_plan(
                 "Launchplane could not resolve DB-backed Odoo volume authority for this lane.",
             )
         host, token = resolved_dokploy_config_reader(control_plane_root=control_plane_root)
-        current_target, live_runtime_values, live_target_payload = _snapshot_current_target(
+        current_target, live_target_payload = _snapshot_current_target(
             host=host,
             token=token,
             target_record=target_record,
             target_id_record=target_id_record,
             request=resolved_dokploy_request,
+        )
+        live_runtime_values = dokploy_api.parse_dokploy_env_text(
+            str(live_target_payload.get("env") or "")
         )
         try:
             approval_issue_url = (
