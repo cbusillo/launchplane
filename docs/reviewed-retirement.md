@@ -34,8 +34,11 @@ the destination; never overwrite a conflicting lane value to make a fold pass.
 
 The existing Odoo target-replacement plan also reports two advisory fields on
 `current_target`. `compose_matches_generated` compares the live provider Compose
-snapshot with the deployment renderer for the plan's exact evaluated artifact.
-Null means no comparison was available; false reports a difference, not a blocker.
+snapshot with the current deployment renderer only when the evaluated artifact,
+inventory and provider identity agree and generation authority is available.
+Null means no comparison was available. False reports a difference from that
+renderer, which can include a template or formatting change; it does not prove
+provider drift or add a blocker.
 `override_environment_keys` lists the environment names referenced by the saved
 provider override payload's config-parameter and addon-setting descriptors. It
 reuses the producer payload schema and returns no values. Null means the payload

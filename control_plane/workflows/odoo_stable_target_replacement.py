@@ -368,9 +368,7 @@ class OdooStableTargetRuntimeSnapshot(BaseModel):
     compose_path: str = ""
     compose_file_sha256: str = ""
     compose_matches_generated: bool | None = None
-    override_environment_keys: tuple[str, ...] | None = Field(
-        default=None, max_length=ODOO_OVERRIDE_READ_MAX_KEYS
-    )
+    override_environment_keys: tuple[str, ...] | None = None
     domain_hosts: tuple[str, ...] = ()
     latest_deployment_status: str = ""
     latest_deployment_id: str = ""
@@ -1615,6 +1613,27 @@ def build_odoo_stable_target_replacement_plan(
             "allow_empty_data_required",
             "Odoo prelaunch rebuild requests must explicitly set allow_empty_data.",
         )
+    current_artifact_id = ""
+    current_source_git_ref = ""
+    if isinstance(inventory, EnvironmentInventory):
+        current_artifact_id = (
+            inventory.artifact_identity.artifact_id if inventory.artifact_identity else ""
+        )
+        current_source_git_ref = inventory.source_git_ref
+    expected_artifact_id = request.artifact_id or current_artifact_id
+    expected_source_git_ref = request.source_git_ref or current_source_git_ref
+    artifact_manifest: ArtifactIdentityManifest | None = None
+    if expected_artifact_id:
+        try:
+            artifact_manifest = record_store.read_artifact_manifest(expected_artifact_id)
+        except FileNotFoundError:
+            artifact_manifest = None
+    artifact_matches_profile = (
+        artifact_manifest is not None
+        and artifact_manifest_matches_image_repository(
+            artifact_manifest, expected_repository=profile.image.repository
+        )
+    )
     recorded_runtime_values: dict[str, str] = {}
     if isinstance(target_record, DokployTargetRecord) and isinstance(
         target_id_record, DokployTargetIdRecord
@@ -1753,14 +1772,32 @@ def build_odoo_stable_target_replacement_plan(
                 )
             )
             # Rendering checks the image, domains and port before any provider write.
-            _render_replacement_compose(
-                image_reference=profile.image.repository,
+            rendered_compose = _render_replacement_compose(
+                image_reference=_artifact_image_reference(artifact_manifest)
+                if artifact_manifest is not None and artifact_matches_profile
+                else profile.image.repository,
                 instance=lane.instance,
                 domain_hosts=current_target.domain_hosts,
                 runtime_port=profile.runtime_port,
                 published_copy=published_copy,
                 generation=generation,
             )
+            if (
+                artifact_manifest is not None
+                and artifact_matches_profile
+                and expected_artifact_id == current_artifact_id
+                and expected_source_git_ref
+                == current_source_git_ref
+                == artifact_manifest.source_commit
+                and _runtime_identity_map(live_runtime_values).get("artifact_id")
+                == expected_artifact_id
+                and current_target.compose_file_sha256
+                and "fresh_testing_authority_unverified" not in blocker_codes
+            ):
+                current_target.compose_matches_generated = (
+                    current_target.compose_file_sha256
+                    == dokploy_compose.compose_file_sha256(rendered_compose)
+                )
             if request.data_source_mode == "upstream_restore" and not (
                 generation is not None and generation.source_mode == "container-export"
             ):
@@ -1807,13 +1844,6 @@ def build_odoo_stable_target_replacement_plan(
             )
         except click.ClickException as error:
             block("prelaunch_rebuild_policy_refused", str(error))
-    current_artifact_id = ""
-    current_source_git_ref = ""
-    if isinstance(inventory, EnvironmentInventory):
-        current_artifact_id = (
-            inventory.artifact_identity.artifact_id if inventory.artifact_identity else ""
-        )
-        current_source_git_ref = inventory.source_git_ref
     if (
         request.expected_current_artifact_id
         and current_artifact_id != request.expected_current_artifact_id
@@ -1822,21 +1852,13 @@ def build_odoo_stable_target_replacement_plan(
             "current_artifact_changed",
             "Current inventory artifact changed after operational readiness preflight.",
         )
-    expected_artifact_id = request.artifact_id or current_artifact_id
-    expected_source_git_ref = request.source_git_ref or current_source_git_ref
     if expected_artifact_id:
-        try:
-            artifact_manifest = record_store.read_artifact_manifest(expected_artifact_id)
-        except FileNotFoundError:
+        if artifact_manifest is None:
             block(
                 "artifact_manifest_missing",
                 f"Launchplane has no artifact manifest for {expected_artifact_id!r}.",
             )
         else:
-            artifact_matches_profile = artifact_manifest_matches_image_repository(
-                artifact_manifest,
-                expected_repository=profile.image.repository,
-            )
             if not artifact_matches_profile:
                 block(
                     "artifact_repository_mismatch",
@@ -1851,23 +1873,6 @@ def build_odoo_stable_target_replacement_plan(
                 block(
                     "artifact_source_ref_mismatch",
                     "Selected artifact source ref does not match the stored manifest.",
-                )
-            elif (
-                artifact_matches_profile
-                and current_target is not None
-                and current_target.compose_file_sha256
-            ):
-                rendered_compose = _render_replacement_compose(
-                    image_reference=f"{artifact_manifest.image.repository}@{artifact_manifest.image.digest}",
-                    instance=lane.instance,
-                    domain_hosts=current_target.domain_hosts,
-                    runtime_port=profile.runtime_port,
-                    published_copy=published_copy,
-                    generation=generation,
-                )
-                current_target.compose_matches_generated = (
-                    current_target.compose_file_sha256
-                    == dokploy_compose.compose_file_sha256(rendered_compose)
                 )
             if ODOO_VERSION_ENV_KEY in provider_only_keys and artifact_odoo_version(
                 artifact_manifest
