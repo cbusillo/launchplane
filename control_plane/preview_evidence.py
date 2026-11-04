@@ -77,7 +77,7 @@ def project_provider_history(
 ) -> dict[str, object]:
     api.require_unique_deployment_ids(deployments)
     terminal = post_deploy.DOKPLOY_TERMINAL_DEPLOYMENT_STATUSES
-    known = terminal | post_deploy.DOKPLOY_RUNNING_DEPLOYMENT_STATUSES | {"building"}
+    known = terminal | post_deploy.DOKPLOY_RUNNING_DEPLOYMENT_STATUSES
     entries = [
         {
             "reference": canonical_json_sha256(api.deployment_key(item)),
@@ -150,20 +150,14 @@ def read_preview_provider_history(
         host, token = source.read_dokploy_config(
             control_plane_root=root, database_url=store.database_url
         )
-        schedules = post_deploy.read_bound_data_workflow_schedules(
+        rows = post_deploy.read_bound_data_workflow_deployments(
             host=host,
             token=token,
             binding=binding,
         )
-        matches = [item for item in schedules if item.get("appName") == binding.app_name]
-        if len(matches) != 1:
+        if rows is None or len(rows) != 1:
             return result
-        raw = matches[0].get("deployments")
-        if not isinstance(raw, list) or api.parse_deployment_history(raw).state == "unknown":
-            return result
-        result["schedule"] = project_provider_history(
-            api.collect_dokploy_object_items(raw), original_title=original_title
-        )
+        result["schedule"] = project_provider_history(rows[0], original_title=original_title)
     except api.DokployRequestFailed as error:
         if error.status_code in {401, 403}:
             raise NativeSourceAuthorizationDenied("Provider refused preview history.") from None

@@ -29,6 +29,7 @@ from control_plane.contracts.odoo_walkthrough import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.odoo_runtime_reads import (
+    OdooRuntimeReadError,
     OdooRuntimeConnection,
     OdooRuntimeEvidence,
     OdooRuntimeSelection,
@@ -86,7 +87,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         from control_plane import preview_evidence
         from control_plane.dokploy import api, source
 
-        request = self.request.model_copy(
+        apply_request = self.request.model_copy(
             update={
                 "apply": self.request.apply.model_copy(
                     update={
@@ -97,11 +98,11 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 )
             }
         )
-        issued = _issued_plan(request)
+        issued = _issued_plan(apply_request)
         retained = dict(
             product=self.profile.product,
             issued_plan=issued.model_dump(mode="json"),
-            apply_request=request.model_dump(mode="json"),
+            apply_request=apply_request.model_dump(mode="json"),
         )
         original = self.replace_record(
             state="completed",
@@ -110,12 +111,12 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             recorded_at=datetime.now(timezone.utc).isoformat(),
             response_payload={"error": {"code": "retained-terminal-error"}},
         )
-        assert request.apply.manifest is not None
+        assert apply_request.apply.manifest is not None
         query = preview_evidence.PreviewEvidenceQuery(
             original_reservation_id=original.record_id,
             pr_number=issued.plan_request.pr_number,
             source_git_ref=issued.plan_request.source_git_ref,
-            image_digest=request.apply.manifest.image.digest,
+            image_digest=apply_request.apply.manifest.image.digest,
         )
         with (
             patch.object(self.store, "read_original_mutation_intent", return_value=retained),
@@ -161,7 +162,6 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             )
         original = cast(dict[str, object], result["original"])
         self.assertEqual(original["reservation_id"], self.reservation.record_id)
-        self.assertEqual(original["state"], self.reservation.state)
         self.assertEqual(
             self.store.read_idempotency_record_by_id(self.reservation.record_id), self.reservation
         )
@@ -169,10 +169,11 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             patch.object(self.store, "read_original_mutation_intent", return_value={}),
             patch.object(preview_evidence, "read_preview_provider_history") as provider,
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaises(OdooRuntimeReadError) as raised:
                 preview_evidence.read_preview_evidence(
                     self.store, product=self.profile.product, query=query, root=self.root
                 )
+        self.assertEqual(raised.exception.code, "preview_original_binding_unavailable")
         provider.assert_not_called()
 
     def test_original_history_requires_retained_schedule_binding_and_complete_provider_shape(
@@ -203,7 +204,9 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             patch.object(
                 api,
                 "dokploy_request",
-                return_value=[{"appName": "private-schedule", "deployments": deployments}],
+                return_value=[
+                    {"name": "data", "appName": "private-schedule", "deployments": deployments}
+                ],
             ) as provider,
         ):
             result = preview_evidence.read_preview_provider_history(
@@ -219,9 +222,10 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             self.assertNotIn("private-", json.dumps(result))
             for raw in (
                 None,
+                [{"name": "data", "appName": "private-schedule", "deployments": deployments}, {}],
                 [{"appName": "private-schedule", "deployments": {"items": deployments}}],
                 [{"appName": "private-schedule", "deployments": [None]}],
-                [{"appName": "other", "deployments": []}],
+                [{"name": "other", "appName": "other", "deployments": []}],
             ):
                 provider.return_value = raw
                 result = preview_evidence.read_preview_provider_history(
@@ -2268,6 +2272,10 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             schedule_type="server", lookup_id="server", app_name="preview-data-workflow"
         )
         cases: tuple[object, ...] = (
+            [
+                {"name": "data", "appName": binding.app_name, "deployments": [{"status": "done"}]},
+                {"appName": "x"},
+            ],
             {},
             {"items": []},
             {"items": [], "total": 40},

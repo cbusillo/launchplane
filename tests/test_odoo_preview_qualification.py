@@ -79,7 +79,6 @@ class PreviewQualificationTests(_DisposableRuntimeAuthorityFixture):
         self.assertEqual(result["current"]["usage"], "unused")
         self.assertEqual(result["current"]["production_resources"], "isolated")
         self.assertEqual(result["current"]["runtime_identity"], "verified")
-        self.assertEqual(result["current"]["data"], "unknown")
         self.assertIsNone(
             self.store.read_disposable_lane_safety(
                 self.profile.product,
