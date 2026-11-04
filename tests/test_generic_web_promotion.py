@@ -1,6 +1,7 @@
 from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.generic_web_release_settings import (
     recorded_release_settings,
     recorded_release_baseline,
@@ -70,6 +71,10 @@ from control_plane.workflows.ship import build_deployment_record
 
 
 class _GenericWebPromotionStore:
+    @staticmethod
+    def read_dokploy_target_id_record(**_scope: object) -> DokployTargetIdRecord:
+        raise FileNotFoundError("No generation target")
+
     def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]:
         return (self.profile,)
 

@@ -17,12 +17,12 @@ to the serving target identity. Retained generations keep their own resource
 selections. Candidate preparation explicitly excludes the serving generation.
 Tracked target environment fields remain in frozen records for publication,
 rollback and recovery comparisons; they no longer supply runtime settings.
+File-backed local rehearsals have no generation custody and use their lane
+declarations. Unsupported shared stores refuse rather than hiding a failed read.
 Onboarding declares ordinary settings in `runtime_environments`, not provider
 targets. Live delivery still requires accepted releases and verified backups.
 The temporary target/lane/generation comparison has been removed after
 qualification; target inspection continues to report stored key names only.
-The settings inventory's `target_overlay` entries describe saved target fields,
-not runtime consumption.
 
 The existing Odoo target-replacement plan also reports two advisory fields on
 `current_target`. `compose_matches_generated` compares the live provider Compose

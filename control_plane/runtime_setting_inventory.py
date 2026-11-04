@@ -80,7 +80,7 @@ def setting_consumer_inventory(
         raise ValueError("A positive inventory limit is required.")
     selected = set(keys)
     consumers: list[SettingConsumer] = []
-    record_count = profile_count = target_count = binding_count = 0
+    record_count = profile_count = binding_count = 0
     for record in records:
         record_count += 1
         consumers.append(
@@ -155,16 +155,7 @@ def setting_consumer_inventory(
                         selected_keys=matches,
                     )
                 )
-    for target in targets:
-        target_count += 1
-        consumers.append(
-            SettingConsumer(
-                kind="target_overlay",
-                context=target.context,
-                instance=target.instance,
-                selected_keys=tuple(sorted(selected.intersection(target.env))),
-            )
-        )
+    target_count = sum(1 for _target in targets)
     for binding in bindings:
         binding_count += 1
         if binding.integration == "runtime_environment" and binding.binding_key in selected:

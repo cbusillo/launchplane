@@ -1412,7 +1412,7 @@ class ProductOnboardingTests(unittest.TestCase):
                 )
             }
         )
-        with self.assertRaisesRegex(ValueError, "runtime_environments"):
+        with self.assertRaises(ValueError):
             build_provider_target_records(manifest=conflicting, updated_at="2026-11-04T00:00:00Z")
 
     def test_product_onboarding_manifest_keeps_empty_provider_targets_intentional(

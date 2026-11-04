@@ -9,14 +9,15 @@ import click
 from control_plane import live_target_runtime as runtime
 from control_plane import runtime_environments as environments
 from control_plane import secrets
-from control_plane.published_generation_resources import published_generation_resources
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.published_generation_resources import (
+    published_generation_resources,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
@@ -63,12 +64,13 @@ class TestingInputStore(
     RuntimeKeySafetyPolicyReadStore,
     Protocol,
 ):
-    def read_dokploy_target_record(
-        self, *, context_name: str, instance_name: str
-    ) -> DokployTargetRecord: ...
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord: ...
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
     ) -> ProviderTargetRecord: ...
@@ -175,10 +177,7 @@ def testing_input_authority(
         profile=profile, context_name=lane.context, instance_name=lane.instance
     )
     resources = (
-        published_generation_resources(
-            cast(PostgresRecordStore, store), context=lane.context, instance=lane.instance
-        )
-        or {}
+        published_generation_resources(store, context=lane.context, instance=lane.instance) or {}
     )
     if (
         not resources
@@ -247,7 +246,7 @@ def prepare_testing_inputs(
         context_name=lane.context,
         instance_name=lane.instance,
         target_environment=published_generation_resources(
-            cast(PostgresRecordStore, store), context=lane.context, instance=lane.instance
+            store, context=lane.context, instance=lane.instance
         )
         or {},
     )

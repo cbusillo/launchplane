@@ -6,6 +6,9 @@ from typing import Protocol, cast
 
 import click
 
+from control_plane.published_generation_resources import (
+    published_generation_resources,
+)
 from control_plane import live_target_runtime
 from control_plane import product_config as control_plane_product_config
 from control_plane import provider_key_adoption
@@ -161,13 +164,13 @@ def _runtime_key_safety_ready(
 class LaneProviderEnvStore(control_plane_secrets.SecretBindingSelectionStore, Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
-    def read_dokploy_target_record(
-        self, *, context_name: str, instance_name: str
-    ) -> DokployTargetRecord: ...
-
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord: ...
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
 
 
 def read_lane_provider_env(
@@ -232,7 +235,13 @@ def read_lane_provider_env(
     return provider_key_adoption.LaneProviderEnv(
         env=env,
         template_defaults=template_defaults,
-        recorded_keys=frozenset(secret_keys),
+        recorded_keys=frozenset(secret_keys)
+        | frozenset(
+            published_generation_resources(
+                record_store, context=context_name, instance=instance_name
+            )
+            or {}
+        ),
         unretirable_keys=frozenset(
             key for key in env if live_target_runtime.provider_key_retirement_blocked(key, declared)
         ),

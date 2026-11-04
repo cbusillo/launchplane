@@ -6,8 +6,6 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
-from control_plane.published_generation_resources import published_generation_resources
-from control_plane.storage.postgres import PostgresRecordStore
 import re
 from time import monotonic, sleep
 from typing import Literal, NamedTuple, Protocol, cast, runtime_checkable
@@ -15,6 +13,9 @@ from typing import Literal, NamedTuple, Protocol, cast, runtime_checkable
 import click
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
+from control_plane.published_generation_resources import (
+    published_generation_resources,
+)
 from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
@@ -592,13 +593,13 @@ class DokployGenericWebDeployStore(control_plane_secrets.SecretReadStore, Protoc
         self, *, context_name: str, instance_name: str
     ) -> ProviderTargetRecord: ...
 
-    def read_dokploy_target_record(
-        self, *, context_name: str, instance_name: str
-    ) -> DokployTargetRecord: ...
-
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord: ...
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
 
     def list_runtime_environment_records(
         self, *, context_name: str = "", instance_name: str = ""
@@ -974,7 +975,7 @@ class DokployGenericWebDeployProvider:
             context_name=context_name,
             instance_name=instance_name,
             target_environment=published_generation_resources(
-                cast(PostgresRecordStore, dokploy_store),
+                dokploy_store,
                 context=context_name,
                 instance=instance_name,
             )

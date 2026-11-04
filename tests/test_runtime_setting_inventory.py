@@ -79,6 +79,7 @@ class SettingConsumerInventoryTests(unittest.TestCase):
             {"copied_env_keys", "omitted_env_keys"},
         )
         self.assertEqual(result.runtime_record_count, 3)
+        self.assertNotIn("target_overlay", by_kind)
         self.assertFalse(result.truncated)
         wire = result.model_dump_json()
         for private in (
