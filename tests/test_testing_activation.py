@@ -31,6 +31,7 @@ from control_plane.testing_activation_compose import (
 )
 from tests import test_testing_separation_resources as preparation
 from control_plane.testing_separation_resources import preparation_binding
+from control_plane.published_generation_resources import published_generation_resources
 
 
 COMPOSE = {
@@ -1589,6 +1590,10 @@ class ActivationTests(unittest.TestCase):
             set(self.planned_record.host_ports),
         )
         self.assertNotIn("OLD_RECIPIENT_ONLY", current.env)
+        self.assertEqual(
+            published_generation_resources(self.store, context=self.context, instance="testing"),
+            current.env,
+        )
         self.assertEqual(current.domains, ())
         self.assertEqual(current.public_hosts, ())
         self.assertEqual(current.pending_public_host_effects, ())

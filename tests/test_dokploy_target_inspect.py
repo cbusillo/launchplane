@@ -212,7 +212,13 @@ class DokployTargetInspectTests(unittest.TestCase):
         self.assertEqual(tracked_target["env_keys"], sorted(stored_target.env))
         self.assertNotIn("synthetic-reader-not-for-output", str(tracked_target))
         self.assertEqual(
-            tracked_target["instance_setting_comparison"],
+            {
+                key: value
+                for key, value in _require_mapping(
+                    tracked_target["instance_setting_comparison"]
+                ).items()
+                if key != "generation_resources"
+            },
             {
                 "same_value_keys": ["ODOO_UPSTREAM_USER"],
                 "different_value_keys": ["DIFFERENT"],

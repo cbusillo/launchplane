@@ -267,6 +267,13 @@ def same_recipient_authority(actual: dict[str, Any], expected: dict[str, Any]) -
     return authority_identity(actual) == authority_identity(expected)
 
 
+def recipient_resource_environment(record: ProductionRecipientRecord) -> dict[str, str]:
+    return {
+        **{key: record.volumes[role] for role, key in record.request.volume_keys.items()},
+        **{key: str(value) for key, value in record.request.ports.items()},
+    }
+
+
 def runtime_values(
     store: PostgresRecordStore,
     root: Path,
@@ -292,14 +299,12 @@ def runtime_values(
         raise ValueError("Use existing, nonsecret, unretired production resource settings.")
     values = dict(environment.values)
     require_delivered_upstreams(store, record)
-    for role, key in record.request.volume_keys.items():
-        values[key] = record.volumes[role]
     for key, value in record.request.ports.items():
         if not published and (
             values.get(key) == str(value) or record.retained_target.env.get(key) == str(value)
         ):
             raise ValueError("Candidate ports must differ from production ports.")
-        values[key] = str(value)
+    values.update(recipient_resource_environment(record))
     values.update(dict.fromkeys(COMPOSE_IMAGE_REFERENCE_ENV_KEYS, record.image_reference))
     if any(
         looks_like_credential(key, value) and key not in environment.secret_keys

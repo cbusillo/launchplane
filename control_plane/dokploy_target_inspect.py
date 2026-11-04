@@ -25,6 +25,8 @@ from control_plane.dokploy.application_runtime import (
     fetch_application_runtime,
 )
 from control_plane.dokploy.application_runtime_summary import summarize_application_runtime
+from control_plane.published_generation_resources import published_generation_resources
+from control_plane.storage.postgres import PostgresRecordStore
 
 DokployTargetType = Literal["application", "compose"]
 _RUNTIME_EVIDENCE_LOG_LINE_COUNT = dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT
@@ -239,7 +241,7 @@ def _instance_setting_comparison(
         None,
     )
     values = record.env if record else {}
-    return {
+    comparison: dict[str, object] = {
         "same_value_keys": sorted(
             key for key, value in target.env.items() if key in values and value == str(values[key])
         ),
@@ -252,6 +254,29 @@ def _instance_setting_comparison(
         else [],
         "instance_settings_updated_at": record.updated_at if record else None,
     }
+    if isinstance(record_store, PostgresRecordStore):
+        try:
+            resources = published_generation_resources(
+                record_store, context=target.context, instance=target.instance
+            )
+            comparison["generation_resources"] = {
+                "status": "compared",
+                "same_value_keys": sorted(
+                    key
+                    for key in target.env.keys() & resources.keys()
+                    if target.env[key] == resources[key]
+                ),
+                "different_value_keys": sorted(
+                    key
+                    for key in target.env.keys() & resources.keys()
+                    if target.env[key] != resources[key]
+                ),
+                "target_only_keys": sorted(target.env.keys() - resources.keys()),
+                "generation_only_keys": sorted(resources.keys() - target.env.keys()),
+            }
+        except (ValueError, FileNotFoundError):
+            comparison["generation_resources"] = {"status": "unavailable"}
+    return comparison
 
 
 def inspect_dokploy_target(
