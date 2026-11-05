@@ -76,7 +76,6 @@ class NewProductIdentity(Protocol):
 
 
 def validate_new_product_identity(intent: NewProductIdentity, *, label: str) -> None:
-    """Check the immutable repository identity every native onboarding intent binds."""
     if _PRODUCT_PATTERN.fullmatch(intent.product) is None:
         raise ValueError(f"{label} product must use lowercase letters, numbers, and hyphens")
     if not intent.display_name:

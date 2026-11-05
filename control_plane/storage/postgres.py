@@ -6513,8 +6513,6 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> None:
         from control_plane.onboarding_target import require_unallocated_onboarding_contexts
 
-        # Generic-web records adopt their allocated testing target; Odoo records
-        # come first, so their contexts must still be empty.
         allocated_testing = isinstance(intent, GenericWebOnboardingIntent)
 
         def guard(_session: Any) -> None:

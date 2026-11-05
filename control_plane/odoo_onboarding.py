@@ -1,5 +1,3 @@
-"""Native records for a new Odoo product: one empty testing lane and PR previews."""
-
 from __future__ import annotations
 
 import re
@@ -35,12 +33,6 @@ _ODOO_DB_USER = "odoo"
 
 
 class OdooOnboardingIntent(BaseModel):
-    """A new Odoo product whose testing lane and previews share one context.
-
-    Records only: target placement, lane data and credentials come from their
-    own service operations after the product owns its context.
-    """
-
     model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal[1] = 1
@@ -91,7 +83,6 @@ def odoo_onboarding_plan_sha256(intent: OdooOnboardingIntent) -> str:
 
 
 def build_odoo_onboarding_manifest(intent: OdooOnboardingIntent) -> ProductOnboardingManifest:
-    """The new testing lane holds no data yet, so it is resettable from empty."""
     return ProductOnboardingManifest(
         product=intent.product,
         display_name=intent.display_name,

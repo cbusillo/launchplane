@@ -110,15 +110,9 @@ def require_empty_testing_target_creation(
             read_provider_source=read_provider_source,
         )
         return
-    # An existing lane that ever deployed or served needs its own current
-    # disposable-lane facts; first setup cannot take over its usage/data
-    # commitments. A lane registered before its first target never ran.
-    if any(lane.instance == request.instance for lane in profile.lanes) and (
-        record_store.list_deployment_records(
-            context_name=request.context, instance_name=request.instance
-        )
-        or _environment_inventory_exists(record_store, request)
-    ):
+    if any(
+        lane.instance == request.instance for lane in profile.lanes
+    ) and _lane_has_usage_or_data_commitments(record_store, request):
         raise ValueError("First testing setup cannot change a lane that has deployed.")
     for read in (
         record_store.read_dokploy_target_record,
@@ -130,6 +124,16 @@ def require_empty_testing_target_creation(
         except FileNotFoundError:
             continue
         raise ValueError("First testing setup cannot replace existing target authority.")
+
+
+def _lane_has_usage_or_data_commitments(
+    record_store: PostgresRecordStore, request: "DokployTargetSetupEnvelope"
+) -> bool:
+    return bool(
+        record_store.list_deployment_records(
+            context_name=request.context, instance_name=request.instance
+        )
+    ) or _environment_inventory_exists(record_store, request)
 
 
 def _environment_inventory_exists(
