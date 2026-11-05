@@ -384,13 +384,18 @@ class GitHubHandoffTests(unittest.TestCase):
             ),
         )
         client_wait = f"Engineering ready; waiting for the Client's acceptance\n\nHead: {HEAD}"
+        stale_client_wait = (
+            f"Engineering ready; waiting for the Client's acceptance\n\nHead: {old_head}"
+        )
         other_wait = f"Engineering ready; waiting for required inspection\n\nHead: {HEAD}"
-        for body, decision, admitted in (
-            (client_wait, acceptance(HEAD), True),
-            (client_wait, carried, True),
-            (client_wait, acceptance(old_head), False),
-            (client_wait, None, False),
-            (other_wait, acceptance(HEAD), False),
+        refusals: list[str] = []
+        for body, decision, admitted, needs_fresh_handoff in (
+            (client_wait, acceptance(HEAD), True, False),
+            (client_wait, carried, True, False),
+            (client_wait, acceptance(old_head), False, False),
+            (client_wait, None, False, False),
+            (stale_client_wait, acceptance(HEAD), False, True),
+            (other_wait, acceptance(HEAD), False, True),
         ):
             with self.subTest(body=body[:40], decision=decision and decision.record_id):
                 with TemporaryDirectory() as directory:
@@ -418,9 +423,11 @@ class GitHubHandoffTests(unittest.TestCase):
                             base_branch="main",
                         )
                 refusal = ready_handoff_refusal(self.policy, handoff, HEAD)
-                self.assertEqual(
-                    refusal, "" if admitted else "latest trusted engineering handoff is waiting"
-                )
+                self.assertEqual(not refusal, admitted, refusal)
+                self.assertEqual("gh-pr.py ready" in refusal, needs_fresh_handoff, refusal)
+                if refusal:
+                    refusals.append(refusal)
+        self.assertEqual(len(set(refusals)), 3)
 
     def test_complete_pagination_and_unavailable_or_malformed_evidence_fail_closed(self) -> None:
         ready_page = [_comment(id=index) for index in range(1, 101)]
