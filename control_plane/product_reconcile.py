@@ -3894,7 +3894,12 @@ def _desired_release(
         current_commit not in built_commits
         or (
             current_run_id
-            and not any(isinstance(run, dict) and run.get("id") == current_run_id for run in runs)
+            and not any(
+                isinstance(run, dict)
+                and successful_build_run(run)
+                and run.get("id") == current_run_id
+                for run in runs
+            )
         )
     ):
         # Before product-owned Build adoption, a recorded generic-web deployment

@@ -111,6 +111,7 @@ from control_plane.product_reconcile import (
     PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS,
     TESTING_FAILURE_DESCRIPTIONS,
     TESTING_DEPLOY_MAX_FAILED_ATTEMPTS,
+    TESTING_BUILD_RUN_PAGE_SIZE,
     RECONCILE_SOURCE,
     PreviewProviderHooks,
     ProductReconcileError,
@@ -1094,6 +1095,21 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertEqual(plan["build_runs_seen"], 1)
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), ())
 
+    def test_recorded_build_with_unsuccessful_latest_attempt_holds_testing(self) -> None:
+        self._running_release(10, OLDER)
+        self.github.add_run(11, OLDER)
+        self.github.add_run(20, DEPLOYABLE)
+        for status, conclusion in (("completed", "failure"), ("in_progress", None)):
+            with self.subTest(status=status, conclusion=conclusion):
+                self.github.runs[10].update(status=status, conclusion=conclusion)
+                self.request()
+                plan = self.reconcile()
+                self.assertEqual(plan["reason"], "incomplete_build_runs")
+                self.assertTrue(plan["held"])
+                self.assertEqual(
+                    self.store.list_odoo_stable_target_replacement_operation_records(), ()
+                )
+
     def test_truncated_first_parent_history_cannot_downgrade_testing(self) -> None:
         self._running_release(20, DEPLOYABLE)
         self.github.add_run(10, OLDER)
@@ -1107,7 +1123,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
 
     def test_held_testing_build_is_found_beyond_first_run_and_commit_pages(self) -> None:
         self._running_release(1, OLDER)
-        for run_id in range(2, 52):
+        for run_id in range(2, TESTING_BUILD_RUN_PAGE_SIZE + 2):
             self.github.add_run(run_id, DEPLOYABLE)
         intermediate = [f"{index:040x}" for index in range(100, 450)]
         chain = [DEPLOYABLE, *intermediate, OLDER]
@@ -1120,7 +1136,10 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 runs = sorted(self.github.runs.values(), key=lambda run: -int(str(run["id"])))
                 return {
                     "total_count": len(runs),
-                    "workflow_runs": runs[(page - 1) * 50 : page * 50],
+                    "workflow_runs": runs[
+                        (page - 1) * TESTING_BUILD_RUN_PAGE_SIZE : page
+                        * TESTING_BUILD_RUN_PAGE_SIZE
+                    ],
                 }
             if "/commits?" in path:
                 return [
@@ -1141,7 +1160,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertEqual(plan["desired_commit"], DEPLOYABLE)
         self.assertTrue(plan["current_commit_seen"])
         self.assertGreater(cast(int, plan["commit_history_seen"]), 300)
-        self.assertGreater(cast(int, plan["build_runs_seen"]), 50)
+        self.assertGreater(cast(int, plan["build_runs_seen"]), TESTING_BUILD_RUN_PAGE_SIZE)
 
     def test_failed_verification_of_current_build_cannot_fall_back_to_its_ancestor(self) -> None:
         self._running_release(20, DEPLOYABLE)
@@ -5030,10 +5049,11 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
 
     def test_failed_baseline_run_does_not_stop_build_inventory_pagination(self) -> None:
         self.record_legacy_baseline()
-        for run_id in range(1, 52):
+        last_run_id = TESTING_BUILD_RUN_PAGE_SIZE + 1
+        for run_id in range(1, last_run_id + 1):
             self.github.add_run(run_id, DEPLOYABLE)
             self.github.runs[run_id]["run_started_at"] = "2026-10-08T12:00:00Z"
-        self.github.runs[51].update(head_sha=OLDER, conclusion="failure")
+        self.github.runs[last_run_id].update(head_sha=OLDER, conclusion="failure")
         get_json = self.github.get_json
 
         def paged(path: str) -> object:
@@ -5042,7 +5062,10 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                 runs = sorted(self.github.runs.values(), key=lambda run: -cast(int, run["id"]))
                 return {
                     "total_count": len(runs),
-                    "workflow_runs": runs[(page - 1) * 50 : page * 50],
+                    "workflow_runs": runs[
+                        (page - 1) * TESTING_BUILD_RUN_PAGE_SIZE : page
+                        * TESTING_BUILD_RUN_PAGE_SIZE
+                    ],
                 }
             return get_json(path)
 
