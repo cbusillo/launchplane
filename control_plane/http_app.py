@@ -6700,6 +6700,13 @@ def create_launchplane_fastapi_app(
                 code="odoo_preview_source_" + error.code,
                 message=str(error),
             ) from error
+        except OdooPreviewPlanProvenanceError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
                 status_code=400,

@@ -1,8 +1,16 @@
 from io import BytesIO
+from contextlib import ExitStack
+from datetime import datetime, timezone
+from pathlib import Path
 import unittest
+from unittest.mock import Mock, patch
 
 from control_plane import odoo_copy_aggregates as reader
+from control_plane import odoo_instance_overrides
 from control_plane.odoo_runtime_reads import OdooRuntimeReadError
+from control_plane.workflows.odoo_preview_runtime import (
+    OdooPreviewApplyInputsResult,
+)
 
 
 MODULE_ROWS = (
@@ -10,6 +18,246 @@ MODULE_ROWS = (
     b"1\tmail\tinstalled\t20.0.1.0\n"
     b"2\tbase\tinstalled\t19.0.1.3\n\\.\n-- done\n"
 )
+
+
+class OrdinaryPreviewSourceVersionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from control_plane import odoo_preview_apply_http as preview
+        from control_plane.clean_testing_snapshot import CleanTestingSnapshot
+        from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from tests.support.profiles import _odoo_preview_profile_payload
+        from tests.test_odoo_preview_apply_execution import _refresh_payload, _issued_plan
+
+        self.preview = preview
+        self.profile = LaunchplaneProductProfileRecord.model_validate(
+            _odoo_preview_profile_payload()
+        )
+        self.profile.preview.clean_testing_snapshot = True
+        budget = OdooTestingDrillStorageBudget(
+            database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+        )
+        self.profile.lanes[0].odoo_testing_drill_storage = budget
+        self.snapshot = CleanTestingSnapshot(
+            product=self.profile.product,
+            context=self.profile.preview.context,
+            snapshot_id="a" * 64,
+            server_id="fixture-server",
+            database_sha256="b" * 64,
+            filestore_sha256="c" * 64,
+            captured_at=datetime.now(timezone.utc).isoformat(),
+            storage_budget=budget,
+        )
+        self.envelope = preview.OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        self.issued = _issued_plan(self.envelope)
+        self.store = Mock(spec=["read_clean_testing_snapshot"])
+        self.store.read_clean_testing_snapshot.return_value = self.snapshot
+        stack = self.enterContext(ExitStack())
+        stack.enter_context(
+            patch.object(preview, "build_odoo_preview_apply_inputs", return_value=self.issued)
+        )
+        stack.enter_context(
+            patch.object(
+                odoo_instance_overrides,
+                "resolve_preview_website_bootstrap",
+                return_value=(None, ""),
+            )
+        )
+        stack.enter_context(
+            patch.object(preview, "preview_has_completed_restore", return_value=False)
+        )
+        stack.enter_context(
+            patch.object(
+                preview,
+                "_odoo_preview_service_environment",
+                return_value=preview._OdooPreviewServiceEnvironment(values={}),
+            )
+        )
+        from control_plane import odoo_snapshot_version as version
+
+        self.archive = stack.enter_context(patch.object(version, "read_snapshot_archive"))
+
+    def plan(self, source: str, target: str) -> OdooPreviewApplyInputsResult:
+        from control_plane.contracts.artifact_identity import ArtifactBuildFlags
+
+        assert self.issued.plan_request.manifest is not None
+        self.issued.plan_request.manifest.build_flags = ArtifactBuildFlags(
+            values={"odoo_version": target}
+        )
+        self.archive.return_value = [
+            {
+                "type": "complete",
+                "metadata": {"recorded_base_version": source, "preparation_stage": None},
+            }
+        ]
+        return self.preview._build_odoo_preview_apply_inputs(
+            control_plane_root=Path("/synthetic-unused"),
+            record_store=self.store,
+            profile=self.profile,
+            request=self.issued.plan_request,
+            database_url=None,
+        )
+
+    def test_cross_major_snapshot_refuses_from_the_selected_archive(self) -> None:
+        with self.assertRaises(self.preview.OdooPreviewPlanProvenanceError) as caught:
+            self.plan("19.0.1.3", "20.0")
+        self.assertEqual(caught.exception.code, "odoo_preview_source_major_mismatch")
+        self.archive.assert_called_once()
+        self.assertEqual(self.archive.call_args.kwargs["snapshot"], self.snapshot)
+
+    def test_compatible_snapshot_uses_the_selected_archive(self) -> None:
+        for major in (19, 20):
+            with self.subTest(major=major):
+                version = f"{major}.0.1.3"
+                result = self.plan(version, f"{major}.0")
+                self.assertEqual(result.status, "ready")
+                self.assertEqual(result.dry_run_plan.clean_snapshot, self.snapshot)
+
+    def test_unavailable_or_unknown_version_refuses_without_claiming_compatibility(self) -> None:
+        for source, target in (("19.0.1.3", ""), ("unknown", "20.0")):
+            with self.subTest(source=source, target=target):
+                with self.assertRaises(self.preview.OdooPreviewPlanProvenanceError) as caught:
+                    self.plan(source, target)
+                self.assertEqual(caught.exception.code, "odoo_preview_source_version_unavailable")
+
+    def test_archive_failures_refuse_without_exposing_provider_details(self) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        for failure in (
+            OdooRuntimeReadError("archive_tool_unavailable", "private", 503),
+            DokployRequestFailed(method="GET", path="/fixture", detail="private", status_code=503),
+            NativeSourceUnavailable("private"),
+            FileNotFoundError("private"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                self.archive.side_effect = failure
+                with self.assertRaises(self.preview.OdooPreviewPlanProvenanceError) as caught:
+                    self.plan("19.0", "20.0")
+                self.assertEqual(caught.exception.code, "odoo_preview_source_version_unavailable")
+                self.assertNotIn("private", str(caught.exception))
+
+    def test_incomplete_archive_frames_never_qualify_an_ordinary_source(self) -> None:
+        for reason in (*reader.ARCHIVE_UNAVAILABLE_CODES, "unexpected"):
+            with self.subTest(reason=reason):
+                self.archive.side_effect = lambda **kwargs: [
+                    {"type": "complete", "unavailable": reason}
+                ]
+                with self.assertRaises(self.preview.OdooPreviewPlanProvenanceError) as caught:
+                    self.plan("19.0", "20.0")
+                self.assertEqual(caught.exception.code, "odoo_preview_source_version_unavailable")
+
+    def test_legacy_preservation_plan_keeps_its_fingerprint_after_source_check(self) -> None:
+        from datetime import timedelta
+
+        from control_plane.contracts.artifact_identity import ArtifactBuildFlags
+
+        assert self.issued.plan_request.manifest is not None
+        self.issued.plan_request.manifest.build_flags = ArtifactBuildFlags(
+            values={"odoo_version": "19.0"}
+        )
+        result = self.issued.model_copy(
+            update={
+                "dry_run_plan": self.issued.dry_run_plan.model_copy(
+                    update={"clean_snapshot": self.snapshot}
+                )
+            }
+        )
+        self.archive.return_value = [
+            {
+                "type": "complete",
+                "metadata": {"recorded_base_version": "19.0.1.3", "preparation_stage": None},
+            }
+        ]
+        issued = self.preview.issue_odoo_preview_apply_plan(result=result, plan_id="legacy-plan")
+        assert issued.plan_provenance is not None
+        envelope = self.envelope.model_copy(
+            update={
+                "apply": self.envelope.apply.model_copy(
+                    update={
+                        "dry_run_plan": issued.dry_run_plan,
+                        "manifest": issued.plan_request.manifest,
+                    }
+                )
+            }
+        )
+        checked = self.preview.refresh_odoo_preview_issued_plan(
+            control_plane_root=Path("/synthetic-unused"),
+            record_store=self.store,
+            profile=self.profile,
+            request=envelope,
+            issued_plan=issued,
+            database_url=None,
+            observed_at=issued.plan_provenance.expires_at + timedelta(seconds=1),
+            retained_preservation_retry=True,
+        )
+        self.assertEqual(checked.apply.dry_run_plan, issued.dry_run_plan)
+
+    def test_changed_snapshot_major_refuses_at_apply_before_provider_work(self) -> None:
+        result = self.plan("19.0.1.3", "19.0")
+        issued = self.preview.issue_odoo_preview_apply_plan(result=result, plan_id="version-plan")
+        envelope = self.envelope.model_copy(
+            update={
+                "apply": self.envelope.apply.model_copy(
+                    update={
+                        "dry_run_plan": issued.dry_run_plan,
+                        "manifest": issued.plan_request.manifest,
+                    }
+                )
+            }
+        )
+        self.store.read_clean_testing_snapshot.return_value = self.snapshot.model_copy(
+            update={"snapshot_id": "d" * 64, "database_sha256": "e" * 64}
+        )
+        self.archive.return_value = [
+            {
+                "type": "complete",
+                "metadata": {"recorded_base_version": "20.0", "preparation_stage": None},
+            }
+        ]
+        with self.assertRaises(self.preview.OdooPreviewPlanProvenanceError) as caught:
+            self.preview.refresh_odoo_preview_issued_plan(
+                control_plane_root=Path("/synthetic-unused"),
+                record_store=self.store,
+                profile=self.profile,
+                request=envelope,
+                issued_plan=issued,
+                database_url=None,
+            )
+        self.assertEqual(caught.exception.code, "odoo_preview_source_major_mismatch")
+
+
+class OrdinaryPreviewVersionHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_planner_exposes_the_source_refusal_codes(self) -> None:
+        from control_plane import odoo_preview_apply_http as preview
+        from tests.test_director_bounded_writes import DirectorBoundedWritesFixture
+        from tests.test_odoo_preview_apply_execution import _issued_plan
+
+        fixture = DirectorBoundedWritesFixture(self, record_source_history=False)
+        issued = _issued_plan(preview.OdooPreviewApplyEnvelope.model_validate(fixture.payload))
+        for code in (
+            "odoo_preview_source_major_mismatch",
+            "odoo_preview_source_version_unavailable",
+        ):
+            with (
+                self.subTest(code=code),
+                patch(
+                    "control_plane.http_app.build_odoo_preview_apply_inputs_result",
+                    side_effect=preview.OdooPreviewPlanProvenanceError(
+                        code=code, message="qualified source required"
+                    ),
+                ),
+            ):
+                response = await fixture.post(
+                    "/v1/drivers/odoo/preview-apply-inputs",
+                    {
+                        "product": fixture.profile.product,
+                        "inputs": issued.plan_request.model_dump(mode="json"),
+                    },
+                    code,
+                )
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertEqual(response.json()["error"]["code"], code)
 
 
 class SnapshotVersionParserTests(unittest.TestCase):

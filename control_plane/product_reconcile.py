@@ -2724,6 +2724,11 @@ def _run_preview_operation(
         plan["failure_trace_id"] = trace_id
         plan["preview_result_error_code"] = error.code
         log_handled_error_cause(error, trace_id, operation_id=plan_id)
+        if error.code in {
+            "odoo_preview_source_major_mismatch",
+            "odoo_preview_source_version_unavailable",
+        }:
+            return _preview_failure(plan, error.code)
         return _preview_failure(plan, "preview_provenance_refused")
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         if is_transient_dokploy_error(error):
@@ -3240,6 +3245,8 @@ def run_product_reconcile_once(
             "preview_plan_blocked",
             "preview_config_refused",
             "preview_provenance_refused",
+            "odoo_preview_source_major_mismatch",
+            "odoo_preview_source_version_unavailable",
             "preview_apply_failed",
             "preview_reconcile_failed",
             "preview_build_failed",

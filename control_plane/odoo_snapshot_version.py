@@ -3,6 +3,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.odoo_copy_aggregates import (
     BASE_VERSION_PATTERN,
     ARCHIVE_UNAVAILABLE_CODES,
@@ -84,6 +85,22 @@ def read_snapshot_version(
             "The original preview snapshot binding differs from the requested evidence.",
             409,
         )
+    metadata = read_snapshot_metadata(store=store, snapshot=snapshot)
+    return SnapshotVersionEvidence(
+        product=product,
+        context=snapshot.context,
+        original_reservation_id=reservation.record_id,
+        snapshot_id=snapshot.snapshot_id,
+        snapshot_database_sha256=snapshot.database_sha256,
+        snapshot_captured_at=snapshot.captured_at,
+        observed_at=datetime.now(timezone.utc).isoformat(),
+        metadata=metadata,
+    )
+
+
+def read_snapshot_metadata(
+    *, store: PostgresRecordStore, snapshot: CleanTestingSnapshot
+) -> SnapshotVersionMetadata:
     frames = read_snapshot_archive(
         store=store,
         context=snapshot.context,
@@ -101,13 +118,4 @@ def read_snapshot_version(
             str(reason) if reason in ARCHIVE_UNAVAILABLE_CODES else "snapshot_version_unavailable"
         )
         raise OdooRuntimeReadError(code, "The bound snapshot metadata read did not complete.", 503)
-    return SnapshotVersionEvidence(
-        product=product,
-        context=snapshot.context,
-        original_reservation_id=reservation.record_id,
-        snapshot_id=snapshot.snapshot_id,
-        snapshot_database_sha256=snapshot.database_sha256,
-        snapshot_captured_at=snapshot.captured_at,
-        observed_at=datetime.now(timezone.utc).isoformat(),
-        metadata=SnapshotVersionMetadata.model_validate(frames[0]["metadata"]),
-    )
+    return SnapshotVersionMetadata.model_validate(frames[0]["metadata"])
