@@ -207,6 +207,54 @@ def resolve_serving_preview(
     return serving[0]
 
 
+CurrentHeadPreview = Literal["served", "failed", "not_served", "no_previews"]
+
+
+def current_head_preview(
+    *, store: ProductReviewStore, repository: str, pull_request_number: int, head_sha: str
+) -> CurrentHeadPreview:
+    previewed_profiles = tuple(
+        profile
+        for profile in product_profiles_for_repository(store=store, repository=repository)
+        if profile.is_active and profile.preview.enabled and profile.preview.context.strip()
+    )
+    if not previewed_profiles:
+        return "no_previews"
+    states = {
+        _profile_current_head_preview(
+            store=store,
+            profile=profile,
+            pull_request_number=pull_request_number,
+            head_sha=head_sha.strip().lower(),
+        )
+        for profile in previewed_profiles
+    }
+    return "failed" if "failed" in states else "not_served" if "not_served" in states else "served"
+
+
+def _profile_current_head_preview(
+    *,
+    store: ProductReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+    head_sha: str,
+) -> CurrentHeadPreview:
+    serving = resolve_serving_preview(
+        store=store, profile=profile, pull_request_number=pull_request_number
+    )
+    if head_sha and serving.preview_url and serving.head_sha == head_sha:
+        return "served"
+    request = product_preview_request(
+        store, product=profile.product, pull_request_number=pull_request_number
+    )
+    if request is None or not preview_refresh_failure(request, store=store):
+        return "not_served"
+    failed_head = request.last_plan.get(
+        "last_failed_head_sha", request.last_plan.get("head_sha", "")
+    )
+    return "failed" if str(failed_head).strip().lower() == head_sha else "not_served"
+
+
 def preview_review_unavailability(
     *,
     store: ProductReviewStore,

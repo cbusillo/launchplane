@@ -812,6 +812,14 @@ Every fresh snapshot requalifies the update under the existing dependency admiss
 and required-check gates; a new head with pending or unknown checks still cannot
 land. A passing rerun on the same head or a base change resolving conflicts can
 also requalify it. An explicit enqueue label uses the normal block path above.
+When an active product on the repository has previews enabled, the update also
+waits until that PR's own preview serves a ready generation built from its
+current head ([Q1268](https://github.com/cbusillo/odoo-devkit/issues/362#issuecomment-6647242111)).
+The snapshot reads the existing preview and reconcile records; it adds no check
+or store. The refusal names a failed current-head preview, a preview that has
+not served the current head yet, or an unreadable record. Products without
+previews, and updates admitted by an enqueue label or a Ready handoff, keep
+their existing admission.
 A service candidate records each update excluded only for that reason as a
 `held_out` entry with reason `dependency_not_ready`, bound to its head and the
 candidate's base. If the update settles while the candidate builds, checks or

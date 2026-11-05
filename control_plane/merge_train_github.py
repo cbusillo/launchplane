@@ -25,7 +25,11 @@ from control_plane.config_authority_comparison import (
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
-from control_plane.product_review import applicable_product_review_decisions
+from control_plane.product_review import (
+    ProductReviewStore,
+    applicable_product_review_decisions,
+    current_head_preview,
+)
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -117,6 +121,9 @@ from control_plane.merge_train_handoff import (
     ready_handoff_refusal,
 )
 from control_plane.source_control_change import change_fingerprint
+from control_plane.merge_train import DEPENDENCY_HEAD_PREVIEW_FAILED
+from control_plane.merge_train import DEPENDENCY_HEAD_PREVIEW_NOT_SERVED
+from control_plane.merge_train import DEPENDENCY_HEAD_PREVIEW_UNREADABLE
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainLabelActor
@@ -4104,6 +4111,15 @@ class GitHubMergeTrainSnapshotReader:
             )
             else None
         )
+        dependency_preview_hold = (
+            self._dependency_preview_hold(
+                repository=base_repository,
+                pull_request_number=pull_request_number,
+                head_sha=head_sha,
+            )
+            if dependency_update_class == "patch_or_minor"
+            else ""
+        )
         review_intent = self.client_review_intent(
             labels=labels,
             repository=base_repository,
@@ -4204,7 +4220,29 @@ class GitHubMergeTrainSnapshotReader:
             required_checks_observation_error=checks_error,
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
+            dependency_preview_hold=dependency_preview_hold,
         )
+
+    def _dependency_preview_hold(
+        self, *, repository: str, pull_request_number: int, head_sha: str
+    ) -> str:
+        store: object = self._branch_refresh_store
+        if not callable(getattr(store, "list_product_profile_records", None)):
+            return ""
+        try:
+            preview = current_head_preview(
+                store=cast(ProductReviewStore, store),
+                repository=repository,
+                pull_request_number=pull_request_number,
+                head_sha=head_sha,
+            )
+        except (SQLAlchemyError, ValueError, OSError):
+            logger.warning("Dependency update preview could not be read.", exc_info=True)
+            return DEPENDENCY_HEAD_PREVIEW_UNREADABLE
+        return {
+            "failed": DEPENDENCY_HEAD_PREVIEW_FAILED,
+            "not_served": DEPENDENCY_HEAD_PREVIEW_NOT_SERVED,
+        }.get(preview, "")
 
     def _recovery_ready_floor(self, repository: str, number: int, head: str) -> int:
         from control_plane.merge_train_setup_recovery_receipt import read_setup_recovery_receipt

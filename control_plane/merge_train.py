@@ -71,9 +71,26 @@ CODE_SCANNING_REVIEW_AUTHOR = "github-advanced-security"
 DEPENDENCY_HEAD_CONFLICTS = "dependency update current-head merge conflicts"
 DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN = "dependency update current-head mergeability unknown"
 DEPENDENCY_HEAD_CHECKS_FAILED = "dependency update current-head checks failed"
+DEPENDENCY_HEAD_PREVIEW_FAILED = "dependency update current-head preview failed"
+DEPENDENCY_HEAD_PREVIEW_NOT_SERVED = "dependency update preview has not served its current head"
+DEPENDENCY_HEAD_PREVIEW_UNREADABLE = "dependency update preview record could not be read"
+DEPENDENCY_HEAD_PREVIEW_HOLDS = frozenset(
+    {
+        DEPENDENCY_HEAD_PREVIEW_FAILED,
+        DEPENDENCY_HEAD_PREVIEW_NOT_SERVED,
+        DEPENDENCY_HEAD_PREVIEW_UNREADABLE,
+    }
+)
 # The current-head holds an automatically admitted dependency update requalifies from.
-DEPENDENCY_HEAD_HOLD_REASONS = frozenset(
-    {DEPENDENCY_HEAD_CONFLICTS, DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN, DEPENDENCY_HEAD_CHECKS_FAILED}
+DEPENDENCY_HEAD_HOLD_REASONS = (
+    frozenset(
+        {
+            DEPENDENCY_HEAD_CONFLICTS,
+            DEPENDENCY_HEAD_MERGEABILITY_UNKNOWN,
+            DEPENDENCY_HEAD_CHECKS_FAILED,
+        }
+    )
+    | DEPENDENCY_HEAD_PREVIEW_HOLDS
 )
 
 
@@ -145,6 +162,7 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     dependency_update_class: DependencyUpdateClass | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    dependency_preview_hold: str = Field(default="", exclude_if=lambda value: not value)
     review_conversations: MergeTrainReviewConversations | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -168,6 +186,11 @@ class MergeTrainPullRequestSnapshot(BaseModel):
         self.base_sha = self.base_sha.strip()
         self.base_ref = self.base_ref.strip()
         self.base_repository = self.base_repository.strip()
+        if (
+            self.dependency_preview_hold
+            and self.dependency_preview_hold not in DEPENDENCY_HEAD_PREVIEW_HOLDS
+        ):
+            raise ValueError("merge train dependency preview hold is not a preview hold reason")
         return self
 
 
@@ -916,6 +939,15 @@ def _build_queue_entry(
                 ineligible_reasons.append(handoff_refusal)
         elif pull_request.dependency_update_class != "patch_or_minor":
             ineligible_reasons.append("dependency update needs agent review")
+    if (
+        is_dependency_update
+        and pull_request.dependency_update_class == "patch_or_minor"
+        and label_refusal
+        and not has_ready_handoff
+        and pull_request.dependency_preview_hold
+        and not DEPENDENCY_HEAD_HOLD_REASONS.intersection(ineligible_reasons)
+    ):
+        ineligible_reasons.append(pull_request.dependency_preview_hold)
     if (
         not is_trusted_automation
         and actor_role not in repository_policy.enqueue.allowed_actor_roles
