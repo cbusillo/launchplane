@@ -452,7 +452,7 @@ def require_disposable_preview_operation(
             profile,
             issued_plan.context,
             issued_plan.preview_slug,
-            allow_destroyed=issued_plan.operation == "refresh",
+            allow_destroyed=issued_plan.operation in {"refresh", "destroy"},
         )
     )
     creating_recipient = (
