@@ -114,8 +114,10 @@ The web service and `service merge-train-workers run` / `run-once` enable INFO
 logging for GitHub request timing at startup. Each controller operation emits a
 `GitHub request tally` to stderr, including short and failed passes, with its
 repository/base and trace, total requests, `not_modified` responses and
-`non_304_requests`. Stdout retains the worker's JSON pass results. Existing
-Python logging handlers are preserved; other libraries' INFO logs stay disabled
+`non_304_requests`. The long-running worker emits bounded per-target
+`merge_train_pass` projections on stderr; `run-once` keeps its JSON result
+on stdout. See [wake observations](merge-train-events.md#wake-observations)
+for pass counts and correlation fields. Existing Python logging handlers are preserved; other libraries' INFO logs stay disabled
 by default. Use timestamped tallies across a full observation window to attribute
 controller traffic; non-304 attempts include failures and are not a substitute
 for the installation's quota response headers or GraphQL point costs.
