@@ -103,6 +103,15 @@ attempt's trace, PR number, provider status, and that state as
 unresolved conversation or a missing review (`merge_blocked`). A failed,
 malformed, closed, or changed-head read leaves the diagnosis unconfirmed and
 asks the admin to reread merge requirements. Raw provider response bodies are not copied into this diagnosis.
+For a blocked head, the adapter also reads the active branch's required
+code-scanning tools and the exact head's native `github-advanced-security`
+results through the existing rule and check readers. If a required tool is
+absent after all observed checks have been complete for ten minutes, the
+refusal diagnosis is `required_code_scanning_missing`. That grace allows GitHub
+to process a just-uploaded result. Running checks, missing completion times,
+unreadable evidence and changed heads do not prove an absent scan; a similarly
+named check from another app cannot supply the native result. This recovery
+neither requests scans nor changes GitHub's rules or findings thresholds.
 The refusal returns HTTP 409 `github_merge_rejected`, not an upstream-outage
 retry instruction; no second merge is attempted by the diagnostic read.
 Before each subsequent merge, the existing PR read also blocks an observed

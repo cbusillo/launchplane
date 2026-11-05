@@ -1,6 +1,7 @@
 from tests.merge_train_policy_fixtures import dependency_repository_policy
 import unittest
 import json
+from datetime import datetime, timedelta, timezone
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.github_app_identity import ADVISORY_GITHUB_APP_ID_ENV_KEY
@@ -328,13 +329,13 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 self.assertEqual(caught.exception.refusal_diagnosis, "unconfirmed")
                 self.assertEqual(len(transport.requests), 2)
 
-    def test_merge_refusal_diagnoses_missing_scans_only_for_the_same_open_head(self) -> None:
+    def test_merge_refusal_diagnoses_missing_scans_only_after_completed_checks_age(self) -> None:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
         observed = {
             "number": 42,
             "state": "open",
-            "head": {"sha": "head-42", "ref": "train/batch"},
+            "head": {"sha": "head-42"},
             "base": {"ref": "main"},
-            "merge_commit_sha": "test-merge-42",
             "mergeable_state": "blocked",
         }
         rules = [
@@ -345,51 +346,53 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 },
             }
         ]
-        scan = {
-            "name": "CodeQL",
+        ci = {
+            "name": "ci-gate",
             "status": "completed",
             "conclusion": "success",
             "head_sha": "head-42",
-            "app": {"slug": "github-advanced-security"},
+            "app": {"slug": "github-actions"},
+            "completed_at": (now - timedelta(hours=1)).isoformat(),
         }
-        for status in (405, 409):
-            for checks, diagnosis in (
-                ([], "required_code_scanning_missing"),
-                ([scan | {"app": {"slug": "another-app"}}], "required_code_scanning_missing"),
-                ([scan], "merge_blocked"),
-                ([scan | {"head_sha": "older-head"}], "merge_blocked"),
-                ([scan | {"status": "in_progress", "conclusion": None}], "merge_blocked"),
-                ([scan | {"name": "Analyze (python)", "status": "queued"}], "merge_blocked"),
-                (None, "merge_blocked"),
-                (MergeTrainGitHubError("unreadable", status_code=403), "merge_blocked"),
+        scan = ci | {"name": "CodeQL", "app": {"slug": "github-advanced-security"}}
+        for checks, diagnosis in (
+            ([ci], "required_code_scanning_missing"),
+            ([ci, scan | {"app": {"slug": "another-app"}}], "required_code_scanning_missing"),
+            ([ci, scan], "merge_blocked"),
+            ([ci, scan | {"head_sha": "older-head"}], "merge_blocked"),
+            ([ci, scan | {"status": "in_progress", "conclusion": None}], "merge_blocked"),
+            ([ci, scan | {"name": "Analyze (python)", "status": "queued"}], "merge_blocked"),
+            ([ci | {"completed_at": now.isoformat()}], "merge_blocked"),
+            ([ci | {"completed_at": None}], "merge_blocked"),
+            ([], "merge_blocked"),
+            (None, "merge_blocked"),
+            (MergeTrainGitHubError("unreadable", status_code=403), "merge_blocked"),
+        ):
+            with (
+                self.subTest(checks=checks),
+                patch("control_plane.merge_train_github.datetime", wraps=datetime) as clock,
             ):
-                with self.subTest(status=status, checks=checks):
-                    transport = RecordingMergeTrainGitHubTransport(
-                        responses=(
-                            MergeTrainGitHubError("private provider detail", status_code=status),
-                            observed,
-                            rules,
-                            checks
-                            if isinstance(checks, MergeTrainGitHubError)
-                            else {"check_runs": checks},
-                        )
+                clock.now.return_value = now
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        MergeTrainGitHubError("private provider detail", status_code=405),
+                        observed,
+                        rules,
+                        checks
+                        if isinstance(checks, MergeTrainGitHubError)
+                        else {"check_runs": checks},
                     )
-                    with self.assertRaises(MergeTrainGitHubError) as caught:
-                        GitHubMergeTrainClient(transport=transport).merge_pull_request(
-                            repository="example/train-repo",
-                            pull_request_number=42,
-                            head_sha="head-42",
-                            merge_method="merge",
-                        )
-                    if status == 405 or diagnosis == "required_code_scanning_missing":
-                        self.assertIsInstance(caught.exception, MergeTrainGitHubMergeRejectedError)
-                        assert isinstance(caught.exception, MergeTrainGitHubMergeRejectedError)
-                        self.assertEqual(caught.exception.refusal_diagnosis, diagnosis)
-                        self.assertNotIn("private provider detail", str(caught.exception))
-                    self.assertEqual(caught.exception.status_code, status)
-                    self.assertEqual(
-                        sum(request.method == "PUT" for request in transport.requests), 1
+                )
+                with self.assertRaises(MergeTrainGitHubMergeRejectedError) as caught:
+                    GitHubMergeTrainClient(transport=transport).merge_pull_request(
+                        repository="example/train-repo",
+                        pull_request_number=42,
+                        head_sha="head-42",
+                        merge_method="merge",
                     )
+                self.assertEqual(caught.exception.refusal_diagnosis, diagnosis)
+                self.assertNotIn("private provider detail", str(caught.exception))
+                self.assertEqual(sum(request.method == "PUT" for request in transport.requests), 1)
 
     def test_merge_transport_ambiguity_is_not_diagnosed_as_a_refusal(self) -> None:
         error = MergeTrainGitHubError("unavailable", status_code=503)

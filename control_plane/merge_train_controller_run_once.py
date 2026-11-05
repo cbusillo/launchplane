@@ -1827,6 +1827,7 @@ def _advance_active_landing_record(
         )
         if isinstance(error, MergeTrainGitHubMergeRejectedError) and (
             not missing_scan
+            or active_landing_record.ordinary_job_binding is not None
             or active_landing_record.landing_plan.candidate_pull_request_number
             != error.pull_request_number
         ):
@@ -1861,7 +1862,12 @@ def _advance_active_landing_record(
                 lease=lease,
                 trace_id=trace_id,
                 recorded_at=recorded_at,
-                reason=str(error) if missing_scan else _CHANGED_MEMBER_CLOSE_REASON,
+                reason=(
+                    "a required code-scanning result did not arrive after its checks completed. "
+                    "The train re-plans from the current queue."
+                    if missing_scan
+                    else _CHANGED_MEMBER_CLOSE_REASON
+                ),
             )
         stale_plan = stale_merge_train_landing_plan(
             admission_guard.landing_plan_record.landing_plan

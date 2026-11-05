@@ -2908,13 +2908,14 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(replay.json()["replayed"])
             for _ in range(3):
-                await _post_merge_train_controller_run_once(app, request)
+                later = await _post_merge_train_controller_run_once(app, request)
+                self.assertEqual(later.json()["result"]["controller_action"], "candidate_failed")
             self.assertEqual(attempts, [99])
             self.assertTrue(closed)
-            self.assertIn("code-scanning", closed[0][1])
             plans = store.list_merge_train_batch_landing_plan_records(
                 repository=repository, base_branch="main"
             )
+            self.assertEqual(closed[0][0], plans[0].landing_plan.candidate_sha)
             self.assertFalse(
                 any(
                     entry.status == "merged"
