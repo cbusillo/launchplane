@@ -159,6 +159,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/contexts/{context}/driver-view": "read_driver_context_view",
     "/v1/contexts/{context}/instances/{instance}/driver-view": "read_driver_instance_view",
     "/v1/product-profiles": "list_product_profiles",
+    "/v1/monitoring-authority-history": "read_monitoring_authority_history",
     "/v1/product-profiles/{product}": "read_product_profile",
     "/v1/product-profiles/{product}/reconcile-requests": "read_product_reconcile_requests",
     "/v1/previews/{preview_id}/history": "read_preview_history",

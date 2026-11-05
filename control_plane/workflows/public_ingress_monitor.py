@@ -896,6 +896,17 @@ def run_public_ingress_monitor_once(
     lane_keys: frozenset[tuple[str, str, str]] | None = None,
     max_concurrent_probes: int = 1,
 ) -> PublicIngressMonitorResult:
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    _check_monitor_cancelled(should_stop)
+    authority_start = None
+    if isinstance(record_store, PostgresRecordStore):
+        try:
+            authority_start = record_store.begin_monitoring_authority_batch()
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "Monitoring authority batch start failed: %s", type(error).__name__
+            )
     observed_at = checked_at.strip() or utc_now_timestamp()
     public_get = http_get or fetch_public_ingress_url
     private_get = private_http_get or fetch_private_health_url
@@ -1039,7 +1050,7 @@ def run_public_ingress_monitor_once(
         reminder_states.extend(stored_transition.reminder_states)
         delivery_attempts.extend(stored_transition.delivery_attempts)
         authority_changed_count += int(stored_transition.authority_changed)
-    return PublicIngressMonitorResult(
+    result = PublicIngressMonitorResult(
         checked_at=observed_at,
         target_count=len(targets),
         pass_count=sum(
@@ -1062,6 +1073,16 @@ def run_public_ingress_monitor_once(
         reminder_states=tuple(reminder_states),
         delivery_attempts=tuple(delivery_attempts),
     )
+    if isinstance(record_store, PostgresRecordStore) and authority_start is not None:
+        try:
+            record_store.complete_monitoring_authority_batch(
+                start=authority_start, checked_at=observed_at, records=result.records
+            )
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "Monitoring authority batch completion failed: %s", type(error).__name__
+            )
+    return result
 
 
 def record_monitor_cadence(

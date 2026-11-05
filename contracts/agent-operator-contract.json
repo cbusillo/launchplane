@@ -384,6 +384,32 @@
       {
         "idempotency": "none",
         "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_monitoring_authority_history",
+        "path": "/v1/monitoring-authority-history",
+        "purpose": "Read settled monitoring revisions and completed batch confirmations within existing product-profile read access; earlier authority stays unknown.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "e2725d016b70480d5eb8e130793f099d225bb6334ea2cf471fe3dd3e5facda29",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
           "read_owner_review_identity"
         ],
         "method": "GET",
@@ -1365,8 +1391,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "818af6d6e374507482d152121e99931b2aed2036"
+    "source_commit_sha": "a6115078b4520f5648ba9c72d0b3ca6a64fcb4d0"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "9ca5a3f806880e8a266406b5f07c0987918cbcea75b793fbee960fff3e822dda"
+  "semantic_digest_sha256": "070eb5b4e0bb9b490de5f24eb6b0444c41c7a05b762c8fabdb9403140641088b"
 }
