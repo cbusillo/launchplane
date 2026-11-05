@@ -36,6 +36,7 @@ class DependabotClientReviewTests(unittest.TestCase):
             release_on_acceptance="held",
             is_active=True,
             repository="cbusillo/sellyouroutboard",
+            preview=SimpleNamespace(enabled=False, context=""),
             owner=SimpleNamespace(is_set=True, review_label="owner-review"),
         )
         transport = RecordingMergeTrainGitHubTransport(
@@ -170,6 +171,7 @@ class DependabotClientReviewTests(unittest.TestCase):
             release_on_acceptance="held",
             is_active=True,
             repository=policy.repository,
+            preview=SimpleNamespace(enabled=False, context=""),
             owner=SimpleNamespace(is_set=True, review_label="owner-review"),
         )
         for body, expected_review, expected_error in (
@@ -378,6 +380,7 @@ class DependabotClientReviewTests(unittest.TestCase):
             is_active=True,
             repository="example/site",
             driver_id="odoo",
+            preview=SimpleNamespace(enabled=False, context=""),
             owner=SimpleNamespace(is_set=True, review_label="owner-review"),
             lanes=(SimpleNamespace(instance="prod", context="site"),),
         )

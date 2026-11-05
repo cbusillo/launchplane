@@ -70,8 +70,8 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationState
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
-from control_plane.merge_train import DEPENDENCY_HEAD_PREVIEW_FAILED
-from control_plane.merge_train import DEPENDENCY_HEAD_PREVIEW_NOT_SERVED
+from control_plane.merge_train import CURRENT_HEAD_PREVIEW_FAILED
+from control_plane.merge_train import CURRENT_HEAD_PREVIEW_NOT_SERVED
 from tests.http_app_test_support import _preview_generation_read_record, _preview_read_record
 
 
@@ -423,6 +423,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             release_on_acceptance="held",
             is_active=True,
             repository=plan.repository,
+            preview=SimpleNamespace(enabled=False, context=""),
             owner=SimpleNamespace(is_set=True, review_label="owner-review"),
         )
         client = GitHubMergeTrainClient(
@@ -3976,6 +3977,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                             is_active=True,
                             repository="cbusillo/sellyouroutboard",
                             release_on_acceptance="director_standing",
+                            preview=SimpleNamespace(enabled=False, context=""),
                             owner=SimpleNamespace(is_set=True, review_label="owner-review"),
                         )
                         store = SimpleNamespace(list_product_profile_records=lambda: (profile,))
@@ -3995,6 +3997,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 is_active=True,
                 repository="example/site",
                 release_on_acceptance=mode,
+                preview=SimpleNamespace(enabled=False, context=""),
                 owner=SimpleNamespace(is_set=True, review_label="owner-review"),
             )
             for mode in ("director_standing", "held")
@@ -4067,6 +4070,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     release_on_acceptance="held",
                     is_active=True,
                     repository="cbusillo/sellyouroutboard",
+                    preview=SimpleNamespace(enabled=False, context=""),
                     owner=SimpleNamespace(
                         is_set=True,
                         review_label=label
@@ -4090,6 +4094,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             release_on_acceptance="held",
             is_active=True,
             repository="example/site",
+            preview=SimpleNamespace(enabled=False, context=""),
             owner=SimpleNamespace(is_set=False, review_label="owner-review"),
         )
         reader = GitHubMergeTrainSnapshotReader(
@@ -4126,6 +4131,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     release_on_acceptance="held",
                     is_active=False,
                     repository="cbusillo/sellyouroutboard",
+                    preview=SimpleNamespace(enabled=False, context=""),
                     owner=SimpleNamespace(is_set=True, review_label="owner-review"),
                 ),
             ),
@@ -4134,6 +4140,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     release_on_acceptance="held",
                     is_active=True,
                     repository="cbusillo/sellyouroutboard",
+                    preview=SimpleNamespace(enabled=False, context=""),
                     owner=SimpleNamespace(is_set=True, review_label="client-check"),
                 ),
             ),
@@ -4356,12 +4363,19 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
 
                 self.assertEqual(snapshot.pull_requests[0].dependency_update_class, expected)
 
-    def test_snapshot_reader_holds_dependency_update_until_its_preview_serves_the_head(
+    def test_snapshot_reader_holds_pull_requests_until_their_preview_serves_the_head(
         self,
     ) -> None:
-        def read_with_previews(record_store: FilesystemRecordStore) -> str:
+        def read_with_previews(record_store: FilesystemRecordStore, *, bot_update: bool) -> str:
             pull_request = _github_pull_request(16, author_association="CONTRIBUTOR")
-            pull_request["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
+            dependency_reads: tuple[object, ...] = ()
+            if bot_update:
+                pull_request["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
+                dependency_reads = (
+                    [_github_commit(49699333, INDIRECT_PATCH, sha="head-16")],
+                    [],
+                    {"files": [{"filename": "package.json", "status": "modified"}]},
+                )
             transport = RecordingMergeTrainGitHubTransport(
                 responses=(
                     _github_branch(),
@@ -4369,9 +4383,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     pull_request,
                     MergeTrainGitHubError("permission not found", status_code=404),
                     _label_events(),
-                    [_github_commit(49699333, INDIRECT_PATCH, sha="head-16")],
-                    [],
-                    {"files": [{"filename": "package.json", "status": "modified"}]},
+                    *dependency_reads,
                     _protected_branch_with_checks("ci-status", app_id=None),
                     [],
                     _combined_status(),
@@ -4385,8 +4397,11 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 branch_refresh_store=cast(Any, record_store),
                 repository_policy=dependency_repository_policy(),
             ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
-            self.assertEqual(snapshot.pull_requests[0].dependency_update_class, "patch_or_minor")
-            return snapshot.pull_requests[0].dependency_preview_hold
+            self.assertEqual(
+                snapshot.pull_requests[0].dependency_update_class,
+                "patch_or_minor" if bot_update else None,
+            )
+            return snapshot.pull_requests[0].preview_hold
 
         def preview_generation(
             head_sha: str, state: PreviewGenerationState = "ready"
@@ -4423,32 +4438,34 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             ...,
         ] = (
             ("product without previews", False, (), None, ""),
-            ("preview never recorded", True, (), None, DEPENDENCY_HEAD_PREVIEW_NOT_SERVED),
+            ("preview never recorded", True, (), None, CURRENT_HEAD_PREVIEW_NOT_SERVED),
             (
                 "preview serves an older head",
                 True,
                 (preview_generation("older-head"),),
                 None,
-                DEPENDENCY_HEAD_PREVIEW_NOT_SERVED,
+                CURRENT_HEAD_PREVIEW_NOT_SERVED,
             ),
             (
                 "current head is still building",
                 True,
                 (preview_generation("head-16", state="building"),),
                 None,
-                DEPENDENCY_HEAD_PREVIEW_NOT_SERVED,
+                CURRENT_HEAD_PREVIEW_NOT_SERVED,
             ),
             (
                 "current head preview failed",
                 True,
                 (preview_generation("older-head"),),
                 failed_refresh,
-                DEPENDENCY_HEAD_PREVIEW_FAILED,
+                CURRENT_HEAD_PREVIEW_FAILED,
             ),
             ("preview serves the current head", True, (preview_generation("head-16"),), None, ""),
         )
-        for label, previews_enabled, generations, reconcile_request, expected in cases:
-            with self.subTest(label), TemporaryDirectory() as state_dir:
+        for (label, previews_enabled, generations, reconcile_request, expected), dependency in (
+            (case, dependency) for case in cases for dependency in (True, False)
+        ):
+            with self.subTest(label, dependency=dependency), TemporaryDirectory() as state_dir:
                 store = _ReconcileRequestStore(
                     state_dir=Path(state_dir), reconcile_request=reconcile_request
                 )
@@ -4465,7 +4482,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         )
                     )
                     store.write_preview_generation_record(generation)
-                self.assertEqual(read_with_previews(store), expected)
+                self.assertEqual(read_with_previews(store, bot_update=dependency), expected)
 
     def test_dependency_bots_share_immutable_diff_and_signature_admission(self) -> None:
         from tests.test_merge_train_dependency_updates import renovate_message
@@ -5356,6 +5373,7 @@ def _client_veto_store(decisions: tuple[ProductReviewDecisionRecord, ...]) -> Si
                 release_on_acceptance="held",
                 is_active=True,
                 repository="cbusillo/sellyouroutboard",
+                preview=SimpleNamespace(enabled=False, context=""),
                 owner=SimpleNamespace(is_set=True, github_id="901", review_label="owner-review"),
             ),
         ),

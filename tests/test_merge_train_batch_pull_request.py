@@ -418,6 +418,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             release_on_acceptance="held",
             is_active=True,
             repository=self.provider.repository_name,
+            preview=SimpleNamespace(enabled=False, context=""),
             owner=SimpleNamespace(review_label="client-check", is_set=True, github_id="901"),
         )
         store = SimpleNamespace(
@@ -565,6 +566,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             release_on_acceptance="held",
             is_active=True,
             repository=provider.repository_name,
+            preview=SimpleNamespace(enabled=False, context=""),
             owner=SimpleNamespace(is_set=True, review_label="owner-review"),
         )
         body = _batch_owner_test_notes(

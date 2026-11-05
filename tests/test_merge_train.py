@@ -13,8 +13,9 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_batch import dependency_not_ready_holds
+from control_plane.merge_train_handoff import MergeTrainReadyHandoff
 from control_plane.merge_train import (
-    DEPENDENCY_HEAD_PREVIEW_HOLDS,
+    CURRENT_HEAD_PREVIEW_HOLDS,
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
     apply_merge_train_branch_update_intent,
@@ -398,63 +399,65 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertEqual(reasons[9], ("dependency update needs agent review",))
         self.assertIn("missing ready-to-merge label", reasons[10])
 
-    def test_automatic_dependency_admission_waits_for_its_current_head_preview(self) -> None:
+    def test_every_admission_route_waits_for_its_current_head_preview(self) -> None:
         policy = _dependency_update_policy(49699333)
-        update = _pull_request(8, labels=(), actor_id=49699333).model_copy(
-            update={"dependency_update_class": "patch_or_minor"}
-        )
-        green = _pull_request(9)
-        for hold in sorted(DEPENDENCY_HEAD_PREVIEW_HOLDS):
-            held_update = update.model_copy(update={"dependency_preview_hold": hold})
+        repository = policy.policies[0].repository
+        routes = {
+            "automatic dependency update": _pull_request(
+                8, labels=(), actor_id=49699333
+            ).model_copy(update={"dependency_update_class": "patch_or_minor"}),
+            "enqueue label": _pull_request(8),
+            "ready handoff": _pull_request(8, labels=()).model_copy(
+                update={
+                    "ready_handoff": MergeTrainReadyHandoff(
+                        status="ready",
+                        head_sha="head-8",
+                        actor_id=20,
+                        actor_role="repo_admin",
+                        comment_id=1,
+                    )
+                }
+            ),
+        }
+        other = _pull_request(9)
+        for route, pull_request in routes.items():
             for batch_landing in (False, True):
-                with self.subTest(hold=hold, batch_landing=batch_landing):
-                    result = build_merge_train_dry_run_result(
+                with self.subTest(route=route, batch_landing=batch_landing):
+                    served = build_merge_train_dry_run_result(
                         policy=policy,
                         snapshot=MergeTrainDryRunSnapshot(
-                            repository=policy.policies[0].repository,
+                            repository=repository,
                             base_branch="main",
-                            pull_requests=(held_update, green),
+                            pull_requests=(pull_request,),
                         ),
                         batch_landing=batch_landing,
                     )
-                    self.assertEqual(result.queue_order, (9,))
-                    self.assertEqual(result.queue[0].ineligible_reasons, (hold,))
-                    self.assertEqual(
-                        [
-                            held.pull_request_number
-                            for held in dependency_not_ready_holds(result, "base-main")
-                        ],
-                        [8],
-                    )
-            with self.subTest(hold=hold, admitted_by="owner label"):
-                labeled = held_update.model_copy(
-                    update={
-                        "labels": ("ready-to-merge",),
-                        "label_actors": labeled_by(("ready-to-merge",), "repo_owner"),
-                    }
-                )
-                result = build_merge_train_dry_run_result(
-                    policy=policy,
-                    snapshot=MergeTrainDryRunSnapshot(
-                        repository=policy.policies[0].repository,
-                        base_branch="main",
-                        pull_requests=(labeled,),
-                    ),
-                )
-                self.assertEqual(result.queue_order, (8,))
-        served = build_merge_train_dry_run_result(
-            policy=policy,
-            snapshot=MergeTrainDryRunSnapshot(
-                repository=policy.policies[0].repository,
-                base_branch="main",
-                pull_requests=(update, green),
-            ),
-            batch_landing=True,
-        )
-        self.assertEqual(served.queue_order, (8,))
+                    self.assertEqual(served.queue_order, (8,))
+                    for hold in sorted(CURRENT_HEAD_PREVIEW_HOLDS):
+                        result = build_merge_train_dry_run_result(
+                            policy=policy,
+                            snapshot=MergeTrainDryRunSnapshot(
+                                repository=repository,
+                                base_branch="main",
+                                pull_requests=(
+                                    pull_request.model_copy(update={"preview_hold": hold}),
+                                    other,
+                                ),
+                            ),
+                            batch_landing=batch_landing,
+                        )
+                        self.assertEqual(result.queue_order, (9,))
+                        self.assertEqual(result.queue[0].ineligible_reasons, (hold,))
+                        self.assertEqual(
+                            [
+                                held.pull_request_number
+                                for held in dependency_not_ready_holds(result, "base-main")
+                            ],
+                            [8],
+                        )
         with self.assertRaises(ValueError):
             MergeTrainPullRequestSnapshot.model_validate(
-                update.model_dump() | {"dependency_preview_hold": "preview looked fine"}
+                other.model_dump() | {"preview_hold": "preview looked fine"}
             )
 
     def test_dependency_candidates_are_isolated_without_original_pr_landing(self) -> None:

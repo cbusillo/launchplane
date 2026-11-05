@@ -121,9 +121,9 @@ from control_plane.merge_train_handoff import (
     ready_handoff_refusal,
 )
 from control_plane.source_control_change import change_fingerprint
-from control_plane.merge_train import DEPENDENCY_HEAD_PREVIEW_FAILED
-from control_plane.merge_train import DEPENDENCY_HEAD_PREVIEW_NOT_SERVED
-from control_plane.merge_train import DEPENDENCY_HEAD_PREVIEW_UNREADABLE
+from control_plane.merge_train import CURRENT_HEAD_PREVIEW_FAILED
+from control_plane.merge_train import CURRENT_HEAD_PREVIEW_NOT_SERVED
+from control_plane.merge_train import CURRENT_HEAD_PREVIEW_UNREADABLE
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainLabelActor
@@ -4111,13 +4111,13 @@ class GitHubMergeTrainSnapshotReader:
             )
             else None
         )
-        dependency_preview_hold = (
-            self._dependency_preview_hold(
+        preview_hold = (
+            self._preview_hold(
                 repository=base_repository,
                 pull_request_number=pull_request_number,
                 head_sha=head_sha,
             )
-            if dependency_update_class == "patch_or_minor"
+            if enrich or dependency_update_class == "patch_or_minor"
             else ""
         )
         review_intent = self.client_review_intent(
@@ -4220,12 +4220,10 @@ class GitHubMergeTrainSnapshotReader:
             required_checks_observation_error=checks_error,
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
-            dependency_preview_hold=dependency_preview_hold,
+            preview_hold=preview_hold,
         )
 
-    def _dependency_preview_hold(
-        self, *, repository: str, pull_request_number: int, head_sha: str
-    ) -> str:
+    def _preview_hold(self, *, repository: str, pull_request_number: int, head_sha: str) -> str:
         store: object = self._branch_refresh_store
         if not callable(getattr(store, "list_product_profile_records", None)):
             return ""
@@ -4237,11 +4235,11 @@ class GitHubMergeTrainSnapshotReader:
                 head_sha=head_sha,
             )
         except (SQLAlchemyError, ValueError, OSError):
-            logger.warning("Dependency update preview could not be read.", exc_info=True)
-            return DEPENDENCY_HEAD_PREVIEW_UNREADABLE
+            logger.warning("Pull request preview could not be read.", exc_info=True)
+            return CURRENT_HEAD_PREVIEW_UNREADABLE
         return {
-            "failed": DEPENDENCY_HEAD_PREVIEW_FAILED,
-            "not_served": DEPENDENCY_HEAD_PREVIEW_NOT_SERVED,
+            "failed": CURRENT_HEAD_PREVIEW_FAILED,
+            "not_served": CURRENT_HEAD_PREVIEW_NOT_SERVED,
         }.get(preview, "")
 
     def _recovery_ready_floor(self, repository: str, number: int, head: str) -> int:
