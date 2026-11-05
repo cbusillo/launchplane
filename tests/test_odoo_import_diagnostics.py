@@ -14,6 +14,7 @@ import pymysql
 from pydantic import SecretStr
 from pymysql.constants import CLIENT, CR
 
+from control_plane import odoo_parameter_presence as presence
 from control_plane import odoo_import_diagnostics as diagnostic
 from control_plane import odoo_runtime_reads as reads
 from control_plane.dokploy import api, source as dokploy_source
@@ -969,6 +970,15 @@ class GrantTests(unittest.TestCase):
             self.assertGreater(run.call_args.kwargs["timeout"], 0)
 
 
+def assert_testing_read_response(
+    test: unittest.TestCase, response: Any, authorization: MagicMock, product: str
+) -> None:
+    test.assertEqual(response.status_code, 200, response.text)
+    test.assertEqual(response.headers["cache-control"], "no-store")
+    test.assertEqual(authorization.call_args.kwargs["product"], product)
+    test.assertEqual(authorization.call_args.kwargs["target"].instances, ("testing",))
+
+
 class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_testing_route_auth_and_no_overrides(self) -> None:
         await self.exercise_read(runtime_only=False)
@@ -996,7 +1006,7 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         app = FastAPI()
         register_odoo_runtime_read_routes(
-            cast(ApiRouteRegistrar, app),
+            cast(ApiRouteRegistrar, cast(object, app)),
             dependencies=OdooRuntimeReadDependencies(
                 common=common, control_plane_root=Path("fixture"), database_url=None
             ),
@@ -1012,9 +1022,7 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
             return_value=diagnostic.unknown_result(),
         ) as execute:
             response = await request(app, "GET", path)
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(response.headers["cache-control"], "no-store")
-            self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
+            assert_testing_read_response(self, response, allowed, fixture.profile.product)
             self.assertNotIn(PRIVATE, response.text)
             if not runtime_only:
                 execute.side_effect = reads._diagnostic_unavailable()
@@ -1046,10 +1054,8 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
 
 class ParameterPresenceTests(unittest.TestCase):
     def setUp(self) -> None:
-        from control_plane import odoo_parameter_presence as presence
         from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 
-        self.presence = presence
         self.fixture = DiagnosticFixture()
         self.key = "fixture.api_key"
         self.fixture.bindings[0] = self.fixture.bindings[0].model_copy(
@@ -1096,8 +1102,8 @@ class ParameterPresenceTests(unittest.TestCase):
         kwargs["receive"]({"type": "complete", "result": self.observed})
 
     def read(self) -> Any:
-        return self.presence.read_parameter_presence(
-            store=self.fixture.store,
+        return presence.read_parameter_presence(
+            store=cast(presence.PresenceStore, cast(object, self.fixture.store)),
             product=self.fixture.profile.product,
             query=self.query,
             control_plane_root=Path("fixture"),
@@ -1180,7 +1186,7 @@ class ParameterPresenceTests(unittest.TestCase):
             self.assertEqual(self.read().runtime, "unknown")
 
     def test_unavailable_or_unselected_outputs_never_expose_values_or_false_absence(self) -> None:
-        for observed in (
+        observations: tuple[dict[str, object], ...] = (
             {"runtime": "unknown"},
             {
                 "runtime": "verified",
@@ -1200,9 +1206,10 @@ class ParameterPresenceTests(unittest.TestCase):
                     "value": PRIVATE,
                 },
             },
-        ):
+        )
+        for observed in observations:
             with self.subTest(observed=observed.get("runtime")):
-                self.observed = dict(observed)
+                self.observed = observed
                 result = self.read()
                 self.assertEqual(result.runtime, "unknown")
                 self.assertIsNone(result.presence)
@@ -1320,7 +1327,6 @@ class ParameterPresenceTests(unittest.TestCase):
 
 class ParameterPresenceHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_read_is_product_scoped_testing_only_and_typed(self) -> None:
-        from control_plane import odoo_parameter_presence as presence
         from urllib.parse import urlencode
 
         fixture = DiagnosticFixture()
@@ -1337,7 +1343,7 @@ class ParameterPresenceHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         app = FastAPI()
         register_odoo_runtime_read_routes(
-            cast(ApiRouteRegistrar, app),
+            cast(ApiRouteRegistrar, cast(object, app)),
             dependencies=OdooRuntimeReadDependencies(
                 common=common, control_plane_root=Path("fixture"), database_url=None
             ),
@@ -1357,10 +1363,7 @@ class ParameterPresenceHttpTests(unittest.IsolatedAsyncioTestCase):
             return_value=presence.ParameterPresenceResult(),
         ) as execute:
             response = await request(app, "GET", path)
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(response.headers["cache-control"], "no-store")
-            self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
-            self.assertEqual(allowed.call_args.kwargs["target"].instances, ("testing",))
+            assert_testing_read_response(self, response, allowed, fixture.profile.product)
             execute.reset_mock()
             self.assertEqual(
                 (await request(app, "GET", path.replace("/testing/", "/prod/"))).status_code, 400
