@@ -603,8 +603,8 @@ and [`toJSON`/`toObject`](https://docs.renovatebot.com/templates/) helpers.
 Every update must have an allowed type and satisfy the same generic safety
 rule. Patch/minor metadata must agree with the version movement and stay within
 one major with an unchanged suffix; a `0.x` minor bump needs review. Digest
-updates need identical nonempty tag values and upstream proof of forward
-movement for their exact old/new commits. Equal tags or well-formed hashes alone
+updates need identical nonempty tag or branch values and upstream proof of
+forward movement for their exact old/new commits. Equal tags or well-formed hashes alone
 do not qualify, including in package manifests and lockfiles.
 Majors, unknown types and incomplete evidence remain for agent review even
 when a bot is configured. Transitive lockfile changes are not classified;
@@ -616,8 +616,8 @@ Release checklist readers use the current policy too; recorded engineering notes
 remain readable, but a removed bot cannot supply a new inferred exemption.
 Both formats require a complete immutable same-repository dependency-only diff.
 `workspace.toml` qualifies only when complete immutable TOML documents differ
-solely in exact devkit/runtime ref pins; shared-addon and other changes keep
-review. In the verified train-admission path, workflow/action YAML, Compose images and Dockerfile frontend/base-image
+solely in exact devkit/runtime ref pins; in train admission each pin must be a
+declared digest update. Shared-addon and other changes keep review. In the verified train-admission path, workflow/action YAML, Compose images and Dockerfile frontend/base-image
 references qualify only when complete immutable before/after documents prove
 that only supported dependency references changed from the PR's merge base.
 Every changed reference must match a named update's exact old/new values or
@@ -628,7 +628,7 @@ inputs and image tags must move forward within their current major with the
 same version suffix. Action SHA changes require a complete upstream comparison
 whose old SHA is the merge base and whose final commit is the proposed SHA;
 stale version comments cannot prove forward movement. Opaque container digest
-changes and branch-following workflow pins remain for agent review. The bot's
+changes remain for agent review. The bot's
 declared update types, verified commit provenance, required checks and explicit
 Client-review overrides remain enforced.
 Other consumers retain the existing manifest/lockfile/workspace-only Client-review

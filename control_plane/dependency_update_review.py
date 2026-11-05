@@ -118,7 +118,11 @@ def pure_dependency_update(
                 and item.get("status") == "modified"
                 and comparison_merge_base is not None
                 and _workspace_pin_only(
-                    read=read, path=path, base_sha=comparison_merge_base, head_sha=head_sha
+                    read=read,
+                    path=path,
+                    base_sha=comparison_merge_base,
+                    head_sha=head_sha,
+                    declared_updates=declared_updates,
                 )
             ):
                 continue
@@ -193,7 +197,12 @@ def _safe_read(read: Callable[[str], object], path: str) -> object:
 
 
 def _workspace_pin_only(
-    *, read: Callable[[str], object], path: str, base_sha: str, head_sha: str
+    *,
+    read: Callable[[str], object],
+    path: str,
+    base_sha: str,
+    head_sha: str,
+    declared_updates: Sequence[dict[str, str]] | None,
 ) -> bool:
     documents = []
     for revision in (base_sha, head_sha):
@@ -221,6 +230,13 @@ def _workspace_pin_only(
             isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref)
             for ref in (old_ref, new_ref)
         ):
+            return False
+        pins_forward_proven_digest = declared_updates is None or any(
+            update.get("depName") == old_repo.get("repository")
+            and (update.get("currentDigest"), update.get("newDigest")) == (old_ref, new_ref)
+            for update in declared_updates
+        )
+        if not pins_forward_proven_digest:
             return False
         changed = True
         old_repo.pop("ref")
