@@ -3003,6 +3003,30 @@ remains rehearsal proof. This qualifies empty target and record onboarding;
 it does not establish working previews or real-repository artifact provenance.
 Verify those independently through [event-driven delivery](event-driven-deploys.md).
 
+#### Native Odoo onboarding
+
+An Odoo product's records come first, because its testing target is a compose
+that only an owned context can stage. The authenticated Director agent or a
+CSRF-checked signed-in administrator sends `POST /v1/product-onboarding/apply`
+with a typed `odoo` intent: the repository identity read as above, `context`,
+`image_repository`, `preview_base_url` and an optional `database_name`
+(default: the context). Start with `mode: dry_run`, then apply with the
+returned `plan_sha256` as `reviewed_plan_sha256` and an `Idempotency-Key`.
+Unchanged original-key replay returns the committed receipt.
+
+Apply records a new `odoo` product with one testing lane and previews on the
+same context. The lane's data is `resettable` from `empty`; its settings are
+`ODOO_DB_NAME` and `ODOO_DB_USER`, the context holds
+`LAUNCHPLANE_PREVIEW_BASE_URL`, and the profile declares the driver's three
+testing passwords as required managed secrets. Apply writes no target, secret
+value, deployment or grant. The product must be new and its context unowned and
+free of target and deployment records, checked again under the record-write lock.
+
+Then stage the empty testing compose through
+[first testing target creation](authorization-authority.md#first-testing-target-creation).
+Credentials, domains, data and the first deploy follow through their own
+operations; registration proves none of them.
+
 #### Compatibility workflow recovery
 
 The retired `Product Onboarding` wrapper and current-source reusable worker
