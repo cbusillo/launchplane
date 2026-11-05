@@ -4204,10 +4204,11 @@ workflow grant, after that.
   Stable target replacement merges that list into `ODOO_INSTALL_MODULES` with
   Launchplane's required safety modules before deploying the target.
 - When the manifest records `build_flags.values.odoo_version`, stable target
-  replacement (and so promotion and rollback), backup restore, ship and Odoo
-  preview apply set the runtime `ODOO_VERSION` from it, overriding any site or
-  global value, for lanes that declare `ODOO_VERSION` or already carry it.
-  Deployment evidence records the value as `artifact_odoo_version`. Older
+  replacement (and so promotion and rollback), backup restore, ship, Odoo
+  preview apply and fresh testing candidate preparation set the runtime
+  `ODOO_VERSION` from it, overriding any site or global value, for lanes that
+  declare `ODOO_VERSION` or already carry it.
+  Stable replacement evidence records the value as `artifact_odoo_version`. Older
   manifests without it keep the environment's value, except clean-snapshot
   previews, which require a versioned manifest and qualified matching capture.
 - With no explicit artifact id, the Odoo prod rollback driver redeploys the
