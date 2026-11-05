@@ -14,10 +14,9 @@ Missing, ambiguous or unpinned source evidence appears as UNKNOWN and blocks
 Client acceptance while known ranges remain visible. New or removed inputs and
 changed floating selectors still need review coverage. Replacing a floating selector
 with an immutable addon pin uses the same verified source range and Client notes;
-the producer intentionally emits no floating-selector entry for a pinned ref.
+a missing selector does not remove the exact addon source or its review coverage.
 Missing or invalid addon evidence and incomplete shared ranges still block.
-Existing release identities
-and saved decisions keep their serialized shape; a newly compiled checklist binds
+Existing release identities and saved decisions keep their serialized shape; a newly compiled checklist binds
 its additional source ranges and notes to the exact acceptance.
 
 ## Generic-web production settings
