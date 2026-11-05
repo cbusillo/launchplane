@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from urllib.parse import unquote
 from unittest.mock import patch
+from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.merge_train_batch import (
@@ -68,6 +69,17 @@ class _ReuseTransport:
         path = unquote(path)
         if self.unavailable_path and self.unavailable_path in path:
             raise MergeTrainGitHubError("unavailable", status_code=403)
+        variables: Any = body.get("variables", {}) if body is not None else {}
+        if path == "/graphql" and "input" in variables:
+            updates = variables["input"]["refUpdates"]
+            if any(
+                self.refs.get(update["name"].removeprefix("refs/heads/")) != update["beforeOid"]
+                for update in updates
+            ):
+                return {"errors": [{"message": "ref moved"}]}
+            for update in updates:
+                self.refs.pop(update["name"].removeprefix("refs/heads/"))
+            return {"data": {"updateRefs": {"clientMutationId": None}}}
         if path == "/graphql":
             history = [
                 event
@@ -89,6 +101,15 @@ class _ReuseTransport:
             }
         prefix = "/repos/example/merge-train-repo"
         suffix = path.removeprefix(prefix)
+        if method == "GET" and not suffix:
+            return {"node_id": "repository-node"}
+        if method == "GET" and suffix.startswith("/git/ref/heads/"):
+            branch = suffix.removeprefix("/git/ref/heads/")
+            if branch not in self.refs:
+                raise MergeTrainGitHubError("missing", status_code=404)
+            return {"ref": "refs/heads/" + branch, "object": {"sha": self.refs[branch]}}
+        if method == "GET" and suffix.startswith("/pulls?"):
+            return []
         if method == "POST" and suffix == "/git/refs":
             assert body is not None
             ref, sha = body["ref"], body["sha"]

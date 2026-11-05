@@ -276,6 +276,12 @@ def close_batch_pull_request(
             raise MergeAdmissionReconciliationRequiredError(
                 "Batch PR has a merged or unavailable effect; it cannot be retired as unused."
             )
+        base = _json_object(pull_request.get("base"), "Retired batch PR base")
+        marker = f"<!-- launchplane-batch:{candidate.batch_id}:{candidate.candidate_sha} -->"
+        if marker not in str(pull_request.get("body") or "") and (
+            head.get("sha") != candidate.candidate_sha or base.get("ref") != candidate.base_branch
+        ):
+            continue
         if pull_request.get("state") == "closed":
             continue
         if pull_request.get("state") != "open":
