@@ -92,6 +92,14 @@ Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
+Production backup capture inherits the Director's standing permission only on
+the typed production capture route with the existing `local_operator` transport.
+Its durable provenance records the active policy and caller, and the worker
+rechecks the current configured identity before provider effects. Capture
+does not authorize restore, delete, cancellation, retention edits or changes
+to backup-gate records. The current backup policy, preflight and capture audit
+remain in force; see [production backups](production-backup-provider.md#service-contract).
+
 Route-binding reconcile admits the Director's existing `local_operator` transport
 to refresh evidence on an exclusively owned declared lane, including production,
 without granting `route_binding.apply`. The request must name the current record

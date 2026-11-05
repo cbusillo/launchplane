@@ -30,6 +30,7 @@ from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     TerminalAgentIdentity,
+    LocalOperatorIdentity,
 )
 from tests.support.auth import _identity
 
@@ -60,6 +61,61 @@ _LEGACY_V2_POLICY_AUTHORIZATION_JSON = (
 
 
 class DurableOperationAuthorizationTests(unittest.TestCase):
+    def test_director_capture_cannot_authorize_restore_delete_or_other_writes(self) -> None:
+        identity = LocalOperatorIdentity(
+            subject="director", token_label="agent", director_agent=True
+        )
+        policy = self._policy_record(LaunchplaneAuthzPolicy(schema_version=2))
+        for action in (
+            "odoo_prod_backup_restore_apply.execute",
+            "preview_lifecycle.cleanup",
+            "production_backup_authority.write",
+            "backup_gate.write",
+        ):
+            with (
+                self.subTest(action=action),
+                self.assertRaises(DurableOperationAuthorizationCaptureError),
+            ):
+                capture_durable_operation_authorization(
+                    identity=identity,
+                    action=action,
+                    product="sample",
+                    context="sample",
+                    instances=("prod",),
+                    policy_record=policy,
+                    authorized_at=policy.updated_at,
+                )
+        authorization = capture_durable_operation_authorization(
+            identity=identity,
+            action="production_backup_gate.execute",
+            product="sample",
+            context="sample",
+            instances=("prod",),
+            policy_record=policy,
+            authorized_at=policy.updated_at,
+        )
+        with self.assertRaises(DurableOperationAuthorizationDeniedError):
+            DurableOperationAuthorizationGuard(
+                authorization=authorization,
+                policy_record_reader=lambda: policy,
+            ).authorize_execution()
+        for change in (
+            {"action": "odoo_prod_backup_restore_apply.execute"},
+            {"action": "preview_lifecycle.cleanup"},
+            {"instances": ["testing"]},
+            {
+                "caller": {
+                    "identity_type": "terminal_agent",
+                    "subject": "director",
+                    "token_label": "agent",
+                }
+            },
+        ):
+            with self.subTest(change=change), self.assertRaises(ValidationError):
+                DurableOperationAuthorization.model_validate(
+                    authorization.model_dump(mode="json") | change
+                )
+
     def _policy(
         self,
         *,

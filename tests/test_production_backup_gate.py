@@ -17,6 +17,9 @@ from control_plane.contracts.durable_operation_authorization import DurableOpera
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerResult
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_routes.production_backup_gate import _response
+from control_plane.durable_operation_authorization import capture_durable_operation_authorization
+from control_plane.service_auth import BearerIdentityConfig, configured_local_operator_identity
+from tests.http_app_test_support import _local_operator_bearer_config
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import (
     enqueue_production_backup_gate,
@@ -60,6 +63,77 @@ class ProductionBackupGateTests(unittest.TestCase):
         )
         self.authorization = DurableOperationAuthorization.model_validate(payload)
         self.store.seed_authz_policy_if_absent(durable_operation_policy_record(payload))
+
+    def test_director_capture_runs_without_grants_and_rechecks_its_identity(self) -> None:
+        config = _local_operator_bearer_config()
+        identity = configured_local_operator_identity(config)
+        assert identity is not None
+        policy = durable_operation_policy_record()
+        authorization = capture_durable_operation_authorization(
+            identity=identity,
+            action="production_backup_gate.execute",
+            product=self.binding.request.product,
+            context=self.binding.request.context,
+            instances=("prod",),
+            policy_record=policy,
+            authorized_at=policy.updated_at,
+        )
+        self.assertEqual(authorization.policy_sha256, policy.policy_sha256)
+        self.assertEqual(authorization.caller.subject, identity.subject)
+        self.assertEqual(
+            DurableOperationAuthorization.model_validate_json(authorization.model_dump_json()),
+            authorization,
+        )
+        for label, current_config, expected_status in (
+            ("current", config, "pass"),
+            ("removed", BearerIdentityConfig(), "fail"),
+            ("replaced", config.model_copy(update={"local_operator_subject": "other"}), "fail"),
+        ):
+            with self.subTest(identity=label):
+                operation = enqueue_production_backup_gate(
+                    record_store=self.store,
+                    request=self.binding.request.model_copy(update={"backup_record_id": label}),
+                    authorization=authorization,
+                    operation_key=f"director|{label}",
+                )
+                host = BackupHost()
+                with (
+                    patch(
+                        "control_plane.service_bootstrap._bearer_identity_config_from_env",
+                        return_value=current_config,
+                    ),
+                    patch(
+                        "control_plane.workflows.production_backup_gate_operation_worker.read_active_authz_policy_record",
+                        return_value=policy,
+                    ),
+                    patch(
+                        "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
+                        return_value={
+                            "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "private",
+                            "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "hosts",
+                        },
+                    ),
+                    patch(
+                        "control_plane.workflows.production_backup_provider.subprocess.run",
+                        side_effect=host.run,
+                    ),
+                ):
+                    result = run_production_backup_gate_operation_worker_once(
+                        record_store=self.store,
+                        control_plane_root_path=self.root,
+                        lease_owner="test-worker",
+                    )
+                self.assertTrue(result.terminal_write_committed)
+                saved = self.store.read_verireel_prod_backup_gate_operation_record(
+                    operation.operation_id
+                )
+                self.assertEqual(saved.status, expected_status, saved.error_code)
+                if expected_status == "pass":
+                    self.assertTrue(any(command[0] == "vzdump" for command in host.commands))
+                    self.assertEqual(self.store.read_backup_gate_record(label).status, "pass")
+                else:
+                    self.assertEqual(saved.error_code, "operation_authorization_revoked")
+                    self.assertEqual(host.commands, [])
 
     def test_replay_and_conflicting_request_do_not_duplicate_work(self) -> None:
         first = enqueue_production_backup_gate(

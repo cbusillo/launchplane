@@ -243,7 +243,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "product_retirement.plan": ActionDeclaration("write"),
         "production_backup_authority.read": ActionDeclaration("read"),
         "production_backup_authority.write": ActionDeclaration("write"),
-        "production_backup_gate.execute": ActionDeclaration("write"),
+        "production_backup_gate.execute": ActionDeclaration("write", director_agent_write=True),
         "promotion.read": ActionDeclaration("read"),
         "promotion.write": ActionDeclaration("write"),
         "provider_target.audit": ActionDeclaration("read"),

@@ -283,12 +283,18 @@ def register_production_backup_gate_routes(
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", max_length=256)] = "",
     ) -> ProductionBackupGateResponse:
         trace_id = common.next_trace_id()
+        director_capture = (
+            isinstance(identity, LocalOperatorIdentity)
+            and director_agent_identity(identity)
+            and request.instance == "prod"
+        )
         if not common.authorization_allows(
             identity=identity,
             action=PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
             product=request.product,
             context=request.context,
             target=AuthorizationTarget(scope="instance", instances=(request.instance,)),
+            inherit_agent_read_role=director_capture,
         ):
             raise common.http_error(
                 status_code=403,
@@ -357,6 +363,7 @@ def register_production_backup_gate_routes(
             product=scope[0],
             context=scope[1],
             target=AuthorizationTarget(scope="instance", instances=(scope[2],)),
+            inherit_agent_read_role=action != PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
         ):
             raise common.http_error(
                 status_code=403,

@@ -51,6 +51,55 @@ from tests.support.durable_operations import durable_operation_authorization_pay
 
 
 class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_director_capture_reaches_idempotency_gate_without_a_policy_grant(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            bearer_identity_config=_local_operator_bearer_config(),
+            authz_policy=LaunchplaneAuthzPolicy(schema_version=2),
+            record_store_factory=object,
+        )
+        response = await request(
+            app,
+            "POST",
+            "/v1/production-backup-gates",
+            headers={"Authorization": "Bearer local-operator-token"},
+            payload=_binding().request.model_dump(mode="json"),
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["error"]["code"], "missing_idempotency_key")
+
+    async def test_director_capture_does_not_allow_delete_cancel_or_policy_changes(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            bearer_identity_config=_local_operator_bearer_config(),
+            authz_policy=LaunchplaneAuthzPolicy(schema_version=2),
+            record_store_factory=object,
+        )
+        headers = {"Authorization": "Bearer local-operator-token"}
+        deleted = await request(
+            app, "DELETE", "/v1/production-backup-gates/operations/backup", headers=headers
+        )
+        self.assertEqual(deleted.status_code, 405, deleted.text)
+        cancelled = await request(
+            app,
+            "POST",
+            "/v1/production-backup-gates/operations/backup/cancel?product=sample&context=sample&instance=prod",
+            headers=headers,
+            payload={"reason": "capture does not authorize cancellation"},
+        )
+        self.assertEqual(cancelled.status_code, 403, cancelled.text)
+        for extra in ({"retention_count": 0}, {"restore": True}, {"delete": True}):
+            with self.subTest(extra=extra):
+                response = await request(
+                    app,
+                    "POST",
+                    "/v1/production-backup-gates",
+                    headers=headers,
+                    payload=_binding().request.model_dump(mode="json") | extra,
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
     async def test_list_operations_rejects_blank_or_missing_scope_and_invalid_selectors(
         self,
     ) -> None:
@@ -338,7 +387,7 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(scoped_response.status_code, 200 if query_scope == scope else 403)
 
-    async def test_director_continuation_preserves_acceptance_without_capture_permission(
+    async def test_director_continuation_preserves_acceptance_without_policy_grants(
         self,
     ) -> None:
         fixture = release_fixtures.GenericWebClientReleaseTests("runTest")
@@ -395,18 +444,6 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                 "fail",
             )
             body.update(apply=True, expected_digest=planned.json()["review_digest"])
-            direct_backup = fixture.store.read_verireel_prod_backup_gate_operation_record(
-                operation_id
-            ).request.model_dump(mode="json")
-            direct_backup["backup_record_id"] = "unaccepted-capture"
-            denied_capture = await request(
-                app,
-                "POST",
-                "/v1/production-backup-gates",
-                headers={**headers, "Idempotency-Key": "forbidden-direct-capture"},
-                payload=direct_backup,
-            )
-            self.assertEqual(denied_capture.status_code, 403, denied_capture.text)
             fixture.switch("held")
             held = await request(app, "POST", path, headers=headers, payload=body)
             self.assertEqual(held.status_code, 409, held.text)
@@ -581,6 +618,7 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 store.close()
 
+    @scoped_agent_test
     async def test_capture_denial_missing_key_and_non_postgres_fail_before_enqueue(self) -> None:
         for actions, key, status, code in (
             (("production_backup_authority.read",), "key", 403, "authorization_denied"),

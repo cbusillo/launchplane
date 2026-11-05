@@ -11,8 +11,8 @@ Requests cannot override topology or skip either operation.
 
 `POST /v1/production-backup-gates` accepts product, context, instance, promotion
 action, backup record ID and timeout. It requires
-`production_backup_gate.execute` for that exact scope, PostgreSQL, a managed
-authorization rule with durable provenance, and `Idempotency-Key`. The service
+`production_backup_gate.execute` for that exact scope, PostgreSQL, durable
+authorization provenance, and `Idempotency-Key`. The service
 resolves current typed authority and stores the exact binding in a durable
 operation. The same caller/key and request reuses that operation even after
 authority changes; changed requests conflict. New captures resolve current
@@ -31,6 +31,18 @@ before the capture's first effect. Launchplane's own worker queues a backup for
 a Client's accepted release under a `client_release_acceptance` grant, which the
 backup worker re-checks against the release decision; see
 [release review](release-review.md#acceptance-starts-the-release).
+
+The Director's authenticated `local_operator` may capture a production backup
+without a managed rule. Its `director_backup_capture` provenance retains the
+caller, exact lane, active authorization-policy revision/digest and timestamp.
+The worker rechecks the active policy and the current configured Director
+identity before provider effects, using the existing bootstrap or managed
+service identity source. A removed or replaced identity refuses execution.
+This permission applies only to the typed capture route. Restore, delete,
+operation cancellation, retention edits and backup-gate record changes retain
+their existing authorization requirements. Capture still enforces the current
+backup policy, host boundary, both verified backups and policy-owned retention.
+No credential, key, policy record or host configuration is created or changed.
 
 `GET /v1/production-backup-gates/operations/{operation_id}` takes the same
 product/context/instance as query parameters and requires
