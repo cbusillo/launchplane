@@ -29,6 +29,7 @@ from control_plane.contracts.odoo_walkthrough import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.odoo_runtime_reads import (
+    OdooRuntimeReadError,
     OdooRuntimeConnection,
     OdooRuntimeEvidence,
     OdooRuntimeSelection,
@@ -82,6 +83,158 @@ from tests.test_odoo_preview_apply_execution import _issued_plan, _refresh_paylo
 
 
 class PreviewReservationRecoveryTests(unittest.TestCase):
+    def test_completed_error_original_keeps_concrete_target_history(self) -> None:
+        from control_plane import preview_evidence
+        from control_plane.dokploy import api, source
+
+        apply_request = self.request.model_copy(
+            update={
+                "apply": self.request.apply.model_copy(
+                    update={
+                        "dry_run_plan": self.request.apply.dry_run_plan.model_copy(
+                            update={"compose_ref": "retained-concrete-target"}
+                        )
+                    }
+                )
+            }
+        )
+        issued = _issued_plan(apply_request)
+        retained = dict(
+            product=self.profile.product,
+            issued_plan=issued.model_dump(mode="json"),
+            apply_request=apply_request.model_dump(mode="json"),
+        )
+        original = self.replace_record(
+            state="completed",
+            response_status_code=409,
+            response_trace_id="terminal-original",
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+            response_payload={"error": {"code": "retained-terminal-error"}},
+        )
+        assert apply_request.apply.manifest is not None
+        query = preview_evidence.PreviewEvidenceQuery(
+            original_reservation_id=original.record_id,
+            pr_number=issued.plan_request.pr_number,
+            source_git_ref=issued.plan_request.source_git_ref,
+            image_digest=apply_request.apply.manifest.image.digest,
+        )
+        with (
+            patch.object(self.store, "read_original_mutation_intent", return_value=retained),
+            patch.object(
+                source,
+                "read_dokploy_config",
+                return_value=("https://provider.invalid", "private-token"),
+            ),
+            patch.object(
+                api,
+                "list_deployments_for_target",
+                return_value=[{"deploymentId": "job", "status": "done"}],
+            ) as history,
+        ):
+            result = preview_evidence.read_preview_evidence(
+                self.store, product=self.profile.product, query=query, root=self.root
+            )
+        history.assert_called_once_with(
+            host="https://provider.invalid",
+            token="private-token",
+            target_type="compose",
+            target_id="retained-concrete-target",
+            require_complete=True,
+        )
+        self.assertEqual(cast(dict[str, object], result["original"])["state"], "completed")
+        self.assertNotIn("private-token", json.dumps(result))
+
+    def test_original_evidence_resolves_controller_plan_without_mutating_or_current_pointer(
+        self,
+    ) -> None:
+        from control_plane import preview_evidence
+
+        assert self.request.apply.manifest is not None
+        query = preview_evidence.PreviewEvidenceQuery(
+            plan_id=self.reservation.idempotency_key,
+            pr_number=self.issued.plan_request.pr_number,
+            source_git_ref=self.issued.plan_request.source_git_ref,
+            image_digest=self.request.apply.manifest.image.digest,
+        )
+        with patch.object(preview_evidence, "read_preview_provider_history", return_value={}):
+            result = preview_evidence.read_preview_evidence(
+                self.store, product=self.profile.product, query=query, root=self.root
+            )
+        original = cast(dict[str, object], result["original"])
+        self.assertEqual(original["reservation_id"], self.reservation.record_id)
+        self.assertEqual(
+            self.store.read_idempotency_record_by_id(self.reservation.record_id), self.reservation
+        )
+        with (
+            patch.object(self.store, "read_original_mutation_intent", return_value={}),
+            patch.object(preview_evidence, "read_preview_provider_history") as provider,
+        ):
+            with self.assertRaises(OdooRuntimeReadError) as raised:
+                preview_evidence.read_preview_evidence(
+                    self.store, product=self.profile.product, query=query, root=self.root
+                )
+        self.assertEqual(raised.exception.code, "preview_original_binding_unavailable")
+        provider.assert_not_called()
+
+    def test_original_history_requires_retained_schedule_binding_and_complete_provider_shape(
+        self,
+    ) -> None:
+        from control_plane import preview_evidence
+        from control_plane.dokploy import api, source
+
+        retained = dict(self.operation.adapter.original_intent())
+        retained["schedule_binding"] = dict(
+            schedule_type="server", lookup_id="private-server", app_name="private-schedule"
+        )
+        deployments = [
+            {
+                "deploymentId": "private-job",
+                "status": "done",
+                "log": "private-log",
+                "env": "private-credential",
+            }
+        ]
+        with (
+            patch.object(self.store, "read_original_mutation_intent", return_value=retained),
+            patch.object(
+                source,
+                "read_dokploy_config",
+                return_value=("https://private-provider", "private-token"),
+            ),
+            patch.object(
+                api,
+                "dokploy_request",
+                return_value=[
+                    {"name": "data", "appName": "private-schedule", "deployments": deployments}
+                ],
+            ) as provider,
+        ):
+            result = preview_evidence.read_preview_provider_history(
+                self.store,
+                root=self.root,
+                reservation=self.reservation,
+                compose_id="${created.unproven}",
+            )
+            schedule = cast(dict[str, object], result["schedule"])
+            self.assertEqual(schedule["coverage"], "complete_retained_history")
+            self.assertTrue(schedule["quiescent"])
+            self.assertEqual(schedule["original_job_binding"], "unavailable")
+            self.assertNotIn("private-", json.dumps(result))
+            for raw in (
+                None,
+                [{"name": "data", "appName": "private-schedule", "deployments": deployments}, {}],
+                [{"appName": "private-schedule", "deployments": {"items": deployments}}],
+                [{"appName": "private-schedule", "deployments": [None]}],
+                [{"name": "other", "appName": "other", "deployments": []}],
+            ):
+                provider.return_value = raw
+                result = preview_evidence.read_preview_provider_history(
+                    self.store, root=self.root, reservation=self.reservation, compose_id=""
+                )
+                schedule = cast(dict[str, object], result["schedule"])
+                self.assertEqual(schedule["coverage"], "unavailable")
+                self.assertIsNone(schedule["quiescent"])
+
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -2119,6 +2272,10 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             schedule_type="server", lookup_id="server", app_name="preview-data-workflow"
         )
         cases: tuple[object, ...] = (
+            [
+                {"name": "data", "appName": binding.app_name, "deployments": [{"status": "done"}]},
+                {"appName": "x"},
+            ],
             {},
             {"items": []},
             {"items": [], "total": 40},

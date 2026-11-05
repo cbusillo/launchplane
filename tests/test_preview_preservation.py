@@ -1044,7 +1044,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "control_plane.odoo_preview_qualification.collect_odoo_preview_qualification",
+                    "control_plane.odoo_preview_qualification.read_odoo_preview_qualification",
                     return_value=PreviewQualification(
                         OdooTestingUsage(usage="in_use", resources_qualified=True), "fixture"
                     ),

@@ -153,6 +153,11 @@ DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES = {
     "finished",
     "healthy",
 }
+DOKPLOY_TERMINAL_DEPLOYMENT_STATUSES = (
+    DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
+    | DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
+    | {"error", "failed", "fail"}
+)
 POST_DEPLOY_UPDATE_IGNORED_ENV_KEYS = {
     "DOKPLOY_HOST",
     "DOKPLOY_TOKEN",
@@ -2815,12 +2820,12 @@ def compose_data_workflow_binding(
     )
 
 
-def bound_data_workflow_is_quiescent(
+def read_bound_data_workflow_deployments(
     *,
     host: str,
     token: str,
     binding: ComposeDataWorkflowBinding,
-) -> bool:
+) -> list[list[api.JsonObject]] | None:
     payload = api.dokploy_request(
         host=host,
         token=token,
@@ -2830,27 +2835,35 @@ def bound_data_workflow_is_quiescent(
     try:
         schedules = api.extract_schedules(payload)
     except click.ClickException:
-        return False
-    terminal = (
-        DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
-        | DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
-        | {"error", "failed", "fail"}
-    )
+        return None
+    bound = []
     for schedule in schedules:
         if not schedule.get("appName") or not schedule.get("name"):
-            return False
+            return None
         if schedule["appName"] != binding.app_name:
             continue
         deployments = schedule.get("deployments")
-        if not isinstance(deployments, list):
-            return False
-        history = api.parse_deployment_history(deployments)
-        if history.state == "unknown" or any(
-            api.deployment_status(deployment) not in terminal
-            for deployment in api.collect_dokploy_object_items(deployments)
+        if (
+            not isinstance(deployments, list)
+            or api.parse_deployment_history(deployments).state == "unknown"
         ):
-            return False
-    return True
+            return None
+        bound.append(api.collect_dokploy_object_items(deployments))
+    return bound
+
+
+def bound_data_workflow_is_quiescent(
+    *,
+    host: str,
+    token: str,
+    binding: ComposeDataWorkflowBinding,
+) -> bool:
+    rows = read_bound_data_workflow_deployments(host=host, token=token, binding=binding)
+    return rows is not None and all(
+        api.deployment_status(deployment) in DOKPLOY_TERMINAL_DEPLOYMENT_STATUSES
+        for row in rows
+        for deployment in row
+    )
 
 
 def compose_data_workflow_is_quiescent(

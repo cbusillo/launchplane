@@ -492,7 +492,7 @@ def run_preview_preservation(
             )
             require_stopped_writers = inspection.get("writers_stopped") is True
         if authority.serving_recipient and not require_stopped_writers:
-            from control_plane.odoo_preview_qualification import collect_odoo_preview_qualification
+            from control_plane.odoo_preview_qualification import read_odoo_preview_qualification
             from control_plane.workflows.launchplane import find_preview_record
 
             preview = find_preview_record(
@@ -503,7 +503,7 @@ def run_preview_preservation(
             )
             if preview is None:
                 raise ValueError("Recorded preservation preview disappeared.")
-            qualification = collect_odoo_preview_qualification(
+            qualification = read_odoo_preview_qualification(
                 store, preview=preview, root=control_plane_root
             )
             if qualification.usage.usage != "unused" or not qualification.usage.resources_qualified:

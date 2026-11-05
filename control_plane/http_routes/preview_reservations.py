@@ -1,6 +1,7 @@
 """Read-only original preview reservation classification under existing preview authority."""
 
 from typing import Annotated, Literal
+from pathlib import Path as FilePath
 
 import click
 from fastapi import Depends, Path, Query, Response
@@ -12,6 +13,9 @@ from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDepend
 from control_plane.preview_reservation_recovery import classify_preview_reservation
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane import preview_evidence
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+from control_plane.odoo_preview_qualification import PreviewQualificationMissing
 
 
 class PreviewReservationClassificationsResponse(BaseModel):
@@ -25,8 +29,73 @@ class PreviewReservationClassificationsResponse(BaseModel):
 
 
 def register_preview_reservation_read_routes(
-    app: ApiRouteRegistrar, *, dependencies: ReadRouteDependencies
+    app: ApiRouteRegistrar, *, dependencies: ReadRouteDependencies, root: FilePath | None = None
 ) -> None:
+    def read_exact_preview_evidence(
+        product: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^\S+$")],
+        query: Annotated[preview_evidence.PreviewEvidenceQuery, Query()],
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        response: Response,
+    ) -> preview_evidence.PreviewEvidenceResponse:
+        trace_id = dependencies.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if not isinstance(record_store, PostgresRecordStore) or root is None:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Preview evidence requires service storage.",
+            )
+        try:
+            profile = record_store.read_product_profile_record(product)
+            if not dependencies.authorization_allows(
+                identity=identity,
+                action="preview.read",
+                product=profile.product,
+                context=profile.preview.context,
+            ):
+                raise dependencies.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Identity cannot read this product's previews.",
+                )
+            return preview_evidence.PreviewEvidenceResponse(
+                trace_id=trace_id,
+                result=preview_evidence.read_preview_evidence(
+                    record_store, product=product, query=query, root=root
+                ),
+            )
+        except NativeSourceAuthorizationDenied:
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Provider refused the preview evidence read.",
+            ) from None
+        except OdooRuntimeReadError as error:
+            raise dependencies.http_error(
+                status_code=error.status_code,
+                trace_id=trace_id,
+                code=error.code,
+                message="Exact preview evidence could not be bound.",
+            ) from None
+        except FileNotFoundError:
+            raise dependencies.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="preview_evidence_unavailable",
+                message="Preview evidence is unavailable.",
+            ) from None
+        except (ValueError, PreviewQualificationMissing, click.ClickException):
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="preview_evidence_unavailable",
+                message="Preview evidence could not be qualified.",
+            ) from None
+
     def read_preview_reservations(
         product: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^\S+$")],
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
@@ -151,6 +220,18 @@ def register_preview_reservation_read_routes(
                 code="snapshot_version_unavailable",
                 message="The retained snapshot version could not be qualified.",
             ) from error
+
+    app.add_api_route(
+        "/v1/products/{product}/preview-evidence",
+        read_exact_preview_evidence,
+        methods=["GET"],
+        response_model=preview_evidence.PreviewEvidenceResponse,
+        operation_id="read_exact_preview_evidence",
+        summary="Read exact original preview evidence without publication or settlement",
+        responses={
+            code: {"model": dependencies.error_response_model} for code in (401, 403, 404, 409, 503)
+        },
+    )
 
     app.add_api_route(
         snapshot_version.ROUTE,
