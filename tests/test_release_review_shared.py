@@ -515,19 +515,24 @@ class SharedReleaseReviewTests(unittest.TestCase):
         self.assertEqual(checklist_blockers(review.checklist, profile=profile()), ())
 
     def test_missing_shared_notes_and_batch_notes_or_uncovered_commits_block(self) -> None:
-        for notes, uncovered in (
-            ("", False),
-            ("#52 has no Client test notes.", False),
-            (self.github.notes, True),
-        ):
-            with self.subTest(notes=notes, uncovered=uncovered):
-                self.github.notes, self.github.uncovered = notes, uncovered
-                self.accept()  # Even an existing accepted record cannot waive coverage.
-                review = self.review()
-                self.assertFalse(review.approved)
-                self.assertTrue(
-                    any("example/shared-addons" in blocker for blocker in review.blockers)
-                )
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        for selectors in (artifact.addon_selectors, ()):
+            self.store.write_artifact_manifest(
+                artifact.model_copy(update={"addon_selectors": selectors})
+            )
+            for notes, uncovered in (
+                ("", False),
+                ("#52 has no Client test notes.", False),
+                (self.github.notes, True),
+            ):
+                with self.subTest(notes=notes, uncovered=uncovered):
+                    self.github.notes, self.github.uncovered = notes, uncovered
+                    self.accept()  # Even an existing accepted record cannot waive coverage.
+                    review = self.review()
+                    self.assertFalse(review.approved)
+                    self.assertTrue(
+                        any("example/shared-addons" in blocker for blocker in review.blockers)
+                    )
 
     def test_shared_notes_or_candidate_changes_require_new_acceptance(self) -> None:
         self.accept()
@@ -536,6 +541,27 @@ class SharedReleaseReviewTests(unittest.TestCase):
         self.accept()
         self.set_sources("testing", "d" * 40)
         self.assertFalse(self.review().approved)
+
+    def test_pinning_floating_sources_uses_complete_shared_commit_coverage(self) -> None:
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        for selectors in (artifact.addon_selectors[:1], ()):
+            with self.subTest(selectors=selectors):
+                self.store.write_artifact_manifest(artifact)
+                before = self.accept()
+                self.store.write_artifact_manifest(
+                    artifact.model_copy(update={"addon_selectors": selectors})
+                )
+                review = self.review()
+                assert review.checklist is not None
+                self.assertTrue(review.checklist_complete)
+                self.assertFalse(review.approved)
+                self.assertNotEqual(review.checklist_digest, before.checklist_digest)
+                self.accept()
+                self.assertTrue(self.review().approved)
+                self.assertEqual(
+                    {source.repository for source in review.checklist.shared_sources},
+                    {source.repository for source in artifact.addon_sources},
+                )
 
     def test_added_removed_selected_or_ambiguous_sources_remain_blocked(self) -> None:
         original = self.store.read_artifact_manifest("artifact-testing")
@@ -570,6 +596,11 @@ class SharedReleaseReviewTests(unittest.TestCase):
                 assert review.checklist is not None
                 self.assertTrue(review.checklist.additional_changes)
                 self.assertFalse(review.approved)
+
+        production = self.store.read_artifact_manifest("artifact-prod")
+        self.store.write_artifact_manifest(production.model_copy(update={"addon_selectors": ()}))
+        self.store.write_artifact_manifest(original)
+        self.assertFalse(self.review().checklist_complete)
 
     def test_repository_forms_normalize_to_the_same_shared_range(self) -> None:
         artifact = self.store.read_artifact_manifest("artifact-prod")
@@ -659,28 +690,33 @@ class SharedReleaseReviewTests(unittest.TestCase):
             self.assertIsNotNone(failed.checklist)
 
     def test_unreadable_or_non_forward_shared_sources_keep_manual_review_path(self) -> None:
-        for fail, status in ((True, "ahead"), (False, "behind"), (False, "diverged")):
-            with self.subTest(fail=fail, status=status):
-                self.github.fail, self.github.status = fail, status
-                review = self.review()
-                assert review.checklist is not None
-                self.assertFalse(review.checklist_complete)
-                self.assertTrue(review.checklist.additional_changes)
-                override = ReleaseReviewDecisionRecord(
-                    record_id=f"manual-{fail}-{status}",
-                    product=profile().product,
-                    checklist_digest=review.checklist_digest,
-                    checklist=review.checklist,
-                    decision="overridden",
-                    reason="Admin reviewed the exact shared changes.",
-                    actor_github_id="9003",
-                    actor_github_login="operator",
-                    decided_at="2026-10-05T00:00:00Z",
-                    release_issue_url="https://github.com/example/site/issues/91",
-                )
-                self.store.write_release_review_decision_record(override)
-                self.assertTrue(self.review().approved)
-                self.assertEqual(self.store.list_deployment_records(), ())
+        artifact = self.store.read_artifact_manifest("artifact-testing")
+        for selectors in (artifact.addon_selectors, ()):
+            self.store.write_artifact_manifest(
+                artifact.model_copy(update={"addon_selectors": selectors})
+            )
+            for fail, status in ((True, "ahead"), (False, "behind"), (False, "diverged")):
+                with self.subTest(fail=fail, status=status):
+                    self.github.fail, self.github.status = fail, status
+                    review = self.review()
+                    assert review.checklist is not None
+                    self.assertFalse(review.checklist_complete)
+                    self.assertTrue(review.checklist.additional_changes)
+                    override = ReleaseReviewDecisionRecord(
+                        record_id=f"manual-{fail}-{status}",
+                        product=profile().product,
+                        checklist_digest=review.checklist_digest,
+                        checklist=review.checklist,
+                        decision="overridden",
+                        reason="Admin reviewed the exact shared changes.",
+                        actor_github_id="9003",
+                        actor_github_login="operator",
+                        decided_at="2026-10-05T00:00:00Z",
+                        release_issue_url="https://github.com/example/site/issues/91",
+                    )
+                    self.store.write_release_review_decision_record(override)
+                    self.assertTrue(self.review().approved)
+                    self.assertEqual(self.store.list_deployment_records(), ())
 
     def test_historical_shared_override_does_not_approve_new_coverage(self) -> None:
         review = self.review()
