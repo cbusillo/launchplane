@@ -5326,6 +5326,24 @@ def try_reflow_failed_merge_train_candidate(
             merge_method=merge_method,
             dry_run_result=dry_run_result,
         ):
+            if _is_missing_scan_failure(active_candidate_record):
+                recovery = _resume_known_failed_batch(
+                    stack_collapse_store=stack_collapse_store,
+                    candidate_store=candidate_store,
+                    github_client=github_client,
+                    policy=policy,
+                    policy_sha256=policy_sha256,
+                    snapshot=snapshot,
+                    dry_run_result=dry_run_result,
+                    held_out=held_out,
+                    merge_method=merge_method,
+                    recorded_at=recorded_at,
+                    trace_id=trace_id,
+                    mutate=mutate,
+                    lease=lease,
+                )
+                if recovery is not None:
+                    return recovery
             recovered = _retry_closed_candidate_after_passing_checks(
                 stack_collapse_store=stack_collapse_store,
                 candidate_store=candidate_store,
@@ -6735,7 +6753,12 @@ def _plan_failed_candidate_replacement(
     )
     plan_dry_run = build_merge_train_dry_run_result(
         policy=policy,
-        snapshot=_without_held_out_pull_requests(snapshot=snapshot, held_out=holds),
+        snapshot=_without_held_out_pull_requests(
+            snapshot=merge_train_snapshot_of(
+                snapshot, {entry.pull_request_number for entry in failed.entries}
+            ),
+            held_out=holds,
+        ),
         batch_landing=True,
     )
     cap = policy.find_repository_policy(
@@ -7470,7 +7493,11 @@ def _stop_failed_batch_after_conflict_probe(
         updated_record = build_merge_train_batch_candidate_record(
             ordinary_job_binding=active_candidate_record.ordinary_job_binding,
             candidate=failed,
-            source=f"service:controller:candidate-held-out:{trace_id}",
+            source=(
+                active_candidate_record.source
+                if _is_missing_scan_failure(active_candidate_record)
+                else f"service:controller:candidate-held-out:{trace_id}"
+            ),
             updated_at=recorded_at,
         )
         candidate_store.write_merge_train_batch_candidate_record(updated_record)

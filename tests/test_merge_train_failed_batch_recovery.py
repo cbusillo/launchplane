@@ -1857,7 +1857,12 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             )
             store = FilesystemRecordStore(Path(directory))
             before = store.list_merge_train_batch_candidate_records()
-            dry = self._fresh_plan(store, mutate=False)
+            dry = self._reflow(
+                store,
+                self.candidate,
+                mutate=False,
+                source=f"{_MISSING_SCAN_FAILURE_SOURCE}test",
+            )
             self.assertEqual(dry["reason_code"], "candidate_retry_resumed")
             self.assertEqual(store.list_merge_train_batch_candidate_records(), before)
             resumed = self._fresh_plan(store, mutate=True)
@@ -1910,6 +1915,26 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 cast(dict[str, object], stopped["details"])["recovery_reason_code"],
                 "infrastructure_retry_used",
             )
+            rebound = store.list_merge_train_batch_candidate_records(status="active")[0]
+            again = self._reflow(store, rebound.candidate, source=rebound.source)
+            self.assertEqual(again["reason_code"], "required_code_scanning_missing")
+            self.assertEqual(again["details"]["recovery_reason_code"], "infrastructure_retry_used")
+
+    def test_capped_failure_isolation_excludes_arrivals_outside_the_failed_batch(self) -> None:
+        self.policy = self.policy.model_copy(
+            update={"policies": (self.policy.policies[0].model_copy(update={"max_batch_size": 2}),)}
+        )
+        third = self.snapshot.pull_requests[-1].model_copy(
+            update={"number": 3, "head_sha": "head-3", "created_at": "2026-05-08T11:00:00Z"}
+        )
+        self.snapshot = self.snapshot.model_copy(
+            update={"pull_requests": (*self.snapshot.pull_requests, third)}
+        )
+        with TemporaryDirectory() as directory:
+            result = self._reflow(FilesystemRecordStore(Path(directory)), self.candidate)
+        self.assertEqual(result["reason_code"], "failure_isolation")
+        self.assertEqual(result["dry_run_result"]["queue_order"], [1])
+        self.assertEqual([e["pull_request_number"] for e in result["candidate"]["entries"]], [1])
 
     def test_capped_infrastructure_retry_resumes_from_larger_parent(self) -> None:
         failed = self._four_member_failed_candidate()
