@@ -924,6 +924,29 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
 
 
 class ProductReconcileTestingTests(ProductReconcileTestCase):
+    def test_stale_success_filter_does_not_hide_the_newest_successful_build(self) -> None:
+        self._running_release(10, OLDER)
+        self.github.add_run(20, DEPLOYABLE)
+        self.github.add_run(30, NEWEST)
+        self.github.runs[30]["conclusion"] = "failure"
+        get_json = self.github.get_json
+
+        def stale_filtered_runs(path: str) -> object:
+            if "/actions/workflows/build.yml/runs?" in path and "status=success" in path:
+                return {"total_count": 1, "workflow_runs": [self.github.runs[10]]}
+            return get_json(path)
+
+        self.request()
+        with patch.object(self.github, "get_json", stale_filtered_runs):
+            plan = self.reconcile()
+
+        self.assertEqual(plan["action"], "deploy")
+        self.assertEqual(plan["desired_commit"], DEPLOYABLE)
+        operation = self.store.read_odoo_stable_target_replacement_operation_record(
+            cast(str, plan["queued_operation_id"])
+        )
+        self.assertEqual(operation.request.source_git_ref, DEPLOYABLE)
+
     def test_failed_restore_holds_new_builds_until_this_target_has_restore_proof(self) -> None:
         self.store.write_dokploy_target_id_record(
             DokployTargetIdRecord(

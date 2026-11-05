@@ -544,8 +544,11 @@ inside refresh serialization. Existing previews need their configured product
 profile to resolve source authority; product onboarding/profile records supply
 that supported configuration path.
 
-Testing searches up to 20 pages of successful build runs and first-parent
-history to find its running build. An omitted running run or commit still
+Testing searches up to 20 pages of build runs and first-parent
+history to find its running build. It selects successful runs locally rather
+than relying on GitHub's status filter, whose listing can omit a completed
+successful run. Exact-run provenance verification still precedes selection.
+An omitted running run or commit still
 holds selection with the observed counts. For a recorded generic-web baseline
 predating contract Build adoption, a complete empty successful Build inventory
 reports `no_verified_build`: there is no candidate to verify or deploy, and no

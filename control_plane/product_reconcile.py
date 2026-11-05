@@ -3821,7 +3821,6 @@ def _desired_release(
         {
             "branch": default_branch,
             "event": "push",
-            "status": "success",
             "per_page": str(TESTING_BUILD_RUN_PAGE_SIZE),
         }
     )
